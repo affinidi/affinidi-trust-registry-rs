@@ -2,9 +2,10 @@ use axum::{routing::get, Json, Router};
 use dotenvy::dotenv;
 use serde_json::{json, Value};
 
-use crate::{configs::HttpServerConfigs, SharedData, CONFIG};
+use crate::{configs::HttpServerConfigs, handlers::application_routes, SharedData, CONFIG};
 
 async fn health_checker_handler() -> Json<Value> {
+    // TODO: connection to storage, any other checks?
     Json(json!({
       "status": "OK"
     }))
@@ -21,15 +22,18 @@ pub async fn start() {
         service_start_timestamp: chrono::Utc::now(),
     };
   
-    let router= Router::new()
-      //  .layer(configs.security.cors_allow_origin)
-      // .layer(RequestBodyLimitLayer::new(configs.limits.http_size as usize))
+    let mut main_router = Router::new()
       .route(
             "/health",
             get(health_checker_handler),
       )
-      .with_state(shared_data);
+      .with_state(shared_data.clone());
+    let router = application_routes("", &shared_data.clone());
+
+    main_router = main_router.merge(router);
+
+    println!("Server is starting on {}...", lesten_address);
 
     let listener = tokio::net::TcpListener::bind(lesten_address).await.unwrap();
-    axum::serve(listener, router).await.unwrap();
+    axum::serve(listener, main_router).await.unwrap();
 }

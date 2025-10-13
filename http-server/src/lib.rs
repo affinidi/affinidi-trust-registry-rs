@@ -8,10 +8,8 @@ use tracing::error;
 
 use crate::configs::HttpServerConfigs;
 
-// pub mod healthcheck;
-// pub mod receiver;
 pub mod server;
-// pub mod utils;
+pub mod handlers;
 pub mod configs;
 
 pub static CONFIG: Lazy<HttpServerConfigs> = Lazy::new(|| {
