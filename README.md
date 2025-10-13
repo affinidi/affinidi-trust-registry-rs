@@ -1,4 +1,4 @@
-# Affinidi "Project name"
+# Affinidi "Trust Registry"
 
 ## Requirements
 
