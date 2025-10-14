@@ -56,19 +56,22 @@ impl LocalStorage {
 
     fn matches_query(record: &TrustRecord, query: &TrustRecordQuery) -> bool {
         if let Some(ref entity_id) = query.entity_id
-            && record.entity_id() != entity_id {
-                return false;
-            }
+            && record.entity_id() != entity_id
+        {
+            return false;
+        }
 
         if let Some(ref authority_id) = query.authority_id
-            && record.authority_id() != authority_id {
-                return false;
-            }
+            && record.authority_id() != authority_id
+        {
+            return false;
+        }
 
         if let Some(ref assertion_id) = query.assertion_id
-            && record.assertion_id() != assertion_id {
-                return false;
-            }
+            && record.assertion_id() != assertion_id
+        {
+            return false;
+        }
         true
     }
 }

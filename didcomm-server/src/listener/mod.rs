@@ -19,14 +19,11 @@ pub(crate) async fn start_one_did_listener(
     profile_config: ProfileConfig,
     config: Arc<DidcommServerConfigs>,
 ) {
-    // sleep(Duration::from_secs(10)).await;
-    // info!("did is over {}", did_and_secrets.did);
-
     let listener =
         Listener::build_listener(profile_config, &config.mediator_did, DefaultHandler {})
             .await
-            .unwrap(); // FIXME: handle error
-    listener.start_listening().await.unwrap(); // FIXME: handle error
+            .unwrap(); // FIXME: handle error?
+    listener.start_listening().await.unwrap(); // FIXME: handle error?
 }
 
 /// starts DIDComm listeners

@@ -1,4 +1,3 @@
-
 use affinidi_messaging_didcomm::{Message, UnpackMetadata};
 use affinidi_messaging_sdk::protocols::Protocols;
 use tracing::{debug, error, info, warn};
@@ -55,8 +54,7 @@ impl<H: MessageHandler> Listener<H> {
             "[profile = {}] status_reply = {:?}",
             &self.profile.inner.alias, status_reply
         );
-        let messages_count = status_reply.map(|m| m.message_count)
-            .unwrap_or(0);
+        let messages_count = status_reply.map(|m| m.message_count).unwrap_or(0);
         info!(
             "[profile = {}] Messages received offline. messages_count = {}",
             &self.profile.inner.alias, messages_count

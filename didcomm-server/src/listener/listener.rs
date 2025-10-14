@@ -1,18 +1,9 @@
 use std::sync::Arc;
 
 use affinidi_messaging_didcomm::{Message, UnpackMetadata};
-use affinidi_messaging_sdk::{
-    ATM,
-    profiles::ATMProfile,
-};
+use affinidi_messaging_sdk::{ATM, profiles::ATMProfile};
 use async_trait::async_trait;
 use tracing::info;
-
-// #[async_trait]
-// pub trait MessageHandler: Send + Sync + 'static {
-//     async fn process(&self, message: Message, meta: UnpackMetadata) -> Result<(), Box<dyn std::error::Error>>;
-// }
-
 pub struct OnlyLoggingHandler {}
 pub struct Listener<H: MessageHandler> {
     pub atm: Arc<ATM>,
