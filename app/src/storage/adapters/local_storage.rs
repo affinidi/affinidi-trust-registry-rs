@@ -4,7 +4,6 @@ use std::sync::{Arc, RwLock};
 use crate::domain::*;
 use crate::storage::repository::*;
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RecordKey {
     entity_id: EntityId,
@@ -30,40 +29,31 @@ impl RecordKey {
     }
 }
 
-
 #[derive(Clone)]
 pub struct LocalStorage {
     records: Arc<RwLock<HashMap<RecordKey, TrustRecord>>>,
 }
 
 impl LocalStorage {
-    
     pub fn new() -> Self {
         Self {
             records: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    
     pub fn with_records(records: Vec<TrustRecord>) -> Self {
         let storage = Self::new();
         for record in records {
             let key = RecordKey::from_record(&record);
-            storage
-                .records
-                .write()
-                .unwrap()
-                .insert(key, record);
+            storage.records.write().unwrap().insert(key, record);
         }
         storage
     }
 
-    
     pub fn clear(&self) {
         self.records.write().unwrap().clear();
     }
 
-    
     fn matches_query(record: &TrustRecord, query: &TrustRecordQuery) -> bool {
         if let Some(ref entity_id) = query.entity_id {
             if record.entity_id() != entity_id {
@@ -96,11 +86,11 @@ impl TrustRecordRepository for LocalStorage {
     async fn save(&self, record: TrustRecord) -> Result<(), RepositoryError> {
         let key = RecordKey::from_record(&record);
         let mut records = self.records.write().unwrap();
-        
+
         if records.contains_key(&key) {
             return Err(RepositoryError::DuplicateKey);
         }
-        
+
         records.insert(key, record);
         Ok(())
     }
@@ -239,9 +229,18 @@ mod tests {
     #[tokio::test]
     async fn test_find_by_entity() {
         let storage = LocalStorage::new();
-        storage.save(create_test_record("e1", "a1", "as1", true, true)).await.unwrap();
-        storage.save(create_test_record("e1", "a2", "as2", true, true)).await.unwrap();
-        storage.save(create_test_record("e2", "a1", "as3", true, true)).await.unwrap();
+        storage
+            .save(create_test_record("e1", "a1", "as1", true, true))
+            .await
+            .unwrap();
+        storage
+            .save(create_test_record("e1", "a2", "as2", true, true))
+            .await
+            .unwrap();
+        storage
+            .save(create_test_record("e2", "a1", "as3", true, true))
+            .await
+            .unwrap();
 
         let results = storage.find_by_entity(&EntityId::new("e1")).await.unwrap();
 
@@ -251,11 +250,23 @@ mod tests {
     #[tokio::test]
     async fn test_find_by_authority() {
         let storage = LocalStorage::new();
-        storage.save(create_test_record("e1", "a1", "as1", true, true)).await.unwrap();
-        storage.save(create_test_record("e2", "a1", "as2", true, true)).await.unwrap();
-        storage.save(create_test_record("e3", "a2", "as3", true, true)).await.unwrap();
+        storage
+            .save(create_test_record("e1", "a1", "as1", true, true))
+            .await
+            .unwrap();
+        storage
+            .save(create_test_record("e2", "a1", "as2", true, true))
+            .await
+            .unwrap();
+        storage
+            .save(create_test_record("e3", "a2", "as3", true, true))
+            .await
+            .unwrap();
 
-        let results = storage.find_by_authority(&AuthorityId::new("a1")).await.unwrap();
+        let results = storage
+            .find_by_authority(&AuthorityId::new("a1"))
+            .await
+            .unwrap();
 
         assert_eq!(results.len(), 2);
     }
@@ -292,8 +303,14 @@ mod tests {
     #[tokio::test]
     async fn test_count() {
         let storage = LocalStorage::new();
-        storage.save(create_test_record("e1", "a1", "as1", true, true)).await.unwrap();
-        storage.save(create_test_record("e2", "a2", "as2", true, true)).await.unwrap();
+        storage
+            .save(create_test_record("e1", "a1", "as1", true, true))
+            .await
+            .unwrap();
+        storage
+            .save(create_test_record("e2", "a2", "as2", true, true))
+            .await
+            .unwrap();
 
         let count = storage.count().await.unwrap();
 
@@ -303,8 +320,14 @@ mod tests {
     #[tokio::test]
     async fn test_clear() {
         let storage = LocalStorage::new();
-        storage.save(create_test_record("e1", "a1", "as1", true, true)).await.unwrap();
-        storage.save(create_test_record("e2", "a2", "as2", true, true)).await.unwrap();
+        storage
+            .save(create_test_record("e1", "a1", "as1", true, true))
+            .await
+            .unwrap();
+        storage
+            .save(create_test_record("e2", "a2", "as2", true, true))
+            .await
+            .unwrap();
 
         storage.clear();
 
