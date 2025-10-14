@@ -4,7 +4,7 @@ use affinidi_secrets_resolver::secrets::Secret;
 use app::configs::Configs;
 use serde_derive::{Deserialize, Serialize};
 
-const DEFAULT_LISTEN_ADDRESS: &'static str = "0.0.0.0:3131";
+const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3131";
 
 // TODO: is this place good enough to define this struct?
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,9 +1,6 @@
 use std::sync::Arc;
-use tokio::{
-    task::JoinError,
-    time::{Duration, sleep},
-};
-use tracing::{error, info};
+use tokio::task::JoinError;
+use tracing::error;
 
 use crate::{
     configs::{DidcommServerConfigs, ProfileConfig},

@@ -1,15 +1,9 @@
-use std::{ops::Deref, sync::Arc, time::Duration};
 
 use affinidi_messaging_didcomm::{Message, UnpackMetadata};
-use affinidi_messaging_sdk::{profiles::ATMProfile, protocols::Protocols};
-use affinidi_tdk::{
-    TDK,
-    common::{config::TDKConfig, profiles::TDKProfile},
-};
-use tokio::time::sleep;
+use affinidi_messaging_sdk::protocols::Protocols;
 use tracing::{debug, error, info, warn};
 
-use crate::{configs::ProfileConfig, listener::listener::*};
+use crate::listener::listener::*;
 
 impl<H: MessageHandler> Listener<H> {
     /// Spawns a new asynchronous task with tokio
@@ -61,8 +55,7 @@ impl<H: MessageHandler> Listener<H> {
             "[profile = {}] status_reply = {:?}",
             &self.profile.inner.alias, status_reply
         );
-        let messages_count = status_reply
-            .and_then(|m| Some(m.message_count))
+        let messages_count = status_reply.map(|m| m.message_count)
             .unwrap_or(0);
         info!(
             "[profile = {}] Messages received offline. messages_count = {}",
@@ -104,7 +97,7 @@ impl<H: MessageHandler> Listener<H> {
             &self.profile.inner.alias, delete_messages_reply
         );
 
-        if let Some(_) = delete_messages_reply {
+        if delete_messages_reply.is_some() {
             info!(
                 "[profile = {}] messages deleted.",
                 &self.profile.inner.alias

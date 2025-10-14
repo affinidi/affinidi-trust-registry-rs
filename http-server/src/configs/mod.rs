@@ -1,7 +1,7 @@
 use app::configs::Configs;
 use std::env;
 
-const DEFAULT_LISTEN_ADDRESS: &'static str = "0.0.0.0:3232";
+const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3232";
 
 #[derive(Debug, Clone)]
 pub struct HttpServerConfigs {

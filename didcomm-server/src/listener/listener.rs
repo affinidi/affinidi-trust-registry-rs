@@ -3,9 +3,7 @@ use std::sync::Arc;
 use affinidi_messaging_didcomm::{Message, UnpackMetadata};
 use affinidi_messaging_sdk::{
     ATM,
-    messages::{MessageList, MessageListElement},
     profiles::ATMProfile,
-    protocols::Protocols,
 };
 use async_trait::async_trait;
 use tracing::info;
