@@ -1,14 +1,14 @@
 use crate::SharedData;
 
 use axum::{
-    Json, Router,
+    Json,
+    Router,
     // extract::State,
-    routing::{post},
+    routing::post,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-async fn handle_trqp_authorization(
-    // State(state): State<SharedData>,
+async fn handle_trqp_authorization(// State(state): State<SharedData>,
     // Json(body): Json<Value>,
 ) -> Json<Value> {
     Json(json!({ "foo": "bar" }))
@@ -17,7 +17,6 @@ async fn handle_trqp_authorization(
 async fn handle_trqp_recognition() -> Json<Value> {
     Json(json!({ "bar": "foo" }))
 }
-
 
 pub fn application_routes(api_prefix: &str, shared_data: &SharedData) -> Router {
     let all_handlers = Router::new()

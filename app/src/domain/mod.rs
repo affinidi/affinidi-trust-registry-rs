@@ -108,7 +108,6 @@ pub struct TrustRecord {
     time_evaluated: Timestamp,
     message: String,
     context: Context,
-   
 }
 
 impl TrustRecord {
@@ -249,11 +248,19 @@ impl TrustRecordBuilder {
     pub fn build(self) -> Result<TrustRecord, TrustRecordError> {
         Ok(TrustRecord {
             entity_id: self.entity_id.ok_or(TrustRecordError::MissingEntityId)?,
-            authority_id: self.authority_id.ok_or(TrustRecordError::MissingAuthorityId)?,
-            assertion_id: self.assertion_id.ok_or(TrustRecordError::MissingAssertionId)?,
+            authority_id: self
+                .authority_id
+                .ok_or(TrustRecordError::MissingAuthorityId)?,
+            assertion_id: self
+                .assertion_id
+                .ok_or(TrustRecordError::MissingAssertionId)?,
             recognized: self.recognized,
-            time_requested: self.time_requested.ok_or(TrustRecordError::MissingTimeRequested)?,
-            time_evaluated: self.time_evaluated.ok_or(TrustRecordError::MissingTimeEvaluated)?,
+            time_requested: self
+                .time_requested
+                .ok_or(TrustRecordError::MissingTimeRequested)?,
+            time_evaluated: self
+                .time_evaluated
+                .ok_or(TrustRecordError::MissingTimeEvaluated)?,
             message: self.message,
             context: self.context,
             assertion_verified: self.assertion_verified,

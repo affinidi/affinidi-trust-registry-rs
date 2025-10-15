@@ -1,8 +1,6 @@
-
 use std::{fmt, future::Future};
 
 use crate::domain::*;
-
 
 // TODO: for TRQP all of these should be queried together but for ADMIN or audit we may need partial query
 #[derive(Debug, Clone, Default)]
@@ -33,7 +31,6 @@ impl TrustRecordQuery {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepositoryError {
     NotFound,
@@ -57,12 +54,10 @@ impl fmt::Display for RepositoryError {
 
 impl std::error::Error for RepositoryError {}
 
-
 pub trait TrustRecordRepository: Send + Sync {
-    
-    fn save(&self, record: TrustRecord) -> impl Future<Output = Result<(), RepositoryError>> + Send;
+    fn save(&self, record: TrustRecord)
+    -> impl Future<Output = Result<(), RepositoryError>> + Send;
 
-    
     fn find_by_ids(
         &self,
         entity_id: &EntityId,
@@ -70,25 +65,21 @@ pub trait TrustRecordRepository: Send + Sync {
         assertion_id: &AssertionId,
     ) -> impl Future<Output = Result<Option<TrustRecord>, RepositoryError>> + Send;
 
-    
     fn find_by_query(
         &self,
         query: TrustRecordQuery,
     ) -> impl Future<Output = Result<Vec<TrustRecord>, RepositoryError>> + Send;
 
-    
     fn find_by_entity(
         &self,
         entity_id: &EntityId,
     ) -> impl Future<Output = Result<Vec<TrustRecord>, RepositoryError>> + Send;
 
-    
     fn find_by_authority(
         &self,
         authority_id: &AuthorityId,
     ) -> impl Future<Output = Result<Vec<TrustRecord>, RepositoryError>> + Send;
 
-    
     fn delete(
         &self,
         entity_id: &EntityId,
@@ -131,8 +122,7 @@ mod tests {
 
     #[test]
     fn test_query_builder() {
-        let query = TrustRecordQuery::new()
-            .entity_id(EntityId::new("entity-123"));
+        let query = TrustRecordQuery::new().entity_id(EntityId::new("entity-123"));
 
         assert_eq!(query.entity_id.as_ref().unwrap().as_str(), "entity-123");
     }

@@ -1,5 +1,3 @@
-use std::env;
-
 pub trait Configs: Sized {
-    fn load() -> Result<Self, env::VarError>;
+    fn load() -> Result<Self, Box<dyn std::error::Error>>;
 }
