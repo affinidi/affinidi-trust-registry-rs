@@ -14,13 +14,6 @@ readme = "README.md"
 
 app = { path = "./app", version = "*" }
 
-
-affinidi-did-resolver-cache-sdk = "0.6.2"
-did-peer = "0.7.4"
-affinidi-messaging-didcomm = "0.11.3"
-affinidi-messaging-helpers = "0.11"
-affinidi-messaging-sdk = "0.12"
-affinidi-secrets-resolver = "0.3.3"
 affinidi-tdk = "0.2.4"
 
 async-trait = "0.1.89"
@@ -41,3 +34,4 @@ serde_json = { version = "1.0" }
 once_cell = "1.20.2"
 axum-server = { version = "0.7", default-features = true}
 tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
+uuid = { version = "1.18", features = ["v4"]}
