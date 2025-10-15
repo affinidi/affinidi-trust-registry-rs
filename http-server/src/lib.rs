@@ -1,16 +1,16 @@
 use app::configs::Configs;
 
-use std::fmt::Debug;
 use chrono::{DateTime, Utc};
 use dotenvy::dotenv;
 use once_cell::sync::Lazy;
+use std::fmt::Debug;
 use tracing::error;
 
 use crate::configs::HttpServerConfigs;
 
-pub mod server;
-pub mod handlers;
 pub mod configs;
+pub mod handlers;
+pub mod server;
 
 pub static CONFIG: Lazy<HttpServerConfigs> = Lazy::new(|| {
     dotenv().ok();
@@ -37,4 +37,3 @@ impl Debug for SharedData {
             .finish()
     }
 }
-
