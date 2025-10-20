@@ -59,23 +59,6 @@ impl fmt::Display for AssertionId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Timestamp(i64);
-
-impl Timestamp {
-    pub fn now() -> Self {
-        Self(chrono::Utc::now().timestamp_millis())
-    }
-
-    pub fn from_millis(millis: i64) -> Self {
-        Self(millis)
-    }
-
-    pub fn as_millis(&self) -> i64 {
-        self.0
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context(serde_json::Value);
 
@@ -113,9 +96,6 @@ pub struct TrustRecord {
     assertion_id: AssertionId,
     recognized: bool,
     assertion_verified: bool,
-    time_requested: Timestamp,
-    time_evaluated: Timestamp,
-    message: String,
     context: Context,
 }
 
@@ -126,20 +106,14 @@ impl TrustRecord {
         authority_id: AuthorityId,
         assertion_id: AssertionId,
         recognized: bool,
-        time_requested: Timestamp,
-        time_evaluated: Timestamp,
-        message: String,
-        context: Context,
         assertion_verified: bool,
+        context: Context,
     ) -> Self {
         Self {
             entity_id,
             authority_id,
             assertion_id,
             recognized,
-            time_requested,
-            time_evaluated,
-            message,
             context,
             assertion_verified,
         }
@@ -161,18 +135,6 @@ impl TrustRecord {
         self.recognized
     }
 
-    pub fn time_requested(&self) -> Timestamp {
-        self.time_requested
-    }
-
-    pub fn time_evaluated(&self) -> Timestamp {
-        self.time_evaluated
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
     pub fn context(&self) -> &Context {
         &self.context
     }
@@ -187,8 +149,6 @@ pub struct TrustRecordBuilder {
     authority_id: Option<AuthorityId>,
     assertion_id: Option<AssertionId>,
     recognized: bool,
-    time_requested: Option<Timestamp>,
-    time_evaluated: Option<Timestamp>,
     message: String,
     context: Context,
     assertion_verified: bool,
@@ -201,8 +161,6 @@ impl TrustRecordBuilder {
             authority_id: None,
             assertion_id: None,
             recognized: false,
-            time_requested: None,
-            time_evaluated: None,
             message: String::new(),
             context: Context::empty(),
             assertion_verified: false,
@@ -229,21 +187,6 @@ impl TrustRecordBuilder {
         self
     }
 
-    pub fn time_requested(mut self, time: Timestamp) -> Self {
-        self.time_requested = Some(time);
-        self
-    }
-
-    pub fn time_evaluated(mut self, time: Timestamp) -> Self {
-        self.time_evaluated = Some(time);
-        self
-    }
-
-    pub fn message(mut self, message: impl Into<String>) -> Self {
-        self.message = message.into();
-        self
-    }
-
     pub fn context(mut self, context: Context) -> Self {
         self.context = context;
         self
@@ -263,16 +206,9 @@ impl TrustRecordBuilder {
             assertion_id: self
                 .assertion_id
                 .ok_or(TrustRecordError::MissingAssertionId)?,
-            recognized: self.recognized,
-            time_requested: self
-                .time_requested
-                .ok_or(TrustRecordError::MissingTimeRequested)?,
-            time_evaluated: self
-                .time_evaluated
-                .ok_or(TrustRecordError::MissingTimeEvaluated)?,
-            message: self.message,
-            context: self.context,
             assertion_verified: self.assertion_verified,
+            recognized: self.recognized,
+            context: self.context,
         })
     }
 }
@@ -317,9 +253,6 @@ mod tests {
             .authority_id(AuthorityId::new("authority-456"))
             .assertion_id(AssertionId::new("assertion-789"))
             .recognized(true)
-            .time_requested(Timestamp::from_millis(1000))
-            .time_evaluated(Timestamp::from_millis(1500))
-            .message("Verification successful")
             .assertion_verified(true)
             .build()
             .unwrap();

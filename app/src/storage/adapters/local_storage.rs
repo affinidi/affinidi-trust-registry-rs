@@ -73,14 +73,13 @@ impl TrustRecordRepository for LocalStorage {
     async fn find_by_query(
         &self,
         query: TrustRecordQuery,
-    ) -> Result<Vec<TrustRecord>, RepositoryError> {
+    ) -> Result<Option<TrustRecord>, RepositoryError> {
         let records = self.records.read().unwrap();
-        let results: Vec<TrustRecord> = records
+        let result = records
             .values()
-            .filter(|record| Self::matches_query(record, &query))
             .cloned()
-            .collect();
-        Ok(results)
+            .find(|record| Self::matches_query(record, &query));
+        Ok(result)
     }
 }
 
@@ -100,9 +99,6 @@ mod tests {
             .authority_id(AuthorityId::new(authority))
             .assertion_id(AssertionId::new(assertion))
             .recognized(recognized)
-            .time_requested(Timestamp::now())
-            .time_evaluated(Timestamp::now())
-            .message("Test message")
             .assertion_verified(verified)
             .build()
             .unwrap()
@@ -121,9 +117,9 @@ mod tests {
             AssertionId::new("assertion-1"),
         );
 
-        let results = storage.find_by_query(query).await.unwrap();
+        let result = storage.find_by_query(query).await.unwrap();
 
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].assertion_id().as_str(), "assertion-1");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().assertion_id().as_str(), "assertion-1");
     }
 }

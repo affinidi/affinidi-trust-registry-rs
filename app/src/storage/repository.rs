@@ -44,7 +44,7 @@ pub trait TrustRecordRepository: Send + Sync {
     fn find_by_query(
         &self,
         query: TrustRecordQuery,
-    ) -> impl Future<Output = Result<Vec<TrustRecord>, RepositoryError>> + Send;
+    ) -> impl Future<Output = Result<Option<TrustRecord>, RepositoryError>> + Send;
 }
 
 #[cfg(test)]
@@ -58,9 +58,6 @@ mod tests {
             .authority_id(AuthorityId::new("authority-456"))
             .assertion_id(AssertionId::new("assertion-789"))
             .recognized(true)
-            .time_requested(Timestamp::from_millis(1000))
-            .time_evaluated(Timestamp::from_millis(1500))
-            .message("Verification successful")
             .assertion_verified(true)
             .build()
             .unwrap();
