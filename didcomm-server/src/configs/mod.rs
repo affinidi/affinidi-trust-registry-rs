@@ -6,7 +6,6 @@ use serde_derive::{Deserialize, Serialize};
 
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3131";
 
-
 // TODO: is this place good enough to define this struct?
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileConfig {

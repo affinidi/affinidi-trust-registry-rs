@@ -1,19 +1,25 @@
 use std::sync::Arc;
 
-
-use tracing::{debug, error, info};
-use uuid::Uuid;
-use affinidi_tdk::{didcomm::{Message, UnpackMetadata}, messaging::{profiles::ATMProfile,ATM}};
+use affinidi_tdk::{
+    didcomm::{Message, UnpackMetadata},
+    messaging::{ATM, profiles::ATMProfile},
+};
 use app::{domain::TrustRecordIds, storage::repository::TrustRecordRepository};
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing::{debug, error, info};
+use uuid::Uuid;
 
 use crate::{handlers::ProtocolHandler, listener::MessageHandler};
 
-pub const QUERY_AUTHORIZATION_MESSAGE_TYPE: &str = "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization";
-pub const QUERY_RECOGNITION_MESSAGE_TYPE: &str = "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition";
-pub const QUERY_AUTHORIZATION_RESPONSE_MESSAGE_TYPE: &str = "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization/response";
-pub const QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE: &str = "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition/response";
+pub const QUERY_AUTHORIZATION_MESSAGE_TYPE: &str =
+    "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization";
+pub const QUERY_RECOGNITION_MESSAGE_TYPE: &str =
+    "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition";
+pub const QUERY_AUTHORIZATION_RESPONSE_MESSAGE_TYPE: &str =
+    "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization/response";
+pub const QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE: &str =
+    "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition/response";
 
 pub struct TRQPMessagesHandler<R: TrustRecordRepository> {
     pub repository: Arc<R>,
@@ -29,10 +35,8 @@ impl<R: TrustRecordRepository + 'static> MessageHandler for TRQPMessagesHandler<
         _meta: UnpackMetadata,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let output_message_type: String = format!("{}/response", message.type_);
-        let message_sender = message
-            .from
-            .unwrap();
-            // .ok_or_else(|| Err("Ignore message, no from field".into()))?;
+        let message_sender = message.from.unwrap();
+        // .ok_or_else(|| Err("Ignore message, no from field".into()))?;
         let ids: TrustRecordIds = serde_json::from_value(message.body)?;
         let mut output_body = serde_json::to_value(ids)?;
         if let Value::Object(map) = &mut output_body {
@@ -44,7 +48,7 @@ impl<R: TrustRecordRepository + 'static> MessageHandler for TRQPMessagesHandler<
             .from(profile.inner.did.clone())
             .to(message_sender.clone())
             .finalize();
-        
+
         let packed_msg = atm
             .pack_encrypted(
                 &output_message,
@@ -63,16 +67,23 @@ impl<R: TrustRecordRepository + 'static> MessageHandler for TRQPMessagesHandler<
                 Some(&message_id),
                 &profile.to_tdk_profile().mediator.unwrap(),
                 &message_sender,
-                None, 
                 None,
-                false
-            ).await;
+                None,
+                false,
+            )
+            .await;
 
         debug!("sending result {:?}", sending_result);
         if let Err(sending_error) = sending_result {
-            error!("[profile = {}] Failed to forward message. Error: {:?}", &profile.inner.alias, sending_error);
-        } else  {
-            info!("[profile = {}] Response sent successfully", &profile.inner.alias);
+            error!(
+                "[profile = {}] Failed to forward message. Error: {:?}",
+                &profile.inner.alias, sending_error
+            );
+        } else {
+            info!(
+                "[profile = {}] Response sent successfully",
+                &profile.inner.alias
+            );
         }
         Ok(())
     }
@@ -87,5 +98,3 @@ impl<R: TrustRecordRepository + 'static> ProtocolHandler for TRQPMessagesHandler
         ]
     }
 }
-
-

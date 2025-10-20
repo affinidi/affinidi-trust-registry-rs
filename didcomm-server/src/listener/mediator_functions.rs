@@ -23,7 +23,9 @@ impl<H: MessageHandler> Listener<H> {
         // .await - ignore await to be ready receiving the next message almost immediately.
     }
 
-    pub(crate) async fn process_next_message(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) async fn process_next_message(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let auto_delete = true;
         let wait_duration = None;
         let protocols = Protocols::new();
@@ -82,11 +84,14 @@ impl<H: MessageHandler> Listener<H> {
             &self.profile.inner.alias, offline_arrived_messages
         );
 
-        let messages_to_delete: Vec<_> = offline_arrived_messages.iter().map(|(m, _)| m.id.clone()).collect();
+        let messages_to_delete: Vec<_> = offline_arrived_messages
+            .iter()
+            .map(|(m, _)| m.id.clone())
+            .collect();
 
-        offline_arrived_messages.into_iter().for_each(|(message, meta)| {
-            self.spawn_handler(message, meta)
-        });
+        offline_arrived_messages
+            .into_iter()
+            .for_each(|(message, meta)| self.spawn_handler(message, meta));
 
         // delete these from mediator queue
 

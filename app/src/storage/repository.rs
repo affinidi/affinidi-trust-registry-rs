@@ -10,15 +10,11 @@ pub struct TrustRecordQuery {
 }
 
 impl TrustRecordQuery {
-    pub fn new(
-        entity_id: EntityId,
-        authority_id: AuthorityId,
-        assertion_id: AssertionId
-    ) -> Self {
+    pub fn new(entity_id: EntityId, authority_id: AuthorityId, assertion_id: AssertionId) -> Self {
         Self {
             entity_id,
             authority_id,
-            assertion_id
+            assertion_id,
         }
     }
 }
