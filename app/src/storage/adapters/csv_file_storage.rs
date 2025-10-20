@@ -13,13 +13,6 @@ use serde::Deserialize;
 use tokio::time::sleep;
 use tracing::{error, info};
 
-fn boxed_error<E>(err: E) -> Box<dyn std::error::Error + Send + Sync>
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    Box::new(err)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RecordKey {
     entity_id: EntityId,
@@ -131,9 +124,8 @@ impl FileStorage {
         Box<dyn std::error::Error + Send + Sync>,
     > {
         let metadata = tokio::fs::metadata(path)
-            .await
-            .map_err(boxed_error)?;
-        let modified = metadata.modified().map_err(boxed_error)?;
+            .await?;
+        let modified = metadata.modified()?;
 
         if let Some(previous) = last_seen {
             if modified <= previous {
@@ -150,8 +142,7 @@ impl FileStorage {
             "Changes detected in trust records file, reloading"
         );
         let contents = tokio::fs::read_to_string(path)
-            .await
-            .map_err(boxed_error)?
+            .await?
             .trim()
             .to_string();
 
@@ -171,7 +162,7 @@ impl FileStorage {
         let mut records = HashMap::new();
 
         for result in reader.deserialize::<TrustRecordCsvRow>() {
-            let row = result.map_err(boxed_error)?;
+            let row = result?;
             let record = row.into_record()?;
             let key = RecordKey::from_record(&record);
             records.insert(key, record);
