@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use app::storage::adapters::local_storage::{self, LocalStorage};
+use app::storage::adapters::local_storage::LocalStorage;
 use tokio::task::JoinError;
 use tracing::error;
 

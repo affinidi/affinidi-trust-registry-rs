@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use tracing::{debug, error, info};
 use uuid::Uuid;
-use affinidi_tdk::{didcomm::{Message, UnpackMetadata}, messaging::{profiles::ATMProfile, protocols::Protocols, ATM}};
-use app::{domain::{EntityId, TrustRecordIds}, storage::repository::TrustRecordRepository};
+use affinidi_tdk::{didcomm::{Message, UnpackMetadata}, messaging::{profiles::ATMProfile,ATM}};
+use app::{domain::TrustRecordIds, storage::repository::TrustRecordRepository};
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::{handlers::ProtocolHandler, listener::MessageHandler};
 
@@ -14,10 +14,6 @@ pub const QUERY_AUTHORIZATION_MESSAGE_TYPE: &str = "https://affinidi.com/didcomm
 pub const QUERY_RECOGNITION_MESSAGE_TYPE: &str = "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition";
 pub const QUERY_AUTHORIZATION_RESPONSE_MESSAGE_TYPE: &str = "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization/response";
 pub const QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE: &str = "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition/response";
-
-
-// #[async_trait]
-// impl<R: TrustRecordRepository + 'static> MessageHandler for BaseHandler<R> {
 
 pub struct TRQPMessagesHandler<R: TrustRecordRepository> {
     pub repository: Arc<R>,
