@@ -1,10 +1,40 @@
 use affinidi_tdk::didcomm::{Message, UnpackMetadata};
 use affinidi_tdk::messaging::protocols::Protocols;
+use affinidi_tdk::messaging::protocols::mediator::acls::{AccessListModeType, MediatorACLSet};
+use sha256::digest;
 use tracing::{debug, error, info, warn};
 
 use crate::listener::*;
 
 impl<H: MessageHandler> Listener<H> {
+    pub(crate) async fn set_public_acls_mode(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let protocols = Protocols::new();
+
+        let account_get_result = protocols
+            .mediator
+            .account_get(&self.atm, &self.profile, None)
+            .await;
+
+        let account_info = account_get_result?.ok_or(format!(
+            "[profile = {}] Failed to get account info",
+            &self.profile.inner.alias
+        ))?;
+        let mut acls = MediatorACLSet::from_u64(account_info.acls);
+        acls.set_access_list_mode(AccessListModeType::ExplicitDeny, true, false)?;
+
+        protocols
+            .mediator
+            .acls_set(
+                &self.atm,
+                &self.profile,
+                &digest(&self.profile.inner.did),
+                &acls,
+            )
+            .await?;
+        Ok(())
+    }
     /// Spawns a new asynchronous task with tokio
     /// to handle message with handler asyncroniously
     fn spawn_handler(&self, message: Message, meta: UnpackMetadata) {
@@ -23,7 +53,9 @@ impl<H: MessageHandler> Listener<H> {
         // .await - ignore await to be ready receiving the next message almost immediately.
     }
 
-    pub(crate) async fn process_next_message(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) async fn process_next_message(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let auto_delete = true;
         let wait_duration = None;
         let protocols = Protocols::new();
@@ -82,11 +114,14 @@ impl<H: MessageHandler> Listener<H> {
             &self.profile.inner.alias, offline_arrived_messages
         );
 
-        let messages_to_delete: Vec<_> = offline_arrived_messages.iter().map(|(m, _)| m.id.clone()).collect();
+        let messages_to_delete: Vec<_> = offline_arrived_messages
+            .iter()
+            .map(|(m, _)| m.id.clone())
+            .collect();
 
-        offline_arrived_messages.into_iter().for_each(|(message, meta)| {
-            self.spawn_handler(message, meta)
-        });
+        offline_arrived_messages
+            .into_iter()
+            .for_each(|(message, meta)| self.spawn_handler(message, meta));
 
         // delete these from mediator queue
 
