@@ -6,7 +6,6 @@ use serde_derive::{Deserialize, Serialize};
 
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3131";
 
-
 // TODO: is this place good enough to define this struct?
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileConfig {
@@ -46,8 +45,7 @@ impl Configs for DidcommServerConfigs {
         let file_storage_config = if use_file_storage {
             Some(FileStorageConfig {
                 enabled: true,
-                file_path: env::var("FILE_STORAGE_PATH")
-                    .unwrap_or("trust_records.csv".to_string()),
+                file_path: env::var("FILE_STORAGE_PATH").unwrap_or("trust_records.csv".to_string()),
                 update_interval_sec: env::var("FILE_STORAGE_UPDATE_INTERVAL_SEC")
                     .unwrap_or("60".to_string())
                     .parse::<u64>()?,

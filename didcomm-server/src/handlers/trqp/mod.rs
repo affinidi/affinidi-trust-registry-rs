@@ -4,9 +4,12 @@ use affinidi_tdk::{
     didcomm::{Message, UnpackMetadata},
     messaging::{ATM, profiles::ATMProfile},
 };
-use app::{domain::TrustRecordIds, storage::repository::{TrustRecordQuery, TrustRecordRepository}};
+use app::{
+    domain::TrustRecordIds,
+    storage::repository::{TrustRecordQuery, TrustRecordRepository},
+};
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 

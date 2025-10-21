@@ -63,12 +63,11 @@ pub(crate) async fn start_one_did_listener(
         let file_storage_config = config.file_storage_config.as_ref().unwrap();
         let file_path = file_storage_config.file_path.clone();
         let update_interval_sec = file_storage_config.update_interval_sec;
-        Some(FileStorage::try_new(
-            file_path,
-            update_interval_sec,
-        )
-        .await
-        .unwrap()) // FIXME: handle error?
+        Some(
+            FileStorage::try_new(file_path, update_interval_sec)
+                .await
+                .unwrap(),
+        ) // FIXME: handle error?
     } else {
         None
     };
@@ -100,7 +99,6 @@ pub(crate) async fn start_one_did_listener(
         );
         listener.start_listening().await.unwrap(); // FIXME: handle error?
     }
-
 }
 
 /// starts DIDComm listeners

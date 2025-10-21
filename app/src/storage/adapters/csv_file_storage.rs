@@ -1,15 +1,15 @@
+use crate::domain::*;
+use crate::storage::repository::*;
+use anyhow::anyhow;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as base64;
+use serde_json::Value;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::{Duration, SystemTime},
 };
-use base64::engine::general_purpose::STANDARD as base64;
-use base64::Engine as _;
-use anyhow::anyhow;
-use serde_json::Value;
-use crate::domain::*;
-use crate::storage::repository::*;
 
 use serde::Deserialize;
 use tokio::time::sleep;
@@ -51,13 +51,11 @@ impl FileStorage {
         let records = Arc::new(RwLock::new(HashMap::new()));
         let last_modified = Arc::new(RwLock::new(None));
 
-        let (initial_records, modified) =
-            Self::load_if_modified(&file_path, None).await?
+        let (initial_records, modified) = Self::load_if_modified(&file_path, None)
+            .await?
             .ok_or_else(|| {
-                anyhow!(
-                    "unable to load trust records from {}",
-                    file_path.display()
-                ).into_boxed_dyn_error()
+                anyhow!("unable to load trust records from {}", file_path.display())
+                    .into_boxed_dyn_error()
             })?;
 
         {
@@ -125,8 +123,7 @@ impl FileStorage {
         Option<(HashMap<RecordKey, TrustRecord>, SystemTime)>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        let metadata = tokio::fs::metadata(path)
-            .await?;
+        let metadata = tokio::fs::metadata(path).await?;
         let modified = metadata.modified()?;
 
         if let Some(previous) = last_seen {
@@ -143,10 +140,7 @@ impl FileStorage {
             path = %path.display(),
             "Changes detected in trust records file, reloading"
         );
-        let contents = tokio::fs::read_to_string(path)
-            .await?
-            .trim()
-            .to_string();
+        let contents = tokio::fs::read_to_string(path).await?.trim().to_string();
 
         let records = Self::parse_csv(&contents)?;
 
@@ -225,7 +219,9 @@ impl TrustRecordCsvRow {
             .assertion_verified(self.assertion_verified)
             .context(Context::new(parsed_context));
 
-        builder.build().map_err(|err| anyhow!("invalid trust record: {err}").into())
+        builder
+            .build()
+            .map_err(|err| anyhow!("invalid trust record: {err}").into())
     }
 }
 
@@ -234,14 +230,12 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     fn csv_header() -> String {
-        String::from(
-            "entity_id,authority_id,assertion_id,recognized,assertion_verified,context\n",
-        )
+        String::from("entity_id,authority_id,assertion_id,recognized,assertion_verified,context\n")
     }
-    
+
     fn sample_csv(records: &[(&str, &str, &str)]) -> String {
         let mut csv = String::new();
         for (entity, authority, assertion) in records {
@@ -285,12 +279,7 @@ mod tests {
 
         let storage = FileStorage::try_new(file.path(), 1).await.unwrap();
 
-        write!(
-            file.as_file_mut(),
-            "{}",
-            sample_csv(&[("e2", "a2", "s2")])
-        )
-        .unwrap();
+        write!(file.as_file_mut(), "{}", sample_csv(&[("e2", "a2", "s2")])).unwrap();
         file.flush().unwrap();
 
         sleep(Duration::from_secs(2)).await;
