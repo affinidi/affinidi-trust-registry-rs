@@ -1,6 +1,7 @@
 use app::storage::adapters::csv_file_storage::FileStorage;
 use app::storage::adapters::local_storage::LocalStorage;
 use std::sync::Arc;
+use app::storage::adapters::local_storage::{self, LocalStorage};
 use tokio::task::JoinError;
 use tracing::error;
 
@@ -9,12 +10,41 @@ use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
 use async_trait::async_trait;
 use tracing::info;
 
+<<<<<<< HEAD
 use crate::configs::{DidcommServerConfigs, ProfileConfig};
 use crate::handlers::BaseHandler;
 
 pub mod build_listener;
 pub mod mediator_functions;
+=======
+use crate::handlers::BaseHandler;
+use crate::{
+    configs::{DidcommServerConfigs, ProfileConfig},
+};
+
+pub mod build_listener;
+>>>>>>> e11f2f09fa9bbf48540bc952e1bdf3975660913c
 pub mod start_listener;
+pub mod mediator_functions;
+
+#[async_trait]
+pub trait MessageHandler: Send + Sync + 'static {
+    // TODO: may grow a lot in case connection to DB and other possible things?
+    async fn handle(
+        &self,
+        atm: &Arc<ATM>,
+        profile: &Arc<ATMProfile>,
+        message: Message,
+        meta: UnpackMetadata,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        info!("[OnlyLoggingHandler]: Message: {:?}", message);
+        info!("[OnlyLoggingHandler]: UnpackMetadata: {:?}", meta);
+        info!("[OnlyLoggingHandler]: profile: {:?}", profile.inner.alias);
+        let _no_warn_please = atm.clone();
+
+        Ok(())
+    }
+}
 
 #[async_trait]
 pub trait MessageHandler: Send + Sync + 'static {
@@ -53,11 +83,16 @@ impl<H: MessageHandler> Listener<H> {
         }
     }
 }
+<<<<<<< HEAD
+=======
+
+>>>>>>> e11f2f09fa9bbf48540bc952e1bdf3975660913c
 
 pub(crate) async fn start_one_did_listener(
     profile_config: ProfileConfig,
     config: Arc<DidcommServerConfigs>,
 ) {
+<<<<<<< HEAD
     // TODO: should one instance be provided for all listeners?
     let file_storage_repository = if config.file_storage_config.is_some() {
         let file_storage_config = config.file_storage_config.as_ref().unwrap();
@@ -101,6 +136,14 @@ pub(crate) async fn start_one_did_listener(
         listener.start_listening().await.unwrap(); // FIXME: handle error?
     }
 
+=======
+    let local_storage = LocalStorage::new();
+    let listener =
+        Listener::build_listener(profile_config, &config.mediator_did, BaseHandler::build(Arc::new(local_storage)))
+            .await
+            .unwrap(); // FIXME: handle error?
+    listener.start_listening().await.unwrap(); // FIXME: handle error?
+>>>>>>> e11f2f09fa9bbf48540bc952e1bdf3975660913c
 }
 
 /// starts DIDComm listeners

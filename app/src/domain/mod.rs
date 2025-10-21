@@ -2,7 +2,11 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+<<<<<<< HEAD
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+=======
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+>>>>>>> e11f2f09fa9bbf48540bc952e1bdf3975660913c
 pub struct EntityId(String);
 
 impl EntityId {
@@ -21,7 +25,11 @@ impl fmt::Display for EntityId {
     }
 }
 
+<<<<<<< HEAD
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+=======
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+>>>>>>> e11f2f09fa9bbf48540bc952e1bdf3975660913c
 pub struct AuthorityId(String);
 
 impl AuthorityId {
@@ -40,7 +48,11 @@ impl fmt::Display for AuthorityId {
     }
 }
 
+<<<<<<< HEAD
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+=======
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+>>>>>>> e11f2f09fa9bbf48540bc952e1bdf3975660913c
 pub struct AssertionId(String);
 
 impl AssertionId {
@@ -59,6 +71,26 @@ impl fmt::Display for AssertionId {
     }
 }
 
+<<<<<<< HEAD
+=======
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Timestamp(i64);
+
+impl Timestamp {
+    pub fn now() -> Self {
+        Self(chrono::Utc::now().timestamp_millis())
+    }
+
+    pub fn from_millis(millis: i64) -> Self {
+        Self(millis)
+    }
+
+    pub fn as_millis(&self) -> i64 {
+        self.0
+    }
+}
+
+>>>>>>> e11f2f09fa9bbf48540bc952e1bdf3975660913c
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context(serde_json::Value);
 
@@ -89,7 +121,11 @@ pub struct TrustRecordIds {
     assertion_id: AssertionId,
 }
 
+<<<<<<< HEAD
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+=======
+#[derive(Debug, Clone, PartialEq)]
+>>>>>>> e11f2f09fa9bbf48540bc952e1bdf3975660913c
 pub struct TrustRecord {
     entity_id: EntityId,
     authority_id: AuthorityId,
