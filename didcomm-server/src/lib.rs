@@ -6,9 +6,9 @@ use tracing::error;
 use crate::configs::DidcommServerConfigs;
 
 pub mod configs;
+pub mod handlers;
 pub mod listener;
 pub mod server;
-pub mod handlers;
 
 pub static CONFIG: Lazy<DidcommServerConfigs> = Lazy::new(|| {
     dotenv().ok();

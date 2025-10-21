@@ -1,5 +1,6 @@
+use app::storage::adapters::csv_file_storage::FileStorage;
+use app::storage::adapters::local_storage::LocalStorage;
 use std::sync::Arc;
-use app::storage::adapters::local_storage::{self, LocalStorage};
 use tokio::task::JoinError;
 use tracing::error;
 
@@ -8,14 +9,12 @@ use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
 use async_trait::async_trait;
 use tracing::info;
 
+use crate::configs::{DidcommServerConfigs, ProfileConfig};
 use crate::handlers::BaseHandler;
-use crate::{
-    configs::{DidcommServerConfigs, ProfileConfig},
-};
 
 pub mod build_listener;
-pub mod start_listener;
 pub mod mediator_functions;
+pub mod start_listener;
 
 #[async_trait]
 pub trait MessageHandler: Send + Sync + 'static {
@@ -55,17 +54,51 @@ impl<H: MessageHandler> Listener<H> {
     }
 }
 
-
 pub(crate) async fn start_one_did_listener(
     profile_config: ProfileConfig,
     config: Arc<DidcommServerConfigs>,
 ) {
-    let local_storage = LocalStorage::new();
-    let listener =
-        Listener::build_listener(profile_config, &config.mediator_did, BaseHandler::build(Arc::new(local_storage)))
-            .await
-            .unwrap(); // FIXME: handle error?
-    listener.start_listening().await.unwrap(); // FIXME: handle error?
+    // TODO: should one instance be provided for all listeners?
+    let file_storage_repository = if config.file_storage_config.is_some() {
+        let file_storage_config = config.file_storage_config.as_ref().unwrap();
+        let file_path = file_storage_config.file_path.clone();
+        let update_interval_sec = file_storage_config.update_interval_sec;
+        Some(
+            FileStorage::try_new(file_path, update_interval_sec)
+                .await
+                .unwrap(),
+        ) // FIXME: handle error?
+    } else {
+        None
+    };
+    if let Some(file_storage) = file_storage_repository {
+        let listener = Listener::build_listener(
+            profile_config,
+            &config.mediator_did,
+            BaseHandler::build(Arc::new(file_storage)),
+        )
+        .await
+        .unwrap(); // FIXME: handle error?
+        info!(
+            "[profile = {}] Listener started with CSV file storage",
+            &listener.profile.inner.alias
+        );
+        listener.start_listening().await.unwrap(); // FIXME: handle error?
+    } else {
+        let local_storage = LocalStorage::new();
+        let listener = Listener::build_listener(
+            profile_config,
+            &config.mediator_did,
+            BaseHandler::build(Arc::new(local_storage)),
+        )
+        .await
+        .unwrap(); // FIXME: handle error?
+        info!(
+            "[profile = {}] Listener started with Local storage",
+            &listener.profile.inner.alias
+        );
+        listener.start_listening().await.unwrap(); // FIXME: handle error?
+    }
 }
 
 /// starts DIDComm listeners
