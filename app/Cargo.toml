@@ -15,12 +15,8 @@ csv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_derive.workspace = true
-<<<<<<< HEAD
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-=======
-tokio.workspace = true
->>>>>>> e11f2f09fa9bbf48540bc952e1bdf3975660913c
