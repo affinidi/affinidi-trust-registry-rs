@@ -4,8 +4,10 @@ use std::{
     sync::{Arc, RwLock},
     time::{Duration, SystemTime},
 };
-
+use base64::engine::general_purpose::STANDARD as base64;
+use base64::Engine as _;
 use anyhow::anyhow;
+use serde_json::Value;
 use crate::domain::*;
 use crate::storage::repository::*;
 
@@ -179,21 +181,19 @@ impl FileStorage {
 }
 
 impl TrustRecordRepository for FileStorage {
-    fn find_by_query(
+    async fn find_by_query(
         &self,
         query: TrustRecordQuery,
-    ) -> impl Future<Output = Result<Option<TrustRecord>, RepositoryError>> + Send {
+    ) -> Result<Option<TrustRecord>, RepositoryError> {
         let records = Arc::clone(&self.records);
 
-        async move {
-            let guard = records.read().unwrap();
-            let result = guard
-                .values()
-                .cloned()
-                .find(|record| FileStorage::matches_query(record, &query));
+        let guard = records.read().unwrap();
+        let result = guard
+            .values()
+            .cloned()
+            .find(|record| FileStorage::matches_query(record, &query));
 
-            Ok(result)
-        }
+        Ok(result)
     }
 }
 
@@ -204,16 +204,26 @@ struct TrustRecordCsvRow {
     assertion_id: String,
     recognized: bool,
     assertion_verified: bool,
+    context: String,
 }
 
 impl TrustRecordCsvRow {
     fn into_record(self) -> Result<TrustRecord, Box<dyn std::error::Error + Send + Sync>> {
+        let decoded_bytes = base64
+            .decode(&self.context)
+            .map_err(|err| anyhow!("failed to decode context from base64: {err}"))?;
+        let decoded_context = String::from_utf8(decoded_bytes)
+            .map_err(|err| anyhow!("decoded context is not valid UTF-8: {err}"))?;
+
+        let parsed_context: Value = serde_json::from_str(&decoded_context)
+            .map_err(|err| anyhow!("failed to parse context JSON: {err}"))?;
         let builder = TrustRecordBuilder::new()
             .entity_id(EntityId::new(self.entity_id))
             .authority_id(AuthorityId::new(self.authority_id))
             .assertion_id(AssertionId::new(self.assertion_id))
             .recognized(self.recognized)
-            .assertion_verified(self.assertion_verified);
+            .assertion_verified(self.assertion_verified)
+            .context(Context::new(parsed_context));
 
         builder.build().map_err(|err| anyhow!("invalid trust record: {err}").into())
     }
@@ -228,7 +238,7 @@ mod tests {
 
     fn csv_header() -> String {
         String::from(
-            "entity_id,authority_id,assertion_id,recognized,assertion_verified,time_requested_ms,time_evaluated_ms,message\n",
+            "entity_id,authority_id,assertion_id,recognized,assertion_verified,context\n",
         )
     }
     
@@ -236,7 +246,7 @@ mod tests {
         let mut csv = String::new();
         for (entity, authority, assertion) in records {
             csv.push_str(&format!(
-                "{entity},{authority},{assertion},true,true,1000,2000,loaded\n"
+                "{entity},{authority},{assertion},true,true,e30=\n"
             ));
         }
         csv

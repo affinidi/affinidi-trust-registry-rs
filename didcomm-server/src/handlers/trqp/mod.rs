@@ -1,12 +1,12 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use affinidi_tdk::{
     didcomm::{Message, UnpackMetadata},
     messaging::{ATM, profiles::ATMProfile},
 };
-use app::{domain::TrustRecordIds, storage::repository::TrustRecordRepository};
+use app::{domain::TrustRecordIds, storage::repository::{TrustRecordQuery, TrustRecordRepository}};
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
@@ -37,10 +37,11 @@ impl<R: TrustRecordRepository + 'static> MessageHandler for TRQPMessagesHandler<
         let output_message_type: String = format!("{}/response", message.type_);
         let message_sender = message.from.unwrap();
         // .ok_or_else(|| Err("Ignore message, no from field".into()))?;
-        let ids: TrustRecordIds = serde_json::from_value(message.body)?;
-        let mut output_body = serde_json::to_value(ids)?;
-        if let Value::Object(map) = &mut output_body {
-            map.insert("hello".to_string(), Value::String("world".to_string()));
+        let query: TrustRecordQuery = serde_json::from_value(message.body)?;
+        let record = self.repository.find_by_query(query).await?;
+        let mut output_body = json!({});
+        if let Some(tr) = record {
+            output_body = serde_json::to_value(tr)?;
         }
 
         let message_id = Uuid::new_v4().to_string();

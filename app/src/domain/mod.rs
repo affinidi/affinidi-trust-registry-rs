@@ -89,7 +89,7 @@ pub struct TrustRecordIds {
     assertion_id: AssertionId,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrustRecord {
     entity_id: EntityId,
     authority_id: AuthorityId,
@@ -149,7 +149,6 @@ pub struct TrustRecordBuilder {
     authority_id: Option<AuthorityId>,
     assertion_id: Option<AssertionId>,
     recognized: bool,
-    message: String,
     context: Context,
     assertion_verified: bool,
 }
@@ -161,7 +160,6 @@ impl TrustRecordBuilder {
             authority_id: None,
             assertion_id: None,
             recognized: false,
-            message: String::new(),
             context: Context::empty(),
             assertion_verified: false,
         }

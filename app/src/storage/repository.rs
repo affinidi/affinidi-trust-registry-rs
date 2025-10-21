@@ -1,8 +1,10 @@
 use std::{fmt, future::Future};
 
+use serde::{Deserialize, Serialize};
+
 use crate::domain::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustRecordQuery {
     pub entity_id: EntityId,
     pub authority_id: AuthorityId,

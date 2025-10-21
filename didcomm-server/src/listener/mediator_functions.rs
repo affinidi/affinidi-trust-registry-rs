@@ -1,10 +1,28 @@
 use affinidi_tdk::didcomm::{Message, UnpackMetadata};
+use affinidi_tdk::messaging::protocols::mediator::acls::{AccessListModeType, MediatorACLSet};
 use affinidi_tdk::messaging::protocols::Protocols;
+use sha256::digest;
 use tracing::{debug, error, info, warn};
 
 use crate::listener::*;
 
 impl<H: MessageHandler> Listener<H> {
+    pub(crate) async fn set_public_acls_mode(&self)  -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let protocols = Protocols::new();
+
+        let account_get_result = protocols.mediator.account_get(&self.atm, &self.profile, None).await;
+
+        let account_info = account_get_result?
+            .ok_or(format!("[profile = {}] Failed to get account info", &self.profile.inner.alias))?;
+        let mut acls = MediatorACLSet::from_u64(account_info.acls);
+        acls.set_access_list_mode(AccessListModeType::ExplicitDeny, true, false)?;
+
+        protocols
+                .mediator
+                .acls_set(&self.atm, &self.profile, &digest(&self.profile.inner.did), &acls)
+                .await?;
+        Ok(())
+    }
     /// Spawns a new asynchronous task with tokio
     /// to handle message with handler asyncroniously
     fn spawn_handler(&self, message: Message, meta: UnpackMetadata) {
