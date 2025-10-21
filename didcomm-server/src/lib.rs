@@ -8,6 +8,7 @@ use crate::configs::DidcommServerConfigs;
 pub mod configs;
 pub mod listener;
 pub mod server;
+pub mod handlers;
 
 pub static CONFIG: Lazy<DidcommServerConfigs> = Lazy::new(|| {
     dotenv().ok();

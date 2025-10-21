@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use affinidi_messaging_sdk::profiles::ATMProfile;
+use affinidi_tdk::messaging::profiles::ATMProfile;
 use affinidi_tdk::{
     TDK,
     common::{config::TDKConfig, profiles::TDKProfile},
@@ -9,7 +9,7 @@ use tokio::time::timeout;
 
 use crate::{
     configs::ProfileConfig,
-    listener::listener::{Listener, MessageHandler},
+    listener::{Listener, MessageHandler},
 };
 
 impl<H: MessageHandler> Listener<H> {
