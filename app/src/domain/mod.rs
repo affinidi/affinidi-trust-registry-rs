@@ -1,6 +1,8 @@
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EntityId(String);
 
 impl EntityId {
@@ -19,7 +21,7 @@ impl fmt::Display for EntityId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AuthorityId(String);
 
 impl AuthorityId {
@@ -38,7 +40,7 @@ impl fmt::Display for AuthorityId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AssertionId(String);
 
 impl AssertionId {
@@ -57,7 +59,7 @@ impl fmt::Display for AssertionId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Timestamp(i64);
 
 impl Timestamp {
@@ -74,7 +76,7 @@ impl Timestamp {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context(serde_json::Value);
 
 impl Context {
@@ -95,6 +97,13 @@ impl Default for Context {
     fn default() -> Self {
         Self::empty()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustRecordIds {
+    entity_id: EntityId,
+    authority_id: AuthorityId,
+    assertion_id: AssertionId,
 }
 
 #[derive(Debug, Clone, PartialEq)]

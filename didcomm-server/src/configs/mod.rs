@@ -1,10 +1,11 @@
 use std::env;
 
-use affinidi_secrets_resolver::secrets::Secret;
+use affinidi_tdk::secrets_resolver::secrets::Secret;
 use app::configs::Configs;
 use serde_derive::{Deserialize, Serialize};
 
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3131";
+
 
 // TODO: is this place good enough to define this struct?
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,7 +35,7 @@ impl Configs for DidcommServerConfigs {
             listen_address: env::var("LISTEN_ADDRESS")
                 .unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string()),
             mediator_did: env::var("MEDIATOR_DID")?,
-            profile_configs: parse_profile_config_from_str(&env::var("DIDS_AND_SECRETS")?)?,
+            profile_configs: parse_profile_config_from_str(&env::var("PROFILE_CONFIGS")?)?,
         })
     }
 }
