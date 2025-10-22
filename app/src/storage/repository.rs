@@ -19,6 +19,15 @@ impl TrustRecordQuery {
             assertion_id,
         }
     }
+
+    pub fn from_ids(ids: TrustRecordIds) -> Self {
+        let (entity_id, authority_id, assertion_id) = ids.into_parts();
+        Self {
+            entity_id,
+            authority_id,
+            assertion_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

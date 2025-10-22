@@ -1,7 +1,7 @@
 use std::env;
 
 use affinidi_tdk::secrets_resolver::secrets::Secret;
-use app::{configs::Configs, storage::adapters::csv_file_storage::FileStorage};
+use app::configs::Configs;
 use serde_derive::{Deserialize, Serialize};
 
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3131";

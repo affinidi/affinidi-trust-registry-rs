@@ -89,6 +89,30 @@ pub struct TrustRecordIds {
     assertion_id: AssertionId,
 }
 
+impl TrustRecordIds {
+    pub fn entity_id(&self) -> &EntityId {
+        &self.entity_id
+    }
+
+    pub fn authority_id(&self) -> &AuthorityId {
+        &self.authority_id
+    }
+
+    pub fn assertion_id(&self) -> &AssertionId {
+        &self.assertion_id
+    }
+
+    pub fn into_parts(self) -> (EntityId, AuthorityId, AssertionId) {
+        let Self {
+            entity_id,
+            authority_id,
+            assertion_id,
+        } = self;
+
+        (entity_id, authority_id, assertion_id)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrustRecord {
     entity_id: EntityId,
