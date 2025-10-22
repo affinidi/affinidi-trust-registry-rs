@@ -37,4 +37,7 @@ once_cell = "1.20.2"
 axum-server = { version = "0.7", default-features = true}
 tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
 uuid = { version = "1.18", features = ["v4"]}
-
+aws-types = { version = "1.3" }
+aws-config = { version = "1.5", default-features = false, features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = { version = "1.47", default-features = false, features = ["rustls"] }
+serde_dynamo = { version = "4.3", features = ["aws-sdk-dynamodb+1"]}

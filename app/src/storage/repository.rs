@@ -32,7 +32,6 @@ impl TrustRecordQuery {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepositoryError {
-    NotFound,
     ConnectionFailed(String),
     QueryFailed(String),
     SerializationFailed(String),
@@ -41,7 +40,6 @@ pub enum RepositoryError {
 impl fmt::Display for RepositoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotFound => write!(f, "Record not found"),
             Self::ConnectionFailed(msg) => write!(f, "Connection failed: {}", msg),
             Self::QueryFailed(msg) => write!(f, "Query failed: {}", msg),
             Self::SerializationFailed(msg) => write!(f, "Serialization failed: {}", msg),

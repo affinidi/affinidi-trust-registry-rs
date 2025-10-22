@@ -17,6 +17,10 @@ serde_json.workspace = true
 serde_derive.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+aws-types.workspace = true
+aws-config.workspace = true
+aws-sdk-dynamodb.workspace = true
+serde_dynamo.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
