@@ -1,16 +1,19 @@
-use app::configs::Configs;
+use app::{configs::Configs, storage::repository::TrustRecordRepository};
 
 use chrono::{DateTime, Utc};
 use dotenvy::dotenv;
 use once_cell::sync::Lazy;
-use std::fmt::Debug;
+use std::{fmt, sync::Arc};
 use tracing::error;
 
 use crate::configs::HttpServerConfigs;
 
 pub mod configs;
+pub mod error;
 pub mod handlers;
 pub mod server;
+
+pub use error::AppError;
 
 pub static CONFIG: Lazy<HttpServerConfigs> = Lazy::new(|| {
     dotenv().ok();
@@ -24,13 +27,14 @@ pub static CONFIG: Lazy<HttpServerConfigs> = Lazy::new(|| {
 });
 
 #[derive(Clone)]
-pub struct SharedData {
+pub struct SharedData<R: TrustRecordRepository> {
     pub config: HttpServerConfigs,
     pub service_start_timestamp: DateTime<Utc>,
+    pub repository: Arc<R>,
 }
 
-impl Debug for SharedData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<R: TrustRecordRepository> fmt::Debug for SharedData<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SharedData")
             .field("config", &self.config)
             .field("service_start_timestamp", &self.service_start_timestamp)

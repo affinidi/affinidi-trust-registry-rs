@@ -10,11 +10,13 @@ readme.workspace = true
 [dependencies]
 app.workspace = true
 axum.workspace = true
+anyhow.workspace = true
 chrono.workspace = true
 dotenvy.workspace = true
 futures.workspace = true
 once_cell.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
