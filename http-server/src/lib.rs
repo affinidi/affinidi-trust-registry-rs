@@ -1,7 +1,4 @@
-use app::{
-    configs::Configs,
-    storage::repository::TrustRecordRepository,
-};
+use app::{configs::Configs, storage::repository::TrustRecordRepository};
 
 use chrono::{DateTime, Utc};
 use dotenvy::dotenv;

@@ -1,12 +1,12 @@
 use app::storage::adapters::csv_file_storage::FileStorage;
-use axum::{routing::get, Json, Router};
+use axum::{Json, Router, routing::get};
 use dotenvy::dotenv;
-use serde_json::{json, Value};
-use tracing_subscriber::EnvFilter;
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
-use crate::{configs::HttpServerConfigs, handlers::application_routes, SharedData, CONFIG};
+use crate::{CONFIG, SharedData, configs::HttpServerConfigs, handlers::application_routes};
 
 fn setup_logging() {
     tracing_subscriber::fmt()
@@ -35,13 +35,14 @@ pub async fn start() {
     let file_storage_path = config.trust_registry_file_path.clone();
     let file_storage_update_interval_sec = config.trust_registry_update_interval_sec;
 
-    let repository = match FileStorage::try_new(file_storage_path, file_storage_update_interval_sec).await {
-        Ok(storage) => storage,
-        Err(err) => {
-            error!("Failed to initialize file storage repository: {err}");
-            panic!("Failed to initialize trust registry repository");
-        }
-    };
+    let repository =
+        match FileStorage::try_new(file_storage_path, file_storage_update_interval_sec).await {
+            Ok(storage) => storage,
+            Err(err) => {
+                error!("Failed to initialize file storage repository: {err}");
+                panic!("Failed to initialize trust registry repository");
+            }
+        };
 
     let shared_data = SharedData {
         config,
@@ -58,6 +59,8 @@ pub async fn start() {
 
     info!("Server is starting on {}...", listen_address);
 
-    let listener = tokio::net::TcpListener::bind(&listen_address).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&listen_address)
+        .await
+        .unwrap();
     axum::serve(listener, main_router).await.unwrap();
 }

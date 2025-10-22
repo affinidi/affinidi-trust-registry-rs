@@ -1,10 +1,7 @@
-use crate::handlers::trqp::{handle_trqp_authorization};
 use crate::SharedData;
+use crate::handlers::trqp::handle_trqp_authorization;
 use app::storage::repository::TrustRecordRepository;
-use axum::{
-    Router,
-    routing::post,
-};
+use axum::{Router, routing::post};
 
 pub mod trqp;
 

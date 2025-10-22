@@ -1,8 +1,8 @@
 use anyhow::Error;
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde_json::{Map, Value};
 use tracing::{error, warn};
@@ -27,9 +27,9 @@ pub enum AppError {
 impl AppError {
     fn into_parts(self) -> (StatusCode, &'static str, &'static str, Option<Value>, Error) {
         match self {
-            AppError::BadRequest { 
-              internal_error, 
-              details 
+            AppError::BadRequest {
+                internal_error,
+                details,
             } => (
                 StatusCode::BAD_REQUEST,
                 "bad_request",
@@ -69,7 +69,6 @@ impl IntoResponse for AppError {
         } else {
             warn!(%internal_error, code, message, "HTTP request failed with exception");
         }
-        
 
         let mut payload = Map::with_capacity(3);
         payload.insert("code".to_string(), Value::String(code.to_string()));
