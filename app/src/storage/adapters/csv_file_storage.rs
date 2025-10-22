@@ -174,6 +174,7 @@ impl FileStorage {
     }
 }
 
+#[async_trait::async_trait]
 impl TrustRecordRepository for FileStorage {
     async fn find_by_query(
         &self,

@@ -31,6 +31,21 @@ impl DynamoDbConfig {
             profile: None,
         }
     }
+
+    pub fn set_region(mut self, region: Option<String>) -> Self {
+        self.region = region;
+        self
+    }
+
+    pub fn set_endpoint_url(mut self, endpoint_url: Option<String>) -> Self {
+        self.endpoint_url = endpoint_url;
+        self
+    }
+
+    pub fn set_profile(mut self, profile: Option<String>) -> Self {
+        self.profile = profile;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -57,6 +72,7 @@ impl DynamoDbStorage {
 
         let shared_config = loader.load().await;
         let client = Client::new(&shared_config);
+        // TODO: describe table to check connection to fail fast?
 
         Ok(Self::with_client(client, config.table_name))
     }
@@ -96,6 +112,7 @@ impl std::fmt::Debug for DynamoDbStorage {
     }
 }
 
+#[async_trait::async_trait]
 impl TrustRecordRepository for DynamoDbStorage {
     async fn find_by_query(
         &self,

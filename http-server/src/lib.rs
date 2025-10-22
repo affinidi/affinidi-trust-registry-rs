@@ -26,8 +26,10 @@ pub static CONFIG: Lazy<HttpServerConfigs> = Lazy::new(|| {
     }
 });
 
-#[derive(Clone)]
-pub struct SharedData<R: TrustRecordRepository> {
+pub struct SharedData<R>
+where
+    R: TrustRecordRepository + ?Sized,
+{
     pub config: HttpServerConfigs,
     pub service_start_timestamp: DateTime<Utc>,
     pub repository: Arc<R>,
@@ -39,5 +41,18 @@ impl<R: TrustRecordRepository> fmt::Debug for SharedData<R> {
             .field("config", &self.config)
             .field("service_start_timestamp", &self.service_start_timestamp)
             .finish()
+    }
+}
+
+impl<R> Clone for SharedData<R>
+where
+    R: TrustRecordRepository + ?Sized,
+{
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            service_start_timestamp: self.service_start_timestamp.clone(),
+            repository: Arc::clone(&self.repository),
+        }
     }
 }

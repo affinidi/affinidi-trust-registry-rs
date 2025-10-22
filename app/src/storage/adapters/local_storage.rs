@@ -69,6 +69,7 @@ impl Default for LocalStorage {
     }
 }
 
+#[async_trait::async_trait]
 impl TrustRecordRepository for LocalStorage {
     async fn find_by_query(
         &self,

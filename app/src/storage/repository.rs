@@ -49,11 +49,12 @@ impl fmt::Display for RepositoryError {
 
 impl std::error::Error for RepositoryError {}
 
+#[async_trait::async_trait]
 pub trait TrustRecordRepository: Send + Sync {
-    fn find_by_query(
+    async fn find_by_query(
         &self,
         query: TrustRecordQuery,
-    ) -> impl Future<Output = Result<Option<TrustRecord>, RepositoryError>> + Send;
+    ) -> Result<Option<TrustRecord>, RepositoryError>;
 }
 
 #[cfg(test)]
