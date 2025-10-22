@@ -2190,6 +2190,7 @@ dependencies = [
 name = "http-server"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "app",
  "axum",
  "axum-server",

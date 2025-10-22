@@ -12,8 +12,11 @@ use tracing::error;
 use crate::configs::HttpServerConfigs;
 
 pub mod configs;
+pub mod error;
 pub mod handlers;
 pub mod server;
+
+pub use error::AppError;
 
 pub static CONFIG: Lazy<HttpServerConfigs> = Lazy::new(|| {
     dotenv().ok();
