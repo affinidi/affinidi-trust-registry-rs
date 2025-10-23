@@ -7,46 +7,13 @@ use aws_types::region::Region;
 use tracing::debug;
 
 use crate::{
+    configs::DynamoDbStorageConfig,
     domain::TrustRecord,
     storage::repository::{RepositoryError, TrustRecordQuery, TrustRecordRepository},
 };
 
 const PK_ATTR: &str = "PK";
 const SK_ATTR: &str = "SK";
-
-#[derive(Debug, Clone)]
-pub struct DynamoDbConfig {
-    pub table_name: String,
-    pub region: Option<String>,
-    pub endpoint_url: Option<String>,
-    pub profile: Option<String>,
-}
-
-impl DynamoDbConfig {
-    pub fn new(table_name: impl Into<String>) -> Self {
-        Self {
-            table_name: table_name.into(),
-            region: None,
-            endpoint_url: None,
-            profile: None,
-        }
-    }
-
-    pub fn set_region(mut self, region: Option<String>) -> Self {
-        self.region = region;
-        self
-    }
-
-    pub fn set_endpoint_url(mut self, endpoint_url: Option<String>) -> Self {
-        self.endpoint_url = endpoint_url;
-        self
-    }
-
-    pub fn set_profile(mut self, profile: Option<String>) -> Self {
-        self.profile = profile;
-        self
-    }
-}
 
 #[derive(Clone)]
 pub struct DynamoDbStorage {
@@ -55,7 +22,7 @@ pub struct DynamoDbStorage {
 }
 
 impl DynamoDbStorage {
-    pub async fn new(config: DynamoDbConfig) -> AnyResult<Self> {
+    pub async fn new(config: DynamoDbStorageConfig) -> AnyResult<Self> {
         let mut loader = aws_config::defaults(BehaviorVersion::latest());
 
         if let Some(profile) = &config.profile {

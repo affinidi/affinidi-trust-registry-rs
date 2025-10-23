@@ -1,18 +1,7 @@
-use app::{
-    configs::TrustStorageBackend,
-    storage::{
-        adapters::{
-            csv_file_storage::FileStorage,
-            ddb_storage::{DynamoDbConfig, DynamoDbStorage},
-        },
-        factory::TrustStorageRepoFactory,
-        repository::TrustRecordRepository,
-    },
-};
+use app::storage::factory::TrustStorageRepoFactory;
 use axum::{Json, Router, routing::get};
 use dotenvy::dotenv;
 use serde_json::{Value, json};
-use std::sync::Arc;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 

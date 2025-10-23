@@ -1,15 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use tracing::error;
 
 use crate::{
     configs::{Configs, DynamoDbStorageConfig, FileStorageConfig, TrustStorageBackend},
     storage::{
-        adapters::{
-            csv_file_storage::FileStorage,
-            ddb_storage::{DynamoDbConfig, DynamoDbStorage},
-        },
+        adapters::{csv_file_storage::FileStorage, ddb_storage::DynamoDbStorage},
         repository::TrustRecordRepository,
     },
 };
@@ -35,11 +31,7 @@ impl TrustStorageRepoFactory {
             }
             TrustStorageBackend::DynamoDb => {
                 let ddb_config = DynamoDbStorageConfig::load()?;
-                let ddb_internal_config = DynamoDbConfig::new(ddb_config.table_name)
-                    .set_endpoint_url(ddb_config.endpoint_url)
-                    .set_region(ddb_config.region)
-                    .set_profile(ddb_config.profile);
-                let ddb = DynamoDbStorage::new(ddb_internal_config)
+                let ddb = DynamoDbStorage::new(ddb_config)
                     .await
                     .map_err(|e| anyhow!(e.to_string()))?;
                 Arc::new(ddb)
