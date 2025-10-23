@@ -5,10 +5,10 @@ use axum::{Router, routing::post};
 
 pub mod trqp;
 
-pub fn application_routes<R: TrustRecordRepository + Clone + Send + 'static>(
-    api_prefix: &str,
-    shared_data: SharedData<R>,
-) -> Router {
+pub fn application_routes<R>(api_prefix: &str, shared_data: SharedData<R>) -> Router
+where
+    R: TrustRecordRepository + Send + ?Sized + 'static,
+{
     let all_handlers = Router::new()
         .route("/authorization", post(handle_trqp_authorization::<R>))
         .route("/recognition", post(handle_trqp_authorization::<R>));
