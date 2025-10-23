@@ -11,10 +11,13 @@ use serde_json::json;
 
 use crate::{AppError, SharedData};
 
-pub async fn handle_trqp_authorization<R: TrustRecordRepository>(
+pub async fn handle_trqp_authorization<R>(
     State(state): State<SharedData<R>>,
     payload: Result<Json<TrustRecordIds>, JsonRejection>,
-) -> Result<Json<TrustRecord>, AppError> {
+) -> Result<Json<TrustRecord>, AppError>
+where
+    R: TrustRecordRepository + Send + ?Sized + 'static,
+{
     let body = payload.map_err(|e| AppError::BadRequest {
         details: Some(json!([{ "issue": e.body_text() }])),
         internal_error: e.into(),
