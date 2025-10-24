@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  http-server:
+    platform: linux/arm64
+    image: trust-registry-http:local
+    build:
+      context: .
+      dockerfile: http-server/Dockerfile
+      platforms:
+        - linux/arm64
+    environment:
+      LISTEN_ADDRESS: 0.0.0.0:3232
+      RUST_LOG: info
+      TR_STORAGE_BACKEND: csv
+      FILE_STORAGE_PATH: /data/data.csv
+    ports:
+      - "3232:3232"
+    volumes:
+      - ./sample-data:/data:ro
