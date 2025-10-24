@@ -13,7 +13,7 @@ cargo --version
 
 ## Usage
 
-### Run in dev mode
+### Run locally
 
 Clone env:   
 
@@ -42,3 +42,37 @@ curl --location 'http://localhost:3232/recognition' \
 
 Test with defined and non-defined ids.  
 Add more records to  `./sample-data/data.csv` (context is base64 encoded VALID JSON).
+
+### Run in docker
+
+#### Build and run
+
+Build:  
+
+```bash
+docker buildx build \
+  --platform linux/arm64 \
+  -f http-server/Dockerfile \
+  -t trust-registry-http \
+  --load \
+```   
+Run:  
+
+```bash
+docker run \
+  -e LISTEN_ADDRESS=0.0.0.0:3232 \
+  -e RUST_LOG=debug,http_server=trace \
+  -e TR_STORAGE_BACKEND=csv \
+  -e FILE_STORAGE_PATH="./sample-data/data.csv" \
+  -p 3232:3232 \
+  trust-registry-http
+```
+
+#### docker compose
+
+Review env vars in ./docker-compose.yaml and run:  
+
+```bash
+docker compose up --build
+```  
+In that scenario, sample-data folder is linked as an volume for container, data.csv changes is synced by the container.
