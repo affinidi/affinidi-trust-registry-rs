@@ -3,7 +3,7 @@ use crate::storage::repository::*;
 use anyhow::anyhow;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as base64;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -199,26 +199,36 @@ struct TrustRecordCsvRow {
     assertion_id: String,
     recognized: bool,
     assertion_verified: bool,
-    context: String,
+    context: Option<String>,
 }
 
 impl TrustRecordCsvRow {
-    fn into_record(self) -> Result<TrustRecord, Box<dyn std::error::Error + Send + Sync>> {
-        let decoded_bytes = base64
-            .decode(&self.context)
-            .map_err(|err| anyhow!("failed to decode context from base64: {err}"))?;
-        let decoded_context = String::from_utf8(decoded_bytes)
-            .map_err(|err| anyhow!("decoded context is not valid UTF-8: {err}"))?;
+    fn parse_context(ctx: Option<String>) -> Option<Value> {
+        let record_context: Option<Value> = if let Some(c) = ctx {
+            base64
+                .decode(&c)
+                .ok()
+                .and_then(|db| String::from_utf8(db).ok())
+                .and_then(|s| serde_json::from_str(&s).ok())
+        } else {
+            None
+        };
 
-        let parsed_context: Value = serde_json::from_str(&decoded_context)
-            .map_err(|err| anyhow!("failed to parse context JSON: {err}"))?;
-        let builder = TrustRecordBuilder::new()
+        record_context
+    }
+
+    fn into_record(self) -> Result<TrustRecord, Box<dyn std::error::Error + Send + Sync>> {
+        let ctx = TrustRecordCsvRow::parse_context(self.context);
+        let mut builder = TrustRecordBuilder::new()
             .entity_id(EntityId::new(self.entity_id))
             .authority_id(AuthorityId::new(self.authority_id))
             .assertion_id(AssertionId::new(self.assertion_id))
             .recognized(self.recognized)
-            .assertion_verified(self.assertion_verified)
-            .context(Context::new(parsed_context));
+            .assertion_verified(self.assertion_verified);
+
+        if let Some(c) = ctx {
+            builder = builder.context(Context::new(c));
+        }
 
         builder
             .build()

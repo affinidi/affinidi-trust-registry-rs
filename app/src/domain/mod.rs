@@ -1,6 +1,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct EntityId(String);
@@ -64,7 +65,7 @@ pub struct Context(serde_json::Value);
 
 impl Context {
     pub fn empty() -> Self {
-        Self(serde_json::Value::Object(serde_json::Map::new()))
+        Self(json!({}))
     }
 
     pub fn new(value: serde_json::Value) -> Self {
@@ -73,6 +74,10 @@ impl Context {
 
     pub fn as_value(&self) -> &serde_json::Value {
         &self.0
+    }
+
+    pub fn merge(self, additional: Context) -> Self {
+        Self(merge_json_values(self.0, additional.0))
     }
 }
 
@@ -118,8 +123,10 @@ pub struct TrustRecord {
     entity_id: EntityId,
     authority_id: AuthorityId,
     assertion_id: AssertionId,
-    recognized: bool,
-    assertion_verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recognized: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assertion_verified: Option<bool>,
     context: Context,
 }
 
@@ -137,9 +144,9 @@ impl TrustRecord {
             entity_id,
             authority_id,
             assertion_id,
-            recognized,
+            recognized: Some(recognized),
             context,
-            assertion_verified,
+            assertion_verified: Some(assertion_verified),
         }
     }
 
@@ -156,7 +163,11 @@ impl TrustRecord {
     }
 
     pub fn is_recognized(&self) -> bool {
-        self.recognized
+        if let Some(b) = self.recognized {
+            b
+        } else {
+            false
+        }
     }
 
     pub fn context(&self) -> &Context {
@@ -164,7 +175,45 @@ impl TrustRecord {
     }
 
     pub fn is_assertion_verified(&self) -> bool {
-        self.assertion_verified
+        if let Some(b) = self.assertion_verified {
+            b
+        } else {
+            false
+        }
+    }
+
+    /// Merges additional_context into the given one.
+    /// additional_context will OVERRIDE the existing one
+    pub fn merge_contexts(mut self, additional_context: Context) -> Self {
+        let base_context = std::mem::take(&mut self.context);
+        self.context = base_context.merge(additional_context);
+        self
+    }
+
+    pub fn none_assertion_verified(mut self) -> Self {
+        self.assertion_verified = None;
+        self
+    }
+
+    pub fn none_recognized(mut self) -> Self {
+        self.recognized = None;
+        self
+    }
+}
+
+fn merge_json_values(base: Value, additional: Value) -> Value {
+    match (base, additional) {
+        (Value::Object(mut base_map), Value::Object(additional_map)) => {
+            for (key, additional_value) in additional_map {
+                let merged_value = match base_map.remove(&key) {
+                    Some(base_value) => merge_json_values(base_value, additional_value),
+                    None => additional_value,
+                };
+                base_map.insert(key, merged_value);
+            }
+            Value::Object(base_map)
+        }
+        (_, additional_value) => additional_value,
     }
 }
 
@@ -172,9 +221,9 @@ pub struct TrustRecordBuilder {
     entity_id: Option<EntityId>,
     authority_id: Option<AuthorityId>,
     assertion_id: Option<AssertionId>,
-    recognized: bool,
+    recognized: Option<bool>,
     context: Context,
-    assertion_verified: bool,
+    assertion_verified: Option<bool>,
 }
 
 impl TrustRecordBuilder {
@@ -183,9 +232,9 @@ impl TrustRecordBuilder {
             entity_id: None,
             authority_id: None,
             assertion_id: None,
-            recognized: false,
+            recognized: None,
             context: Context::empty(),
-            assertion_verified: false,
+            assertion_verified: None,
         }
     }
 
@@ -205,7 +254,7 @@ impl TrustRecordBuilder {
     }
 
     pub fn recognized(mut self, recognized: bool) -> Self {
-        self.recognized = recognized;
+        self.recognized = Some(recognized);
         self
     }
 
@@ -215,7 +264,7 @@ impl TrustRecordBuilder {
     }
 
     pub fn assertion_verified(mut self, verified: bool) -> Self {
-        self.assertion_verified = verified;
+        self.assertion_verified = Some(verified);
         self
     }
 
@@ -289,5 +338,76 @@ mod tests {
             .build();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_context_merge_overrides() {
+        let base = Context::new(json!({
+            "a": 1,
+            "nested": {
+                "b": 1
+            },
+            "arr_replaced": [3, 4],
+        }));
+        let additional = Context::new(json!({
+            "nested": {
+                "b": 2,
+                "c": 3
+            },
+            "arr_replaced": [1, 2],
+            "d": 4
+        }));
+
+        let merged = base.merge(additional);
+
+        assert_eq!(
+            merged.as_value(),
+            &json!({
+                "a": 1,
+                "nested": {
+                    "b": 2,
+                    "c": 3
+                },
+                "arr_replaced": [1, 2],
+                "d": 4
+            })
+        );
+    }
+
+    #[test]
+    fn test_trust_record_merge_contexts() {
+        let record = TrustRecord::new(
+            EntityId::new("entity-123"),
+            AuthorityId::new("authority-456"),
+            AssertionId::new("assertion-789"),
+            true,
+            true,
+            Context::new(json!({
+                "original": true,
+                "nested": {
+                    "keep": true,
+                    "override": false
+                }
+            })),
+        );
+
+        let merged_record = record.merge_contexts(Context::new(json!({
+            "nested": {
+                "override": true
+            },
+            "additional": "value"
+        })));
+
+        assert_eq!(
+            merged_record.context().as_value(),
+            &json!({
+                "original": true,
+                "nested": {
+                    "keep": true,
+                    "override": true
+                },
+                "additional": "value"
+            })
+        );
     }
 }
