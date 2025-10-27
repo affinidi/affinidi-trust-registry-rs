@@ -63,19 +63,17 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, code, message, details, internal_error) = self.into_parts();
+        let (status, title, message, details, internal_error) = self.into_parts();
         if status.as_u16() > LAST_WARNING_ERROR_CODE {
-            error!(%internal_error, code, message, "HTTP request failed with error");
+            error!(%internal_error, title, message, "HTTP request failed with error. details: {:?}", details);
         } else {
-            warn!(%internal_error, code, message, "HTTP request failed with exception");
+            warn!(%internal_error, title, message, "HTTP request failed with exception. details: {:?}", details);
         }
 
-        let mut payload = Map::with_capacity(3);
-        payload.insert("code".to_string(), Value::String(code.to_string()));
-        payload.insert("message".to_string(), Value::String(message.to_string()));
-        if let Some(details) = details {
-            payload.insert("details".to_string(), details);
-        }
+        let mut payload = Map::new();
+        payload.insert("title".to_string(), Value::String(title.to_string()));
+        payload.insert("type".to_string(), Value::String("about:blank".to_string()));
+        payload.insert("code".to_string(), Value::Number(status.as_u16().into()));
 
         (status, Json(Value::Object(payload))).into_response()
     }
