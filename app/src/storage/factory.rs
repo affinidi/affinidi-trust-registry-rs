@@ -6,7 +6,7 @@ use crate::{
     configs::{Configs, DynamoDbStorageConfig, FileStorageConfig, TrustStorageBackend},
     storage::{
         adapters::{csv_file_storage::FileStorage, ddb_storage::DynamoDbStorage},
-        repository::TrustRecordRepository,
+        repository::TrustRecordAdminRepository,
     },
 };
 
@@ -20,8 +20,8 @@ impl TrustStorageRepoFactory {
     }
     pub async fn create(
         &self,
-    ) -> Result<Arc<dyn TrustRecordRepository>, Box<dyn std::error::Error>> {
-        let repository: Arc<dyn TrustRecordRepository> = match self.storage_backend {
+    ) -> Result<Arc<dyn TrustRecordAdminRepository>, Box<dyn std::error::Error>> {
+        let repository: Arc<dyn TrustRecordAdminRepository> = match self.storage_backend {
             TrustStorageBackend::Csv => {
                 let config = FileStorageConfig::load()?;
                 let file_storage = FileStorage::try_new(config.path, config.update_interval_sec)

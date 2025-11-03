@@ -11,6 +11,25 @@ pub struct TrustRecordQuery {
     pub assertion_id: AssertionId,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustRecordList {
+    records: Vec<TrustRecord>,
+}
+
+impl TrustRecordList {
+    pub fn new(records: Vec<TrustRecord>) -> Self {
+        Self { records }
+    }
+
+    pub fn records(&self) -> &[TrustRecord] {
+        &self.records
+    }
+
+    pub fn into_records(self) -> Vec<TrustRecord> {
+        self.records
+    }
+}
+
 impl TrustRecordQuery {
     pub fn new(entity_id: EntityId, authority_id: AuthorityId, assertion_id: AssertionId) -> Self {
         Self {
@@ -35,6 +54,9 @@ pub enum RepositoryError {
     ConnectionFailed(String),
     QueryFailed(String),
     SerializationFailed(String),
+    RecordNotFound(String),
+    RecordAlreadyExists(String),
+    ValidationError(String),
 }
 
 impl fmt::Display for RepositoryError {
@@ -43,18 +65,32 @@ impl fmt::Display for RepositoryError {
             Self::ConnectionFailed(msg) => write!(f, "Connection failed: {}", msg),
             Self::QueryFailed(msg) => write!(f, "Query failed: {}", msg),
             Self::SerializationFailed(msg) => write!(f, "Serialization failed: {}", msg),
+            Self::RecordNotFound(msg) => write!(f, "Record not found: {}", msg),
+            Self::RecordAlreadyExists(msg) => write!(f, "Record already exists: {}", msg),
+            Self::ValidationError(msg) => write!(f, "Validation error: {}", msg),
         }
     }
 }
 
 impl std::error::Error for RepositoryError {}
 
+/// Read-only repository trait for querying trust records
 #[async_trait::async_trait]
 pub trait TrustRecordRepository: Send + Sync {
     async fn find_by_query(
         &self,
         query: TrustRecordQuery,
     ) -> Result<Option<TrustRecord>, RepositoryError>;
+}
+
+/// Write operations for trust record administration
+#[async_trait::async_trait]
+pub trait TrustRecordAdminRepository: TrustRecordRepository {
+    async fn create(&self, record: TrustRecord) -> Result<(), RepositoryError>;
+    async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError>;
+    async fn delete(&self, query: TrustRecordQuery) -> Result<(), RepositoryError>;
+    async fn list(&self) -> Result<TrustRecordList, RepositoryError>;
+    async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError>;
 }
 
 #[cfg(test)]

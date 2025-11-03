@@ -24,12 +24,12 @@ pub const QUERY_AUTHORIZATION_RESPONSE_MESSAGE_TYPE: &str =
 pub const QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE: &str =
     "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition/response";
 
-pub struct TRQPMessagesHandler<R: TrustRecordRepository> {
+pub struct TRQPMessagesHandler<R: ?Sized + TrustRecordRepository> {
     pub repository: Arc<R>,
 }
 
 #[async_trait]
-impl<R: TrustRecordRepository + 'static> MessageHandler for TRQPMessagesHandler<R> {
+impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for TRQPMessagesHandler<R> {
     async fn handle(
         &self,
         atm: &Arc<ATM>,
@@ -94,7 +94,7 @@ impl<R: TrustRecordRepository + 'static> MessageHandler for TRQPMessagesHandler<
 }
 
 #[async_trait]
-impl<R: TrustRecordRepository + 'static> ProtocolHandler for TRQPMessagesHandler<R> {
+impl<R: ?Sized + TrustRecordRepository + 'static> ProtocolHandler for TRQPMessagesHandler<R> {
     fn get_supported_inboud_message_types(&self) -> Vec<String> {
         vec![
             QUERY_AUTHORIZATION_MESSAGE_TYPE.to_string(),
