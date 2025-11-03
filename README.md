@@ -55,6 +55,7 @@ docker buildx build \
   -f http-server/Dockerfile \
   -t trust-registry-http \
   --load \
+  .
 ```   
 Run:  
 
@@ -63,7 +64,7 @@ docker run \
   -e LISTEN_ADDRESS=0.0.0.0:3232 \
   -e RUST_LOG=debug,http_server=trace \
   -e TR_STORAGE_BACKEND=csv \
-  -e FILE_STORAGE_PATH="./sample-data/data.csv" \
+  -e FILE_STORAGE_PATH="/usr/local/bin/sample-data/data.csv" \
   -p 3232:3232 \
   trust-registry-http
 ```

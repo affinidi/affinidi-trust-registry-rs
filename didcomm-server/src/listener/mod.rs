@@ -1,5 +1,4 @@
-use app::storage::adapters::csv_file_storage::FileStorage;
-use app::storage::adapters::local_storage::LocalStorage;
+use app::storage::factory::TrustStorageRepoFactory;
 use std::sync::Arc;
 use tokio::task::JoinError;
 use tracing::error;
@@ -58,47 +57,30 @@ pub(crate) async fn start_one_did_listener(
     profile_config: ProfileConfig,
     config: Arc<DidcommServerConfigs>,
 ) {
-    // TODO: should one instance be provided for all listeners?
-    let file_storage_repository = if config.file_storage_config.is_some() {
-        let file_storage_config = config.file_storage_config.as_ref().unwrap();
-        let file_path = file_storage_config.file_path.clone();
-        let update_interval_sec = file_storage_config.update_interval_sec;
-        Some(
-            FileStorage::try_new(file_path, update_interval_sec)
-                .await
-                .unwrap(),
-        ) // FIXME: handle error?
-    } else {
-        None
+    let repository_factory = TrustStorageRepoFactory::new(config.storage_backend);
+
+    let repository = match repository_factory.create().await {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to initialize trust record repository: {}", e);
+            panic!("Failed to initialize trust record repository: {}", e);
+        }
     };
-    if let Some(file_storage) = file_storage_repository {
-        let listener = Listener::build_listener(
-            profile_config,
-            &config.mediator_did,
-            BaseHandler::build(Arc::new(file_storage)),
-        )
-        .await
-        .unwrap(); // FIXME: handle error?
-        info!(
-            "[profile = {}] Listener started with CSV file storage",
-            &listener.profile.inner.alias
-        );
-        listener.start_listening().await.unwrap(); // FIXME: handle error?
-    } else {
-        let local_storage = LocalStorage::new();
-        let listener = Listener::build_listener(
-            profile_config,
-            &config.mediator_did,
-            BaseHandler::build(Arc::new(local_storage)),
-        )
-        .await
-        .unwrap(); // FIXME: handle error?
-        info!(
-            "[profile = {}] Listener started with Local storage",
-            &listener.profile.inner.alias
-        );
-        listener.start_listening().await.unwrap(); // FIXME: handle error?
-    }
+
+    let listener = Listener::build_listener(
+        profile_config,
+        &config.mediator_did,
+        BaseHandler::build_from_arc(repository, config.clone()),
+    )
+    .await
+    .unwrap();
+
+    info!(
+        "[profile = {}] Listener started",
+        &listener.profile.inner.alias
+    );
+    
+    listener.start_listening().await.unwrap();
 }
 
 /// starts DIDComm listeners

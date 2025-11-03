@@ -3,7 +3,8 @@ use crate::storage::repository::*;
 use anyhow::anyhow;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as base64;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -172,6 +173,45 @@ impl FileStorage {
             && record.authority_id() == &query.authority_id
             && record.assertion_id() == &query.assertion_id
     }
+
+    async fn write_to_file(&self) -> Result<(), RepositoryError> {
+        let records_clone = {
+            let records = self.records.read().unwrap();
+            records.values().cloned().collect::<Vec<_>>()
+        };
+        
+        let mut csv_records = Vec::new();
+        for record in records_clone.iter() {
+            csv_records.push(TrustRecordCsvRow::from_record(record));
+        }
+
+        let mut wtr = csv::Writer::from_writer(vec![]);
+        for row in csv_records {
+            wtr.serialize(&row)
+                .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))?;
+        }
+
+        let csv_data = wtr
+            .into_inner()
+            .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))?;
+        
+        tokio::fs::write(&self.file_path, csv_data)
+            .await
+            .map_err(|e| RepositoryError::QueryFailed(format!("Failed to write CSV file: {}", e)))?;
+
+        // Update last_modified to prevent reload
+        let metadata = tokio::fs::metadata(&self.file_path)
+            .await
+            .map_err(|e| RepositoryError::QueryFailed(format!("Failed to get file metadata: {}", e)))?;
+        let modified = metadata
+            .modified()
+            .map_err(|e| RepositoryError::QueryFailed(format!("Failed to get modified time: {}", e)))?;
+        
+        let mut guard = self.last_modified.write().unwrap();
+        *guard = Some(modified);
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -192,7 +232,83 @@ impl TrustRecordRepository for FileStorage {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[async_trait::async_trait]
+impl TrustRecordAdminRepository for FileStorage {
+    async fn create(&self, record: TrustRecord) -> Result<(), RepositoryError> {
+        let key = RecordKey::from_record(&record);
+        {
+            let mut records = self.records.write().unwrap();
+            if records.contains_key(&key) {
+                return Err(RepositoryError::RecordAlreadyExists(format!(
+                    "Record already exists: {}|{}|{}",
+                    record.entity_id(),
+                    record.authority_id(),
+                    record.assertion_id()
+                )));
+            }
+            records.insert(key, record);
+        }
+        self.write_to_file().await
+    }
+
+    async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError> {
+        let key = RecordKey::from_record(&record);
+        {
+            let mut records = self.records.write().unwrap();
+            if !records.contains_key(&key) {
+                return Err(RepositoryError::RecordNotFound(format!(
+                    "Record not found: {}|{}|{}",
+                    record.entity_id(),
+                    record.authority_id(),
+                    record.assertion_id()
+                )));
+            }
+            records.insert(key, record);
+        }
+        self.write_to_file().await
+    }
+
+    async fn delete(&self, query: TrustRecordQuery) -> Result<(), RepositoryError> {
+        let key = RecordKey {
+            entity_id: query.entity_id.clone(),
+            authority_id: query.authority_id.clone(),
+            assertion_id: query.assertion_id.clone(),
+        };
+        {
+            let mut records = self.records.write().unwrap();
+            if records.remove(&key).is_none() {
+                return Err(RepositoryError::RecordNotFound(format!(
+                    "Record not found: {}|{}|{}",
+                    query.entity_id, query.authority_id, query.assertion_id
+                )));
+            }
+        }
+        self.write_to_file().await
+    }
+
+    async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
+        let records = self.records.read().unwrap();
+        let records_vec: Vec<TrustRecord> = records.values().cloned().collect();
+        Ok(TrustRecordList::new(records_vec))
+    }
+
+    async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
+        let records = self.records.read().unwrap();
+        let result = records
+            .values()
+            .cloned()
+            .find(|record| FileStorage::matches_query(record, &query));
+        
+        result.ok_or_else(|| {
+            RepositoryError::RecordNotFound(format!(
+                "Record not found: {}|{}|{}",
+                query.entity_id, query.authority_id, query.assertion_id
+            ))
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct TrustRecordCsvRow {
     entity_id: String,
     authority_id: String,
@@ -215,6 +331,25 @@ impl TrustRecordCsvRow {
         };
 
         record_context
+    }
+
+    fn from_record(record: &TrustRecord) -> Self {
+        let context = if record.context().as_value().is_object() || record.context().as_value().is_array() {
+            let json_str = serde_json::to_string(record.context().as_value()).unwrap_or_default();
+            let encoded = base64.encode(json_str.as_bytes());
+            Some(encoded)
+        } else {
+            None
+        };
+
+        Self {
+            entity_id: record.entity_id().to_string(),
+            authority_id: record.authority_id().to_string(),
+            assertion_id: record.assertion_id().to_string(),
+            recognized: record.is_recognized(),
+            assertion_verified: record.is_assertion_verified(),
+            context,
+        }
     }
 
     fn into_record(self) -> Result<TrustRecord, Box<dyn std::error::Error + Send + Sync>> {

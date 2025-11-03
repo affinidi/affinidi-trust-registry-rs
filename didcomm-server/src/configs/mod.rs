@@ -1,8 +1,9 @@
 use std::env;
 
 use affinidi_tdk::secrets_resolver::secrets::Secret;
-use app::configs::Configs;
+use app::configs::{Configs, TrustStorageBackend};
 use serde_derive::{Deserialize, Serialize};
+use tracing::error;
 
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3131";
 
@@ -21,12 +22,19 @@ pub struct FileStorageConfig {
     pub update_interval_sec: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminApiConfig {
+    pub admin_dids: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DidcommServerConfigs {
     pub(crate) listen_address: String,
     pub(crate) profile_configs: Vec<ProfileConfig>,
     pub(crate) mediator_did: String,
     pub(crate) file_storage_config: Option<FileStorageConfig>,
+    pub(crate) admin_api_config: AdminApiConfig,
+    pub(crate) storage_backend: TrustStorageBackend,
 }
 
 pub(crate) fn parse_profile_config_from_str(
@@ -38,6 +46,12 @@ pub(crate) fn parse_profile_config_from_str(
 
 impl Configs for DidcommServerConfigs {
     fn load() -> Result<Self, Box<dyn std::error::Error>> {
+        let storage_backend_str = env::var("STORAGE_BACKEND").unwrap_or("csv".to_string()).to_lowercase();
+        let storage_backend = match storage_backend_str.as_str() {
+            "dynamodb" | "ddb" => TrustStorageBackend::DynamoDb,
+            _ => TrustStorageBackend::Csv,
+        };
+
         let use_file_storage = env::var("FILE_STORAGE_ENABLED")
             .unwrap_or("false".to_string())
             .to_lowercase()
@@ -53,12 +67,21 @@ impl Configs for DidcommServerConfigs {
         } else {
             None
         };
+
+        let admin_dids_str = env::var("ADMIN_DIDS").unwrap_or_default();
+        let admin_dids: Vec<String> = admin_dids_str.split(",").map(|e| e.to_string()).collect();
+        let admin_api_config = AdminApiConfig {
+                admin_dids,
+        };
+
         Ok(DidcommServerConfigs {
             listen_address: env::var("LISTEN_ADDRESS")
                 .unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string()),
             mediator_did: env::var("MEDIATOR_DID")?,
             profile_configs: parse_profile_config_from_str(&env::var("PROFILE_CONFIGS")?)?,
             file_storage_config,
+            admin_api_config,
+            storage_backend,
         })
     }
 }
