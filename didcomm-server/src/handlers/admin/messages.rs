@@ -1,3 +1,4 @@
+// TODO: refactor function sugnatures to reduce amount of input params
 use std::sync::Arc;
 
 use affinidi_tdk::{
@@ -12,7 +13,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::{debug, info};
 
-use crate::utils::didcomm_helpers;
+use crate::didcomm::transport;
 
 use super::{
     AdminMessagesHandler, CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
@@ -98,7 +99,7 @@ pub async fn handle_create_record<R: ?Sized + TrustRecordAdminRepository>(
         "assertion_id": request.assertion_id
     });
 
-    didcomm_helpers::send_response(
+    transport::send_response(
         atm,
         profile,
         CREATE_RECORD_RESPONSE_MESSAGE_TYPE.to_string(),
@@ -154,7 +155,7 @@ pub async fn handle_update_record<R: ?Sized + TrustRecordAdminRepository>(
         "assertion_id": request.assertion_id
     });
 
-    didcomm_helpers::send_response(
+    transport::send_response(
         atm,
         profile,
         UPDATE_RECORD_RESPONSE_MESSAGE_TYPE.to_string(),
@@ -203,7 +204,7 @@ pub async fn handle_delete_record<R: ?Sized + TrustRecordAdminRepository>(
         "assertion_id": request.assertion_id
     });
 
-    didcomm_helpers::send_response(
+    transport::send_response(
         atm,
         profile,
         DELETE_RECORD_RESPONSE_MESSAGE_TYPE.to_string(),
@@ -255,7 +256,7 @@ pub async fn handle_read_record<R: ?Sized + TrustRecordAdminRepository>(
         "context": record.context().as_value()
     });
 
-    didcomm_helpers::send_response(
+    transport::send_response(
         atm,
         profile,
         READ_RECORD_RESPONSE_MESSAGE_TYPE.to_string(),
@@ -304,7 +305,7 @@ pub async fn handle_list_records<R: ?Sized + TrustRecordAdminRepository>(
         "count": records_json.len()
     });
 
-    didcomm_helpers::send_response(
+    transport::send_response(
         atm,
         profile,
         LIST_RECORDS_RESPONSE_MESSAGE_TYPE.to_string(),

@@ -4,7 +4,7 @@ use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
 use serde_json::json;
 use tracing::{error, info};
 
-use super::didcomm_helpers;
+use super::transport;
 
 pub mod codes {
     pub const ERROR_UNAUTHORIZED: &str = "e.p.msg.unauthorized";
@@ -91,7 +91,7 @@ pub async fn send_problem_report(
     thid: Option<String>,
     pthid: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let problem_message = didcomm_helpers::build_problem_report(
+    let problem_message = transport::build_problem_report(
         profile.inner.did.clone(),
         recipient.to_string(),
         report,

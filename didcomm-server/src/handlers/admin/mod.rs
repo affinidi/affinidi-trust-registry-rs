@@ -9,10 +9,7 @@ use async_trait::async_trait;
 use tracing::{error, info, warn};
 
 use crate::{
-    configs::AdminApiConfig,
-    handlers::ProtocolHandler,
-    listener::MessageHandler,
-    utils::{didcomm_helpers, problem_report},
+    configs::AdminApiConfig, didcomm::{get_parent_thread_id, get_thread_id, problem_report}, handlers::ProtocolHandler, listener::MessageHandler
 };
 
 pub mod messages;
@@ -75,12 +72,10 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> MessageHandler for AdminM
     ) -> Result<(), Box<dyn std::error::Error>> {
         let message_type = message.type_.clone();
         let sender_did = message.from.clone().ok_or("Missing sender DID")?;
-        
-        // Extract thread IDs for proper message threading
-        let thid = didcomm_helpers::get_thread_id(&message).or_else(|| Some(message.id.clone()));
-        let pthid = didcomm_helpers::get_parent_thread_id(&message);
 
-        // Validate admin authorization
+        let thid = get_thread_id(&message).or_else(|| Some(message.id.clone()));
+        let pthid = get_parent_thread_id(&message);
+
         if let Err(auth_error) = self.validate_admin_did(&sender_did) {
             warn!(
                 "[profile = {}] Unauthorized admin access attempt from {}: {}",
@@ -98,7 +93,7 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> MessageHandler for AdminM
             &profile.inner.alias, message_type, sender_did
         );
 
-        // Route to appropriate handler based on message type
+        // TODO: refactor to avoid code duplication
         let result = match message_type.as_str() {
             CREATE_RECORD_MESSAGE_TYPE => {
                 messages::handle_create_record(self, atm, profile, message, &sender_did, thid.clone(), pthid.clone())

@@ -9,7 +9,7 @@ pub mod configs;
 pub mod handlers;
 pub mod listener;
 pub mod server;
-pub mod utils;
+pub mod didcomm;
 
 pub static CONFIG: Lazy<DidcommServerConfigs> = Lazy::new(|| {
     dotenv().ok();

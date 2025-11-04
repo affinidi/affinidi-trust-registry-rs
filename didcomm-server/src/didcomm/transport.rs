@@ -6,15 +6,12 @@ use affinidi_tdk::{
 };
 use serde_json::Value;
 use tracing::{error, info};
-use uuid::Uuid;
+
+use crate::didcomm::new_message_id;
 
 use super::problem_report::ProblemReport;
 
 const PROBLEM_REPORT_TYPE: &str = "https://didcomm.org/report-problem/2.0/problem-report";
-
-pub fn new_message_id() -> String {
-    Uuid::new_v4().to_string()
-}
 
 pub fn build_response(
     type_: String,
@@ -40,7 +37,6 @@ pub fn build_response(
     builder.finalize()
 }
 
-/// Build a problem report message
 pub fn build_problem_report(
     from: String,
     to: String,
@@ -58,17 +54,6 @@ pub fn build_problem_report(
     )
 }
 
-
-pub fn get_thread_id(msg: &Message) -> Option<String> {
-    msg.thid.clone().or_else(|| Some(msg.id.clone()))
-}
-
-/// Extract parent thread ID from incoming message
-pub fn get_parent_thread_id(msg: &Message) -> Option<String> {
-    msg.pthid.clone().or_else(|| get_thread_id(msg))
-}
-
-/// Send a DIDComm response message via ATM
 pub async fn send_response(
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
@@ -130,14 +115,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_message_id() {
-        let id1 = new_message_id();
-        let id2 = new_message_id();
-        assert_ne!(id1, id2);
-        assert!(Uuid::parse_str(&id1).is_ok());
-    }
-
-    #[test]
     fn test_build_response() {
         let msg = build_response(
             "https://example.com/test".to_string(),
@@ -152,18 +129,5 @@ mod tests {
         assert_eq!(msg.from.as_ref().unwrap(), "did:example:alice");
         assert_eq!(msg.to.as_ref().unwrap()[0], "did:example:bob");
         assert_eq!(msg.thid.as_ref().unwrap(), "thread-123");
-    }
-
-    #[test]
-    fn test_get_thread_id() {
-        let msg = Message::build(
-            new_message_id(),
-            "test".to_string(),
-            serde_json::json!({}),
-        )
-        .thid("thread-123".to_string())
-        .finalize();
-
-        assert_eq!(get_thread_id(&msg), Some("thread-123".to_string()));
     }
 }
