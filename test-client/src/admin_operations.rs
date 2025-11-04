@@ -7,7 +7,6 @@ use affinidi_tdk::{
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-// Admin message type constants
 pub const CREATE_RECORD_MESSAGE_TYPE: &str =
     "https://affinidi.com/didcomm/protocols/tr-admin/1.0/create-record";
 pub const UPDATE_RECORD_MESSAGE_TYPE: &str =
@@ -19,7 +18,6 @@ pub const READ_RECORD_MESSAGE_TYPE: &str =
 pub const LIST_RECORDS_MESSAGE_TYPE: &str =
     "https://affinidi.com/didcomm/protocols/tr-admin/1.0/list-records";
 
-/// Create a new trust record
 pub async fn create_record(
     atm: &Arc<ATM>,
     profile: Arc<ATMProfile>,
@@ -57,7 +55,6 @@ pub async fn create_record(
     .await
 }
 
-/// Update an existing trust record
 pub async fn update_record(
     atm: &Arc<ATM>,
     profile: Arc<ATMProfile>,
@@ -95,7 +92,6 @@ pub async fn update_record(
     .await
 }
 
-/// Delete a trust record
 pub async fn delete_record(
     atm: &Arc<ATM>,
     profile: Arc<ATMProfile>,
@@ -124,7 +120,6 @@ pub async fn delete_record(
     .await
 }
 
-/// Read a specific trust record
 pub async fn read_record(
     atm: &Arc<ATM>,
     profile: Arc<ATMProfile>,
@@ -153,7 +148,6 @@ pub async fn read_record(
     .await
 }
 
-/// List all trust records
 pub async fn list_records(
     atm: &Arc<ATM>,
     profile: Arc<ATMProfile>,
