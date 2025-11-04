@@ -95,7 +95,7 @@ impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for TRQPMessage
 
 #[async_trait]
 impl<R: ?Sized + TrustRecordRepository + 'static> ProtocolHandler for TRQPMessagesHandler<R> {
-    fn get_supported_inboud_message_types(&self) -> Vec<String> {
+    fn get_supported_inbound_message_types(&self) -> Vec<String> {
         vec![
             QUERY_AUTHORIZATION_MESSAGE_TYPE.to_string(),
             QUERY_RECOGNITION_MESSAGE_TYPE.to_string(),

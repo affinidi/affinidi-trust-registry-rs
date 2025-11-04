@@ -16,7 +16,7 @@ pub mod problem_report;
 pub mod trqp;
 
 pub trait ProtocolHandler: MessageHandler {
-    fn get_supported_inboud_message_types(&self) -> Vec<String>;
+    fn get_supported_inbound_message_types(&self) -> Vec<String>;
 }
 
 pub struct BaseHandler<R: ?Sized + TrustRecordRepository> {
@@ -37,7 +37,7 @@ impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for BaseHandler
         let message_type = &message.type_;
         let from = message.from.clone().unwrap_or("anon".into());
         let ph = self.protocols_handlers.iter().find(|ph| {
-            ph.get_supported_inboud_message_types()
+            ph.get_supported_inbound_message_types()
                 .contains(message_type)
         });
         if let Some(protocol_handler) = ph {

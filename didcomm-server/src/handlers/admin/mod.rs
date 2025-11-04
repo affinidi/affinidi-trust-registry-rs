@@ -217,7 +217,7 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> MessageHandler for AdminM
 
 #[async_trait]
 impl<R: ?Sized + TrustRecordAdminRepository + 'static> ProtocolHandler for AdminMessagesHandler<R> {
-    fn get_supported_inboud_message_types(&self) -> Vec<String> {
+    fn get_supported_inbound_message_types(&self) -> Vec<String> {
         vec![
             CREATE_RECORD_MESSAGE_TYPE.to_string(),
             UPDATE_RECORD_MESSAGE_TYPE.to_string(),

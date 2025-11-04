@@ -71,7 +71,7 @@ impl MessageHandler for ProblemReportHandler {
 }
 
 impl ProtocolHandler for ProblemReportHandler {
-    fn get_supported_inboud_message_types(&self) -> Vec<String> {
+    fn get_supported_inbound_message_types(&self) -> Vec<String> {
         vec![PROBLEM_REPORT_TYPE.to_string()]
     }
 }
