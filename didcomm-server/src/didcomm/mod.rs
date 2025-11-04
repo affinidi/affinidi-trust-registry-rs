@@ -4,12 +4,12 @@ use uuid::Uuid;
 pub mod problem_report;
 pub mod transport;
 
-/// get thid OR message id, if thid is None
+/// Returns the thread ID for a message, falling back to the message ID if no thread ID is set.
 pub fn get_thread_id(msg: &Message) -> Option<String> {
     msg.thid.clone().or_else(|| Some(msg.id.clone()))
 }
 
-/// get pthid OR thid OR message id
+/// Returns the parent thread ID, falling back to thread ID, then message ID.
 pub fn get_parent_thread_id(msg: &Message) -> Option<String> {
     msg.pthid.clone().or_else(|| get_thread_id(msg))
 }

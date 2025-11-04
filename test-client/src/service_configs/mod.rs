@@ -24,12 +24,7 @@ pub fn load_user_config() -> Result<HashMap<String, ServiceConfig>, Box<dyn std:
         Err(_) => "./conf/user_config.json".to_string(),
     };
 
-    let services_configs = match load_file(service_config_path.as_str()) {
-        Ok(sc) => sc,
-        Err(err) => {
-            return Err(err);
-        }
-    };
+    let services_configs = load_file(service_config_path.as_str())?;
 
     Ok(services_configs)
 }

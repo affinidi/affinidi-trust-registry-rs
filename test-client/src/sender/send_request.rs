@@ -22,7 +22,7 @@ pub async fn send_request(
         None,
     );
 
-    let packed_msg = match atm
+    let packed_msg = atm
         .pack_encrypted(
             &msg,
             service_did,
@@ -30,15 +30,9 @@ pub async fn send_request(
             Some(&issuer_profile.inner.did),
             None,
         )
-        .await
-    {
-        Ok(pm) => pm,
-        Err(err) => {
-            return Err(err);
-        }
-    };
+        .await?;
 
-    let (forward_id, forward_msg) = match protocols
+    let (forward_id, forward_msg) = protocols
         .routing
         .forward_message(
             &atm,
@@ -50,13 +44,7 @@ pub async fn send_request(
             None,
             None,
         )
-        .await
-    {
-        Ok(fm) => fm,
-        Err(err) => {
-            return Err(err);
-        }
-    };
+        .await?;
 
     match atm
         .send_message(&issuer_profile, &forward_msg, &forward_id, false, false)

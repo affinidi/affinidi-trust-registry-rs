@@ -3,7 +3,6 @@ use crate::storage::repository::*;
 use anyhow::anyhow;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as base64;
-use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -12,7 +11,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 use tracing::{error, info};
 

@@ -62,7 +62,7 @@ impl MessageHandler for ProblemReportHandler {
             ?escalate_to,
             ?thid,
             ?pthid,
-            "[profile = {}]Problem Report received",
+            "[profile = {}] Problem Report received",
             profile.inner.alias
         );
 
