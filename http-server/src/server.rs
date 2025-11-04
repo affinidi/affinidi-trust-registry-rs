@@ -2,6 +2,7 @@ use app::storage::factory::TrustStorageRepoFactory;
 use axum::{Json, Router, routing::get};
 use dotenvy::dotenv;
 use serde_json::{Value, json};
+use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -25,6 +26,30 @@ async fn health_checker_handler() -> Json<Value> {
     }))
 }
 
+fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
+    if allowed_origins.is_empty() {
+        info!("CORS: No allowed origins configured, allowing all origins");
+        return CorsLayer::permissive();
+    }
+
+    if allowed_origins.len() == 1 && allowed_origins[0] == "*" {
+        info!("CORS: Wildcard configured, allowing all origins");
+        return CorsLayer::permissive();
+    }
+
+    info!("CORS: Configured allowed origins: {:?}", allowed_origins);
+
+    let origins: Vec<_> = allowed_origins
+        .iter()
+        .filter_map(|origin| origin.parse().ok())
+        .collect();
+
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any)
+}
+
 pub async fn start() {
     dotenv().ok();
     setup_logging();
@@ -43,15 +68,17 @@ pub async fn start() {
     };
 
     let shared_data = SharedData {
-        config,
+        config: config.clone(),
         service_start_timestamp: chrono::Utc::now(),
         repository: repository,
     };
 
+    let cors = build_cors_layer(&config.cors_allowed_origins);
+
     let mut main_router = Router::new().route("/health", get(health_checker_handler));
     let router = application_routes("", shared_data);
 
-    main_router = main_router.merge(router);
+    main_router = main_router.merge(router).layer(cors);
 
     info!("Server is starting on {}...", listen_address);
 
