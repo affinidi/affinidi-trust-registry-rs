@@ -33,6 +33,7 @@ impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for BaseHandler
         message: Message,
         meta: UnpackMetadata,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // TODO: validate UnpackMetadata, so in config the admin of TR can define would they allow unsign / anon / etc messages
         let message_type = &message.type_;
         let from = message.from.clone().unwrap_or("anon".into());
         let ph = self.protocols_handlers.iter().find(|ph| {

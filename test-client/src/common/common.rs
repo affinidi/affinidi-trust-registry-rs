@@ -3,7 +3,7 @@ use affinidi_tdk::didcomm::Message;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-
+// TODO: reuse didcomm-server/src/didcomm
 pub fn build_message(
     service_did: String,
     issuer_profile_did: String,

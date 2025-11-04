@@ -60,7 +60,7 @@ async fn main() {
         }
     };
 
-    // let cis_did = get_cis_did("https://apse1.dev.api.affinidi.io/cis/v1".to_string()).await;
+    // TODO: provide dids via envs
     let trust_registry_did = "did:peer:2.Vz6MkoZXto9vJeW5GqxzEwyiavksMXbbuokqgcLXny4G8kBAH.EzQ3shSLGtcTmaJeWfDYTiZvZMbFJx3ALtkjoXpKVHAqY8L6vA.SeyJ0IjoiZG0iLCJzIjp7InVyaSI6Imh0dHBzOi8vYnJpZGdlLWV1dzEuYXRsYXMuZGV2LmFmZmluaWRpLmlvIiwiYWNjZXB0IjpbImRpZGNvbW0vdjIiXSwicm91dGluZ19rZXlzIjpbXX0sImlkIjpudWxsfQ".to_string();
     println!("AMA DID: {}", trust_registry_did);
     let mediator_did = Arc::new("did:web:66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io".to_string());
@@ -186,23 +186,23 @@ async fn main() {
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-            // match delete_record(
-            //     &atm,
-            //     profile.clone(),
-            //     &trust_registry_did,
-            //     &protocols,
-            //     &mediator_did,
-            //     "did:example:entity123",
-            //     "did:example:authority456",
-            //     "credential_type_xyz",
-            // )
-            // .await
-            // {
-            //     Ok(_) => println!("Delete record completed"),
-            //     Err(err) => println!("Delete record failed: {:#?}", err),
-            // }
+            match delete_record(
+                &atm,
+                profile.clone(),
+                &trust_registry_did,
+                &protocols,
+                &mediator_did,
+                "did:example:entity123",
+                "did:example:authority456",
+                "credential_type_xyz",
+            )
+            .await
+            {
+                Ok(_) => println!("Delete record completed"),
+                Err(err) => println!("Delete record failed: {:#?}", err),
+            }
 
-            // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
             match read_record(
                 &atm,
@@ -235,32 +235,4 @@ async fn main() {
         }
         
     }
-
-    // match atm
-    //     .fetch_messages(
-    //         &bank_profile,
-    //         &FetchOptions {
-    //             limit: 10,
-    //             start_id: None,
-    //             delete_policy: affinidi_messaging_sdk::messages::FetchDeletePolicy::OnReceive,
-    //         },
-    //     )
-    //     .await
-    // {
-    //     Ok(res) => {
-    //         if !res.success.is_empty() {
-    //             for msg_elem in res.success {
-    //                 if let Some(message) = msg_elem.msg {
-    //                     let unpacked_msg = atm.unpack(&message).await.unwrap();
-    //                     println!("Received message: {:#?}", unpacked_msg.0.body);
-    //                 }
-    //             }
-    //         } else {
-    //             println!("Success array failed: {:#?}", res);
-    //         }
-    //     }
-    //     Err(err) => {
-    //         println!("Error: {:?}", err)
-    //     }
-    // }
 }
