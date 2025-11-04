@@ -12,7 +12,7 @@ pub async fn send_request(
     body: &Value,
     operation: &str,
 ) -> Result<(), ATMError> {
-    let message_type = format!("https://affinidi.com/didcomm/protocols/{}", operation).to_string();
+    let message_type = format!("https://affinidi.com/didcomm/protocols/{}", operation);
 
     let msg = build_message(
         service_did.to_string(),
@@ -66,7 +66,7 @@ pub async fn send_request(
             println!("Message sent from {}", issuer_profile.inner.alias);
         }
         Err(e) => {
-            println!("Error in sending message to Bob: {:#?}", e);
+            println!("Error in sending message: {:#?}", e);
             return Err(e);
         }
     };

@@ -71,7 +71,10 @@ impl Configs for DidcommServerConfigs {
         };
 
         let admin_dids_str = env::var("ADMIN_DIDS").unwrap_or_default();
-        let admin_dids: Vec<String> = admin_dids_str.split(",").map(|e| e.to_string()).collect();
+        let admin_dids: Vec<String> = admin_dids_str
+            .split(',')
+            .map(|e| e.trim().to_string())
+            .collect();
         let admin_api_config = AdminApiConfig { admin_dids };
 
         Ok(DidcommServerConfigs {

@@ -1,4 +1,4 @@
-// TODO: refactor function sugnatures to reduce amount of input params
+// TODO: refactor function signatures to reduce amount of input params
 use std::sync::Arc;
 
 use affinidi_tdk::{
