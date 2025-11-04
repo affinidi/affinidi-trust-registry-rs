@@ -1,6 +1,17 @@
 use std::sync::Arc;
 
-use affinidi_tdk::{TDK, common::{config::TDKConfig, profiles::TDKProfile}, messaging::{ATM, profiles::ATMProfile, protocols::{Protocols, mediator::acls::{AccessListModeType, MediatorACLSet}}}};
+use affinidi_tdk::{
+    TDK,
+    common::{config::TDKConfig, profiles::TDKProfile},
+    messaging::{
+        ATM,
+        profiles::ATMProfile,
+        protocols::{
+            Protocols,
+            mediator::acls::{AccessListModeType, MediatorACLSet},
+        },
+    },
+};
 use dotenvy::dotenv;
 
 use serde_json::json;
@@ -14,39 +25,31 @@ use crate::{
 
 pub mod admin_operations;
 pub mod common;
-pub mod sender;
 pub mod receivers;
+pub mod sender;
 pub mod service_configs;
 
 async fn set_public_acls_mode(
-        atm: Arc<ATM>,
-        profile: Arc<ATMProfile>
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let protocols = Protocols::new();
+    atm: Arc<ATM>,
+    profile: Arc<ATMProfile>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let protocols = Protocols::new();
 
-        let account_get_result = protocols
-            .mediator
-            .account_get(&atm, &profile, None)
-            .await;
+    let account_get_result = protocols.mediator.account_get(&atm, &profile, None).await;
 
-        let account_info = account_get_result?.ok_or(format!(
-            "[profile = {}] Failed to get account info",
-            &profile.inner.alias
-        ))?;
-        let mut acls = MediatorACLSet::from_u64(account_info.acls);
-        acls.set_access_list_mode(AccessListModeType::ExplicitDeny, true, false)?;
+    let account_info = account_get_result?.ok_or(format!(
+        "[profile = {}] Failed to get account info",
+        &profile.inner.alias
+    ))?;
+    let mut acls = MediatorACLSet::from_u64(account_info.acls);
+    acls.set_access_list_mode(AccessListModeType::ExplicitDeny, true, false)?;
 
-        protocols
-            .mediator
-            .acls_set(
-                &atm,
-                &profile,
-                &digest(&profile.inner.did),
-                &acls,
-            )
-            .await?;
-        Ok(())
-    }
+    protocols
+        .mediator
+        .acls_set(&atm, &profile, &digest(&profile.inner.did), &acls)
+        .await?;
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() {
@@ -63,7 +66,8 @@ async fn main() {
     // TODO: provide dids via envs
     let trust_registry_did = "did:peer:2.Vz6MkoZXto9vJeW5GqxzEwyiavksMXbbuokqgcLXny4G8kBAH.EzQ3shSLGtcTmaJeWfDYTiZvZMbFJx3ALtkjoXpKVHAqY8L6vA.SeyJ0IjoiZG0iLCJzIjp7InVyaSI6Imh0dHBzOi8vYnJpZGdlLWV1dzEuYXRsYXMuZGV2LmFmZmluaWRpLmlvIiwiYWNjZXB0IjpbImRpZGNvbW0vdjIiXSwicm91dGluZ19rZXlzIjpbXX0sImlkIjpudWxsfQ".to_string();
     println!("AMA DID: {}", trust_registry_did);
-    let mediator_did = Arc::new("did:web:66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io".to_string());
+    let mediator_did =
+        Arc::new("did:web:66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io".to_string());
 
     for (did, did_config) in user_configs {
         let mediator_did_clone = Arc::clone(&mediator_did);
@@ -96,11 +100,12 @@ async fn main() {
             )
             .await
             .unwrap();
-        
-        if did_config.alias.eq("Alice") {
 
+        if did_config.alias.eq("Alice") {
             println!("\nStarting Admin Operations Demo for Alice...\n");
-            set_public_acls_mode(Arc::clone(&atm), Arc::clone(&profile)).await.unwrap();
+            set_public_acls_mode(Arc::clone(&atm), Arc::clone(&profile))
+                .await
+                .unwrap();
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
             match create_record(
@@ -225,14 +230,7 @@ async fn main() {
         }
 
         if did_config.alias.eq("Alice") {
-            user_listener(
-                did_config,
-                &atm_clone,
-                protocols_clone,
-                &profile,
-            )
-            .await;
+            user_listener(did_config, &atm_clone, protocols_clone, &profile).await;
         }
-        
     }
 }

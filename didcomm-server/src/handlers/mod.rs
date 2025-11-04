@@ -12,8 +12,8 @@ use crate::listener::MessageHandler;
 
 pub mod admin;
 pub mod build;
-pub mod trqp;
 pub mod problem_report;
+pub mod trqp;
 
 pub trait ProtocolHandler: MessageHandler {
     fn get_supported_inboud_message_types(&self) -> Vec<String>;

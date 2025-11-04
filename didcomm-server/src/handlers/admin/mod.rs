@@ -9,7 +9,10 @@ use async_trait::async_trait;
 use tracing::{error, info, warn};
 
 use crate::{
-    configs::AdminApiConfig, didcomm::{get_parent_thread_id, get_thread_id, problem_report}, handlers::ProtocolHandler, listener::MessageHandler
+    configs::AdminApiConfig,
+    didcomm::{get_parent_thread_id, get_thread_id, problem_report},
+    handlers::ProtocolHandler,
+    listener::MessageHandler,
 };
 
 pub mod messages;
@@ -53,10 +56,17 @@ impl<R: ?Sized + TrustRecordAdminRepository> AdminMessagesHandler<R> {
 
     /// Validate that the sender DID is authorized as an admin
     fn validate_admin_did(&self, sender_did: &str) -> Result<(), String> {
-        if self.admin_config.admin_dids.contains(&sender_did.to_string()) {
+        if self
+            .admin_config
+            .admin_dids
+            .contains(&sender_did.to_string())
+        {
             Ok(())
         } else {
-            Err(format!("Unauthorized: DID {} is not in admin list", sender_did))
+            Err(format!(
+                "Unauthorized: DID {} is not in admin list",
+                sender_did
+            ))
         }
     }
 }
@@ -82,7 +92,16 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> MessageHandler for AdminM
                 &profile.inner.alias, sender_did, auth_error
             );
             let report = problem_report::ProblemReport::unauthorized(auth_error);
-            if let Err(e) = problem_report::send_problem_report(atm, profile, report, &sender_did, thid.clone(), pthid.clone()).await {
+            if let Err(e) = problem_report::send_problem_report(
+                atm,
+                profile,
+                report,
+                &sender_did,
+                thid.clone(),
+                pthid.clone(),
+            )
+            .await
+            {
                 error!("Failed to send problem report: {}", e);
             }
             return Ok(());
@@ -95,35 +114,77 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> MessageHandler for AdminM
 
         // TODO: refactor to avoid code duplication
         let result = match message_type.as_str() {
-            CREATE_RECORD_MESSAGE_TYPE => {
-                messages::handle_create_record(self, atm, profile, message, &sender_did, thid.clone(), pthid.clone())
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            UPDATE_RECORD_MESSAGE_TYPE => {
-                messages::handle_update_record(self, atm, profile, message, &sender_did, thid.clone(), pthid.clone())
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            DELETE_RECORD_MESSAGE_TYPE => {
-                messages::handle_delete_record(self, atm, profile, message, &sender_did, thid.clone(), pthid.clone())
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            READ_RECORD_MESSAGE_TYPE => {
-                messages::handle_read_record(self, atm, profile, message, &sender_did, thid.clone(), pthid.clone())
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            LIST_RECORDS_MESSAGE_TYPE => {
-                messages::handle_list_records(self, atm, profile, message, &sender_did, thid.clone(), pthid.clone())
-                    .await
-                    .map_err(|e| e.to_string())
-            }
+            CREATE_RECORD_MESSAGE_TYPE => messages::handle_create_record(
+                self,
+                atm,
+                profile,
+                message,
+                &sender_did,
+                thid.clone(),
+                pthid.clone(),
+            )
+            .await
+            .map_err(|e| e.to_string()),
+            UPDATE_RECORD_MESSAGE_TYPE => messages::handle_update_record(
+                self,
+                atm,
+                profile,
+                message,
+                &sender_did,
+                thid.clone(),
+                pthid.clone(),
+            )
+            .await
+            .map_err(|e| e.to_string()),
+            DELETE_RECORD_MESSAGE_TYPE => messages::handle_delete_record(
+                self,
+                atm,
+                profile,
+                message,
+                &sender_did,
+                thid.clone(),
+                pthid.clone(),
+            )
+            .await
+            .map_err(|e| e.to_string()),
+            READ_RECORD_MESSAGE_TYPE => messages::handle_read_record(
+                self,
+                atm,
+                profile,
+                message,
+                &sender_did,
+                thid.clone(),
+                pthid.clone(),
+            )
+            .await
+            .map_err(|e| e.to_string()),
+            LIST_RECORDS_MESSAGE_TYPE => messages::handle_list_records(
+                self,
+                atm,
+                profile,
+                message,
+                &sender_did,
+                thid.clone(),
+                pthid.clone(),
+            )
+            .await
+            .map_err(|e| e.to_string()),
             _ => {
                 warn!("Unknown admin message type: {}", message_type);
-                let report = problem_report::ProblemReport::bad_request(format!("Unknown message type: {}", message_type));
-                if let Err(e) = problem_report::send_problem_report(atm, profile, report, &sender_did, thid.clone(), pthid.clone()).await {
+                let report = problem_report::ProblemReport::bad_request(format!(
+                    "Unknown message type: {}",
+                    message_type
+                ));
+                if let Err(e) = problem_report::send_problem_report(
+                    atm,
+                    profile,
+                    report,
+                    &sender_did,
+                    thid.clone(),
+                    pthid.clone(),
+                )
+                .await
+                {
                     error!("Failed to send problem report: {}", e);
                 }
                 return Ok(());
@@ -136,7 +197,16 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> MessageHandler for AdminM
                 &profile.inner.alias, error_msg
             );
             let report = problem_report::ProblemReport::internal_error(error_msg);
-            if let Err(send_err) = problem_report::send_problem_report(atm, profile, report, &sender_did, thid.clone(), pthid.clone()).await {
+            if let Err(send_err) = problem_report::send_problem_report(
+                atm,
+                profile,
+                report,
+                &sender_did,
+                thid.clone(),
+                pthid.clone(),
+            )
+            .await
+            {
                 error!("Failed to send problem report: {}", send_err);
             }
         }

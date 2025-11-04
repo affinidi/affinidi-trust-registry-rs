@@ -21,14 +21,10 @@ pub fn build_response(
     thid: Option<String>,
     pthid: Option<String>,
 ) -> Message {
-    let mut builder = Message::build(
-        new_message_id(),
-        type_,
-        body,
-    )
-    .from(from)
-    .to(to)
-    .thid(thid.unwrap_or_else(new_message_id));
+    let mut builder = Message::build(new_message_id(), type_, body)
+        .from(from)
+        .to(to)
+        .thid(thid.unwrap_or_else(new_message_id));
 
     if let Some(parent_id) = pthid {
         builder = builder.header("pthid".into(), Value::String(parent_id));
@@ -106,7 +102,10 @@ pub async fn send_response(
         return Err(sending_error.into());
     }
 
-    info!("[profile = {}] Response sent successfully", &profile.inner.alias);
+    info!(
+        "[profile = {}] Response sent successfully",
+        &profile.inner.alias
+    );
     Ok(())
 }
 

@@ -46,7 +46,9 @@ pub(crate) fn parse_profile_config_from_str(
 
 impl Configs for DidcommServerConfigs {
     fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        let storage_backend_str = env::var("STORAGE_BACKEND").unwrap_or("csv".to_string()).to_lowercase();
+        let storage_backend_str = env::var("STORAGE_BACKEND")
+            .unwrap_or("csv".to_string())
+            .to_lowercase();
         let storage_backend = match storage_backend_str.as_str() {
             "dynamodb" | "ddb" => TrustStorageBackend::DynamoDb,
             _ => TrustStorageBackend::Csv,
@@ -70,9 +72,7 @@ impl Configs for DidcommServerConfigs {
 
         let admin_dids_str = env::var("ADMIN_DIDS").unwrap_or_default();
         let admin_dids: Vec<String> = admin_dids_str.split(",").map(|e| e.to_string()).collect();
-        let admin_api_config = AdminApiConfig {
-                admin_dids,
-        };
+        let admin_api_config = AdminApiConfig { admin_dids };
 
         Ok(DidcommServerConfigs {
             listen_address: env::var("LISTEN_ADDRESS")

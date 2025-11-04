@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use affinidi_tdk::{
     didcomm::{Message, UnpackMetadata},
-    messaging::{profiles::ATMProfile, ATM},
+    messaging::{ATM, profiles::ATMProfile},
 };
 use async_trait::async_trait;
 use tracing::info;
@@ -33,10 +33,21 @@ impl MessageHandler for ProblemReportHandler {
         let unknown = "unknown".to_string();
         let from = message.from.as_ref().unwrap_or(&unknown);
         let message_id = &message.id;
-        
-        let code = message.body.get("code").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let comment = message.body.get("comment").and_then(|v| v.as_str()).unwrap_or("no comment");
-        let args = message.body.get("args").map(|v| serde_json::to_string(v).unwrap_or_default());
+
+        let code = message
+            .body
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let comment = message
+            .body
+            .get("comment")
+            .and_then(|v| v.as_str())
+            .unwrap_or("no comment");
+        let args = message
+            .body
+            .get("args")
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
         let escalate_to = message.body.get("escalate_to").and_then(|v| v.as_str());
         let thid = message.thid.as_deref();
         let pthid = message.pthid.as_deref();

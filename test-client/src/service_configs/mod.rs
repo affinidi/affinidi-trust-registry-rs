@@ -10,7 +10,6 @@ pub struct ServiceConfig {
 }
 
 pub fn load_file(path: &str) -> Result<HashMap<String, ServiceConfig>, Box<dyn std::error::Error>> {
-
     let file_content = fs::read_to_string(path)?;
 
     let service_configs: HashMap<String, ServiceConfig> =
@@ -18,7 +17,6 @@ pub fn load_file(path: &str) -> Result<HashMap<String, ServiceConfig>, Box<dyn s
 
     Ok(service_configs)
 }
-
 
 pub fn load_user_config() -> Result<HashMap<String, ServiceConfig>, Box<dyn std::error::Error>> {
     let service_config_path = match env::var("SERVICE_CONFIG_PATH") {

@@ -79,7 +79,7 @@ pub(crate) async fn start_one_did_listener(
         "[profile = {}] Listener started",
         &listener.profile.inner.alias
     );
-    
+
     listener.start_listening().await.unwrap();
 }
 

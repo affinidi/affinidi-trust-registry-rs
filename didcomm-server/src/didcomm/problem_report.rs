@@ -133,7 +133,10 @@ pub async fn send_problem_report(
         return Err(sending_error.into());
     }
 
-    info!("[profile = {}] Problem report sent successfully", &profile.inner.alias);
+    info!(
+        "[profile = {}] Problem report sent successfully",
+        &profile.inner.alias
+    );
     Ok(())
 }
 

@@ -16,9 +16,9 @@ use tracing::{debug, info};
 use crate::didcomm::transport;
 
 use super::{
-    AdminMessagesHandler, CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
-    DELETE_RECORD_RESPONSE_MESSAGE_TYPE, LIST_RECORDS_RESPONSE_MESSAGE_TYPE,
-    READ_RECORD_RESPONSE_MESSAGE_TYPE, UPDATE_RECORD_RESPONSE_MESSAGE_TYPE,
+    AdminMessagesHandler, CREATE_RECORD_RESPONSE_MESSAGE_TYPE, DELETE_RECORD_RESPONSE_MESSAGE_TYPE,
+    LIST_RECORDS_RESPONSE_MESSAGE_TYPE, READ_RECORD_RESPONSE_MESSAGE_TYPE,
+    UPDATE_RECORD_RESPONSE_MESSAGE_TYPE,
 };
 
 #[derive(Debug, Deserialize)]
@@ -86,7 +86,11 @@ pub async fn handle_create_record<R: ?Sized + TrustRecordAdminRepository>(
 
     let record = builder.build().map_err(|e| e.to_string())?;
 
-    handler.repository.create(record).await.map_err(|e| e.to_string())?;
+    handler
+        .repository
+        .create(record)
+        .await
+        .map_err(|e| e.to_string())?;
 
     info!(
         "[admin = {}] Created record: {}|{}|{}",
@@ -142,7 +146,11 @@ pub async fn handle_update_record<R: ?Sized + TrustRecordAdminRepository>(
 
     let record = builder.build().map_err(|e| e.to_string())?;
 
-    handler.repository.update(record).await.map_err(|e| e.to_string())?;
+    handler
+        .repository
+        .update(record)
+        .await
+        .map_err(|e| e.to_string())?;
 
     info!(
         "[admin = {}] Updated record: {}|{}|{}",
@@ -191,7 +199,11 @@ pub async fn handle_delete_record<R: ?Sized + TrustRecordAdminRepository>(
         AssertionId::new(request.assertion_id.clone()),
     );
 
-    handler.repository.delete(query).await.map_err(|e| e.to_string())?;
+    handler
+        .repository
+        .delete(query)
+        .await
+        .map_err(|e| e.to_string())?;
 
     info!(
         "[admin = {}] Deleted record: {}|{}|{}",
@@ -240,7 +252,11 @@ pub async fn handle_read_record<R: ?Sized + TrustRecordAdminRepository>(
         AssertionId::new(request.assertion_id.clone()),
     );
 
-    let record = handler.repository.read(query).await.map_err(|e| e.to_string())?;
+    let record = handler
+        .repository
+        .read(query)
+        .await
+        .map_err(|e| e.to_string())?;
 
     info!(
         "[admin = {}] Read record: {}|{}|{}",
@@ -298,7 +314,11 @@ pub async fn handle_list_records<R: ?Sized + TrustRecordAdminRepository>(
         })
         .collect();
 
-    info!("[admin = {}] Listed {} records", sender_did, records_json.len());
+    info!(
+        "[admin = {}] Listed {} records",
+        sender_did,
+        records_json.len()
+    );
 
     let response_body = json!({
         "records": records_json,

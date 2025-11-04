@@ -1,8 +1,8 @@
 use affinidi_tdk::didcomm::Message;
 use uuid::Uuid;
 
-pub mod transport;
 pub mod problem_report;
+pub mod transport;
 
 /// get thid OR message id, if thid is None
 pub fn get_thread_id(msg: &Message) -> Option<String> {
@@ -23,13 +23,9 @@ mod tests {
     use super::*;
     #[test]
     fn test_get_thread_id() {
-        let msg = Message::build(
-            new_message_id(),
-            "test".to_string(),
-            serde_json::json!({}),
-        )
-        .thid("thread-123".to_string())
-        .finalize();
+        let msg = Message::build(new_message_id(), "test".to_string(), serde_json::json!({}))
+            .thid("thread-123".to_string())
+            .finalize();
 
         assert_eq!(get_thread_id(&msg), Some("thread-123".to_string()));
     }

@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use affinidi_tdk::{
     didcomm::Message,
-    messaging::{profiles::ATMProfile, protocols::Protocols, ATM},
+    messaging::{ATM, profiles::ATMProfile, protocols::Protocols},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 pub const CREATE_RECORD_MESSAGE_TYPE: &str =

@@ -179,7 +179,7 @@ impl FileStorage {
             let records = self.records.read().unwrap();
             records.values().cloned().collect::<Vec<_>>()
         };
-        
+
         let mut csv_records = Vec::new();
         for record in records_clone.iter() {
             csv_records.push(TrustRecordCsvRow::from_record(record));
@@ -194,19 +194,21 @@ impl FileStorage {
         let csv_data = wtr
             .into_inner()
             .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))?;
-        
+
         tokio::fs::write(&self.file_path, csv_data)
             .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Failed to write CSV file: {}", e)))?;
+            .map_err(|e| {
+                RepositoryError::QueryFailed(format!("Failed to write CSV file: {}", e))
+            })?;
 
         // Update last_modified to prevent reload
-        let metadata = tokio::fs::metadata(&self.file_path)
-            .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Failed to get file metadata: {}", e)))?;
-        let modified = metadata
-            .modified()
-            .map_err(|e| RepositoryError::QueryFailed(format!("Failed to get modified time: {}", e)))?;
-        
+        let metadata = tokio::fs::metadata(&self.file_path).await.map_err(|e| {
+            RepositoryError::QueryFailed(format!("Failed to get file metadata: {}", e))
+        })?;
+        let modified = metadata.modified().map_err(|e| {
+            RepositoryError::QueryFailed(format!("Failed to get modified time: {}", e))
+        })?;
+
         let mut guard = self.last_modified.write().unwrap();
         *guard = Some(modified);
 
@@ -298,7 +300,7 @@ impl TrustRecordAdminRepository for FileStorage {
             .values()
             .cloned()
             .find(|record| FileStorage::matches_query(record, &query));
-        
+
         result.ok_or_else(|| {
             RepositoryError::RecordNotFound(format!(
                 "Record not found: {}|{}|{}",
@@ -334,7 +336,9 @@ impl TrustRecordCsvRow {
     }
 
     fn from_record(record: &TrustRecord) -> Self {
-        let context = if record.context().as_value().is_object() || record.context().as_value().is_array() {
+        let context = if record.context().as_value().is_object()
+            || record.context().as_value().is_array()
+        {
             let json_str = serde_json::to_string(record.context().as_value()).unwrap_or_default();
             let encoded = base64.encode(json_str.as_bytes());
             Some(encoded)

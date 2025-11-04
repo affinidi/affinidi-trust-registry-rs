@@ -1,4 +1,3 @@
-
 use affinidi_tdk::didcomm::Message;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;

@@ -144,7 +144,7 @@ impl TrustRecordAdminRepository for LocalStorage {
             .values()
             .cloned()
             .find(|record| Self::matches_query(record, &query));
-        
+
         result.ok_or_else(|| {
             RepositoryError::RecordNotFound(format!(
                 "Record not found: {}|{}|{}",
