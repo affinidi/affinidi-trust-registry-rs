@@ -1,0 +1,8 @@
+# copied from ayra-infra-service
+
+version: "1.0"
+deployments:
+  - account: "912469213006"
+    tier: dev
+    regions:
+      - ap-southeast-1
