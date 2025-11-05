@@ -9,7 +9,10 @@ use tracing::debug;
 use crate::{
     configs::DynamoDbStorageConfig,
     domain::TrustRecord,
-    storage::repository::{RepositoryError, TrustRecordQuery, TrustRecordRepository},
+    storage::repository::{
+        RepositoryError, TrustRecordAdminRepository, TrustRecordList, TrustRecordQuery,
+        TrustRecordRepository,
+    },
 };
 
 const PK_ATTR: &str = "PK";
@@ -115,5 +118,190 @@ impl TrustRecordRepository for DynamoDbStorage {
         }
 
         Ok(None)
+    }
+}
+
+#[async_trait::async_trait]
+impl TrustRecordAdminRepository for DynamoDbStorage {
+    async fn create(&self, record: TrustRecord) -> Result<(), RepositoryError> {
+        debug!(
+            entity = record.entity_id().as_str(),
+            authority = record.authority_id().as_str(),
+            assertion = record.assertion_id().as_str(),
+            "Creating trust record in DynamoDB"
+        );
+
+        let mut item: HashMap<String, AttributeValue> = serde_dynamo::to_item(&record)
+            .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))?;
+
+        // Add PK and SK for DynamoDB
+        let key_value = format!(
+            "{}|{}|{}",
+            record.entity_id(),
+            record.authority_id(),
+            record.assertion_id()
+        );
+        item.insert(PK_ATTR.to_string(), AttributeValue::S(key_value.clone()));
+        item.insert(SK_ATTR.to_string(), AttributeValue::S(key_value));
+
+        // Use condition expression to prevent overwriting existing records
+        self.client
+            .put_item()
+            .table_name(&self.table_name)
+            .set_item(Some(item))
+            .condition_expression("attribute_not_exists(PK)")
+            .send()
+            .await
+            .map_err(|err| {
+                if err.to_string().contains("ConditionalCheckFailed") {
+                    RepositoryError::RecordAlreadyExists(format!(
+                        "Record already exists: {}|{}|{}",
+                        record.entity_id(),
+                        record.authority_id(),
+                        record.assertion_id()
+                    ))
+                } else {
+                    RepositoryError::QueryFailed(format!("Failed to create record: {}", err))
+                }
+            })?;
+
+        Ok(())
+    }
+
+    async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError> {
+        debug!(
+            entity = record.entity_id().as_str(),
+            authority = record.authority_id().as_str(),
+            assertion = record.assertion_id().as_str(),
+            "Updating trust record in DynamoDB"
+        );
+
+        let mut item: HashMap<String, AttributeValue> = serde_dynamo::to_item(&record)
+            .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))?;
+
+        // Add PK and SK
+        let key_value = format!(
+            "{}|{}|{}",
+            record.entity_id(),
+            record.authority_id(),
+            record.assertion_id()
+        );
+        item.insert(PK_ATTR.to_string(), AttributeValue::S(key_value.clone()));
+        item.insert(SK_ATTR.to_string(), AttributeValue::S(key_value));
+
+        // Use condition expression to ensure record exists before updating
+        self.client
+            .put_item()
+            .table_name(&self.table_name)
+            .set_item(Some(item))
+            .condition_expression("attribute_exists(PK)")
+            .send()
+            .await
+            .map_err(|err| {
+                if err.to_string().contains("ConditionalCheckFailed") {
+                    RepositoryError::RecordNotFound(format!(
+                        "Record not found: {}|{}|{}",
+                        record.entity_id(),
+                        record.authority_id(),
+                        record.assertion_id()
+                    ))
+                } else {
+                    RepositoryError::QueryFailed(format!("Failed to update record: {}", err))
+                }
+            })?;
+
+        Ok(())
+    }
+
+    async fn delete(&self, query: TrustRecordQuery) -> Result<(), RepositoryError> {
+        debug!(
+            entity = query.entity_id.as_str(),
+            authority = query.authority_id.as_str(),
+            assertion = query.assertion_id.as_str(),
+            "Deleting trust record from DynamoDB"
+        );
+
+        let key = self.build_key(&query);
+
+        self.client
+            .delete_item()
+            .table_name(&self.table_name)
+            .set_key(Some(key))
+            .condition_expression("attribute_exists(PK)")
+            .send()
+            .await
+            .map_err(|err| {
+                if err.to_string().contains("ConditionalCheckFailed") {
+                    RepositoryError::RecordNotFound(format!(
+                        "Record not found: {}|{}|{}",
+                        query.entity_id, query.authority_id, query.assertion_id
+                    ))
+                } else {
+                    RepositoryError::QueryFailed(format!("Failed to delete record: {}", err))
+                }
+            })?;
+
+        Ok(())
+    }
+
+    async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
+        debug!("Listing all trust records from DynamoDB");
+
+        let response = self
+            .client
+            .scan()
+            .table_name(&self.table_name)
+            .send()
+            .await
+            .map_err(|err| {
+                RepositoryError::QueryFailed(format!("Failed to scan table: {}", err))
+            })?;
+
+        let items = response.items.unwrap_or_default();
+        let mut records = Vec::with_capacity(items.len());
+
+        for item in items {
+            let record: TrustRecord = serde_dynamo::from_item(item)
+                .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))?;
+            records.push(record);
+        }
+
+        Ok(TrustRecordList::new(records))
+    }
+
+    async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
+        debug!(
+            entity = query.entity_id.as_str(),
+            authority = query.authority_id.as_str(),
+            assertion = query.assertion_id.as_str(),
+            "Reading trust record from DynamoDB"
+        );
+
+        let key = self.build_key(&query);
+
+        let response = self
+            .client
+            .get_item()
+            .table_name(&self.table_name)
+            .set_key(Some(key))
+            .send()
+            .await
+            .map_err(|err| {
+                RepositoryError::ConnectionFailed(format!(
+                    "Failed to fetch item from DynamoDB: {}",
+                    err
+                ))
+            })?;
+
+        if let Some(item) = response.item {
+            let trust_record: TrustRecord = serde_dynamo::from_item(item)
+                .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))?;
+            return Ok(trust_record);
+        }
+
+        Err(RepositoryError::RecordNotFound(format!(
+            "Record not found: {}|{}|{}",
+            query.entity_id, query.authority_id, query.assertion_id
+        )))
     }
 }
