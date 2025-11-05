@@ -9,12 +9,30 @@ services:
       dockerfile: http-server/Dockerfile
       platforms:
         - linux/arm64
+    env_file:
+      - .env
     environment:
       LISTEN_ADDRESS: 0.0.0.0:3232
-      RUST_LOG: info
-      TR_STORAGE_BACKEND: csv
-      FILE_STORAGE_PATH: /data/data.csv
+      FILE_STORAGE_PATH: /sample-data/data.csv
     ports:
       - "3232:3232"
     volumes:
-      - ./sample-data:/data:ro
+      - ./sample-data:/sample-data
+  
+  didcomm-server:
+    platform: linux/arm64
+    image: trust-registry-didcomm:local
+    build:
+      context: .
+      dockerfile: didcomm-server/Dockerfile
+      platforms:
+        - linux/arm64
+    env_file:
+      - .env
+    environment:
+      LISTEN_ADDRESS: 0.0.0.0:3131
+      FILE_STORAGE_PATH: /sample-data/data.csv
+    ports:
+      - "3131:3131"
+    volumes:
+      - ./sample-data:/sample-data
