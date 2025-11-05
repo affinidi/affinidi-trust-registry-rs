@@ -1,0 +1,28 @@
+{
+  "did:peer:2.Vz6Mkpun7xEJWBqwtaiHSqfjLe1ejqQ4PAUEas1gjH7VVNxjs.EzQ3shoprXELvJw9ou4VbfrFRx5FZQsP9EB1LMUJaPacDKtiZ8": {
+    "alias": "Alice",
+    "secrets": [
+      {
+        "id": "did:peer:2.Vz6Mkpun7xEJWBqwtaiHSqfjLe1ejqQ4PAUEas1gjH7VVNxjs.EzQ3shoprXELvJw9ou4VbfrFRx5FZQsP9EB1LMUJaPacDKtiZ8#key-1",
+        "type": "JsonWebKey2020",
+        "privateKeyJwk": {
+          "crv": "Ed25519",
+          "d": "2Pj2_sEBwc2okBLwP14RsQlOfzCSeju6PqasyVcpqww",
+          "kty": "OKP",
+          "x": "m1_59_vXcAkSRgBdlXrPdaXFmHrF9nIobzzqSQKh-no"
+        }
+      },
+      {
+        "id": "did:peer:2.Vz6Mkpun7xEJWBqwtaiHSqfjLe1ejqQ4PAUEas1gjH7VVNxjs.EzQ3shoprXELvJw9ou4VbfrFRx5FZQsP9EB1LMUJaPacDKtiZ8#key-2",
+        "type": "JsonWebKey2020",
+        "privateKeyJwk": {
+          "crv": "secp256k1",
+          "d": "Dcz76VvxJrYobx4fKf7UPGT1ZNngsI2qoEmw0QgO6Pw",
+          "kty": "EC",
+          "x": "iHoOlwQ2z1a37jPcJANjRmkopIZP8b_twYkLmd6gp-M",
+          "y": "YLslM8gEW550xvna4Xlt8KF5esRCWtZ33wLPWkYOPDs"
+        }
+      }
+    ]
+  }
+}

@@ -84,6 +84,76 @@ impl TrustRecordRepository for LocalStorage {
     }
 }
 
+#[async_trait::async_trait]
+impl TrustRecordAdminRepository for LocalStorage {
+    async fn create(&self, record: TrustRecord) -> Result<(), RepositoryError> {
+        let key = RecordKey::from_record(&record);
+        let mut records = self.records.write().unwrap();
+        if records.contains_key(&key) {
+            return Err(RepositoryError::RecordAlreadyExists(format!(
+                "Record already exists: {}|{}|{}",
+                record.entity_id(),
+                record.authority_id(),
+                record.assertion_id()
+            )));
+        }
+        records.insert(key, record);
+        Ok(())
+    }
+
+    async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError> {
+        let key = RecordKey::from_record(&record);
+        let mut records = self.records.write().unwrap();
+        if !records.contains_key(&key) {
+            return Err(RepositoryError::RecordNotFound(format!(
+                "Record not found: {}|{}|{}",
+                record.entity_id(),
+                record.authority_id(),
+                record.assertion_id()
+            )));
+        }
+        records.insert(key, record);
+        Ok(())
+    }
+
+    async fn delete(&self, query: TrustRecordQuery) -> Result<(), RepositoryError> {
+        let key = RecordKey {
+            entity_id: query.entity_id.clone(),
+            authority_id: query.authority_id.clone(),
+            assertion_id: query.assertion_id.clone(),
+        };
+        let mut records = self.records.write().unwrap();
+        if records.remove(&key).is_none() {
+            return Err(RepositoryError::RecordNotFound(format!(
+                "Record not found: {}|{}|{}",
+                query.entity_id, query.authority_id, query.assertion_id
+            )));
+        }
+        Ok(())
+    }
+
+    async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
+        let records = self.records.read().unwrap();
+        let records_vec: Vec<TrustRecord> = records.values().cloned().collect();
+        Ok(TrustRecordList::new(records_vec))
+    }
+
+    async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
+        let records = self.records.read().unwrap();
+        let result = records
+            .values()
+            .cloned()
+            .find(|record| Self::matches_query(record, &query));
+
+        result.ok_or_else(|| {
+            RepositoryError::RecordNotFound(format!(
+                "Record not found: {}|{}|{}",
+                query.entity_id, query.authority_id, query.assertion_id
+            ))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,18 +1,35 @@
 use std::sync::Arc;
 
-use app::storage::repository::TrustRecordRepository;
+use app::storage::repository::TrustRecordAdminRepository;
 
-use crate::handlers::{BaseHandler, trqp::TRQPMessagesHandler};
+use crate::{
+    configs::DidcommServerConfigs,
+    handlers::{
+        BaseHandler, admin::AdminMessagesHandler, problem_report::ProblemReportHandler,
+        trqp::TRQPMessagesHandler,
+    },
+};
 
-impl<R: TrustRecordRepository + 'static> BaseHandler<R> {
-    pub fn build(repository: Arc<R>) -> Self {
+impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
+    pub fn build_from_arc(repository: Arc<R>, config: Arc<DidcommServerConfigs>) -> BaseHandler<R> {
         let trqp = TRQPMessagesHandler {
             repository: repository.clone(),
         };
 
-        Self {
+        let tradmin = AdminMessagesHandler {
+            repository: repository.clone(),
+            admin_config: config.admin_api_config.clone(),
+        };
+
+        let problem_report_handler = ProblemReportHandler::new();
+
+        BaseHandler {
             repository,
-            protocols_handlers: vec![Arc::new(trqp)],
+            protocols_handlers: vec![
+                Arc::new(trqp),
+                Arc::new(tradmin),
+                Arc::new(problem_report_handler),
+            ],
         }
     }
 }
