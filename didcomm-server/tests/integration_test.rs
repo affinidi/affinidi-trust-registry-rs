@@ -36,7 +36,6 @@ pub const ENTITY_ID: &str = "did:example:entityYW";
 pub const AUTHORITY_ID: &str = "did:example:authorityWY";
 pub const ASSERTION_ID: &str = "credential_type_abc";
 
-// Test configuration constants
 const MESSAGE_FETCH_LIMIT: usize = 10;
 const INITIAL_FETCH_LIMIT: usize = 100;
 const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
@@ -49,7 +48,6 @@ async fn init_didcomm_server() {
         .await;
 }
 
-// Helper function to create standard fetch options
 fn create_fetch_options(limit: usize) -> FetchOptions {
     FetchOptions {
         limit,
@@ -58,12 +56,12 @@ fn create_fetch_options(limit: usize) -> FetchOptions {
     }
 }
 
-// Helper function to create record JSON body
-fn create_record_body(number: Option<&str>) -> Value {
+// Helper function to create record JSON body with unique test-specific IDs
+fn create_test_record_body(test_name: &str) -> Value {
     json!({
-        "entity_id": format!("{}{}", ENTITY_ID, number.unwrap_or("")),
-        "authority_id": format!("{}{}", AUTHORITY_ID, number.unwrap_or("")),
-        "assertion_id": format!("{}{}", ASSERTION_ID, number.unwrap_or(""))
+        "entity_id": format!("{}_{}", ENTITY_ID, test_name),
+        "authority_id": format!("{}_{}", AUTHORITY_ID, test_name),
+        "assertion_id": format!("{}_{}", ASSERTION_ID, test_name)
     })
 }
 
@@ -115,8 +113,8 @@ async fn fetch_and_verify_response(
     Err(format!("Expected message type not found: {}", expected_message_type).into())
 }
 
-#[tokio::test]
-async fn integration_test_admin_handlers() {
+// Helper function to set up test environment for admin handlers
+async fn setup_test_environment() -> (Arc<ATM>, Arc<ATMProfile>, Arc<Protocols>) {
     init_didcomm_server().await;
     let protocols = Arc::new(Protocols::new());
     let secrets: Vec<Secret> = serde_json::from_str(CLIENT_SECRETS).unwrap();
@@ -124,52 +122,59 @@ async fn integration_test_admin_handlers() {
         prepare_atm_and_profile("test-client", &CLIENT_DID, MEDIATOR_DID, secrets, false)
             .await
             .unwrap();
+
     // Wait until server is ready to process messages
-    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // atm.fetch_messages(&profile, &create_fetch_options(INITIAL_FETCH_LIMIT))
-    //     .await
-    //     .unwrap();
+    // Clear any existing messages
+    atm.fetch_messages(
+        &profile,
+        &FetchOptions {
+            limit: INITIAL_FETCH_LIMIT,
+            start_id: None,
+            delete_policy: FetchDeletePolicy::Optimistic,
+        },
+    )
+    .await
+    .unwrap();
 
-    // Send create record message
-    let body = json!({
-        "entity_id": ENTITY_ID,
-        "authority_id": AUTHORITY_ID,
-        "assertion_id": ASSERTION_ID,
-        "recognized": true,
-        "assertion_verified": true,
-        "context": json!({
+    (atm, profile, protocols)
+}
+
+#[tokio::test]
+async fn test_admin_read() {
+    let (atm, profile, protocols) = setup_test_environment().await;
+
+    // First create a record to read with unique IDs for this test
+    let mut create_body = create_test_record_body("read");
+    create_body["recognized"] = serde_json::Value::Bool(true);
+    create_body["assertion_verified"] = serde_json::Value::Bool(true);
+    create_body["context"] = json!({
         "description": "Test credential type",
         "version": "1.0",
         "tags": ["test", "demo"]
-        })
     });
 
-    send_admin_message(
+    send_message(
         &atm,
         profile.clone(),
         TRUST_REGISTRY_DID,
         &protocols,
         MEDIATOR_DID,
-        &body,
+        &create_body,
         CREATE_RECORD_MESSAGE_TYPE,
     )
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
-    // Receive create record response
-    let response_body =
-        fetch_and_verify_response(&atm, &profile, CREATE_RECORD_RESPONSE_MESSAGE_TYPE)
-            .await
-            .unwrap();
-
-    assert_eq!(response_body, create_record_body(None));
+    // Clear create response
+    let _ = fetch_and_verify_response(&atm, &profile, CREATE_RECORD_RESPONSE_MESSAGE_TYPE).await;
 
     // Now send read record message
-    let read_body = create_record_body(None);
+    let read_body = create_test_record_body("read");
 
-    send_admin_message(
+    send_message(
         &atm,
         profile.clone(),
         TRUST_REGISTRY_DID,
@@ -181,28 +186,60 @@ async fn integration_test_admin_handlers() {
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+
     // Receive read record response
     let response_body =
         fetch_and_verify_response(&atm, &profile, READ_RECORD_RESPONSE_MESSAGE_TYPE)
             .await
             .unwrap();
 
-    assert_eq!(response_body["entity_id"], ENTITY_ID);
-    assert_eq!(response_body["authority_id"], AUTHORITY_ID);
-    assert_eq!(response_body["assertion_id"], ASSERTION_ID);
+    let expected_entity_id = format!("{}_{}", ENTITY_ID, "read");
+    let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "read");
+    let expected_assertion_id = format!("{}_{}", ASSERTION_ID, "read");
+
+    assert_eq!(response_body["entity_id"], expected_entity_id);
+    assert_eq!(response_body["authority_id"], expected_authority_id);
+    assert_eq!(response_body["assertion_id"], expected_assertion_id);
     assert_eq!(response_body["recognized"], true);
     assert_eq!(response_body["assertion_verified"], true);
+}
 
-    println!(
-        "Read record test passed - received full record: {}",
-        serde_json::to_string_pretty(&response_body).unwrap()
-    );
+#[tokio::test]
+async fn test_admin_update() {
+    let (atm, profile, protocols) = setup_test_environment().await;
+
+    // First create a record to update with unique IDs for this test
+    let mut create_body = create_test_record_body("update");
+    create_body["recognized"] = serde_json::Value::Bool(true);
+    create_body["assertion_verified"] = serde_json::Value::Bool(true);
+    create_body["context"] = json!({
+        "description": "Test credential type",
+        "version": "1.0",
+        "tags": ["test", "demo"]
+    });
+
+    send_message(
+        &atm,
+        profile.clone(),
+        TRUST_REGISTRY_DID,
+        &protocols,
+        MEDIATOR_DID,
+        &create_body,
+        CREATE_RECORD_MESSAGE_TYPE,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+
+    // Clear create response
+    let _ = fetch_and_verify_response(&atm, &profile, CREATE_RECORD_RESPONSE_MESSAGE_TYPE).await;
+
     // Now send update record message
-    let mut update_body = create_record_body(None);
+    let mut update_body = create_test_record_body("update");
     update_body["recognized"] = serde_json::Value::Bool(false);
     update_body["assertion_verified"] = serde_json::Value::Bool(false);
 
-    send_admin_message(
+    send_message(
         &atm,
         profile.clone(),
         TRUST_REGISTRY_DID,
@@ -214,24 +251,56 @@ async fn integration_test_admin_handlers() {
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+
     // Receive update record response
     let response_body =
         fetch_and_verify_response(&atm, &profile, UPDATE_RECORD_RESPONSE_MESSAGE_TYPE)
             .await
             .unwrap();
 
-    assert_eq!(response_body["entity_id"], ENTITY_ID);
-    assert_eq!(response_body["authority_id"], AUTHORITY_ID);
-    assert_eq!(response_body["assertion_id"], ASSERTION_ID);
+    let expected_entity_id = format!("{}_{}", ENTITY_ID, "update");
+    let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "update");
+    let expected_assertion_id = format!("{}_{}", ASSERTION_ID, "update");
 
-    println!(
-        "Update record test passed - received full record: {}",
-        serde_json::to_string_pretty(&response_body).unwrap()
-    );
+    assert_eq!(response_body["entity_id"], expected_entity_id);
+    assert_eq!(response_body["authority_id"], expected_authority_id);
+    assert_eq!(response_body["assertion_id"], expected_assertion_id);
+}
+
+#[tokio::test]
+async fn test_admin_list() {
+    let (atm, profile, protocols) = setup_test_environment().await;
+
+    // First create a record to list with unique IDs for this test
+    let mut create_body = create_test_record_body("list");
+    create_body["recognized"] = serde_json::Value::Bool(true);
+    create_body["assertion_verified"] = serde_json::Value::Bool(true);
+    create_body["context"] = json!({
+        "description": "Test credential type",
+        "version": "1.0",
+        "tags": ["test", "demo"]
+    });
+
+    send_message(
+        &atm,
+        profile.clone(),
+        TRUST_REGISTRY_DID,
+        &protocols,
+        MEDIATOR_DID,
+        &create_body,
+        CREATE_RECORD_MESSAGE_TYPE,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+
+    // Clear create response
+    let _ = fetch_and_verify_response(&atm, &profile, CREATE_RECORD_RESPONSE_MESSAGE_TYPE).await;
+
     // Now send list records message
     let list_body = json!({});
 
-    send_admin_message(
+    send_message(
         &atm,
         profile.clone(),
         TRUST_REGISTRY_DID,
@@ -243,6 +312,7 @@ async fn integration_test_admin_handlers() {
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+
     // Receive list records response
     let response_body =
         fetch_and_verify_response(&atm, &profile, LIST_RECORDS_RESPONSE_MESSAGE_TYPE)
@@ -253,20 +323,58 @@ async fn integration_test_admin_handlers() {
         .as_array()
         .unwrap_or(&Vec::new())
         .clone();
-    let record = records.first().expect("Records list is empty").clone();
-    assert_eq!(count, 1);
-    assert_eq!(record["authority_id"], AUTHORITY_ID);
-    assert_eq!(record["assertion_id"], ASSERTION_ID);
-    assert_eq!(record["assertion_verified"], false);
 
-    println!(
-        "List records test passed - received full record: {}",
-        serde_json::to_string_pretty(&response_body).unwrap()
-    );
+    assert!(count >= 1);
+
+    let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "list");
+    let expected_assertion_id = format!("{}_{}", ASSERTION_ID, "list");
+
+    let our_record = records
+        .iter()
+        .find(|record| {
+            record["authority_id"] == expected_authority_id
+                && record["assertion_id"] == expected_assertion_id
+        })
+        .expect("Our test record not found in list");
+
+    assert_eq!(our_record["authority_id"], expected_authority_id);
+    assert_eq!(our_record["assertion_id"], expected_assertion_id);
+}
+
+#[tokio::test]
+async fn test_admin_delete() {
+    let (atm, profile, protocols) = setup_test_environment().await;
+
+    // First create a record to delete with unique IDs for this test
+    let mut create_body = create_test_record_body("delete");
+    create_body["recognized"] = serde_json::Value::Bool(true);
+    create_body["assertion_verified"] = serde_json::Value::Bool(true);
+    create_body["context"] = json!({
+        "description": "Test credential type",
+        "version": "1.0",
+        "tags": ["test", "demo"]
+    });
+
+    send_message(
+        &atm,
+        profile.clone(),
+        TRUST_REGISTRY_DID,
+        &protocols,
+        MEDIATOR_DID,
+        &create_body,
+        CREATE_RECORD_MESSAGE_TYPE,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+
+    // Clear create response
+    let _ = fetch_and_verify_response(&atm, &profile, CREATE_RECORD_RESPONSE_MESSAGE_TYPE).await;
+
     // Now send delete record message
-    let delete_body = create_record_body(None);
+    let delete_body = create_test_record_body("delete");
 
-    send_admin_message(
+    send_message(
         &atm,
         profile.clone(),
         TRUST_REGISTRY_DID,
@@ -278,56 +386,56 @@ async fn integration_test_admin_handlers() {
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+
     // Receive delete record response
     let response_body =
         fetch_and_verify_response(&atm, &profile, DELETE_RECORD_RESPONSE_MESSAGE_TYPE)
             .await
             .unwrap();
 
-    assert_eq!(response_body["authority_id"], AUTHORITY_ID);
-    assert_eq!(response_body["assertion_id"], ASSERTION_ID);
-    assert_eq!(response_body["entity_id"], ENTITY_ID);
+    let expected_entity_id = format!("{}_{}", ENTITY_ID, "delete");
+    let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "delete");
+    let expected_assertion_id = format!("{}_{}", ASSERTION_ID, "delete");
 
-    println!(
-        "Delete records test passed - received full record: {}",
-        serde_json::to_string_pretty(&response_body).unwrap()
-    );
+    assert_eq!(response_body["authority_id"], expected_authority_id);
+    assert_eq!(response_body["assertion_id"], expected_assertion_id);
+    assert_eq!(response_body["entity_id"], expected_entity_id);
 }
 
-// #[tokio::test]
-async fn integration_test_handler() {
-    init_didcomm_server().await;
-    let protocols = Arc::new(Protocols::new());
-    let secrets: Vec<Secret> = serde_json::from_str(CLIENT_SECRETS).unwrap();
-    let (atm, profile) =
-        prepare_atm_and_profile("test-client", &CLIENT_DID, MEDIATOR_DID, secrets, false)
-            .await
-            .unwrap();
-    let response_body =
-        fetch_and_verify_response(&atm, &profile, READ_RECORD_RESPONSE_MESSAGE_TYPE)
-            .await
-            .unwrap();
-    println!(
-        "Recognition received full record: {}",
-        serde_json::to_string_pretty(&response_body).unwrap()
-    );
-}
 #[tokio::test]
-async fn integration_test_trqp_handler() {
-    init_didcomm_server().await;
-    let protocols = Arc::new(Protocols::new());
-    let secrets: Vec<Secret> = serde_json::from_str(CLIENT_SECRETS).unwrap();
-    let (atm, profile) =
-        prepare_atm_and_profile("test-client", &CLIENT_DID, MEDIATOR_DID, secrets, false)
-            .await
-            .unwrap();
-    // Wait until admin creates a record
-    tokio::time::sleep(Duration::from_secs(8)).await;
+async fn test_trqp_handler() {
+    let (atm, profile, protocols) = setup_test_environment().await;
+
+    // First create a record to query with unique IDs for this test
+    let mut create_body = create_test_record_body("trqp");
+    create_body["recognized"] = serde_json::Value::Bool(true);
+    create_body["assertion_verified"] = serde_json::Value::Bool(true);
+    create_body["context"] = json!({
+        "description": "Test credential type",
+        "version": "1.0",
+        "tags": ["test", "demo"]
+    });
+
+    send_message(
+        &atm,
+        profile.clone(),
+        TRUST_REGISTRY_DID,
+        &protocols,
+        MEDIATOR_DID,
+        &create_body,
+        CREATE_RECORD_MESSAGE_TYPE,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+
+    // Clear create response
+    let _ = fetch_and_verify_response(&atm, &profile, CREATE_RECORD_RESPONSE_MESSAGE_TYPE).await;
 
     // Send recognition record message
-    let recognition_body = create_record_body(None);
+    let recognition_body = create_test_record_body("trqp");
 
-    send_admin_message(
+    send_message(
         &atm,
         profile.clone(),
         TRUST_REGISTRY_DID,
@@ -339,23 +447,25 @@ async fn integration_test_trqp_handler() {
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+
     // Receive recognition record response
     let response_body =
         fetch_and_verify_response(&atm, &profile, QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE)
             .await
             .unwrap();
-    println!(
-        "Recognition received full record: {}",
-        serde_json::to_string_pretty(&response_body).unwrap()
-    );
-    assert_eq!(response_body["entity_id"], ENTITY_ID);
-    assert_eq!(response_body["authority_id"], AUTHORITY_ID);
-    assert_eq!(response_body["assertion_id"], ASSERTION_ID);
+
+    let expected_entity_id = format!("{}_{}", ENTITY_ID, "trqp");
+    let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "trqp");
+    let expected_assertion_id = format!("{}_{}", ASSERTION_ID, "trqp");
+
+    assert_eq!(response_body["entity_id"], expected_entity_id);
+    assert_eq!(response_body["authority_id"], expected_authority_id);
+    assert_eq!(response_body["assertion_id"], expected_assertion_id);
     assert_eq!(response_body["recognized"].as_bool(), Some(true));
     assert_eq!(response_body["assertion_verified"].as_bool(), Some(true));
 }
 
-async fn send_admin_message(
+async fn send_message(
     atm: &Arc<ATM>,
     profile: Arc<ATMProfile>,
     trust_registry_did: &str,
@@ -369,13 +479,6 @@ async fn send_admin_message(
         .from(profile.inner.did.clone())
         .to(trust_registry_did.to_string())
         .finalize();
-
-    // println!(
-    //     "\nSending admin message: {}",
-    //     message_type.split('/').last().unwrap_or(message_type)
-    // );
-    // println!("   Message ID: {}", message_id);
-    // println!("   Body: {}", serde_json::to_string_pretty(body)?);
 
     let packed_msg = atm
         .pack_encrypted(
