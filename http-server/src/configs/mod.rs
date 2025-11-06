@@ -1,13 +1,20 @@
 use app::configs::{Configs, TrustStorageBackend};
+use serde::{Deserialize, Serialize};
 use std::env;
 
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3232";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileConfig {
+    pub did: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct HttpServerConfigs {
     pub(crate) listen_address: String,
     pub(crate) storage_backend: TrustStorageBackend,
     pub(crate) cors_allowed_origins: Vec<String>,
+    pub(crate) profile_configs: Vec<ProfileConfig>,
 }
 
 impl Configs for HttpServerConfigs {
@@ -32,10 +39,16 @@ impl Configs for HttpServerConfigs {
             .filter(|s| !s.is_empty())
             .collect();
 
+        let profile_configs = env::var("PROFILE_CONFIGS")
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<ProfileConfig>>(&s).ok())
+            .unwrap_or_default();
+
         Ok(HttpServerConfigs {
             listen_address,
             storage_backend,
             cors_allowed_origins,
+            profile_configs,
         })
     }
 }
