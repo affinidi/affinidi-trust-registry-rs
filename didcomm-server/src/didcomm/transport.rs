@@ -129,4 +129,19 @@ mod tests {
         assert_eq!(msg.to.as_ref().unwrap()[0], "did:example:bob");
         assert_eq!(msg.thid.as_ref().unwrap(), "thread-123");
     }
+    #[test]
+    fn test_build_problem_report() {
+        let report = ProblemReport::unauthorized("Invalid DID");
+        let msg = build_problem_report(
+            "did:example:alice".to_string(),
+            "did:example:bob".to_string(),
+            report,
+            Some("thread-123".to_string()),
+            Some("parent-456".to_string()),
+        );
+        assert_eq!(msg.type_, PROBLEM_REPORT_TYPE);
+        assert_eq!(msg.from.as_ref().unwrap(), "did:example:alice");
+        assert_eq!(msg.to.as_ref().unwrap()[0], "did:example:bob");
+        assert_eq!(msg.thid.as_ref().unwrap(), "thread-123");
+    }
 }
