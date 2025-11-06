@@ -6,6 +6,8 @@ impl<H: MessageHandler> Listener<H> {
     pub async fn start_listening(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.set_public_acls_mode().await?;
         loop {
+            // TODO: review implementation of offline messages processing
+            // as it causes redundant processing of messages
             let offline_messages_result = self.sync_and_process_offline_messages().await;
             if let Err(e) = offline_messages_result {
                 error!(

@@ -23,7 +23,7 @@ use didcomm_server::{
     server::start,
 };
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration, vec};
+use std::{env, fs::File, sync::Arc, time::Duration, vec};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -115,6 +115,13 @@ async fn fetch_and_verify_response(
 
 // Helper function to set up test environment for admin handlers
 async fn setup_test_environment() -> (Arc<ATM>, Arc<ATMProfile>, Arc<Protocols>) {
+    let temp_file = std::env::temp_dir().join("integration_test_data.csv");
+    File::create(temp_file.clone()).unwrap();
+    unsafe {
+        env::set_var("FILE_STORAGE_PATH", temp_file.to_str().unwrap());
+        env::set_var("ADMIN_DIDS", CLIENT_DID);
+    };
+
     init_didcomm_server().await;
     let protocols = Arc::new(Protocols::new());
     let secrets: Vec<Secret> = serde_json::from_str(CLIENT_SECRETS).unwrap();
