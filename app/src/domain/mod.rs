@@ -410,4 +410,196 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn test_merge_json_values_both_objects() {
+        let base = json!({
+            "a": 1,
+            "nested": {
+                "x": 10,
+                "y": 20
+            }
+        });
+        let additional = json!({
+            "b": 2,
+            "nested": {
+                "y": 30,
+                "z": 40
+            }
+        });
+
+        let result = merge_json_values(base, additional);
+
+        assert_eq!(
+            result,
+            json!({
+                "a": 1,
+                "b": 2,
+                "nested": {
+                    "x": 10,
+                    "y": 30,
+                    "z": 40
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_merge_json_values_base_not_object() {
+        let base = json!("string_value");
+        let additional = json!({
+            "key": "value"
+        });
+
+        let result = merge_json_values(base, additional);
+
+        // When base is not an object, additional should completely replace it
+        assert_eq!(result, json!({"key": "value"}));
+    }
+
+    #[test]
+    fn test_merge_json_values_additional_not_object() {
+        let base = json!({
+            "existing": "value"
+        });
+        let additional = json!("replacement_string");
+
+        let result = merge_json_values(base, additional);
+
+        // When additional is not an object, it should completely replace base
+        assert_eq!(result, json!("replacement_string"));
+    }
+
+    #[test]
+    fn test_merge_json_values_empty_objects() {
+        let base = json!({});
+        let additional = json!({
+            "new_key": "new_value"
+        });
+
+        let result = merge_json_values(base, additional);
+
+        assert_eq!(result, json!({"new_key": "new_value"}));
+    }
+
+    #[test]
+    fn test_merge_json_values_additional_empty() {
+        let base = json!({
+            "existing": "value"
+        });
+        let additional = json!({});
+
+        let result = merge_json_values(base, additional);
+
+        assert_eq!(result, json!({"existing": "value"}));
+    }
+
+    #[test]
+    fn test_merge_json_values_nested_arrays_replaced() {
+        let base = json!({
+            "array_field": [1, 2, 3],
+            "other": "value"
+        });
+        let additional = json!({
+            "array_field": [4, 5]
+        });
+
+        let result = merge_json_values(base, additional);
+
+        assert_eq!(
+            result,
+            json!({
+                "array_field": [4, 5],
+                "other": "value"
+            })
+        );
+    }
+
+    #[test]
+    fn test_merge_json_values_deep_nesting() {
+        let base = json!({
+            "level1": {
+                "level2": {
+                    "level3": {
+                        "keep": true,
+                        "override": "original"
+                    }
+                }
+            }
+        });
+        let additional = json!({
+            "level1": {
+                "level2": {
+                    "level3": {
+                        "override": "new_value",
+                        "added": "extra"
+                    }
+                }
+            }
+        });
+
+        let result = merge_json_values(base, additional);
+
+        assert_eq!(
+            result,
+            json!({
+                "level1": {
+                    "level2": {
+                        "level3": {
+                            "keep": true,
+                            "override": "new_value",
+                            "added": "extra"
+                        }
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_merge_json_values_different_types_at_same_key() {
+        let base = json!({
+            "field": "string_value"
+        });
+        let additional = json!({
+            "field": {
+                "nested": "object"
+            }
+        });
+
+        let result = merge_json_values(base, additional);
+
+        // Different types should result in complete replacement
+        assert_eq!(
+            result,
+            json!({
+                "field": {
+                    "nested": "object"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_merge_json_values_null_values() {
+        let base = json!({
+            "keep": "value",
+            "replace": "old"
+        });
+        let additional = json!({
+            "replace": null,
+            "new": null
+        });
+
+        let result = merge_json_values(base, additional);
+
+        assert_eq!(
+            result,
+            json!({
+                "keep": "value",
+                "replace": null,
+                "new": null
+            })
+        );
+    }
 }
