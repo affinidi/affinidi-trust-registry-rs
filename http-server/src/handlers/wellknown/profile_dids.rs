@@ -16,5 +16,5 @@ where
         .map(|c| c.did.clone())
         .collect();
 
-    (StatusCode::OK, Json(json!(dids)))
+    (StatusCode::OK, Json(json!({ "dids": dids })))
 }
