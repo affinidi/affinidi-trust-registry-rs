@@ -23,5 +23,6 @@ aws-config.workspace = true
 aws-sdk-dynamodb.workspace = true
 serde_dynamo.workspace = true
 
+
 [dev-dependencies]
 tempfile.workspace = true

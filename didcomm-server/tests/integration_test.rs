@@ -36,7 +36,6 @@ pub const ENTITY_ID: &str = "did:example:entityYW";
 pub const AUTHORITY_ID: &str = "did:example:authorityWY";
 pub const ASSERTION_ID: &str = "credential_type_abc";
 
-const MESSAGE_FETCH_LIMIT: usize = 10;
 const INITIAL_FETCH_LIMIT: usize = 100;
 const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
 
@@ -114,19 +113,33 @@ async fn fetch_and_verify_response(
 }
 
 // Helper function to set up test environment for admin handlers
-async fn setup_test_environment() -> (Arc<ATM>, Arc<ATMProfile>, Arc<Protocols>) {
+async fn setup_test_environment(
+    client_did: &str,
+    secrets: &str,
+) -> (Arc<ATM>, Arc<ATMProfile>, Arc<Protocols>) {
     let temp_file = std::env::temp_dir().join("integration_test_data.csv");
     File::create(temp_file.clone()).unwrap();
+
+    if env::var("TR_STORAGE_BACKEND").unwrap_or("csv".to_owned()) == "ddb" {
+        unsafe {
+            env::set_var("FILE_STORAGE_ENABLED", "false");
+            env::set_var("DDB_TABLE_NAME", "test");
+        };
+    } else {
+        unsafe {
+            env::set_var("FILE_STORAGE_PATH", temp_file.to_str().unwrap());
+        }
+    }
+
     unsafe {
-        env::set_var("FILE_STORAGE_PATH", temp_file.to_str().unwrap());
-        env::set_var("ADMIN_DIDS", CLIENT_DID);
+        env::set_var("ADMIN_DIDS", client_did);
     };
 
     init_didcomm_server().await;
     let protocols = Arc::new(Protocols::new());
-    let secrets: Vec<Secret> = serde_json::from_str(CLIENT_SECRETS).unwrap();
+    let secrets: Vec<Secret> = serde_json::from_str(secrets).unwrap();
     let (atm, profile) =
-        prepare_atm_and_profile("test-client", &CLIENT_DID, MEDIATOR_DID, secrets, false)
+        prepare_atm_and_profile("test-client", client_did, MEDIATOR_DID, secrets, false)
             .await
             .unwrap();
 
@@ -150,7 +163,7 @@ async fn setup_test_environment() -> (Arc<ATM>, Arc<ATMProfile>, Arc<Protocols>)
 
 #[tokio::test]
 async fn test_admin_read() {
-    let (atm, profile, protocols) = setup_test_environment().await;
+    let (atm, profile, protocols) = setup_test_environment(CLIENT_DID, CLIENT_SECRETS).await;
 
     // First create a record to read with unique IDs for this test
     let mut create_body = create_test_record_body("read");
@@ -213,7 +226,7 @@ async fn test_admin_read() {
 
 #[tokio::test]
 async fn test_admin_update() {
-    let (atm, profile, protocols) = setup_test_environment().await;
+    let (atm, profile, protocols) = setup_test_environment(CLIENT_DID, CLIENT_SECRETS).await;
 
     // First create a record to update with unique IDs for this test
     let mut create_body = create_test_record_body("update");
@@ -276,7 +289,7 @@ async fn test_admin_update() {
 
 #[tokio::test]
 async fn test_admin_list() {
-    let (atm, profile, protocols) = setup_test_environment().await;
+    let (atm, profile, protocols) = setup_test_environment(CLIENT_DID, CLIENT_SECRETS).await;
 
     // First create a record to list with unique IDs for this test
     let mut create_body = create_test_record_body("list");
@@ -350,7 +363,7 @@ async fn test_admin_list() {
 
 #[tokio::test]
 async fn test_admin_delete() {
-    let (atm, profile, protocols) = setup_test_environment().await;
+    let (atm, profile, protocols) = setup_test_environment(CLIENT_DID, CLIENT_SECRETS).await;
 
     // First create a record to delete with unique IDs for this test
     let mut create_body = create_test_record_body("delete");
@@ -411,7 +424,7 @@ async fn test_admin_delete() {
 
 #[tokio::test]
 async fn test_trqp_handler() {
-    let (atm, profile, protocols) = setup_test_environment().await;
+    let (atm, profile, protocols) = setup_test_environment(CLIENT_DID, CLIENT_SECRETS).await;
 
     // First create a record to query with unique IDs for this test
     let mut create_body = create_test_record_body("trqp");
