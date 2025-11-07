@@ -73,6 +73,10 @@ pub(crate) async fn start_one_did_listener(
         BaseHandler::build_from_arc(repository, config.clone()),
     )
     .await
+    .map_err(|e| {
+        error!("Build listener error: {:?}", e);
+        e
+    })
     .unwrap();
 
     info!(
@@ -80,7 +84,14 @@ pub(crate) async fn start_one_did_listener(
         &listener.profile.inner.alias
     );
 
-    listener.start_listening().await.unwrap();
+    listener
+        .start_listening()
+        .await
+        .map_err(|e| {
+            error!("Start listener error: {:?}", e);
+            e
+        })
+        .unwrap()
 }
 
 /// starts DIDComm listeners

@@ -3,7 +3,6 @@ use std::env;
 use affinidi_tdk::secrets_resolver::secrets::Secret;
 use app::configs::{Configs, TrustStorageBackend};
 use serde_derive::{Deserialize, Serialize};
-use tracing::error;
 
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3131";
 
@@ -32,7 +31,6 @@ pub struct DidcommServerConfigs {
     pub(crate) listen_address: String,
     pub(crate) profile_configs: Vec<ProfileConfig>,
     pub(crate) mediator_did: String,
-    pub(crate) file_storage_config: Option<FileStorageConfig>,
     pub(crate) admin_api_config: AdminApiConfig,
     pub(crate) storage_backend: TrustStorageBackend,
 }
@@ -46,7 +44,7 @@ pub(crate) fn parse_profile_config_from_str(
 
 impl Configs for DidcommServerConfigs {
     fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        let storage_backend_str = env::var("STORAGE_BACKEND")
+        let storage_backend_str = env::var("TR_STORAGE_BACKEND")
             .unwrap_or("csv".to_string())
             .to_lowercase();
         let storage_backend = match storage_backend_str.as_str() {
@@ -82,7 +80,6 @@ impl Configs for DidcommServerConfigs {
                 .unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string()),
             mediator_did: env::var("MEDIATOR_DID")?,
             profile_configs: parse_profile_config_from_str(&env::var("PROFILE_CONFIGS")?)?,
-            file_storage_config,
             admin_api_config,
             storage_backend,
         })

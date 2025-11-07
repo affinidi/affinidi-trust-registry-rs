@@ -64,11 +64,12 @@ async fn main() {
     };
 
     // TODO: provide dids via envs
-    let trust_registry_did = "did:peer:2.Vz6MkoZXto9vJeW5GqxzEwyiavksMXbbuokqgcLXny4G8kBAH.EzQ3shSLGtcTmaJeWfDYTiZvZMbFJx3ALtkjoXpKVHAqY8L6vA.SeyJ0IjoiZG0iLCJzIjp7InVyaSI6Imh0dHBzOi8vYnJpZGdlLWV1dzEuYXRsYXMuZGV2LmFmZmluaWRpLmlvIiwiYWNjZXB0IjpbImRpZGNvbW0vdjIiXSwicm91dGluZ19rZXlzIjpbXX0sImlkIjpudWxsfQ".to_string();
-    println!("AMA DID: {}", trust_registry_did);
-    let mediator_did =
-        Arc::new("did:web:66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io".to_string());
-
+    let trust_registry_did = std::env::var("TRUST_REGISTRY_DID")
+        .unwrap_or("did:peer:2.Vz6Mkjm4p8h47Q9faL3oTrEYLyo8RAAndAyR35oUHBudWZhR3.EzQ3sherFvK5Fp7gfM9etgWwqiKMiaYGA5KbbDQGj4C7APDRHi".to_string());
+    let mediator_did = std::env::var("MEDIATOR_DID").unwrap_or(
+        "did:web:afddf5a2-bb92-4b9d-a467-9f4b0a57e51f.atlas.dev.affinidi.io".to_string(),
+    );
+    let mediator_did = Arc::new(mediator_did);
     for (did, did_config) in user_configs {
         let mediator_did_clone = Arc::clone(&mediator_did);
         let profile = TDKProfile::new(
