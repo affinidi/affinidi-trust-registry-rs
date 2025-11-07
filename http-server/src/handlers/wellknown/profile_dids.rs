@@ -1,7 +1,7 @@
 use crate::SharedData;
 use app::storage::repository::TrustRecordRepository;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use serde_json::{Value, json};
+use serde_json::json;
 
 pub async fn handle_wellknown_profile_dids<R>(
     State(state): State<SharedData<R>>,
