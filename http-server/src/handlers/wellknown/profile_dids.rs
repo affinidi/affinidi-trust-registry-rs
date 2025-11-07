@@ -16,7 +16,5 @@ where
         .map(|c| c.did.clone())
         .collect();
 
-    let response: Value = json!(dids);
-
-    (StatusCode::OK, Json(response))
+    (StatusCode::OK, Json(json!(dids)))
 }
