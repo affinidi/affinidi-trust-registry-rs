@@ -1,23 +1,21 @@
-use std::{env, time::Duration};
-
+use once_cell::sync::Lazy;
 use serde_json::{Value, json};
-use tokio::sync::OnceCell;
+use std::{env, time::Duration};
+use tokio::sync::{Mutex, MutexGuard};
+use tokio::task::JoinHandle;
 
-static TEST_SERVER: OnceCell<String> = OnceCell::const_new();
+static SERVER_HANDLE: Lazy<Mutex<Option<tokio::task::JoinHandle<()>>>> =
+    Lazy::new(|| Mutex::new(None));
+static SERVER_URL: &str = "http://127.0.0.1:3233";
 
-// Set up environment for CSV-based testing - only called once
-async fn setup_test_environment() -> String {
-    // Use a fixed port for all tests to share the same server
+async fn setup_test_environment() {
     let port = 3233;
 
-    // Set environment variables for the server to use CSV storage
     unsafe {
-        env::set_var("TR_STORAGE_BACKEND", "csv");
         env::set_var("LISTEN_ADDRESS", &format!("127.0.0.1:{}", port));
         env::set_var("CORS_ALLOWED_ORIGINS", "http://localhost:3000");
     }
 
-    // Create test data file
     let test_data = "entity_id,authority_id,assertion_id,recognized,assertion_verified,context
 did:example:entity1,did:example:authority1,assertion1,true,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
 did:example:entity2,did:example:authority2,assertion2,false,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
@@ -29,51 +27,75 @@ did:example:entity3,did:example:authority3,assertion3,true,false,eyJ0ZXN0IjogImN
     unsafe {
         env::set_var("FILE_STORAGE_PATH", temp_file.to_str().unwrap());
     }
+}
 
-    // Start the server in a background task
-    tokio::spawn(async move {
+async fn is_server_alive() -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    matches!(
+        client.get(&format!("{}/health", SERVER_URL)).send().await,
+        Ok(response) if response.status() == 200
+    )
+}
+
+async fn start_server(handle_guard: MutexGuard<'_, Option<JoinHandle<()>>>) {
+    setup_test_environment().await;
+
+    drop(handle_guard);
+    let handle = tokio::spawn(async move {
         http_server::server::start().await;
     });
 
-    // Give the server time to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    *SERVER_HANDLE.lock().await = Some(handle);
 
-    let base_url = format!("http://127.0.0.1:{}", port);
-
-    // Wait for server to be responsive with more retries
+    // Wait for server to be ready
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
 
-    // Try to connect to health endpoint to ensure server is ready
     for attempt in 0..30 {
-        match client.get(&format!("{}/health", base_url)).send().await {
+        match client.get(&format!("{}/health", SERVER_URL)).send().await {
             Ok(response) if response.status() == 200 => {
                 println!("Test server ready on attempt {}", attempt + 1);
-                return base_url;
+                return;
             }
-            Ok(_) => {
-                println!(
-                    "Server responded but not with 200 status, attempt {}",
-                    attempt + 1
-                );
-            }
-            Err(e) => {
-                println!("Connection failed on attempt {}: {}", attempt + 1, e);
+            _ => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
     panic!("Failed to start test server after 30 attempts");
 }
 
 async fn get_test_server_url() -> String {
-    TEST_SERVER
-        .get_or_init(|| async { setup_test_environment().await })
-        .await
-        .clone()
+    let mut handle_guard = SERVER_HANDLE.lock().await;
+
+    // Check if server handle exists and is still running
+    let needs_restart = match &*handle_guard {
+        None => true,
+        Some(handle) => handle.is_finished(),
+    };
+
+    drop(handle_guard);
+
+    if needs_restart || !is_server_alive().await {
+        println!("Server is dead or not running, restarting...");
+
+        // Kill old handle if it exists
+        let mut handle_guard = SERVER_HANDLE.lock().await;
+        if let Some(handle) = handle_guard.take() {
+            handle.abort();
+        }
+
+        start_server(handle_guard).await;
+    }
+
+    SERVER_URL.to_string()
 }
 
 #[tokio::test]
@@ -110,7 +132,7 @@ async fn test_recognition_endpoint_success() {
         .json(&request_body)
         .send()
         .await
-        .expect("Failed to send recognition request");
+        .unwrap();
 
     assert_eq!(response.status(), 200);
 
@@ -173,7 +195,7 @@ async fn test_authorization_endpoint_success() {
 
 #[tokio::test]
 async fn test_authorization_endpoint_not_found() {
-    let server_url = setup_test_environment().await;
+    let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
 
     let request_body = json!({
@@ -229,7 +251,7 @@ async fn test_recognition_endpoint_not_found() {
 
 #[tokio::test]
 async fn test_authorization_endpoint_bad_request() {
-    let server_url = setup_test_environment().await;
+    let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
 
     // Missing required fields
@@ -283,7 +305,7 @@ async fn test_recognition_endpoint_bad_request() {
 
 #[tokio::test]
 async fn test_context_merging_authorization() {
-    let server_url = setup_test_environment().await;
+    let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
 
     let request_body = json!({
@@ -315,7 +337,7 @@ async fn test_context_merging_authorization() {
 
 #[tokio::test]
 async fn test_context_merging_recognition() {
-    let server_url = setup_test_environment().await;
+    let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
 
     let request_body = json!({
@@ -346,7 +368,7 @@ async fn test_context_merging_recognition() {
 
 #[tokio::test]
 async fn test_cors_headers_present() {
-    let server_url = setup_test_environment().await;
+    let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
 
     let response = client
@@ -378,7 +400,7 @@ async fn test_method_not_allowed() {
 
 #[tokio::test]
 async fn test_invalid_endpoint() {
-    let server_url = setup_test_environment().await;
+    let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
 
     let response = client
@@ -392,7 +414,7 @@ async fn test_invalid_endpoint() {
 
 #[tokio::test]
 async fn test_authorization_with_empty_context() {
-    let server_url = setup_test_environment().await;
+    let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
 
     let request_body = json!({
@@ -421,7 +443,7 @@ async fn test_authorization_with_empty_context() {
 
 #[tokio::test]
 async fn test_authorization_without_context() {
-    let server_url = setup_test_environment().await;
+    let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
 
     let request_body = json!({
