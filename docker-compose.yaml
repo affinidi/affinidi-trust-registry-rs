@@ -18,7 +18,6 @@ services:
       - "3232:3232"
     volumes:
       - ./sample-data:/sample-data
-  
   didcomm-server:
     platform: linux/arm64
     image: trust-registry-didcomm:local
@@ -36,3 +35,13 @@ services:
       - "3131:3131"
     volumes:
       - ./sample-data:/sample-data
+  localstack:
+    image: localstack/localstack:3.6.0
+    container_name: localstack
+    restart: always
+    ports:
+      - 4566:4566
+    environment:
+      - SERVICES=dynamodb,firehose,kms,secretsmanager,sqs,events,s3,eventbridge,iot
+      - DEBUG=1
+      - DEFAULT_REGION=ap-southeast-1
