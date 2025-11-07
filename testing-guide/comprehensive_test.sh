@@ -3,12 +3,16 @@
 # Default values
 TR_STORAGE_BACKEND="csv"
 PROFILE_CONFIGS=""
+TEST_TYPE="all"
+COVERAGE="false"
 
 # Parse flags
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --profile-configs) PROFILE_CONFIGS="$2"; shift ;;
         --storage-backend) TR_STORAGE_BACKEND="$2"; shift ;;
+        --test_type) TEST_TYPE="$2"; shift ;;
+        --coverage) COVERAGE="$2"; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
     shift
@@ -66,7 +70,8 @@ if [ "$TR_STORAGE_BACKEND" == "ddb" ]; then
             AttributeName=SK,KeyType=RANGE \
         --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
         --endpoint-url "$DYNAMODB_ENDPOINT" \
-        --region ap-southeast-1
+        --region ap-southeast-1 \
+        --no-cli-pager
 
     if [ $? -ne 0 ]; then
         echo "Failed to create DynamoDB table. Exiting."
@@ -101,4 +106,15 @@ fi
 
 # Run tests
 echo "Running cargo tests..."
-cargo test 
+if [ "$COVERAGE" == "true" ]; then
+    cargo llvm-cov --html   -p http-server -p didcomm-server -p app
+elif [ "$TEST_TYPE" == "all" ]; then
+    cargo test  
+elif [ "$TEST_TYPE" == "unit" ]; then
+    cargo test --lib
+elif [ "$TEST_TYPE" == "integration" ]; then
+    cargo test --test integration_test
+else
+    echo "Unknown TEST_TYPE: $TEST_TYPE. Valid options are 'all', 'unit', 'integration'."
+    exit 1
+fi
