@@ -22,22 +22,65 @@ use didcomm_server::{
     },
     server::start,
 };
+use dotenvy::dotenv;
 use serde_json::{Value, json};
 use std::{env, fs::File, sync::Arc, time::Duration, vec};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 static SERVER_INIT: OnceCell<()> = OnceCell::const_new();
-pub const CLIENT_DID: &str = "did:peer:2.Vz6MkjUP1rEPtqqtNS65nVfAHLG6DoATr9u8TjoaWG1SJ5N43.EzQ3shaX7SqfCRWnR1KVvYfsuLCDzQKzqggfKyRZWkgHNryrYS.SeyJ0IjoiZG0iLCJzIjp7InVyaSI6Imh0dHBzOi8vZWQzOTM5MmItOGIyNC00OWIxLTk4ODQtZWZjOWZiMWZjM2Y4LmF0bGFzLmFmZmluaWRpLmlvIiwiYWNjZXB0IjpbImRpZGNvbW0vdjIiXSwicm91dGluZ19rZXlzIjpbXX0sImlkIjpudWxsfQ";
-pub const CLIENT_SECRETS: &str = "[{\"id\":\"did:peer:2.Vz6MkjUP1rEPtqqtNS65nVfAHLG6DoATr9u8TjoaWG1SJ5N43.EzQ3shaX7SqfCRWnR1KVvYfsuLCDzQKzqggfKyRZWkgHNryrYS.SeyJ0IjoiZG0iLCJzIjp7InVyaSI6Imh0dHBzOi8vZWQzOTM5MmItOGIyNC00OWIxLTk4ODQtZWZjOWZiMWZjM2Y4LmF0bGFzLmFmZmluaWRpLmlvIiwiYWNjZXB0IjpbImRpZGNvbW0vdjIiXSwicm91dGluZ19rZXlzIjpbXX0sImlkIjpudWxsfQ#key-1\",\"type\":\"JsonWebKey2020\",\"privateKeyJwk\":{\"crv\":\"Ed25519\",\"d\":\"SqijD_NleY0h6Fql02YYk05IZNZur9jMzIV4AWl-XYs\",\"kty\":\"OKP\",\"x\":\"SpPle1SUBtFBoDMFOKza2Ph6IrJAO9nShev5BXiftHQ\"}},{\"id\":\"did:peer:2.Vz6MkjUP1rEPtqqtNS65nVfAHLG6DoATr9u8TjoaWG1SJ5N43.EzQ3shaX7SqfCRWnR1KVvYfsuLCDzQKzqggfKyRZWkgHNryrYS.SeyJ0IjoiZG0iLCJzIjp7InVyaSI6Imh0dHBzOi8vZWQzOTM5MmItOGIyNC00OWIxLTk4ODQtZWZjOWZiMWZjM2Y4LmF0bGFzLmFmZmluaWRpLmlvIiwiYWNjZXB0IjpbImRpZGNvbW0vdjIiXSwicm91dGluZ19rZXlzIjpbXX0sImlkIjpudWxsfQ#key-2\",\"type\":\"JsonWebKey2020\",\"privateKeyJwk\":{\"crv\":\"secp256k1\",\"d\":\"inEoKYX4-eTqoHfvzxtLc6GWKfjoELcnA0tFilwQwiU\",\"kty\":\"EC\",\"x\":\"wsaMHi-TrwVlQAkO6uS45uN2IvLbcF9R05Is2XWUBHM\",\"y\":\"DV4AZjcw1Bx7KA7Pn-0lPE088928OhgAZqKckaql1Zw\"}}]";
-pub const MEDIATOR_DID: &str = "did:web:66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io";
-pub const TRUST_REGISTRY_DID: &str = "did:peer:2.VzDnaebgAmHaKo1svFeu4k3jZQScNjNdRj8XjoWX2FKzMdKHUZ.Vz6MkoxrzY7XtpyihUkXMgwFEREwaSS2Aoc9WGc1pBj7StT9o.EzQ3shwH2HC1AMd4QEK2s3cPsduWKiTJbNmqHhCUarbSvbUoNn.EzDnaewBr6iwmNfiqiXVYvdHxX9YSL2rrnuEqrq5k1vfdtDjmq";
+static TEST_CONTEXT: OnceCell<Arc<TestConfig>> = OnceCell::const_new();
+
 pub const ENTITY_ID: &str = "did:example:entityYW";
 pub const AUTHORITY_ID: &str = "did:example:authorityWY";
 pub const ASSERTION_ID: &str = "credential_type_abc";
+pub const PROBLEM_REPORT_TYPE: &str = "https://didcomm.org/report-problem/2.0/problem-report";
 
 const INITIAL_FETCH_LIMIT: usize = 100;
 const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
+
+pub struct TestConfig {
+    pub client_did: String,
+    pub client_secrets: String,
+    pub mediator_did: String,
+    pub trust_registry_did: String,
+}
+
+pub struct AtmTestContext {
+    pub atm: Arc<ATM>,
+    pub profile: Arc<ATMProfile>,
+    pub protocols: Arc<Protocols>,
+}
+
+async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
+    dotenv().ok();
+    let client_did = env::var("CLIENT_DID").expect("CLIENT_DID not set in .env");
+    let client_secrets = env::var("CLIENT_SECRETS").expect("CLIENT_SECRETS not set in .env");
+    let mediator_did = env::var("MEDIATOR_DID").expect("MEDIATOR_DID not set in .env");
+
+    let (atm, profile, protocols) =
+        setup_test_environment(&client_did, &client_secrets, &mediator_did).await;
+
+    (
+        AtmTestContext {
+            atm,
+            profile,
+            protocols,
+        },
+        TEST_CONTEXT
+            .get_or_init(|| async {
+                Arc::new(TestConfig {
+                    client_did: client_did.to_string(),
+                    client_secrets: client_secrets.to_string(),
+                    mediator_did: env::var("MEDIATOR_DID").expect("MEDIATOR_DID not set in .env"),
+                    trust_registry_did: env::var("TRUST_REGISTRY_DID")
+                        .expect("TRUST_REGISTRY_DID not set in .env"),
+                })
+            })
+            .await
+            .clone(),
+    )
+}
 
 async fn init_didcomm_server() {
     SERVER_INIT
@@ -55,7 +98,6 @@ fn create_fetch_options(limit: usize) -> FetchOptions {
     }
 }
 
-// Helper function to create record JSON body with unique test-specific IDs
 fn create_test_record_body(test_name: &str) -> Value {
     json!({
         "entity_id": format!("{}_{}", ENTITY_ID, test_name),
@@ -75,14 +117,11 @@ async fn delete_message(atm: &Arc<ATM>, profile: &Arc<ATMProfile>, msg_ids: Vec<
         .await;
 }
 
-// Helper function to fetch and process messages
 async fn fetch_and_verify_response(
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
     expected_message_type: &str,
 ) -> Result<Value, Box<dyn std::error::Error>> {
-    let problem_report_type: String =
-        "https://didcomm.org/report-problem/2.0/problem-report".to_string();
     let fetched_messages = atm
         .fetch_messages(profile, &create_fetch_options(INITIAL_FETCH_LIMIT))
         .await?;
@@ -95,16 +134,15 @@ async fn fetch_and_verify_response(
         if let Some(message) = msg_elem.msg {
             let unpacked_msg = atm.unpack(&message).await?;
             println!("Received message of type: {}", unpacked_msg.0.type_);
-            if unpacked_msg.0.type_ == expected_message_type {
-                delete_message(atm, profile, vec![unpacked_msg.1.sha256_hash]).await;
-                return Ok(unpacked_msg.0.body);
-            } else if unpacked_msg.0.type_ == problem_report_type {
-                println!(
-                    "Received problem report: {}",
-                    serde_json::to_string_pretty(&unpacked_msg.0.body)?
-                );
-                msg_ids.push(unpacked_msg.1.sha256_hash);
-            }
+            match unpacked_msg.0.type_.as_str() {
+                t if t == expected_message_type => {
+                    delete_message(atm, profile, vec![unpacked_msg.1.sha256_hash]).await;
+                    return Ok(unpacked_msg.0.body);
+                }
+                _ => {
+                    msg_ids.push(unpacked_msg.1.sha256_hash);
+                }
+            };
         }
     }
     delete_message(atm, profile, msg_ids).await;
@@ -116,30 +154,22 @@ async fn fetch_and_verify_response(
 async fn setup_test_environment(
     client_did: &str,
     secrets: &str,
+    mediator_did: &str,
 ) -> (Arc<ATM>, Arc<ATMProfile>, Arc<Protocols>) {
     let temp_file = std::env::temp_dir().join("integration_test_data.csv");
     File::create(temp_file.clone()).unwrap();
 
-    if env::var("TR_STORAGE_BACKEND").unwrap_or("csv".to_owned()) == "ddb" {
-        unsafe {
-            env::set_var("FILE_STORAGE_ENABLED", "false");
-            env::set_var("DDB_TABLE_NAME", "test");
-        };
-    } else {
+    if env::var("TR_STORAGE_BACKEND").unwrap_or("csv".to_owned()) == "csv" {
         unsafe {
             env::set_var("FILE_STORAGE_PATH", temp_file.to_str().unwrap());
         }
     }
 
-    unsafe {
-        env::set_var("ADMIN_DIDS", client_did);
-    };
-
     init_didcomm_server().await;
     let protocols = Arc::new(Protocols::new());
     let secrets: Vec<Secret> = serde_json::from_str(secrets).unwrap();
     let (atm, profile) =
-        prepare_atm_and_profile("test-client", client_did, MEDIATOR_DID, secrets, false)
+        prepare_atm_and_profile("test-client", client_did, mediator_did, secrets, false)
             .await
             .unwrap();
 
@@ -163,7 +193,7 @@ async fn setup_test_environment(
 
 #[tokio::test]
 async fn test_admin_read() {
-    let (atm, profile, protocols) = setup_test_environment(CLIENT_DID, CLIENT_SECRETS).await;
+    let (atm_test_context, config) = get_test_context().await;
 
     // First create a record to read with unique IDs for this test
     let mut create_body = create_test_record_body("read");
@@ -176,11 +206,11 @@ async fn test_admin_read() {
     });
 
     send_message(
-        &atm,
-        profile.clone(),
-        TRUST_REGISTRY_DID,
-        &protocols,
-        MEDIATOR_DID,
+        &atm_test_context.atm,
+        atm_test_context.profile.clone(),
+        &config.trust_registry_did,
+        &atm_test_context.protocols,
+        &config.mediator_did,
         &create_body,
         CREATE_RECORD_MESSAGE_TYPE,
     )
@@ -189,17 +219,22 @@ async fn test_admin_read() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Clear create response
-    let _ = fetch_and_verify_response(&atm, &profile, CREATE_RECORD_RESPONSE_MESSAGE_TYPE).await;
+    let _ = fetch_and_verify_response(
+        &atm_test_context.atm,
+        &atm_test_context.profile,
+        CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
+    )
+    .await;
 
     // Now send read record message
     let read_body = create_test_record_body("read");
 
     send_message(
-        &atm,
-        profile.clone(),
-        TRUST_REGISTRY_DID,
-        &protocols,
-        MEDIATOR_DID,
+        &atm_test_context.atm,
+        atm_test_context.profile.clone(),
+        &config.trust_registry_did,
+        &atm_test_context.protocols,
+        &config.mediator_did,
         &read_body,
         READ_RECORD_MESSAGE_TYPE,
     )
@@ -208,10 +243,13 @@ async fn test_admin_read() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Receive read record response
-    let response_body =
-        fetch_and_verify_response(&atm, &profile, READ_RECORD_RESPONSE_MESSAGE_TYPE)
-            .await
-            .unwrap();
+    let response_body = fetch_and_verify_response(
+        &atm_test_context.atm,
+        &atm_test_context.profile,
+        READ_RECORD_RESPONSE_MESSAGE_TYPE,
+    )
+    .await
+    .unwrap();
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "read");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "read");
@@ -226,7 +264,7 @@ async fn test_admin_read() {
 
 #[tokio::test]
 async fn test_admin_update() {
-    let (atm, profile, protocols) = setup_test_environment(CLIENT_DID, CLIENT_SECRETS).await;
+    let (atm_test_context, config) = get_test_context().await;
 
     // First create a record to update with unique IDs for this test
     let mut create_body = create_test_record_body("update");
@@ -239,11 +277,11 @@ async fn test_admin_update() {
     });
 
     send_message(
-        &atm,
-        profile.clone(),
-        TRUST_REGISTRY_DID,
-        &protocols,
-        MEDIATOR_DID,
+        &atm_test_context.atm,
+        atm_test_context.profile.clone(),
+        &config.trust_registry_did,
+        &atm_test_context.protocols,
+        &config.mediator_did,
         &create_body,
         CREATE_RECORD_MESSAGE_TYPE,
     )
@@ -252,7 +290,12 @@ async fn test_admin_update() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Clear create response
-    let _ = fetch_and_verify_response(&atm, &profile, CREATE_RECORD_RESPONSE_MESSAGE_TYPE).await;
+    let _ = fetch_and_verify_response(
+        &atm_test_context.atm,
+        &atm_test_context.profile,
+        CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
+    )
+    .await;
 
     // Now send update record message
     let mut update_body = create_test_record_body("update");
@@ -260,11 +303,11 @@ async fn test_admin_update() {
     update_body["assertion_verified"] = serde_json::Value::Bool(false);
 
     send_message(
-        &atm,
-        profile.clone(),
-        TRUST_REGISTRY_DID,
-        &protocols,
-        MEDIATOR_DID,
+        &atm_test_context.atm,
+        atm_test_context.profile.clone(),
+        &config.trust_registry_did,
+        &atm_test_context.protocols,
+        &config.mediator_did,
         &update_body,
         UPDATE_RECORD_MESSAGE_TYPE,
     )
@@ -273,10 +316,13 @@ async fn test_admin_update() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Receive update record response
-    let response_body =
-        fetch_and_verify_response(&atm, &profile, UPDATE_RECORD_RESPONSE_MESSAGE_TYPE)
-            .await
-            .unwrap();
+    let response_body = fetch_and_verify_response(
+        &atm_test_context.atm,
+        &atm_test_context.profile,
+        UPDATE_RECORD_RESPONSE_MESSAGE_TYPE,
+    )
+    .await
+    .unwrap();
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "update");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "update");
@@ -289,7 +335,7 @@ async fn test_admin_update() {
 
 #[tokio::test]
 async fn test_admin_list() {
-    let (atm, profile, protocols) = setup_test_environment(CLIENT_DID, CLIENT_SECRETS).await;
+    let (atm_test_context, config) = get_test_context().await;
 
     // First create a record to list with unique IDs for this test
     let mut create_body = create_test_record_body("list");
@@ -302,11 +348,11 @@ async fn test_admin_list() {
     });
 
     send_message(
-        &atm,
-        profile.clone(),
-        TRUST_REGISTRY_DID,
-        &protocols,
-        MEDIATOR_DID,
+        &atm_test_context.atm,
+        atm_test_context.profile.clone(),
+        &config.trust_registry_did,
+        &atm_test_context.protocols,
+        &config.mediator_did,
         &create_body,
         CREATE_RECORD_MESSAGE_TYPE,
     )
@@ -315,17 +361,22 @@ async fn test_admin_list() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Clear create response
-    let _ = fetch_and_verify_response(&atm, &profile, CREATE_RECORD_RESPONSE_MESSAGE_TYPE).await;
+    let _ = fetch_and_verify_response(
+        &atm_test_context.atm,
+        &atm_test_context.profile,
+        CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
+    )
+    .await;
 
     // Now send list records message
     let list_body = json!({});
 
     send_message(
-        &atm,
-        profile.clone(),
-        TRUST_REGISTRY_DID,
-        &protocols,
-        MEDIATOR_DID,
+        &atm_test_context.atm,
+        atm_test_context.profile.clone(),
+        &config.trust_registry_did,
+        &atm_test_context.protocols,
+        &config.mediator_did,
         &list_body,
         LIST_RECORDS_MESSAGE_TYPE,
     )
@@ -334,10 +385,13 @@ async fn test_admin_list() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Receive list records response
-    let response_body =
-        fetch_and_verify_response(&atm, &profile, LIST_RECORDS_RESPONSE_MESSAGE_TYPE)
-            .await
-            .unwrap();
+    let response_body = fetch_and_verify_response(
+        &atm_test_context.atm,
+        &atm_test_context.profile,
+        LIST_RECORDS_RESPONSE_MESSAGE_TYPE,
+    )
+    .await
+    .unwrap();
     let count = response_body["count"].as_u64().unwrap_or(0);
     let records = response_body["records"]
         .as_array()
@@ -363,7 +417,7 @@ async fn test_admin_list() {
 
 #[tokio::test]
 async fn test_admin_delete() {
-    let (atm, profile, protocols) = setup_test_environment(CLIENT_DID, CLIENT_SECRETS).await;
+    let (atm_test_context, config) = get_test_context().await;
 
     // First create a record to delete with unique IDs for this test
     let mut create_body = create_test_record_body("delete");
@@ -376,11 +430,11 @@ async fn test_admin_delete() {
     });
 
     send_message(
-        &atm,
-        profile.clone(),
-        TRUST_REGISTRY_DID,
-        &protocols,
-        MEDIATOR_DID,
+        &atm_test_context.atm,
+        atm_test_context.profile.clone(),
+        &config.trust_registry_did,
+        &atm_test_context.protocols,
+        &config.mediator_did,
         &create_body,
         CREATE_RECORD_MESSAGE_TYPE,
     )
@@ -389,17 +443,22 @@ async fn test_admin_delete() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Clear create response
-    let _ = fetch_and_verify_response(&atm, &profile, CREATE_RECORD_RESPONSE_MESSAGE_TYPE).await;
+    let _ = fetch_and_verify_response(
+        &atm_test_context.atm,
+        &atm_test_context.profile,
+        CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
+    )
+    .await;
 
     // Now send delete record message
     let delete_body = create_test_record_body("delete");
 
     send_message(
-        &atm,
-        profile.clone(),
-        TRUST_REGISTRY_DID,
-        &protocols,
-        MEDIATOR_DID,
+        &atm_test_context.atm,
+        atm_test_context.profile.clone(),
+        &config.trust_registry_did,
+        &atm_test_context.protocols,
+        &config.mediator_did,
         &delete_body,
         DELETE_RECORD_MESSAGE_TYPE,
     )
@@ -408,10 +467,13 @@ async fn test_admin_delete() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Receive delete record response
-    let response_body =
-        fetch_and_verify_response(&atm, &profile, DELETE_RECORD_RESPONSE_MESSAGE_TYPE)
-            .await
-            .unwrap();
+    let response_body = fetch_and_verify_response(
+        &atm_test_context.atm,
+        &atm_test_context.profile,
+        DELETE_RECORD_RESPONSE_MESSAGE_TYPE,
+    )
+    .await
+    .unwrap();
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "delete");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "delete");
@@ -424,7 +486,7 @@ async fn test_admin_delete() {
 
 #[tokio::test]
 async fn test_trqp_handler() {
-    let (atm, profile, protocols) = setup_test_environment(CLIENT_DID, CLIENT_SECRETS).await;
+    let (atm_test_context, config) = get_test_context().await;
 
     // First create a record to query with unique IDs for this test
     let mut create_body = create_test_record_body("trqp");
@@ -437,11 +499,11 @@ async fn test_trqp_handler() {
     });
 
     send_message(
-        &atm,
-        profile.clone(),
-        TRUST_REGISTRY_DID,
-        &protocols,
-        MEDIATOR_DID,
+        &atm_test_context.atm,
+        atm_test_context.profile.clone(),
+        &config.trust_registry_did,
+        &atm_test_context.protocols,
+        &config.mediator_did,
         &create_body,
         CREATE_RECORD_MESSAGE_TYPE,
     )
@@ -450,17 +512,22 @@ async fn test_trqp_handler() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Clear create response
-    let _ = fetch_and_verify_response(&atm, &profile, CREATE_RECORD_RESPONSE_MESSAGE_TYPE).await;
+    let _ = fetch_and_verify_response(
+        &atm_test_context.atm,
+        &atm_test_context.profile,
+        CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
+    )
+    .await;
 
     // Send recognition record message
     let recognition_body = create_test_record_body("trqp");
 
     send_message(
-        &atm,
-        profile.clone(),
-        TRUST_REGISTRY_DID,
-        &protocols,
-        MEDIATOR_DID,
+        &atm_test_context.atm,
+        atm_test_context.profile.clone(),
+        &config.trust_registry_did,
+        &atm_test_context.protocols,
+        &config.mediator_did,
         &recognition_body,
         QUERY_RECOGNITION_MESSAGE_TYPE,
     )
@@ -469,10 +536,13 @@ async fn test_trqp_handler() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Receive recognition record response
-    let response_body =
-        fetch_and_verify_response(&atm, &profile, QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE)
-            .await
-            .unwrap();
+    let response_body = fetch_and_verify_response(
+        &atm_test_context.atm,
+        &atm_test_context.profile,
+        QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE,
+    )
+    .await
+    .unwrap();
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "trqp");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "trqp");
