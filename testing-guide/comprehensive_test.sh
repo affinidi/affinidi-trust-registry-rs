@@ -11,7 +11,7 @@ while [[ "$#" -gt 0 ]]; do
     case $1 in
         --profile-configs) PROFILE_CONFIGS="$2"; shift ;;
         --storage-backend) TR_STORAGE_BACKEND="$2"; shift ;;
-        --test_type) TEST_TYPE="$2"; shift ;;
+        --test-type) TEST_TYPE="$2"; shift ;;
         --coverage) COVERAGE="$2"; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
@@ -112,7 +112,7 @@ elif [ "$TEST_TYPE" == "all" ]; then
     cargo test  
 elif [ "$TEST_TYPE" == "unit" ]; then
     cargo test --lib
-elif [ "$TEST_TYPE" == "integration" ]; then
+elif [ "$TEST_TYPE" == "int" ]; then
     cargo test --test integration_test
 else
     echo "Unknown TEST_TYPE: $TEST_TYPE. Valid options are 'all', 'unit', 'integration'."

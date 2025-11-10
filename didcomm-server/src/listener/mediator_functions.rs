@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use affinidi_tdk::didcomm::{Message, UnpackMetadata};
 use affinidi_tdk::messaging::protocols::Protocols;
 use affinidi_tdk::messaging::protocols::mediator::acls::{AccessListModeType, MediatorACLSet};
@@ -8,7 +10,7 @@ use crate::listener::*;
 
 impl<H: MessageHandler> Listener<H> {
     pub(crate) async fn set_public_acls_mode(
-        &self,
+        self: Arc<Self>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let protocols = Protocols::new();
 
@@ -57,11 +59,11 @@ impl<H: MessageHandler> Listener<H> {
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let auto_delete = true;
-        let wait_duration = None;
+        let wait_duration = Duration::from_secs(5);
         let protocols = Protocols::new();
         let next_message_packet = protocols
             .message_pickup
-            .live_stream_next(&self.atm, &self.profile, wait_duration, auto_delete)
+            .live_stream_next(&self.atm, &self.profile, Some(wait_duration), auto_delete)
             .await?;
 
         if let Some((message, meta)) = next_message_packet {

@@ -41,13 +41,13 @@ bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --storage-backend
 To run only integration tests with the CSV storage backend:
 
 ```bash
-bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --test_type integration
+bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --test_type int
 ```
 
 To run only integration tests with the DynamoDB storage backend:
 
 ```bash
-bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --test_type integration
+bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --test_type int
 ```
 
 ---
