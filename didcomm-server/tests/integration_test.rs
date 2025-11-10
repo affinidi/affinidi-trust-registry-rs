@@ -122,32 +122,56 @@ async fn fetch_and_verify_response(
     profile: &Arc<ATMProfile>,
     expected_message_type: &str,
 ) -> Result<Value, Box<dyn std::error::Error>> {
+    let problem_report_type = "https://didcomm.org/report-problem/2.0/problem-report";
     let fetched_messages = atm
         .fetch_messages(profile, &create_fetch_options(INITIAL_FETCH_LIMIT))
         .await?;
+
     println!("Fetched {} messages", fetched_messages.success.len());
+
     if fetched_messages.success.is_empty() {
         return Err("No response received".into());
     }
-    let mut msg_ids: Vec<String> = vec![];
-    for msg_elem in fetched_messages.success {
-        if let Some(message) = msg_elem.msg {
-            let unpacked_msg = atm.unpack(&message).await?;
-            println!("Received message of type: {}", unpacked_msg.0.type_);
-            match unpacked_msg.0.type_.as_str() {
-                t if t == expected_message_type => {
-                    delete_message(atm, profile, vec![unpacked_msg.1.sha256_hash]).await;
-                    return Ok(unpacked_msg.0.body);
-                }
-                _ => {
-                    msg_ids.push(unpacked_msg.1.sha256_hash);
-                }
-            };
+    // Collect all messages and unpack them
+    let mut unpacked_messages = Vec::new();
+    for msg_elem in &fetched_messages.success {
+        if let Some(message) = &msg_elem.msg {
+            let unpacked = atm.unpack(message).await?;
+            unpacked_messages.push(unpacked);
         }
     }
-    delete_message(atm, profile, msg_ids).await;
-
-    Err(format!("Expected message type not found: {}", expected_message_type).into())
+    // Collect problem report hashes and log them
+    let problem_report_hashes: Vec<String> = unpacked_messages
+        .iter()
+        .filter(|(msg, _)| msg.type_ == problem_report_type)
+        .map(|(msg, meta)| {
+            if let Ok(json) = serde_json::to_string_pretty(&msg.body) {
+                println!("Received problem report: {}", json);
+            }
+            meta.sha256_hash.clone()
+        })
+        .collect();
+    if !problem_report_hashes.is_empty() {
+        delete_message(atm, profile, problem_report_hashes).await;
+    }
+    // Find the expected message
+    let result = unpacked_messages
+        .into_iter()
+        .find(|(msg, _)| msg.type_ == expected_message_type)
+        .map(|(msg, meta)| {
+            // Delete the message we found
+            let hash = meta.sha256_hash.clone();
+            let atm = atm.clone();
+            let profile = profile.clone();
+            tokio::spawn(async move {
+                delete_message(&atm, &profile, vec![hash]).await;
+            });
+            msg.body
+        })
+        .ok_or_else(|| {
+            format!("Expected message type not found: {}", expected_message_type).into()
+        });
+    result
 }
 
 // Helper function to set up test environment for admin handlers
