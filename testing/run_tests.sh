@@ -19,21 +19,18 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # Export required environment variables
-export AWS_ACCESS_KEY_ID=test
-export AWS_SECRET_ACCESS_KEY=test
-export DYNAMODB_TABLE_NAME=test
-export DYNAMODB_ENDPOINT=http://localhost:4566
-export MEDIATOR_DID=did:web:66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io
-export ADMIN_DIDS=did:peer:2.Vz6Mkpun7xEJWBqwtaiHSqfjLe1ejqQ4PAUEas1gjH7VVNxjs.EzQ3shoprXELvJw9ou4VbfrFRx5FZQsP9EB1LMUJaPacDKtiZ8
-export CORS_ALLOWED_ORIGINS=http://localhost:3000
 export TR_STORAGE_BACKEND="$TR_STORAGE_BACKEND"
 export PROFILE_CONFIGS="$PROFILE_CONFIGS"
-export FILE_STORAGE_ENABLED=true
 
 echo "Using TR_STORAGE_BACKEND=$TR_STORAGE_BACKEND"
-echo "Using PROFILE_CONFIGS=$PROFILE_CONFIGS"
+# echo "Using PROFILE_CONFIGS=$PROFILE_CONFIGS"
 
-
+cp testing/.env.example .env
+if [ $? -ne 0 ]; then
+    echo "Failed to copy .env.example to .env. Please ensure the file exists and the destination is writable."
+    exit 1
+fi
+source .env 
 
 # Create DynamoDB table if backend is ddb
 if [ "$TR_STORAGE_BACKEND" == "ddb" ]; then

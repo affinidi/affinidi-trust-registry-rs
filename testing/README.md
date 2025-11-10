@@ -9,13 +9,13 @@ This guide provides instructions for running tests in the project, including uni
 To run all tests (unit and integration):
 
 ```bash
-bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS>
+bash run_tests.sh --profile-configs <PROFILE_CONFIGS>
 ```
 
 To run all tests with the DynamoDB storage backend:
 
 ```bash
-bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb
+bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb
 ```
 
 ---
@@ -25,13 +25,13 @@ bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --storage-backend
 To run only unit tests with the CSV storage backend:
 
 ```bash
-bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --test_type unit
+bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --test_type unit
 ```
 
 To run only unit tests with the DynamoDB storage backend:
 
 ```bash
-bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --test_type unit
+bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --test_type unit
 ```
 
 ---
@@ -41,13 +41,13 @@ bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --storage-backend
 To run only integration tests with the CSV storage backend:
 
 ```bash
-bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --test_type int
+bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --test_type int
 ```
 
 To run only integration tests with the DynamoDB storage backend:
 
 ```bash
-bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --test_type int
+bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --test_type int
 ```
 
 ---
@@ -57,7 +57,7 @@ bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --storage-backend
 To generate a coverage report with the DynamoDB storage backend:
 
 ```bash
-bash comprehensive_test.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --coverage true
+bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --coverage true
 ```
 
 To see the coverage report run:

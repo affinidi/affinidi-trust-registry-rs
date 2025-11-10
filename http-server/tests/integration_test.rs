@@ -1,24 +1,24 @@
+use dotenvy::dotenv;
 use serde_json::{Value, json};
 use serial_test::serial;
 use std::{env, time::Duration};
 
 async fn setup_test_environment() -> String {
+    dotenv().ok();
     let port = 3233;
 
-    unsafe {
-        env::set_var("LISTEN_ADDRESS", &format!("127.0.0.1:{}", port));
-        env::set_var("CORS_ALLOWED_ORIGINS", "http://localhost:3000");
-    }
-    // Create test data file
     let test_data = "entity_id,authority_id,assertion_id,recognized,assertion_verified,context
 did:example:entity1,did:example:authority1,assertion1,true,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
 did:example:entity2,did:example:authority2,assertion2,false,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
 did:example:entity3,did:example:authority3,assertion3,true,false,eyJ0ZXN0IjogImNvbnRleHQifQ==";
     let temp_file = std::env::temp_dir().join("integration_test_data.csv");
     tokio::fs::write(&temp_file, test_data).await.unwrap();
-    unsafe {
-        env::set_var("FILE_STORAGE_PATH", temp_file.to_str().unwrap());
+    if env::var("TR_STORAGE_BACKEND").unwrap_or("csv".to_owned()) == "csv" {
+        unsafe {
+            env::set_var("FILE_STORAGE_PATH", temp_file.to_str().unwrap());
+        }
     }
+
     // Start the server in a background task
     tokio::spawn(async move {
         http_server::server::start().await;
@@ -31,6 +31,7 @@ did:example:entity3,did:example:authority3,assertion3,true,false,eyJ0ZXN0IjogImN
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
+
     // Try to connect to health endpoint to ensure server is ready
     for attempt in 0..30 {
         match client.get(&format!("{}/health", base_url)).send().await {
