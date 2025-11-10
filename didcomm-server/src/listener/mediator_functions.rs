@@ -156,4 +156,20 @@ impl<H: MessageHandler> Listener<H> {
 
         Ok(())
     }
+
+    pub(crate) async fn spawn_periodic_offline_sync(self: Arc<Self>) {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                let offline_messages_result = self.sync_and_process_offline_messages().await;
+
+                if let Err(e) = offline_messages_result {
+                    error!(
+                        "[profile = {}] Error returned from offline_messages_result function. {}",
+                        &self.profile.inner.alias, e
+                    );
+                }
+            }
+        });
+    }
 }

@@ -8,19 +8,7 @@ impl<H: MessageHandler> Listener<H> {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.clone().set_public_acls_mode().await?;
         let cloned_self = self.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                let offline_messages_result = cloned_self.sync_and_process_offline_messages().await;
-
-                if let Err(e) = offline_messages_result {
-                    error!(
-                        "[profile = {}] Error returned from offline_messages_result function. {}",
-                        &cloned_self.profile.inner.alias, e
-                    );
-                }
-            }
-        });
+        cloned_self.spawn_periodic_offline_sync().await;
 
         loop {
             let next_message_result = self.process_next_message().await;

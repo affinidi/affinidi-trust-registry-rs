@@ -112,6 +112,6 @@ elif [ "$TEST_TYPE" == "unit" ]; then
 elif [ "$TEST_TYPE" == "int" ]; then
     cargo test --test integration_test
 else
-    echo "Unknown TEST_TYPE: $TEST_TYPE. Valid options are 'all', 'unit', 'integration'."
+    echo "Unknown TEST_TYPE: $TEST_TYPE. Valid options are 'all', 'unit', 'int'."
     exit 1
 fi
