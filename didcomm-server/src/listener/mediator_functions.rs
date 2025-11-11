@@ -160,7 +160,7 @@ impl<H: MessageHandler> Listener<H> {
     pub(crate) async fn spawn_periodic_offline_sync(self: Arc<Self>) {
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 let offline_messages_result = self.sync_and_process_offline_messages().await;
 
                 if let Err(e) = offline_messages_result {
