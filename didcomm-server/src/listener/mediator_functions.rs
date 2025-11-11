@@ -8,6 +8,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::listener::*;
 
+pub const OFFLINE_SYNC_INTERVAL_SECS: u64 = 30;
+pub const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
+
 impl<H: MessageHandler> Listener<H> {
     pub(crate) async fn set_public_acls_mode(
         self: Arc<Self>,
@@ -59,7 +62,7 @@ impl<H: MessageHandler> Listener<H> {
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let auto_delete = true;
-        let wait_duration = Duration::from_secs(5);
+        let wait_duration = Duration::from_secs(MESSAGE_WAIT_DURATION_SECS);
         let protocols = Protocols::new();
         let next_message_packet = protocols
             .message_pickup
@@ -160,7 +163,8 @@ impl<H: MessageHandler> Listener<H> {
     pub(crate) async fn spawn_periodic_offline_sync(self: Arc<Self>) {
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(OFFLINE_SYNC_INTERVAL_SECS))
+                    .await;
                 let offline_messages_result = self.sync_and_process_offline_messages().await;
 
                 if let Err(e) = offline_messages_result {

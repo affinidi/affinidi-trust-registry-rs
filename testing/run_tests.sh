@@ -25,12 +25,12 @@ export PROFILE_CONFIGS="$PROFILE_CONFIGS"
 echo "Using TR_STORAGE_BACKEND=$TR_STORAGE_BACKEND"
 # echo "Using PROFILE_CONFIGS=$PROFILE_CONFIGS"
 
-cp testing/.env.example .env
+cp testing/.env.example .env.test
 if [ $? -ne 0 ]; then
-    echo "Failed to copy .env.example to .env. Please ensure the file exists and the destination is writable."
+    echo "Failed to copy .env.example to .env.test. Please ensure the file exists and the destination is writable."
     exit 1
 fi
-source .env 
+source .env.test
 
 # Create DynamoDB table if backend is ddb
 if [ "$TR_STORAGE_BACKEND" == "ddb" ]; then
