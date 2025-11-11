@@ -74,9 +74,10 @@ where
     // in order to follow spec remove this field from output
     trust_record = trust_record.none_recognized();
     let message = format!(
-        "{} authorized to {} by {}",
+        "{} authorized to {}+{} by {}",
         trust_record.entity_id(),
-        trust_record.assertion_id(),
+        trust_record.action(),
+        trust_record.resource(),
         trust_record.authority_id()
     );
     let evaluated_at = Utc::now();
@@ -99,11 +100,10 @@ where
     let requested_at = Utc::now();
     let mut trust_record = handle_trqp(state, payload).await?;
     // in order to follow spec remove this field from output
-    trust_record = trust_record.none_assertion_verified();
+    trust_record = trust_record.none_authorized();
     let message = format!(
-        "{} recognized to {} by {}",
+        "{} recognized by {}",
         trust_record.entity_id(),
-        trust_record.assertion_id(),
         trust_record.authority_id()
     );
     let evaluated_at = Utc::now();

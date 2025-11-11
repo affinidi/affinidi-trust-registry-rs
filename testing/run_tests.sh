@@ -79,19 +79,19 @@ if [ "$TR_STORAGE_BACKEND" == "ddb" ]; then
 
     aws dynamodb put-item \
         --table-name test \
-        --item '{"PK": {"S": "did:example:entity1|did:example:authority1|assertion1"}, "SK": {"S": "did:example:entity1|did:example:authority1|assertion1"}, "entity_id": {"S": "did:example:entity1"}, "authority_id": {"S": "did:example:authority1"}, "assertion_id": {"S": "assertion1"}, "recognized": {"BOOL": true}, "assertion_verified": {"BOOL": true}, "context": {"S": "eyJ0ZXN0IjogImNvbnRleHQifQ=="}}' \
+        --item '{"PK": {"S": "did:example:entity1|did:example:authority1|action1|resource1"}, "SK": {"S": "did:example:entity1|did:example:authority1|action1|resource1"}, "entity_id": {"S": "did:example:entity1"}, "authority_id": {"S": "did:example:authority1"}, "action": {"S": "action1"}, "resource": {"S": "resource1"}, "recognized": {"BOOL": true}, "authorized": {"BOOL": true}, "context": {"S": "eyJ0ZXN0IjogImNvbnRleHQifQ=="}}' \
         --endpoint-url "$DYNAMODB_ENDPOINT" \
         --region ap-southeast-1
 
     aws dynamodb put-item \
         --table-name test \
-        --item '{"PK": {"S": "did:example:entity2|did:example:authority2|assertion2"}, "SK": {"S": "did:example:entity2|did:example:authority2|assertion2"}, "entity_id": {"S": "did:example:entity2"}, "authority_id": {"S": "did:example:authority2"}, "assertion_id": {"S": "assertion2"}, "recognized": {"BOOL": false}, "assertion_verified": {"BOOL": true}, "context": {"S": "eyJ0ZXN0IjogImNvbnRleHQifQ=="}}' \
+        --item '{"PK": {"S": "did:example:entity2|did:example:authority2|action2|resource2"}, "SK": {"S": "did:example:entity2|did:example:authority2|action2|resource2"}, "entity_id": {"S": "did:example:entity2"}, "authority_id": {"S": "did:example:authority2"}, "action": {"S": "action2"}, "resource": {"S": "resource2"}, "recognized": {"BOOL": false}, "authorized": {"BOOL": true}, "context": {"S": "eyJ0ZXN0IjogImNvbnRleHQifQ=="}}' \
         --endpoint-url "$DYNAMODB_ENDPOINT" \
         --region ap-southeast-1
 
     aws dynamodb put-item \
         --table-name test \
-        --item '{"PK": {"S": "did:example:entity3|did:example:authority3|assertion3"}, "SK": {"S": "did:example:entity3|did:example:authority3|assertion3"}, "entity_id": {"S": "did:example:entity3"}, "authority_id": {"S": "did:example:authority3"}, "assertion_id": {"S": "assertion3"}, "recognized": {"BOOL": true}, "assertion_verified": {"BOOL": false}, "context": {"S": "eyJ0ZXN0IjogImNvbnRleHQifQ=="}}' \
+        --item '{"PK": {"S": "did:example:entity3|did:example:authority3|action3|resource3"}, "SK": {"S": "did:example:entity3|did:example:authority3|action3|resource3"}, "entity_id": {"S": "did:example:entity3"}, "authority_id": {"S": "did:example:authority3"}, "action": {"S": "action3"}, "resource": {"S": "resource3"}, "recognized": {"BOOL": true}, "authorized": {"BOOL": false}, "context": {"S": "eyJ0ZXN0IjogImNvbnRleHQifQ=="}}' \
         --endpoint-url "$DYNAMODB_ENDPOINT" \
         --region ap-southeast-1
 
