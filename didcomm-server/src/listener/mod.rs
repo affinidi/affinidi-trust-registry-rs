@@ -84,7 +84,7 @@ pub(crate) async fn start_one_did_listener(
         &listener.profile.inner.alias
     );
 
-    listener
+    Arc::new(listener)
         .start_listening()
         .await
         .map_err(|e| {

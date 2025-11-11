@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use affinidi_tdk::didcomm::{Message, UnpackMetadata};
 use affinidi_tdk::messaging::protocols::Protocols;
 use affinidi_tdk::messaging::protocols::mediator::acls::{AccessListModeType, MediatorACLSet};
@@ -6,9 +8,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::listener::*;
 
+pub const OFFLINE_SYNC_INTERVAL_SECS: u64 = 30;
+pub const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
+
 impl<H: MessageHandler> Listener<H> {
     pub(crate) async fn set_public_acls_mode(
-        &self,
+        self: Arc<Self>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let protocols = Protocols::new();
 
@@ -57,11 +62,11 @@ impl<H: MessageHandler> Listener<H> {
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let auto_delete = true;
-        let wait_duration = None;
+        let wait_duration = Duration::from_secs(MESSAGE_WAIT_DURATION_SECS);
         let protocols = Protocols::new();
         let next_message_packet = protocols
             .message_pickup
-            .live_stream_next(&self.atm, &self.profile, wait_duration, auto_delete)
+            .live_stream_next(&self.atm, &self.profile, Some(wait_duration), auto_delete)
             .await?;
 
         if let Some((message, meta)) = next_message_packet {
@@ -153,5 +158,22 @@ impl<H: MessageHandler> Listener<H> {
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn spawn_periodic_offline_sync(self: Arc<Self>) {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(OFFLINE_SYNC_INTERVAL_SECS))
+                    .await;
+                let offline_messages_result = self.sync_and_process_offline_messages().await;
+
+                if let Err(e) = offline_messages_result {
+                    error!(
+                        "[profile = {}] Error returned from offline_messages_result function. {}",
+                        &self.profile.inner.alias, e
+                    );
+                }
+            }
+        });
     }
 }

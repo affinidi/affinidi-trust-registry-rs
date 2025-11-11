@@ -3,17 +3,14 @@ use tracing::{debug, error};
 use crate::listener::*;
 
 impl<H: MessageHandler> Listener<H> {
-    pub async fn start_listening(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.set_public_acls_mode().await?;
-        loop {
-            let offline_messages_result = self.sync_and_process_offline_messages().await;
-            if let Err(e) = offline_messages_result {
-                error!(
-                    "[profile = {}] Error returned from offline_messages_result function. {}",
-                    &self.profile.inner.alias, e
-                );
-            }
+    pub async fn start_listening(
+        self: Arc<Self>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.clone().set_public_acls_mode().await?;
+        let cloned_self = self.clone();
+        cloned_self.spawn_periodic_offline_sync().await;
 
+        loop {
             let next_message_result = self.process_next_message().await;
 
             if let Err(e) = next_message_result {
