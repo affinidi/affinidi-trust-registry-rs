@@ -1,15 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
-
 use affinidi_tdk::{
     didcomm::{Message, UnpackMetadata},
     messaging::{ATM, profiles::ATMProfile},
 };
-use app::{
-    domain::TrustRecordIds,
-    storage::repository::{TrustRecordQuery, TrustRecordRepository},
-};
+use app::storage::repository::{TrustRecordQuery, TrustRecordRepository};
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::json;
+use std::sync::Arc;
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
