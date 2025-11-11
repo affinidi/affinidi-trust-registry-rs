@@ -16,7 +16,7 @@ fn setup_logging() {
         .with_target(false)
         .with_level(true)
         .with_thread_ids(true)
-        .init();
+        .try_init();
 }
 
 async fn health_checker_handler() -> Json<Value> {

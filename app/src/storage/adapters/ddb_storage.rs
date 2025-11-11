@@ -38,6 +38,9 @@ impl DynamoDbStorage {
 
         if let Some(endpoint_url) = &config.endpoint_url {
             loader = loader.endpoint_url(endpoint_url.clone());
+            if endpoint_url.contains("local") {
+                loader = loader.test_credentials();
+            }
         }
 
         let shared_config = loader.load().await;
