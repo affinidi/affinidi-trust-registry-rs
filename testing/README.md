@@ -25,13 +25,13 @@ bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb
 To run only unit tests with the CSV storage backend:
 
 ```bash
-bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --test_type unit
+bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --test-type unit
 ```
 
 To run only unit tests with the DynamoDB storage backend:
 
 ```bash
-bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --test_type unit
+bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --test-type unit
 ```
 
 ---
@@ -41,13 +41,13 @@ bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --te
 To run only integration tests with the CSV storage backend:
 
 ```bash
-bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --test_type int
+bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --test-type int
 ```
 
 To run only integration tests with the DynamoDB storage backend:
 
 ```bash
-bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --test_type int
+bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --storage-backend ddb --test-type int
 ```
 
 ---
