@@ -213,7 +213,8 @@ mod tests {
 
         let result = storage.find_by_query(query).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(result.clone().unwrap().action().as_str(), "action-1");
-        assert_eq!(result.unwrap().resource().as_str(), "resource-1");
+        let record = result.unwrap();
+        assert_eq!(record.action().as_str(), "action-1");
+        assert_eq!(record.resource().as_str(), "resource-1");
     }
 }

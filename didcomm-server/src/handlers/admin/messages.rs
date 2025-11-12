@@ -160,8 +160,8 @@ pub async fn handle_update_record<R: ?Sized + TrustRecordAdminRepository>(
         .map_err(|e| e.to_string())?;
 
     info!(
-        "[admin = {}] Updated record: {}|{}|{}",
-        sender_did, request.entity_id, request.authority_id, request.action
+        "[admin = {}] Updated record: {}|{}|{}|{}",
+        sender_did, request.entity_id, request.authority_id, request.action, request.resource
     );
 
     let response_body = json!({
