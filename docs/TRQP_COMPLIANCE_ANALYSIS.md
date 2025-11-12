@@ -139,7 +139,10 @@ Content-Type: application/json
   "resource":     "country:state:driverlicense",
   "authorized":   true,
   "time":         "2025-06-19T11:30:00Z",
-  "message":      "did:user-1234 is authorized for issue+country:state:driverlicense (action+resource) by auth-service-A."
+  "message":      "did:user-1234 is authorized for issue+country:state:driverlicense (action+resource) by auth-service-A.",
+   "context": {
+    "time": "2025-06-19T11:30:00Z"
+  }
 }
 ```
 
@@ -213,7 +216,10 @@ Content-Type: application/json
   "action":       "recognize",
   "resource":     "listed-registry",
   "recognized":   true,
-  "message":      "Service-42 is recognized by did:example."
+  "message":      "Service-42 is recognized by did:example.",
+   "context": {
+    "time": "2025-06-19T11:30:00Z"
+  }
 }
 ```
 
