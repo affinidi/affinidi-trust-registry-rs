@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Default values
-TR_STORAGE_BACKEND="csv"
+
 PROFILE_CONFIGS=""
 TEST_TYPE="all"
 COVERAGE="false"
@@ -10,7 +10,6 @@ COVERAGE="false"
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --profile-configs) PROFILE_CONFIGS="$2"; shift ;;
-        --storage-backend) TR_STORAGE_BACKEND="$2"; shift ;;
         --test-type) TEST_TYPE="$2"; shift ;;
         --coverage) COVERAGE="$2"; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
@@ -19,7 +18,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # Export required environment variables
-export TR_STORAGE_BACKEND="$TR_STORAGE_BACKEND"
+
 export PROFILE_CONFIGS="$PROFILE_CONFIGS"
 
 echo "Using TR_STORAGE_BACKEND=$TR_STORAGE_BACKEND"
@@ -32,8 +31,15 @@ if [ $? -ne 0 ]; then
 fi
 source .env.test
 
+
+export AWS_ACCESS_KEY_ID
+export AWS_SECRET_ACCESS_KEY
+export AWS_SESSION_TOKEN
+export AWS_DEFAULT_REGION
+export AWS_REGION
 # Create DynamoDB table if backend is ddb
 if [ "$TR_STORAGE_BACKEND" == "ddb" ]; then
+    echo "Setting up DynamoDB localstack..."
     export FILE_STORAGE_ENABLED=false
     # Check if localstack is already built
     if ! docker image inspect localstack_localstack >/dev/null 2>&1; then
