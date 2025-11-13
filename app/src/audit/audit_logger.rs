@@ -248,7 +248,7 @@ impl AuditLogger for LoggingAuditLogger {
         let timestamp = Utc::now();
         match self.config.log_format {
             crate::configs::AuditLogFormat::Json => self.emit_json(
-                "audit",
+                AUDIT_ROLE_ADMIN,
                 &operation,
                 actor_did,
                 "UNAUTHORIZED",
