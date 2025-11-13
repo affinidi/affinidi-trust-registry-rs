@@ -151,7 +151,6 @@ impl LoggingAuditLogger {
                 );
             }
             _ => {
-                // Fallback: emit a minimal text log
                 info!(
                     audit.role=AUDIT_ROLE_ADMIN,
                     audit.actor = %actor,
