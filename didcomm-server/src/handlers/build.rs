@@ -1,7 +1,3 @@
-use std::sync::Arc;
-
-use app::storage::repository::TrustRecordAdminRepository;
-
 use crate::{
     configs::DidcommServerConfigs,
     handlers::{
@@ -9,6 +5,10 @@ use crate::{
         trqp::TRQPMessagesHandler,
     },
 };
+use app::{
+    audit::audit_logger::LoggingAuditLogger, storage::repository::TrustRecordAdminRepository,
+};
+use std::sync::Arc;
 
 impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
     pub fn build_from_arc(repository: Arc<R>, config: Arc<DidcommServerConfigs>) -> BaseHandler<R> {
@@ -16,9 +16,13 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
             repository: repository.clone(),
         };
 
+        let audit_logger = Arc::new(LoggingAuditLogger::new(
+            config.admin_api_config.audit_config.clone(),
+        ));
         let tradmin = AdminMessagesHandler {
             repository: repository.clone(),
             admin_config: config.admin_api_config.clone(),
+            audit_service: audit_logger,
         };
 
         let problem_report_handler = ProblemReportHandler::new();

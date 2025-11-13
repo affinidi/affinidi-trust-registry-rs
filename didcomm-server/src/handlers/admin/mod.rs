@@ -1,19 +1,18 @@
-use std::sync::Arc;
-
-use affinidi_tdk::{
-    didcomm::{Message, UnpackMetadata},
-    messaging::{ATM, profiles::ATMProfile},
-};
-use app::storage::repository::TrustRecordAdminRepository;
-use async_trait::async_trait;
-use tracing::{error, info, warn};
-
 use crate::{
     configs::AdminApiConfig,
     didcomm::{get_parent_thread_id, get_thread_id, problem_report},
     handlers::ProtocolHandler,
     listener::MessageHandler,
 };
+use affinidi_tdk::{
+    didcomm::{Message, UnpackMetadata},
+    messaging::{ATM, profiles::ATMProfile},
+};
+use app::audit::audit::{AuditLogger, AuditOperation, AuditResource};
+use app::storage::repository::TrustRecordAdminRepository;
+use async_trait::async_trait;
+use std::sync::Arc;
+use tracing::{error, info, warn};
 
 pub mod messages;
 
@@ -44,13 +43,19 @@ pub const LIST_RECORDS_RESPONSE_MESSAGE_TYPE: &str =
 pub struct AdminMessagesHandler<R: ?Sized + TrustRecordAdminRepository> {
     pub repository: Arc<R>,
     pub admin_config: AdminApiConfig,
+    pub audit_service: Arc<dyn AuditLogger>,
 }
 
 impl<R: ?Sized + TrustRecordAdminRepository> AdminMessagesHandler<R> {
-    pub fn new(repository: Arc<R>, admin_config: AdminApiConfig) -> Self {
+    pub fn new(
+        repository: Arc<R>,
+        admin_config: AdminApiConfig,
+        audit_service: Arc<dyn AuditLogger>,
+    ) -> Self {
         Self {
             repository,
             admin_config,
+            audit_service: audit_service,
         }
     }
 
@@ -91,6 +96,26 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> MessageHandler for AdminM
                 "[profile = {}] Unauthorized admin access attempt from {}: {}",
                 &profile.inner.alias, sender_did, auth_error
             );
+
+            let operation = match message_type.as_str() {
+                CREATE_RECORD_MESSAGE_TYPE => AuditOperation::Create,
+                UPDATE_RECORD_MESSAGE_TYPE => AuditOperation::Update,
+                DELETE_RECORD_MESSAGE_TYPE => AuditOperation::Delete,
+                READ_RECORD_MESSAGE_TYPE => AuditOperation::Read,
+                LIST_RECORDS_MESSAGE_TYPE => AuditOperation::List,
+                _ => AuditOperation::Create,
+            };
+
+            self.audit_service
+                .log_unauthorized(
+                    operation,
+                    &sender_did,
+                    AuditResource::empty(),
+                    &auth_error,
+                    thid.clone(),
+                )
+                .await;
+
             let report = problem_report::ProblemReport::unauthorized(auth_error);
             if let Err(e) = problem_report::send_problem_report(
                 atm,

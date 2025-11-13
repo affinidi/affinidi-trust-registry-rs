@@ -22,7 +22,6 @@ use didcomm_server::{
     },
     server::start,
 };
-use dotenvy::dotenv;
 use serde_json::{Value, json};
 use std::{env, fs::File, sync::Arc, time::Duration, vec};
 use tokio::sync::OnceCell;
@@ -54,7 +53,7 @@ pub struct AtmTestContext {
 }
 
 async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
-    dotenv().ok();
+    dotenvy::from_filename(".env.test").ok();
     let client_did = env::var("CLIENT_DID").expect("CLIENT_DID not set in .env");
     let client_secrets = env::var("CLIENT_SECRETS").expect("CLIENT_SECRETS not set in .env");
     let mediator_did = env::var("MEDIATOR_DID").expect("MEDIATOR_DID not set in .env");

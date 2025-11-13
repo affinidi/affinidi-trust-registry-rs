@@ -1,10 +1,9 @@
-use dotenvy::dotenv;
 use serde_json::{Value, json};
 use serial_test::serial;
 use std::{env, time::Duration};
 
 async fn setup_test_environment() -> String {
-    dotenv().ok();
+    dotenvy::from_filename(".env.test").ok();
     let port = 3233;
 
     let test_data = "entity_id,authority_id,action,resource,recognized,authorized,context

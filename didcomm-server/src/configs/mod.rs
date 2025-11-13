@@ -1,7 +1,7 @@
 use std::env;
 
 use affinidi_tdk::secrets_resolver::secrets::Secret;
-use app::configs::{Configs, TrustStorageBackend};
+use app::configs::{AuditConfig, AuditLogFormat, Configs, TrustStorageBackend};
 use serde_derive::{Deserialize, Serialize};
 
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3131";
@@ -21,9 +21,10 @@ pub struct FileStorageConfig {
     pub update_interval_sec: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AdminApiConfig {
     pub admin_dids: Vec<String>,
+    pub audit_config: AuditConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -73,7 +74,20 @@ impl Configs for DidcommServerConfigs {
             .split(',')
             .map(|e| e.trim().to_string())
             .collect();
-        let admin_api_config = AdminApiConfig { admin_dids };
+
+        let audit_log_format = env::var("AUDIT_LOG_FORMAT")
+            .unwrap_or_else(|_| "text".to_string())
+            .parse::<AuditLogFormat>()
+            .unwrap_or(AuditLogFormat::Text);
+
+        let audit_config = AuditConfig {
+            log_format: audit_log_format,
+        };
+
+        let admin_api_config = AdminApiConfig {
+            admin_dids,
+            audit_config,
+        };
 
         Ok(DidcommServerConfigs {
             listen_address: env::var("LISTEN_ADDRESS")
