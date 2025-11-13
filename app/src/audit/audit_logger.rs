@@ -27,11 +27,12 @@ impl LoggingAuditLogger {
         json!({
             "entity_id": resource.entity_id.as_ref().map(|id| id.to_string()).unwrap_or(NA.to_string()),
             "authority_id": resource.authority_id.as_ref().map(|id| id.to_string()).unwrap_or(NA.to_string()),
-            "assertion_id": resource.assertion_id.as_ref().map(|id| id.to_string()).unwrap_or(NA.to_string()),
+            "action": resource.action.as_ref().map(|id| id.to_string()).unwrap_or(NA.to_string()),
+            "resource": resource.resource.as_ref().map(|id| id.to_string()).unwrap_or(NA.to_string()),
         })
     }
 
-    fn resource_text_fields(&self, resource: &AuditResource) -> (String, String, String) {
+    fn resource_text_fields(&self, resource: &AuditResource) -> (String, String, String, String) {
         (
             resource
                 .entity_id
@@ -44,7 +45,12 @@ impl LoggingAuditLogger {
                 .map(|id| id.to_string())
                 .unwrap_or(NA.to_string()),
             resource
-                .assertion_id
+                .action
+                .as_ref()
+                .map(|id| id.to_string())
+                .unwrap_or(NA.to_string()),
+            resource
+                .resource
                 .as_ref()
                 .map(|id| id.to_string())
                 .unwrap_or(NA.to_string()),
@@ -91,7 +97,7 @@ impl LoggingAuditLogger {
         thread_id: Option<String>,
         timestamp: chrono::DateTime<Utc>,
     ) {
-        let (entity_id, authority_id, assertion_id) = self.resource_text_fields(resource);
+        let (entity_id, authority_id, action, resource_id) = self.resource_text_fields(resource);
         let thread_id_str = self.thread_id_or_na(thread_id);
 
         match (status, extra) {
@@ -103,7 +109,8 @@ impl LoggingAuditLogger {
                     audit.status = "SUCCESS",
                     audit.resource.entity_id = ?entity_id,
                     audit.resource.authority_id = ?authority_id,
-                    audit.resource.assertion_id = ?assertion_id,
+                    audit.resource.action = ?action,
+                    audit.resource.resource = ?resource_id,
                     audit.timestamp = %timestamp.to_rfc3339(),
                     audit.thread_id = ?thread_id_str,
                     "{}: {} operation by {} - SUCCESS",
@@ -120,7 +127,8 @@ impl LoggingAuditLogger {
                     audit.status = "FAILURE",
                     audit.resource.entity_id = ?entity_id,
                     audit.resource.authority_id = ?authority_id,
-                    audit.resource.assertion_id = ?assertion_id,
+                    audit.resource.action = ?action,
+                    audit.resource.resource = ?resource_id,
                     audit.error = %err,
                     audit.timestamp = %timestamp.to_rfc3339(),
                     audit.thread_id = ?thread_id_str,
@@ -139,7 +147,8 @@ impl LoggingAuditLogger {
                     audit.status = "UNAUTHORIZED",
                     audit.resource.entity_id = ?entity_id,
                     audit.resource.authority_id = ?authority_id,
-                    audit.resource.assertion_id = ?assertion_id,
+                    audit.resource.action = ?action,
+                    audit.resource.resource = ?resource_id,
                     audit.reason = %reason,
                     audit.timestamp = %timestamp.to_rfc3339(),
                     audit.thread_id = ?thread_id_str,
@@ -266,7 +275,7 @@ impl AuditLogger for LoggingAuditLogger {
 mod tests {
     use super::*;
     use crate::configs::{AuditConfig, AuditLogFormat};
-    use crate::domain::{AssertionId, AuthorityId, EntityId};
+    use crate::domain::{Action, AuthorityId, EntityId, Resource};
 
     #[tokio::test]
     async fn test_log_success_text() {
@@ -278,7 +287,8 @@ mod tests {
         let resource = AuditResource::new(
             Some(EntityId::new("entity-1")),
             Some(AuthorityId::new("authority-1")),
-            Some(AssertionId::new("assertion-1")),
+            Some(Action::new("action-1")),
+            Some(Resource::new("resource-1")),
         );
 
         logger
@@ -300,7 +310,8 @@ mod tests {
         let resource = AuditResource::new(
             Some(EntityId::new("entity-1")),
             Some(AuthorityId::new("authority-1")),
-            Some(AssertionId::new("assertion-1")),
+            Some(Action::new("action-1")),
+            Some(Resource::new("resource-1")),
         );
 
         logger

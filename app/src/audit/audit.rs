@@ -1,4 +1,4 @@
-use crate::domain::{AssertionId, AuthorityId, EntityId, TrustRecord};
+use crate::domain::{Action, AuthorityId, EntityId, Resource, TrustRecord};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -60,19 +60,23 @@ pub struct AuditResource {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authority_id: Option<AuthorityId>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub assertion_id: Option<AssertionId>,
+    pub action: Option<Action>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<Resource>,
 }
 
 impl AuditResource {
     pub fn new(
         entity_id: Option<EntityId>,
         authority_id: Option<AuthorityId>,
-        assertion_id: Option<AssertionId>,
+        action: Option<Action>,
+        resource: Option<Resource>,
     ) -> Self {
         Self {
             entity_id,
             authority_id,
-            assertion_id,
+            action,
+            resource,
         }
     }
 
@@ -80,7 +84,8 @@ impl AuditResource {
         Self {
             entity_id: Some(record.entity_id().clone()),
             authority_id: Some(record.authority_id().clone()),
-            assertion_id: Some(record.assertion_id().clone()),
+            action: Some(record.action().clone()),
+            resource: Some(record.resource().clone()),
         }
     }
 
@@ -88,7 +93,8 @@ impl AuditResource {
         Self {
             entity_id: None,
             authority_id: None,
-            assertion_id: None,
+            action: None,
+            resource: None,
         }
     }
 }
@@ -104,9 +110,10 @@ mod tests {
         let record = TrustRecordBuilder::new()
             .entity_id(EntityId::new("entity-1"))
             .authority_id(AuthorityId::new("authority-1"))
-            .assertion_id(AssertionId::new("assertion-1"))
+            .action(Action::new("action-1"))
+            .resource(Resource::new("resource-1"))
             .recognized(true)
-            .assertion_verified(true)
+            .authorized(true)
             .build()
             .unwrap();
 
@@ -117,9 +124,7 @@ mod tests {
             resource.authority_id.as_ref().unwrap().as_str(),
             "authority-1"
         );
-        assert_eq!(
-            resource.assertion_id.as_ref().unwrap().as_str(),
-            "assertion-1"
-        );
+        assert_eq!(resource.action.as_ref().unwrap().as_str(), "action-1");
+        assert_eq!(resource.resource.as_ref().unwrap().as_str(), "resource-1");
     }
 }

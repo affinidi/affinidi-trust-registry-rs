@@ -103,12 +103,12 @@ pub async fn handle_create_record<R: ?Sized + TrustRecordAdminRepository>(
                 .log_success(AuditOperation::Create, sender_did, resource, thid.clone())
                 .await;
 
-    let response_body = json!({
-        "entity_id": request.entity_id,
-        "authority_id": request.authority_id,
-        "action": request.action,
-        "resource": request.resource
-    });
+            let response_body = json!({
+                "entity_id": request.entity_id,
+                "authority_id": request.authority_id,
+                "action": request.action,
+                "resource": request.resource
+            });
 
             transport::send_response(
                 atm,
@@ -182,12 +182,12 @@ pub async fn handle_update_record<R: ?Sized + TrustRecordAdminRepository>(
                 .log_success(AuditOperation::Update, sender_did, resource, thid.clone())
                 .await;
 
-    let response_body = json!({
-        "entity_id": request.entity_id,
-        "authority_id": request.authority_id,
-        "action": request.action,
-        "resource": request.resource
-    });
+            let response_body = json!({
+                "entity_id": request.entity_id,
+                "authority_id": request.authority_id,
+                "action": request.action,
+                "resource": request.resource
+            });
 
             transport::send_response(
                 atm,
@@ -246,7 +246,8 @@ pub async fn handle_delete_record<R: ?Sized + TrustRecordAdminRepository>(
     let resource = AuditResource::new(
         Some(EntityId::new(request.entity_id.clone())),
         Some(AuthorityId::new(request.authority_id.clone())),
-        Some(AssertionId::new(request.assertion_id.clone())),
+        Some(Action::new(request.action.clone())),
+        Some(Resource::new(request.resource.clone())),
     );
 
     let result = handler.repository.delete(query).await;
@@ -258,12 +259,12 @@ pub async fn handle_delete_record<R: ?Sized + TrustRecordAdminRepository>(
                 .log_success(AuditOperation::Delete, sender_did, resource, thid.clone())
                 .await;
 
-    let response_body = json!({
-        "entity_id": request.entity_id,
-        "authority_id": request.authority_id,
-        "action": request.action,
-        "resource": request.resource
-    });
+            let response_body = json!({
+                "entity_id": request.entity_id,
+                "authority_id": request.authority_id,
+                "action": request.action,
+                "resource": request.resource
+            });
 
             transport::send_response(
                 atm,
@@ -322,7 +323,8 @@ pub async fn handle_read_record<R: ?Sized + TrustRecordAdminRepository>(
     let resource = AuditResource::new(
         Some(EntityId::new(request.entity_id.clone())),
         Some(AuthorityId::new(request.authority_id.clone())),
-        Some(AssertionId::new(request.assertion_id.clone())),
+        Some(Action::new(request.action.clone())),
+        Some(Resource::new(request.resource.clone())),
     );
 
     let result = handler.repository.read(query).await;
@@ -334,15 +336,15 @@ pub async fn handle_read_record<R: ?Sized + TrustRecordAdminRepository>(
                 .log_success(AuditOperation::Read, sender_did, resource, thid.clone())
                 .await;
 
-    let response_body = json!({
-        "entity_id": record.entity_id().to_string(),
-        "authority_id": record.authority_id().to_string(),
-        "action": record.action().to_string(),
-        "resource": record.resource().to_string(),
-        "recognized": record.is_recognized(),
-        "authorized": record.is_authorized(),
-        "context": record.context().as_value()
-    });
+            let response_body = json!({
+                "entity_id": record.entity_id().to_string(),
+                "authority_id": record.authority_id().to_string(),
+                "action": record.action().to_string(),
+                "resource": record.resource().to_string(),
+                "recognized": record.is_recognized(),
+                "authorized": record.is_authorized(),
+                "context": record.context().as_value()
+            });
 
             transport::send_response(
                 atm,
