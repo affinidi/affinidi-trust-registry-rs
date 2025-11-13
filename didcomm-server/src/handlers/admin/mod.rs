@@ -55,7 +55,7 @@ impl<R: ?Sized + TrustRecordAdminRepository> AdminMessagesHandler<R> {
         Self {
             repository,
             admin_config,
-            audit_service: audit_service,
+            audit_service,
         }
     }
 
