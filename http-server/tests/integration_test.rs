@@ -7,10 +7,10 @@ async fn setup_test_environment() -> String {
     dotenv().ok();
     let port = 3233;
 
-    let test_data = "entity_id,authority_id,assertion_id,recognized,assertion_verified,context
-did:example:entity1,did:example:authority1,assertion1,true,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
-did:example:entity2,did:example:authority2,assertion2,false,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
-did:example:entity3,did:example:authority3,assertion3,true,false,eyJ0ZXN0IjogImNvbnRleHQifQ==";
+    let test_data = "entity_id,authority_id,action,resource,recognized,authorized,context
+did:example:entity1,did:example:authority1,action1,resource1,true,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
+did:example:entity2,did:example:authority2,action2,resource2,false,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
+did:example:entity3,did:example:authority3,action3,resource3,true,false,eyJ0ZXN0IjogImNvbnRleHQifQ==";
     let temp_file = std::env::temp_dir().join("integration_test_data.csv");
     tokio::fs::write(&temp_file, test_data).await.unwrap();
     if env::var("TR_STORAGE_BACKEND").unwrap_or("csv".to_owned()) == "csv" {
@@ -84,7 +84,8 @@ async fn test_recognition_endpoint_success() {
     let request_body = json!({
         "entity_id": "did:example:entity1",
         "authority_id": "did:example:authority1",
-        "assertion_id": "assertion1"
+        "action": "action1",
+        "resource": "resource1"
     });
 
     let response = client
@@ -99,20 +100,20 @@ async fn test_recognition_endpoint_success() {
 
     let json: Value = response.json().await.unwrap();
 
-    // Check that the response contains expected fields
     assert!(json.get("entity_id").is_some());
     assert!(json.get("authority_id").is_some());
-    assert!(json.get("assertion_id").is_some());
+    assert!(json.get("action").is_some());
+    assert!(json.get("resource").is_some());
     assert!(json.get("time_requested").is_some());
     assert!(json.get("time_evaluated").is_some());
     assert!(json.get("message").is_some());
 
-    // Check that assertion_verified is None (removed for recognition)
-    assert_eq!(json.get("assertion_verified"), None);
+    // Check that authorized is None (removed for recognition)
+    assert_eq!(json.get("authorized"), None);
 
     // Check message format
     let message = json["message"].as_str().unwrap();
-    assert!(message.contains("recognized to"));
+    assert!(message.contains("recognized by"));
 }
 
 #[tokio::test]
@@ -124,7 +125,8 @@ async fn test_authorization_endpoint_success() {
     let request_body = json!({
         "entity_id": "did:example:entity1",
         "authority_id": "did:example:authority1",
-        "assertion_id": "assertion1"
+        "action": "action1",
+        "resource": "resource1"
     });
 
     let response = client
@@ -139,10 +141,10 @@ async fn test_authorization_endpoint_success() {
 
     let json: Value = response.json().await.unwrap();
 
-    // Check that the response contains expected fields
     assert!(json.get("entity_id").is_some());
     assert!(json.get("authority_id").is_some());
-    assert!(json.get("assertion_id").is_some());
+    assert!(json.get("action").is_some());
+    assert!(json.get("resource").is_some());
     assert!(json.get("time_requested").is_some());
     assert!(json.get("time_evaluated").is_some());
     assert!(json.get("message").is_some());
@@ -153,6 +155,7 @@ async fn test_authorization_endpoint_success() {
     // Check message format
     let message = json["message"].as_str().unwrap();
     assert!(message.contains("authorized to"));
+    assert!(message.contains("+"));
 }
 
 #[tokio::test]
@@ -164,7 +167,8 @@ async fn test_authorization_endpoint_not_found() {
     let request_body = json!({
         "entity_id": "did:example:nonexistent",
         "authority_id": "did:example:authority1",
-        "assertion_id": "assertion1"
+        "action": "action1",
+        "resource": "resource1"
     });
 
     let response = client
@@ -193,7 +197,8 @@ async fn test_recognition_endpoint_not_found() {
     let request_body = json!({
         "entity_id": "did:example:nonexistent",
         "authority_id": "did:example:authority1",
-        "assertion_id": "assertion1"
+        "action": "action1",
+        "resource": "resource1"
     });
 
     let response = client
@@ -223,7 +228,7 @@ async fn test_authorization_endpoint_bad_request() {
     let request_body = json!({
         "entity_id": "did:example:entity1",
         "authority_id": "did:example:authority1"
-        // Missing assertion_id
+        // Missing action and resource
     });
 
     let response = client
@@ -278,7 +283,8 @@ async fn test_context_merging_authorization() {
     let request_body = json!({
         "entity_id": "did:example:entity1",
         "authority_id": "did:example:authority1",
-        "assertion_id": "assertion1",
+        "action": "action1",
+        "resource": "resource1",
         "context": {
             "additional": "info",
             "test": "overridden"
@@ -311,7 +317,8 @@ async fn test_context_merging_recognition() {
     let request_body = json!({
         "entity_id": "did:example:entity1",
         "authority_id": "did:example:authority1",
-        "assertion_id": "assertion1",
+        "action": "action1",
+        "resource": "resource1",
         "context": {
             "recognition_context": "specific_info"
         }

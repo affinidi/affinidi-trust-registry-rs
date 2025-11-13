@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Default values
-TR_STORAGE_BACKEND="csv"
+
 PROFILE_CONFIGS=""
 TEST_TYPE="all"
 COVERAGE="false"
@@ -10,7 +10,6 @@ COVERAGE="false"
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --profile-configs) PROFILE_CONFIGS="$2"; shift ;;
-        --storage-backend) TR_STORAGE_BACKEND="$2"; shift ;;
         --test-type) TEST_TYPE="$2"; shift ;;
         --coverage) COVERAGE="$2"; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
@@ -19,7 +18,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # Export required environment variables
-export TR_STORAGE_BACKEND="$TR_STORAGE_BACKEND"
+
 export PROFILE_CONFIGS="$PROFILE_CONFIGS"
 
 echo "Using TR_STORAGE_BACKEND=$TR_STORAGE_BACKEND"
@@ -32,8 +31,15 @@ if [ $? -ne 0 ]; then
 fi
 source .env.test
 
+
+export AWS_ACCESS_KEY_ID
+export AWS_SECRET_ACCESS_KEY
+export AWS_SESSION_TOKEN
+export AWS_DEFAULT_REGION
+export AWS_REGION
 # Create DynamoDB table if backend is ddb
 if [ "$TR_STORAGE_BACKEND" == "ddb" ]; then
+    echo "Setting up DynamoDB localstack..."
     export FILE_STORAGE_ENABLED=false
     # Check if localstack is already built
     if ! docker image inspect localstack_localstack >/dev/null 2>&1; then
@@ -79,19 +85,19 @@ if [ "$TR_STORAGE_BACKEND" == "ddb" ]; then
 
     aws dynamodb put-item \
         --table-name test \
-        --item '{"PK": {"S": "did:example:entity1|did:example:authority1|assertion1"}, "SK": {"S": "did:example:entity1|did:example:authority1|assertion1"}, "entity_id": {"S": "did:example:entity1"}, "authority_id": {"S": "did:example:authority1"}, "assertion_id": {"S": "assertion1"}, "recognized": {"BOOL": true}, "assertion_verified": {"BOOL": true}, "context": {"S": "eyJ0ZXN0IjogImNvbnRleHQifQ=="}}' \
+        --item '{"PK": {"S": "did:example:entity1|did:example:authority1|action1|resource1"}, "SK": {"S": "did:example:entity1|did:example:authority1|action1|resource1"}, "entity_id": {"S": "did:example:entity1"}, "authority_id": {"S": "did:example:authority1"}, "action": {"S": "action1"}, "resource": {"S": "resource1"}, "recognized": {"BOOL": true}, "authorized": {"BOOL": true}, "context": {"M": {}}}' \
         --endpoint-url "$DYNAMODB_ENDPOINT" \
         --region ap-southeast-1
 
     aws dynamodb put-item \
         --table-name test \
-        --item '{"PK": {"S": "did:example:entity2|did:example:authority2|assertion2"}, "SK": {"S": "did:example:entity2|did:example:authority2|assertion2"}, "entity_id": {"S": "did:example:entity2"}, "authority_id": {"S": "did:example:authority2"}, "assertion_id": {"S": "assertion2"}, "recognized": {"BOOL": false}, "assertion_verified": {"BOOL": true}, "context": {"S": "eyJ0ZXN0IjogImNvbnRleHQifQ=="}}' \
+        --item '{"PK": {"S": "did:example:entity2|did:example:authority2|action2|resource2"}, "SK": {"S": "did:example:entity2|did:example:authority2|action2|resource2"}, "entity_id": {"S": "did:example:entity2"}, "authority_id": {"S": "did:example:authority2"}, "action": {"S": "action2"}, "resource": {"S": "resource2"}, "recognized": {"BOOL": false}, "authorized": {"BOOL": true}, "context": {"M": {}}}' \
         --endpoint-url "$DYNAMODB_ENDPOINT" \
         --region ap-southeast-1
 
     aws dynamodb put-item \
         --table-name test \
-        --item '{"PK": {"S": "did:example:entity3|did:example:authority3|assertion3"}, "SK": {"S": "did:example:entity3|did:example:authority3|assertion3"}, "entity_id": {"S": "did:example:entity3"}, "authority_id": {"S": "did:example:authority3"}, "assertion_id": {"S": "assertion3"}, "recognized": {"BOOL": true}, "assertion_verified": {"BOOL": false}, "context": {"S": "eyJ0ZXN0IjogImNvbnRleHQifQ=="}}' \
+        --item '{"PK": {"S": "did:example:entity3|did:example:authority3|action3|resource3"}, "SK": {"S": "did:example:entity3|did:example:authority3|action3|resource3"}, "entity_id": {"S": "did:example:entity3"}, "authority_id": {"S": "did:example:authority3"}, "action": {"S": "action3"}, "resource": {"S": "resource3"}, "recognized": {"BOOL": true}, "authorized": {"BOOL": false}, "context": {"M": {}}}' \
         --endpoint-url "$DYNAMODB_ENDPOINT" \
         --region ap-southeast-1
 
