@@ -26,17 +26,19 @@ pub async fn create_record(
     mediator_did: &str,
     entity_id: &str,
     authority_id: &str,
-    assertion_id: &str,
+    action: &str,
+    resource: &str,
     recognized: bool,
-    assertion_verified: bool,
+    authorized: bool,
     context: Option<Value>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut body = json!({
         "entity_id": entity_id,
         "authority_id": authority_id,
-        "assertion_id": assertion_id,
+        "action": action,
+        "resource": resource,
         "recognized": recognized,
-        "assertion_verified": assertion_verified,
+        "authorized": authorized,
     });
 
     if let Some(ctx) = context {
@@ -63,17 +65,19 @@ pub async fn update_record(
     mediator_did: &str,
     entity_id: &str,
     authority_id: &str,
-    assertion_id: &str,
+    action: &str,
+    resource: &str,
     recognized: bool,
-    assertion_verified: bool,
+    authorized: bool,
     context: Option<Value>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut body = json!({
         "entity_id": entity_id,
         "authority_id": authority_id,
-        "assertion_id": assertion_id,
+        "action": action,
+        "resource": resource,
         "recognized": recognized,
-        "assertion_verified": assertion_verified,
+        "authorized": authorized,
     });
 
     if let Some(ctx) = context {
@@ -100,12 +104,14 @@ pub async fn delete_record(
     mediator_did: &str,
     entity_id: &str,
     authority_id: &str,
-    assertion_id: &str,
+    action: &str,
+    resource: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let body = json!({
         "entity_id": entity_id,
         "authority_id": authority_id,
-        "assertion_id": assertion_id,
+        "action": action,
+        "resource": resource,
     });
 
     send_admin_message(
@@ -128,12 +134,14 @@ pub async fn read_record(
     mediator_did: &str,
     entity_id: &str,
     authority_id: &str,
-    assertion_id: &str,
+    action: &str,
+    resource: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let body = json!({
         "entity_id": entity_id,
         "authority_id": authority_id,
-        "assertion_id": assertion_id,
+        "action": action,
+        "resource": resource,
     });
 
     send_admin_message(

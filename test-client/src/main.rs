@@ -117,7 +117,8 @@ async fn main() {
                 &mediator_did,
                 "did:example:entity123",
                 "did:example:authority456",
-                "credential_type_xyz",
+                "action_xyz",
+                "resource_abc",
                 true,
                 true,
                 Some(json!({
@@ -142,7 +143,8 @@ async fn main() {
                 &mediator_did,
                 "did:example:entity123",
                 "did:example:authority456",
-                "credential_type_xyz",
+                "action_xyz",
+                "resource_abc",
             )
             .await
             {
@@ -160,7 +162,8 @@ async fn main() {
                 &mediator_did,
                 "did:example:entity123",
                 "did:example:authority456",
-                "credential_type_xyz",
+                "action_xyz",
+                "resource_abc",
                 false,
                 true,
                 Some(json!({
@@ -200,7 +203,8 @@ async fn main() {
                 &mediator_did,
                 "did:example:entity123",
                 "did:example:authority456",
-                "credential_type_xyz",
+                "action_xyz",
+                "resource_abc",
             )
             .await
             {
@@ -218,7 +222,8 @@ async fn main() {
                 &mediator_did,
                 "did:example:entity123",
                 "did:example:authority456",
-                "credential_type_xyz",
+                "action_xyz",
+                "resource_abc",
             )
             .await
             {

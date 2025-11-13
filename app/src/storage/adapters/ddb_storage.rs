@@ -59,8 +59,8 @@ impl DynamoDbStorage {
 
     fn build_key(&self, query: &TrustRecordQuery) -> HashMap<String, AttributeValue> {
         let key_value = format!(
-            "{}|{}|{}",
-            query.entity_id, query.authority_id, query.assertion_id
+            "{}|{}|{}|{}",
+            query.entity_id, query.authority_id, query.action, query.resource
         );
         let mut key = HashMap::with_capacity(2);
         key.insert(PK_ATTR.to_string(), AttributeValue::S(key_value.clone()));
@@ -94,7 +94,8 @@ impl TrustRecordRepository for DynamoDbStorage {
         debug!(
             entity = query.entity_id.as_str(),
             authority = query.authority_id.as_str(),
-            assertion = query.assertion_id.as_str(),
+            action = query.action.as_str(),
+            resource = query.resource.as_str(),
             "Querying trust record in DynamoDB"
         );
 
@@ -130,7 +131,8 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
         debug!(
             entity = record.entity_id().as_str(),
             authority = record.authority_id().as_str(),
-            assertion = record.assertion_id().as_str(),
+            action = record.action().as_str(),
+            resource = record.resource().as_str(),
             "Creating trust record in DynamoDB"
         );
 
@@ -139,10 +141,11 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
 
         // Add PK and SK for DynamoDB
         let key_value = format!(
-            "{}|{}|{}",
+            "{}|{}|{}|{}",
             record.entity_id(),
             record.authority_id(),
-            record.assertion_id()
+            record.action(),
+            record.resource()
         );
         item.insert(PK_ATTR.to_string(), AttributeValue::S(key_value.clone()));
         item.insert(SK_ATTR.to_string(), AttributeValue::S(key_value));
@@ -158,10 +161,11 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             .map_err(|err| {
                 if err.to_string().contains("ConditionalCheckFailed") {
                     RepositoryError::RecordAlreadyExists(format!(
-                        "Record already exists: {}|{}|{}",
+                        "Record already exists: {}|{}|{}|{}",
                         record.entity_id(),
                         record.authority_id(),
-                        record.assertion_id()
+                        record.action(),
+                        record.resource()
                     ))
                 } else {
                     RepositoryError::QueryFailed(format!("Failed to create record: {}", err))
@@ -175,7 +179,8 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
         debug!(
             entity = record.entity_id().as_str(),
             authority = record.authority_id().as_str(),
-            assertion = record.assertion_id().as_str(),
+            action = record.action().as_str(),
+            resource = record.resource().as_str(),
             "Updating trust record in DynamoDB"
         );
 
@@ -184,10 +189,11 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
 
         // Add PK and SK
         let key_value = format!(
-            "{}|{}|{}",
+            "{}|{}|{}|{}",
             record.entity_id(),
             record.authority_id(),
-            record.assertion_id()
+            record.action(),
+            record.resource()
         );
         item.insert(PK_ATTR.to_string(), AttributeValue::S(key_value.clone()));
         item.insert(SK_ATTR.to_string(), AttributeValue::S(key_value));
@@ -203,10 +209,11 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             .map_err(|err| {
                 if err.to_string().contains("ConditionalCheckFailed") {
                     RepositoryError::RecordNotFound(format!(
-                        "Record not found: {}|{}|{}",
+                        "Record not found: {}|{}|{}|{}",
                         record.entity_id(),
                         record.authority_id(),
-                        record.assertion_id()
+                        record.action(),
+                        record.resource()
                     ))
                 } else {
                     RepositoryError::QueryFailed(format!("Failed to update record: {}", err))
@@ -220,7 +227,8 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
         debug!(
             entity = query.entity_id.as_str(),
             authority = query.authority_id.as_str(),
-            assertion = query.assertion_id.as_str(),
+            action = query.action.as_str(),
+            resource = query.resource.as_str(),
             "Deleting trust record from DynamoDB"
         );
 
@@ -236,8 +244,8 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             .map_err(|err| {
                 if err.to_string().contains("ConditionalCheckFailed") {
                     RepositoryError::RecordNotFound(format!(
-                        "Record not found: {}|{}|{}",
-                        query.entity_id, query.authority_id, query.assertion_id
+                        "Record not found: {}|{}|{}|{}",
+                        query.entity_id, query.authority_id, query.action, query.resource
                     ))
                 } else {
                     RepositoryError::QueryFailed(format!("Failed to delete record: {}", err))
@@ -276,7 +284,8 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
         debug!(
             entity = query.entity_id.as_str(),
             authority = query.authority_id.as_str(),
-            assertion = query.assertion_id.as_str(),
+            action = query.action.as_str(),
+            resource = query.resource.as_str(),
             "Reading trust record from DynamoDB"
         );
 
@@ -303,8 +312,8 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
         }
 
         Err(RepositoryError::RecordNotFound(format!(
-            "Record not found: {}|{}|{}",
-            query.entity_id, query.authority_id, query.assertion_id
+            "Record not found: {}|{}|{}|{}",
+            query.entity_id, query.authority_id, query.action, query.resource
         )))
     }
 }

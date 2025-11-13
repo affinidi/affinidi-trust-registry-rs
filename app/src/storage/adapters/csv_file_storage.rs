@@ -19,7 +19,8 @@ use tracing::{error, info};
 struct RecordKey {
     entity_id: EntityId,
     authority_id: AuthorityId,
-    assertion_id: AssertionId,
+    action: Action,
+    resource: Resource,
 }
 
 impl RecordKey {
@@ -27,7 +28,8 @@ impl RecordKey {
         Self {
             entity_id: record.entity_id().clone(),
             authority_id: record.authority_id().clone(),
-            assertion_id: record.assertion_id().clone(),
+            action: record.action().clone(),
+            resource: record.resource().clone(),
         }
     }
 }
@@ -170,7 +172,8 @@ impl FileStorage {
     fn matches_query(record: &TrustRecord, query: &TrustRecordQuery) -> bool {
         record.entity_id() == &query.entity_id
             && record.authority_id() == &query.authority_id
-            && record.assertion_id() == &query.assertion_id
+            && record.action() == &query.action
+            && record.resource() == &query.resource
     }
 
     async fn write_to_file(&self) -> Result<(), RepositoryError> {
@@ -241,10 +244,11 @@ impl TrustRecordAdminRepository for FileStorage {
             let mut records = self.records.write().unwrap();
             if records.contains_key(&key) {
                 return Err(RepositoryError::RecordAlreadyExists(format!(
-                    "Record already exists: {}|{}|{}",
+                    "Record already exists: {}|{}|{}|{}",
                     record.entity_id(),
                     record.authority_id(),
-                    record.assertion_id()
+                    record.action(),
+                    record.resource(),
                 )));
             }
             records.insert(key, record);
@@ -258,10 +262,11 @@ impl TrustRecordAdminRepository for FileStorage {
             let mut records = self.records.write().unwrap();
             if !records.contains_key(&key) {
                 return Err(RepositoryError::RecordNotFound(format!(
-                    "Record not found: {}|{}|{}",
+                    "Record not found: {}|{}|{}|{}",
                     record.entity_id(),
                     record.authority_id(),
-                    record.assertion_id()
+                    record.action(),
+                    record.resource()
                 )));
             }
             records.insert(key, record);
@@ -273,14 +278,15 @@ impl TrustRecordAdminRepository for FileStorage {
         let key = RecordKey {
             entity_id: query.entity_id.clone(),
             authority_id: query.authority_id.clone(),
-            assertion_id: query.assertion_id.clone(),
+            action: query.action.clone(),
+            resource: query.resource.clone(),
         };
         {
             let mut records = self.records.write().unwrap();
             if records.remove(&key).is_none() {
                 return Err(RepositoryError::RecordNotFound(format!(
-                    "Record not found: {}|{}|{}",
-                    query.entity_id, query.authority_id, query.assertion_id
+                    "Record not found: {}|{}|{}|{}",
+                    query.entity_id, query.authority_id, query.action, query.resource
                 )));
             }
         }
@@ -302,8 +308,8 @@ impl TrustRecordAdminRepository for FileStorage {
 
         result.ok_or_else(|| {
             RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}",
-                query.entity_id, query.authority_id, query.assertion_id
+                "Record not found: {}|{}|{}|{}",
+                query.entity_id, query.authority_id, query.action, query.resource
             ))
         })
     }
@@ -313,9 +319,10 @@ impl TrustRecordAdminRepository for FileStorage {
 struct TrustRecordCsvRow {
     entity_id: String,
     authority_id: String,
-    assertion_id: String,
+    action: String,
+    resource: String,
     recognized: bool,
-    assertion_verified: bool,
+    authorized: bool,
     context: Option<String>,
 }
 
@@ -348,9 +355,10 @@ impl TrustRecordCsvRow {
         Self {
             entity_id: record.entity_id().to_string(),
             authority_id: record.authority_id().to_string(),
-            assertion_id: record.assertion_id().to_string(),
+            action: record.action().to_string(),
+            resource: record.resource().to_string(),
             recognized: record.is_recognized(),
-            assertion_verified: record.is_assertion_verified(),
+            authorized: record.is_authorized(),
             context,
         }
     }
@@ -360,9 +368,10 @@ impl TrustRecordCsvRow {
         let mut builder = TrustRecordBuilder::new()
             .entity_id(EntityId::new(self.entity_id))
             .authority_id(AuthorityId::new(self.authority_id))
-            .assertion_id(AssertionId::new(self.assertion_id))
+            .action(Action::new(self.action))
+            .resource(Resource::new(self.resource))
             .recognized(self.recognized)
-            .assertion_verified(self.assertion_verified);
+            .authorized(self.authorized);
 
         if let Some(c) = ctx {
             builder = builder.context(Context::new(c));
@@ -382,14 +391,14 @@ mod tests {
     use tokio::time::{Duration, sleep};
 
     fn csv_header() -> String {
-        String::from("entity_id,authority_id,assertion_id,recognized,assertion_verified,context\n")
+        String::from("entity_id,authority_id,action,resource,recognized,authorized,context\n")
     }
 
-    fn sample_csv(records: &[(&str, &str, &str)]) -> String {
+    fn sample_csv(records: &[(&str, &str, &str, &str)]) -> String {
         let mut csv = String::new();
-        for (entity, authority, assertion) in records {
+        for (entity, authority, action, resource) in records {
             csv.push_str(&format!(
-                "{entity},{authority},{assertion},true,true,e30=\n"
+                "{entity},{authority},{action},{resource},true,true,e30=\n"
             ));
         }
         csv
@@ -405,14 +414,15 @@ mod tests {
     async fn finds_records_from_initial_load() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "{}", csv_header()).unwrap();
-        write!(file, "{}", sample_csv(&[("e1", "a1", "s1")])).unwrap();
+        write!(file, "{}", sample_csv(&[("e1", "a1", "ac1", "r1")])).unwrap();
 
         let storage = FileStorage::try_new(file.path(), 1).await.unwrap();
 
         let query = TrustRecordQuery::new(
             EntityId::new("e1"),
             AuthorityId::new("a1"),
-            AssertionId::new("s1"),
+            Action::new("ac1"),
+            Resource::new("r1"),
         );
 
         let result = storage.find_by_query(query).await.unwrap();
@@ -423,12 +433,17 @@ mod tests {
     async fn reloads_when_file_changes() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "{}", csv_header()).unwrap();
-        write!(file, "{}", sample_csv(&[("e1", "a1", "s1")])).unwrap();
+        write!(file, "{}", sample_csv(&[("e1", "a1", "ac1", "r1")])).unwrap();
         file.flush().unwrap();
 
         let storage = FileStorage::try_new(file.path(), 1).await.unwrap();
 
-        write!(file.as_file_mut(), "{}", sample_csv(&[("e2", "a2", "s2")])).unwrap();
+        write!(
+            file.as_file_mut(),
+            "{}",
+            sample_csv(&[("e2", "a2", "ac2", "r2")])
+        )
+        .unwrap();
         file.flush().unwrap();
 
         sleep(Duration::from_secs(2)).await;
@@ -436,7 +451,8 @@ mod tests {
         let query = TrustRecordQuery::new(
             EntityId::new("e2"),
             AuthorityId::new("a2"),
-            AssertionId::new("s2"),
+            Action::new("ac2"),
+            Resource::new("r2"),
         );
 
         let result = storage.find_by_query(query).await.unwrap();

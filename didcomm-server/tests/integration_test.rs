@@ -33,7 +33,8 @@ static TEST_CONTEXT: OnceCell<Arc<TestConfig>> = OnceCell::const_new();
 
 pub const ENTITY_ID: &str = "did:example:entityYW";
 pub const AUTHORITY_ID: &str = "did:example:authorityWY";
-pub const ASSERTION_ID: &str = "credential_type_abc";
+pub const ACTION: &str = "action";
+pub const RESOURCE: &str = "resource";
 pub const PROBLEM_REPORT_TYPE: &str = "https://didcomm.org/report-problem/2.0/problem-report";
 
 const INITIAL_FETCH_LIMIT: usize = 100;
@@ -102,7 +103,8 @@ fn create_test_record_body(test_name: &str) -> Value {
     json!({
         "entity_id": format!("{}_{}", ENTITY_ID, test_name),
         "authority_id": format!("{}_{}", AUTHORITY_ID, test_name),
-        "assertion_id": format!("{}_{}", ASSERTION_ID, test_name)
+        "action": format!("{}_{}", ACTION, test_name),
+        "resource": format!("{}_{}", RESOURCE, test_name)
     })
 }
 
@@ -222,7 +224,7 @@ async fn test_admin_read() {
     // First create a record to read with unique IDs for this test
     let mut create_body = create_test_record_body("read");
     create_body["recognized"] = serde_json::Value::Bool(true);
-    create_body["assertion_verified"] = serde_json::Value::Bool(true);
+    create_body["authorized"] = serde_json::Value::Bool(true);
     create_body["context"] = json!({
         "description": "Test credential type",
         "version": "1.0",
@@ -277,13 +279,15 @@ async fn test_admin_read() {
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "read");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "read");
-    let expected_assertion_id = format!("{}_{}", ASSERTION_ID, "read");
+    let expected_action = format!("{}_{}", ACTION, "read");
+    let expected_resource = format!("{}_{}", RESOURCE, "read");
 
     assert_eq!(response_body["entity_id"], expected_entity_id);
     assert_eq!(response_body["authority_id"], expected_authority_id);
-    assert_eq!(response_body["assertion_id"], expected_assertion_id);
+    assert_eq!(response_body["action"], expected_action);
+    assert_eq!(response_body["resource"], expected_resource);
     assert_eq!(response_body["recognized"], true);
-    assert_eq!(response_body["assertion_verified"], true);
+    assert_eq!(response_body["authorized"], true);
 }
 
 #[tokio::test]
@@ -293,7 +297,7 @@ async fn test_admin_update() {
     // First create a record to update with unique IDs for this test
     let mut create_body = create_test_record_body("update");
     create_body["recognized"] = serde_json::Value::Bool(true);
-    create_body["assertion_verified"] = serde_json::Value::Bool(true);
+    create_body["authorized"] = serde_json::Value::Bool(true);
     create_body["context"] = json!({
         "description": "Test credential type",
         "version": "1.0",
@@ -324,7 +328,7 @@ async fn test_admin_update() {
     // Now send update record message
     let mut update_body = create_test_record_body("update");
     update_body["recognized"] = serde_json::Value::Bool(false);
-    update_body["assertion_verified"] = serde_json::Value::Bool(false);
+    update_body["authorized"] = serde_json::Value::Bool(false);
 
     send_message(
         &atm_test_context.atm,
@@ -350,11 +354,13 @@ async fn test_admin_update() {
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "update");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "update");
-    let expected_assertion_id = format!("{}_{}", ASSERTION_ID, "update");
+    let expected_action = format!("{}_{}", ACTION, "update");
+    let expected_resource = format!("{}_{}", RESOURCE, "update");
 
     assert_eq!(response_body["entity_id"], expected_entity_id);
     assert_eq!(response_body["authority_id"], expected_authority_id);
-    assert_eq!(response_body["assertion_id"], expected_assertion_id);
+    assert_eq!(response_body["action"], expected_action);
+    assert_eq!(response_body["resource"], expected_resource);
 }
 
 #[tokio::test]
@@ -364,7 +370,7 @@ async fn test_admin_list() {
     // First create a record to list with unique IDs for this test
     let mut create_body = create_test_record_body("list");
     create_body["recognized"] = serde_json::Value::Bool(true);
-    create_body["assertion_verified"] = serde_json::Value::Bool(true);
+    create_body["authorized"] = serde_json::Value::Bool(true);
     create_body["context"] = json!({
         "description": "Test credential type",
         "version": "1.0",
@@ -425,18 +431,21 @@ async fn test_admin_list() {
     assert!(count >= 1);
 
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "list");
-    let expected_assertion_id = format!("{}_{}", ASSERTION_ID, "list");
+    let expected_action = format!("{}_{}", ACTION, "list");
+    let expected_resource = format!("{}_{}", RESOURCE, "list");
 
     let our_record = records
         .iter()
         .find(|record| {
             record["authority_id"] == expected_authority_id
-                && record["assertion_id"] == expected_assertion_id
+                && record["action"] == expected_action
+                && record["resource"] == expected_resource
         })
         .expect("Our test record not found in list");
 
     assert_eq!(our_record["authority_id"], expected_authority_id);
-    assert_eq!(our_record["assertion_id"], expected_assertion_id);
+    assert_eq!(our_record["action"], expected_action);
+    assert_eq!(our_record["resource"], expected_resource);
 }
 
 #[tokio::test]
@@ -446,7 +455,7 @@ async fn test_admin_delete() {
     // First create a record to delete with unique IDs for this test
     let mut create_body = create_test_record_body("delete");
     create_body["recognized"] = serde_json::Value::Bool(true);
-    create_body["assertion_verified"] = serde_json::Value::Bool(true);
+    create_body["authorized"] = serde_json::Value::Bool(true);
     create_body["context"] = json!({
         "description": "Test credential type",
         "version": "1.0",
@@ -501,10 +510,12 @@ async fn test_admin_delete() {
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "delete");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "delete");
-    let expected_assertion_id = format!("{}_{}", ASSERTION_ID, "delete");
+    let expected_action = format!("{}_{}", ACTION, "delete");
+    let expected_resource = format!("{}_{}", RESOURCE, "delete");
 
     assert_eq!(response_body["authority_id"], expected_authority_id);
-    assert_eq!(response_body["assertion_id"], expected_assertion_id);
+    assert_eq!(response_body["action"], expected_action);
+    assert_eq!(response_body["resource"], expected_resource);
     assert_eq!(response_body["entity_id"], expected_entity_id);
 }
 
@@ -515,7 +526,7 @@ async fn test_trqp_handler() {
     // First create a record to query with unique IDs for this test
     let mut create_body = create_test_record_body("trqp");
     create_body["recognized"] = serde_json::Value::Bool(true);
-    create_body["assertion_verified"] = serde_json::Value::Bool(true);
+    create_body["authorized"] = serde_json::Value::Bool(true);
     create_body["context"] = json!({
         "description": "Test credential type",
         "version": "1.0",
@@ -570,13 +581,15 @@ async fn test_trqp_handler() {
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "trqp");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "trqp");
-    let expected_assertion_id = format!("{}_{}", ASSERTION_ID, "trqp");
+    let expected_action = format!("{}_{}", ACTION, "trqp");
+    let expected_resource = format!("{}_{}", RESOURCE, "trqp");
 
     assert_eq!(response_body["entity_id"], expected_entity_id);
     assert_eq!(response_body["authority_id"], expected_authority_id);
-    assert_eq!(response_body["assertion_id"], expected_assertion_id);
+    assert_eq!(response_body["action"], expected_action);
+    assert_eq!(response_body["resource"], expected_resource);
     assert_eq!(response_body["recognized"].as_bool(), Some(true));
-    assert_eq!(response_body["assertion_verified"].as_bool(), Some(true));
+    assert_eq!(response_body["authorized"].as_bool(), Some(true));
 }
 
 async fn send_message(

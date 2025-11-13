@@ -8,7 +8,8 @@ use crate::storage::repository::*;
 struct RecordKey {
     entity_id: EntityId,
     authority_id: AuthorityId,
-    assertion_id: AssertionId,
+    action: Action,
+    resource: Resource,
 }
 
 impl RecordKey {
@@ -16,7 +17,8 @@ impl RecordKey {
         Self {
             entity_id: record.entity_id().clone(),
             authority_id: record.authority_id().clone(),
-            assertion_id: record.assertion_id().clone(),
+            action: record.action().clone(),
+            resource: record.resource().clone(),
         }
     }
 }
@@ -59,7 +61,8 @@ impl LocalStorage {
     fn matches_query(record: &TrustRecord, query: &TrustRecordQuery) -> bool {
         record.entity_id() == &query.entity_id
             && record.authority_id() == &query.authority_id
-            && record.assertion_id() == &query.assertion_id
+            && record.action() == &query.action
+            && record.resource() == &query.resource
     }
 }
 
@@ -91,10 +94,11 @@ impl TrustRecordAdminRepository for LocalStorage {
         let mut records = self.records.write().unwrap();
         if records.contains_key(&key) {
             return Err(RepositoryError::RecordAlreadyExists(format!(
-                "Record already exists: {}|{}|{}",
+                "Record already exists: {}|{}|{}|{}",
                 record.entity_id(),
                 record.authority_id(),
-                record.assertion_id()
+                record.action(),
+                record.resource()
             )));
         }
         records.insert(key, record);
@@ -106,10 +110,11 @@ impl TrustRecordAdminRepository for LocalStorage {
         let mut records = self.records.write().unwrap();
         if !records.contains_key(&key) {
             return Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}",
+                "Record not found: {}|{}|{}|{}",
                 record.entity_id(),
                 record.authority_id(),
-                record.assertion_id()
+                record.action(),
+                record.resource()
             )));
         }
         records.insert(key, record);
@@ -120,13 +125,14 @@ impl TrustRecordAdminRepository for LocalStorage {
         let key = RecordKey {
             entity_id: query.entity_id.clone(),
             authority_id: query.authority_id.clone(),
-            assertion_id: query.assertion_id.clone(),
+            action: query.action.clone(),
+            resource: query.resource.clone(),
         };
         let mut records = self.records.write().unwrap();
         if records.remove(&key).is_none() {
             return Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}",
-                query.entity_id, query.authority_id, query.assertion_id
+                "Record not found: {}|{}|{}|{}",
+                query.entity_id, query.authority_id, query.action, query.resource
             )));
         }
         Ok(())
@@ -147,8 +153,8 @@ impl TrustRecordAdminRepository for LocalStorage {
 
         result.ok_or_else(|| {
             RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}",
-                query.entity_id, query.authority_id, query.assertion_id
+                "Record not found: {}|{}|{}|{}",
+                query.entity_id, query.authority_id, query.action, query.resource
             ))
         })
     }
@@ -161,16 +167,18 @@ mod tests {
     fn create_test_record(
         entity: &str,
         authority: &str,
-        assertion: &str,
+        action: &str,
+        resource: &str,
         recognized: bool,
         verified: bool,
     ) -> TrustRecord {
         TrustRecordBuilder::new()
             .entity_id(EntityId::new(entity))
             .authority_id(AuthorityId::new(authority))
-            .assertion_id(AssertionId::new(assertion))
+            .action(Action::new(action))
+            .resource(Resource::new(resource))
             .recognized(recognized)
-            .assertion_verified(verified)
+            .authorized(verified)
             .build()
             .unwrap()
     }
@@ -178,19 +186,35 @@ mod tests {
     #[tokio::test]
     async fn test_find_by_query_filters_records() {
         let storage = LocalStorage::with_records(vec![
-            create_test_record("entity-1", "authority-1", "assertion-1", true, true),
-            create_test_record("entity-2", "authority-2", "assertion-2", false, false),
+            create_test_record(
+                "entity-1",
+                "authority-1",
+                "action-1",
+                "resource-1",
+                true,
+                true,
+            ),
+            create_test_record(
+                "entity-2",
+                "authority-2",
+                "action-2",
+                "resource-2",
+                false,
+                false,
+            ),
         ]);
 
         let query = TrustRecordQuery::new(
             EntityId::new("entity-1"),
             AuthorityId::new("authority-1"),
-            AssertionId::new("assertion-1"),
+            Action::new("action-1"),
+            Resource::new("resource-1"),
         );
 
         let result = storage.find_by_query(query).await.unwrap();
-
         assert!(result.is_some());
-        assert_eq!(result.unwrap().assertion_id().as_str(), "assertion-1");
+        let record = result.unwrap();
+        assert_eq!(record.action().as_str(), "action-1");
+        assert_eq!(record.resource().as_str(), "resource-1");
     }
 }

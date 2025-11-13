@@ -42,11 +42,11 @@ impl fmt::Display for AuthorityId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub struct AssertionId(String);
+pub struct Action(String);
 
-impl AssertionId {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+impl Action {
+    pub fn new(action: impl Into<String>) -> Self {
+        Self(action.into())
     }
 
     pub fn as_str(&self) -> &str {
@@ -54,7 +54,25 @@ impl AssertionId {
     }
 }
 
-impl fmt::Display for AssertionId {
+impl fmt::Display for Action {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct Resource(String);
+
+impl Resource {
+    pub fn new(resource: impl Into<String>) -> Self {
+        Self(resource.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Resource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -91,7 +109,8 @@ impl Default for Context {
 pub struct TrustRecordIds {
     entity_id: EntityId,
     authority_id: AuthorityId,
-    assertion_id: AssertionId,
+    action: Action,
+    resource: Resource,
 }
 
 impl TrustRecordIds {
@@ -103,18 +122,23 @@ impl TrustRecordIds {
         &self.authority_id
     }
 
-    pub fn assertion_id(&self) -> &AssertionId {
-        &self.assertion_id
+    pub fn resource(&self) -> &Resource {
+        &self.resource
     }
 
-    pub fn into_parts(self) -> (EntityId, AuthorityId, AssertionId) {
+    pub fn action(&self) -> &Action {
+        &self.action
+    }
+
+    pub fn into_parts(self) -> (EntityId, AuthorityId, Action, Resource) {
         let Self {
             entity_id,
             authority_id,
-            assertion_id,
+            action,
+            resource,
         } = self;
 
-        (entity_id, authority_id, assertion_id)
+        (entity_id, authority_id, action, resource)
     }
 }
 
@@ -122,11 +146,12 @@ impl TrustRecordIds {
 pub struct TrustRecord {
     entity_id: EntityId,
     authority_id: AuthorityId,
-    assertion_id: AssertionId,
+    action: Action,
+    resource: Resource,
     #[serde(skip_serializing_if = "Option::is_none")]
     recognized: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    assertion_verified: Option<bool>,
+    authorized: Option<bool>,
     context: Context,
 }
 
@@ -135,18 +160,20 @@ impl TrustRecord {
     pub fn new(
         entity_id: EntityId,
         authority_id: AuthorityId,
-        assertion_id: AssertionId,
+        action: Action,
+        resource: Resource,
         recognized: bool,
-        assertion_verified: bool,
+        authorized: bool,
         context: Context,
     ) -> Self {
         Self {
             entity_id,
             authority_id,
-            assertion_id,
+            action,
+            resource,
             recognized: Some(recognized),
+            authorized: Some(authorized),
             context,
-            assertion_verified: Some(assertion_verified),
         }
     }
 
@@ -158,8 +185,12 @@ impl TrustRecord {
         &self.authority_id
     }
 
-    pub fn assertion_id(&self) -> &AssertionId {
-        &self.assertion_id
+    pub fn action(&self) -> &Action {
+        &self.action
+    }
+
+    pub fn resource(&self) -> &Resource {
+        &self.resource
     }
 
     pub fn is_recognized(&self) -> bool {
@@ -174,8 +205,8 @@ impl TrustRecord {
         &self.context
     }
 
-    pub fn is_assertion_verified(&self) -> bool {
-        if let Some(b) = self.assertion_verified {
+    pub fn is_authorized(&self) -> bool {
+        if let Some(b) = self.authorized {
             b
         } else {
             false
@@ -190,8 +221,8 @@ impl TrustRecord {
         self
     }
 
-    pub fn none_assertion_verified(mut self) -> Self {
-        self.assertion_verified = None;
+    pub fn none_authorized(mut self) -> Self {
+        self.authorized = None;
         self
     }
 
@@ -220,10 +251,11 @@ fn merge_json_values(base: Value, additional: Value) -> Value {
 pub struct TrustRecordBuilder {
     entity_id: Option<EntityId>,
     authority_id: Option<AuthorityId>,
-    assertion_id: Option<AssertionId>,
+    action: Option<Action>,
+    resource: Option<Resource>,
     recognized: Option<bool>,
     context: Context,
-    assertion_verified: Option<bool>,
+    authorized: Option<bool>,
 }
 
 impl TrustRecordBuilder {
@@ -231,10 +263,11 @@ impl TrustRecordBuilder {
         Self {
             entity_id: None,
             authority_id: None,
-            assertion_id: None,
+            action: None,
+            resource: None,
             recognized: None,
             context: Context::empty(),
-            assertion_verified: None,
+            authorized: None,
         }
     }
 
@@ -248,8 +281,12 @@ impl TrustRecordBuilder {
         self
     }
 
-    pub fn assertion_id(mut self, id: AssertionId) -> Self {
-        self.assertion_id = Some(id);
+    pub fn action(mut self, action: Action) -> Self {
+        self.action = Some(action);
+        self
+    }
+    pub fn resource(mut self, resource: Resource) -> Self {
+        self.resource = Some(resource);
         self
     }
 
@@ -263,8 +300,8 @@ impl TrustRecordBuilder {
         self
     }
 
-    pub fn assertion_verified(mut self, verified: bool) -> Self {
-        self.assertion_verified = Some(verified);
+    pub fn authorized(mut self, authorized: bool) -> Self {
+        self.authorized = Some(authorized);
         self
     }
 
@@ -274,12 +311,11 @@ impl TrustRecordBuilder {
             authority_id: self
                 .authority_id
                 .ok_or(TrustRecordError::MissingAuthorityId)?,
-            assertion_id: self
-                .assertion_id
-                .ok_or(TrustRecordError::MissingAssertionId)?,
-            assertion_verified: self.assertion_verified,
+            action: self.action.ok_or(TrustRecordError::MissingAction)?,
+            authorized: self.authorized,
             recognized: self.recognized,
             context: self.context,
+            resource: self.resource.ok_or(TrustRecordError::MissingResource)?,
         })
     }
 }
@@ -294,7 +330,8 @@ impl Default for TrustRecordBuilder {
 pub enum TrustRecordError {
     MissingEntityId,
     MissingAuthorityId,
-    MissingAssertionId,
+    MissingAction,
+    MissingResource,
     MissingTimeRequested,
     MissingTimeEvaluated,
 }
@@ -304,7 +341,8 @@ impl fmt::Display for TrustRecordError {
         match self {
             Self::MissingEntityId => write!(f, "Entity ID is required"),
             Self::MissingAuthorityId => write!(f, "Authority ID is required"),
-            Self::MissingAssertionId => write!(f, "Assertion ID is required"),
+            Self::MissingAction => write!(f, "Action is required"),
+            Self::MissingResource => write!(f, "Resource is required"),
             Self::MissingTimeRequested => write!(f, "Time requested is required"),
             Self::MissingTimeEvaluated => write!(f, "Time evaluated is required"),
         }
@@ -322,9 +360,10 @@ mod tests {
         let record = TrustRecordBuilder::new()
             .entity_id(EntityId::new("entity-123"))
             .authority_id(AuthorityId::new("authority-456"))
-            .assertion_id(AssertionId::new("assertion-789"))
+            .action(Action::new("action-789"))
+            .resource(Resource::new("resource-112"))
             .recognized(true)
-            .assertion_verified(true)
+            .authorized(true)
             .build()
             .unwrap();
 
@@ -379,7 +418,8 @@ mod tests {
         let record = TrustRecord::new(
             EntityId::new("entity-123"),
             AuthorityId::new("authority-456"),
-            AssertionId::new("assertion-789"),
+            Action::new("action-789"),
+            Resource::new("resource-112"),
             true,
             true,
             Context::new(json!({

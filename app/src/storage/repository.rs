@@ -8,7 +8,8 @@ use crate::domain::*;
 pub struct TrustRecordQuery {
     pub entity_id: EntityId,
     pub authority_id: AuthorityId,
-    pub assertion_id: AssertionId,
+    pub action: Action,
+    pub resource: Resource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,20 +32,27 @@ impl TrustRecordList {
 }
 
 impl TrustRecordQuery {
-    pub fn new(entity_id: EntityId, authority_id: AuthorityId, assertion_id: AssertionId) -> Self {
+    pub fn new(
+        entity_id: EntityId,
+        authority_id: AuthorityId,
+        action: Action,
+        resource: Resource,
+    ) -> Self {
         Self {
             entity_id,
             authority_id,
-            assertion_id,
+            action,
+            resource,
         }
     }
 
     pub fn from_ids(ids: TrustRecordIds) -> Self {
-        let (entity_id, authority_id, assertion_id) = ids.into_parts();
+        let (entity_id, authority_id, action, resource) = ids.into_parts();
         Self {
             entity_id,
             authority_id,
-            assertion_id,
+            action,
+            resource,
         }
     }
 }
@@ -102,9 +110,10 @@ mod tests {
         let record = TrustRecordBuilder::new()
             .entity_id(EntityId::new("entity-123"))
             .authority_id(AuthorityId::new("authority-456"))
-            .assertion_id(AssertionId::new("assertion-789"))
+            .action(Action::new("action-789"))
+            .resource(Resource::new("resource-112"))
             .recognized(true)
-            .assertion_verified(true)
+            .authorized(true)
             .build()
             .unwrap();
 
@@ -125,7 +134,8 @@ mod tests {
         let query = TrustRecordQuery::new(
             EntityId::new("entity-123"),
             AuthorityId::new("authority-456"),
-            AssertionId::new("assertion-789"),
+            Action::new("action-789"),
+            Resource::new("resource-012"),
         );
 
         assert_eq!(query.entity_id.as_str(), "entity-123");
