@@ -1,34 +1,110 @@
 use crate::domain::{Action, AuthorityId, EntityId, Resource, TrustRecord};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+pub const AUDIT_ROLE_ADMIN: &str = "ADMIN";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditLog {
+    pub target: String,
+    pub operation: AuditOperation,
+    pub actor: String,
+    pub status: AuditStatus,
+    pub resource: AuditResource,
+    pub extra: Option<String>,
+    pub thread_id: Option<String>,
+    pub timestamp: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AuditStatus {
+    Success,
+    Failure,
+    Unauthorized,
+}
+
+impl fmt::Display for AuditStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success => write!(f, "SUCCESS"),
+            Self::Failure => write!(f, "FAILURE"),
+            Self::Unauthorized => write!(f, "UNAUTHORIZED"),
+        }
+    }
+}
+
+pub struct AuditLogBuilder {
+    audit_log: AuditLog,
+}
+
+impl AuditLogBuilder {
+    pub fn new() -> Self {
+        Self {
+            audit_log: AuditLog {
+                target: AUDIT_ROLE_ADMIN.to_string(),
+                operation: AuditOperation::Read,
+                actor: String::new(),
+                status: AuditStatus::Success,
+                resource: AuditResource::empty(),
+                extra: None,
+                thread_id: None,
+                timestamp: Utc::now(),
+            },
+        }
+    }
+
+    pub fn operation(mut self, operation: AuditOperation) -> Self {
+        self.audit_log.operation = operation;
+        self
+    }
+
+    pub fn actor(mut self, actor: impl Into<String>) -> Self {
+        self.audit_log.actor = actor.into();
+        self
+    }
+
+    pub fn resource(mut self, resource: AuditResource) -> Self {
+        self.audit_log.resource = resource;
+        self
+    }
+
+    pub fn thread_id(mut self, thread_id: Option<String>) -> Self {
+        self.audit_log.thread_id = thread_id;
+        self
+    }
+
+    pub fn build_success(mut self) -> AuditLog {
+        self.audit_log.status = AuditStatus::Success;
+        self.audit_log.timestamp = Utc::now();
+        self.audit_log
+    }
+
+    pub fn build_failure(mut self, error_message: impl Into<String>) -> AuditLog {
+        self.audit_log.status = AuditStatus::Failure;
+        self.audit_log.extra = Some(format!("audit.error={}", error_message.into()));
+        self.audit_log.timestamp = Utc::now();
+        self.audit_log
+    }
+
+    pub fn build_unauthorized(mut self, reason: impl Into<String>) -> AuditLog {
+        self.audit_log.status = AuditStatus::Unauthorized;
+        self.audit_log.extra = Some(format!("audit.reason={}", reason.into()));
+        self.audit_log.timestamp = Utc::now();
+        self.audit_log
+    }
+}
+
+impl Default for AuditLogBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 pub trait AuditLogger: Send + Sync {
-    async fn log_success(
-        &self,
-        operation: AuditOperation,
-        actor_did: &str,
-        resource: AuditResource,
-        thread_id: Option<String>,
-    );
-
-    async fn log_failure(
-        &self,
-        operation: AuditOperation,
-        actor_did: &str,
-        resource: AuditResource,
-        error_message: &str,
-        thread_id: Option<String>,
-    );
-
-    async fn log_unauthorized(
-        &self,
-        operation: AuditOperation,
-        actor_did: &str,
-        resource: AuditResource,
-        reason: &str,
-        thread_id: Option<String>,
-    );
+    async fn log(&self, audit_log: AuditLog);
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

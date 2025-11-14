@@ -1,14 +1,10 @@
 use crate::{
     configs::AdminApiConfig,
-    didcomm::{get_parent_thread_id, get_thread_id, problem_report},
-    handlers::ProtocolHandler,
-    listener::MessageHandler,
+    didcomm::{problem_report, transport},
+    handlers::{HandlerContext, ProtocolHandler},
 };
-use affinidi_tdk::{
-    didcomm::{Message, UnpackMetadata},
-    messaging::{ATM, profiles::ATMProfile},
-};
-use app::audit::audit::{AuditLogger, AuditOperation, AuditResource};
+use affinidi_tdk::didcomm::{Message, UnpackMetadata};
+use app::audit::audit::{AuditLogBuilder, AuditLogger, AuditOperation, AuditResource};
 use app::storage::repository::TrustRecordAdminRepository;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -46,6 +42,57 @@ pub struct AdminMessagesHandler<R: ?Sized + TrustRecordAdminRepository> {
     pub audit_service: Arc<dyn AuditLogger>,
 }
 
+fn get_operation_from_message_type(message_type: &str) -> AuditOperation {
+    match message_type {
+        CREATE_RECORD_MESSAGE_TYPE => AuditOperation::Create,
+        UPDATE_RECORD_MESSAGE_TYPE => AuditOperation::Update,
+        DELETE_RECORD_MESSAGE_TYPE => AuditOperation::Delete,
+        READ_RECORD_MESSAGE_TYPE => AuditOperation::Read,
+        LIST_RECORDS_MESSAGE_TYPE => AuditOperation::List,
+        _ => AuditOperation::Create,
+    }
+}
+
+fn extract_audit_resource(message: &Message) -> AuditResource {
+    message
+        .body
+        .as_object()
+        .and_then(|body| {
+            let entity_id = body
+                .get("entity_id")
+                .and_then(|v| v.as_str())
+                .map(|s| app::domain::EntityId::new(s));
+            let authority_id = body
+                .get("authority_id")
+                .and_then(|v| v.as_str())
+                .map(|s| app::domain::AuthorityId::new(s));
+            let action = body
+                .get("action")
+                .and_then(|v| v.as_str())
+                .map(|s| app::domain::Action::new(s));
+            let resource = body
+                .get("resource")
+                .and_then(|v| v.as_str())
+                .map(|s| app::domain::Resource::new(s));
+
+            if entity_id.is_some()
+                || authority_id.is_some()
+                || action.is_some()
+                || resource.is_some()
+            {
+                Some(AuditResource::new(
+                    entity_id,
+                    authority_id,
+                    action,
+                    resource,
+                ))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(AuditResource::empty)
+}
+
 impl<R: ?Sized + TrustRecordAdminRepository> AdminMessagesHandler<R> {
     pub fn new(
         repository: Arc<R>,
@@ -74,126 +121,152 @@ impl<R: ?Sized + TrustRecordAdminRepository> AdminMessagesHandler<R> {
             ))
         }
     }
-}
 
-#[async_trait]
-impl<R: ?Sized + TrustRecordAdminRepository + 'static> MessageHandler for AdminMessagesHandler<R> {
-    async fn handle(
+    async fn handle_success(
         &self,
-        atm: &Arc<ATM>,
-        profile: &Arc<ATMProfile>,
-        message: Message,
-        _meta: UnpackMetadata,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let message_type = message.type_.clone();
-        let sender_did = message.from.clone().ok_or("Missing sender DID")?;
-
-        let thid = get_thread_id(&message).or_else(|| Some(message.id.clone()));
-        let pthid = get_parent_thread_id(&message);
-
-        if let Err(auth_error) = self.validate_admin_did(&sender_did) {
-            warn!(
-                "[profile = {}] Unauthorized admin access attempt from {}: {}",
-                &profile.inner.alias, sender_did, auth_error
-            );
-
-            let operation = match message_type.as_str() {
-                CREATE_RECORD_MESSAGE_TYPE => AuditOperation::Create,
-                UPDATE_RECORD_MESSAGE_TYPE => AuditOperation::Update,
-                DELETE_RECORD_MESSAGE_TYPE => AuditOperation::Delete,
-                READ_RECORD_MESSAGE_TYPE => AuditOperation::Read,
-                LIST_RECORDS_MESSAGE_TYPE => AuditOperation::List,
-                _ => AuditOperation::Create,
-            };
-
-            self.audit_service
-                .log_unauthorized(
-                    operation,
-                    &sender_did,
-                    AuditResource::empty(),
-                    &auth_error,
-                    thid.clone(),
-                )
-                .await;
-
-            let report = problem_report::ProblemReport::unauthorized(auth_error);
-            if let Err(e) = problem_report::send_problem_report(
-                atm,
-                profile,
-                report,
-                &sender_did,
-                thid.clone(),
-                pthid.clone(),
+        ctx: &Arc<HandlerContext>,
+        response_message_type: String,
+        response_body: serde_json::Value,
+        operation: AuditOperation,
+        resource: AuditResource,
+    ) {
+        self.audit_service
+            .log(
+                AuditLogBuilder::new()
+                    .operation(operation)
+                    .actor(&ctx.sender_did)
+                    .resource(resource)
+                    .thread_id(ctx.thid.clone())
+                    .build_success(),
             )
-            .await
-            {
-                error!("Failed to send problem report: {}", e);
-            }
-            return Ok(());
-        }
+            .await;
 
-        info!(
-            "[profile = {}] Admin operation: {} from {}",
-            &profile.inner.alias, message_type, sender_did
+        if let Err(e) = transport::send_response(
+            &ctx.atm,
+            &ctx.profile,
+            response_message_type,
+            response_body,
+            &ctx.sender_did,
+            ctx.thid.clone(),
+            ctx.pthid.clone(),
+        )
+        .await
+        {
+            error!("Failed to send response: {}", e);
+        }
+    }
+
+    async fn handle_failure(
+        &self,
+        ctx: &Arc<HandlerContext>,
+        error_msg: String,
+        operation: AuditOperation,
+        resource: AuditResource,
+    ) {
+        self.audit_service
+            .log(
+                AuditLogBuilder::new()
+                    .operation(operation)
+                    .actor(&ctx.sender_did)
+                    .resource(resource)
+                    .thread_id(ctx.thid.clone())
+                    .build_failure(&error_msg),
+            )
+            .await;
+
+        error!(
+            "[profile = {}] Admin operation failed: {}",
+            &ctx.profile.inner.alias, error_msg
+        );
+        let report = problem_report::ProblemReport::internal_error(error_msg);
+        if let Err(send_err) = problem_report::send_problem_report(
+            &ctx.atm,
+            &ctx.profile,
+            report,
+            &ctx.sender_did,
+            ctx.thid.clone(),
+            ctx.pthid.clone(),
+        )
+        .await
+        {
+            error!("Failed to send problem report: {}", send_err);
+        }
+    }
+
+    async fn handle_unauthorized(
+        &self,
+        ctx: &Arc<HandlerContext>,
+        auth_error: String,
+        message_type: &str,
+    ) {
+        warn!(
+            "[profile = {}] Unauthorized admin access attempt from {}: {}",
+            &ctx.profile.inner.alias, ctx.sender_did, auth_error
         );
 
-        // TODO: refactor to avoid code duplication
-        let result = match message_type.as_str() {
-            CREATE_RECORD_MESSAGE_TYPE => messages::handle_create_record(
-                self,
-                atm,
-                profile,
-                message,
-                &sender_did,
-                thid.clone(),
-                pthid.clone(),
+        let operation = get_operation_from_message_type(message_type);
+
+        self.audit_service
+            .log(
+                AuditLogBuilder::new()
+                    .operation(operation)
+                    .actor(&ctx.sender_did)
+                    .resource(AuditResource::empty())
+                    .thread_id(ctx.thid.clone())
+                    .build_unauthorized(&auth_error),
             )
-            .await
-            .map_err(|e| e.to_string()),
-            UPDATE_RECORD_MESSAGE_TYPE => messages::handle_update_record(
-                self,
-                atm,
-                profile,
-                message,
-                &sender_did,
-                thid.clone(),
-                pthid.clone(),
-            )
-            .await
-            .map_err(|e| e.to_string()),
-            DELETE_RECORD_MESSAGE_TYPE => messages::handle_delete_record(
-                self,
-                atm,
-                profile,
-                message,
-                &sender_did,
-                thid.clone(),
-                pthid.clone(),
-            )
-            .await
-            .map_err(|e| e.to_string()),
-            READ_RECORD_MESSAGE_TYPE => messages::handle_read_record(
-                self,
-                atm,
-                profile,
-                message,
-                &sender_did,
-                thid.clone(),
-                pthid.clone(),
-            )
-            .await
-            .map_err(|e| e.to_string()),
-            LIST_RECORDS_MESSAGE_TYPE => messages::handle_list_records(
-                self,
-                atm,
-                profile,
-                message,
-                &sender_did,
-                thid.clone(),
-                pthid.clone(),
-            )
-            .await
-            .map_err(|e| e.to_string()),
+            .await;
+
+        let report = problem_report::ProblemReport::unauthorized(auth_error);
+        if let Err(e) = problem_report::send_problem_report(
+            &ctx.atm,
+            &ctx.profile,
+            report,
+            &ctx.sender_did,
+            ctx.thid.clone(),
+            ctx.pthid.clone(),
+        )
+        .await
+        {
+            error!("Failed to send problem report: {}", e);
+        }
+    }
+
+    async fn handle_request(
+        &self,
+        ctx: &Arc<HandlerContext>,
+        message: Message,
+        message_type: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        info!(
+            "[profile = {}] Admin operation: {} from {}",
+            &ctx.profile.inner.alias, message_type, ctx.sender_did
+        );
+
+        let operation = get_operation_from_message_type(message_type);
+        let resource = extract_audit_resource(&message);
+
+        let (response_message_type, handler_result) = match message_type {
+            CREATE_RECORD_MESSAGE_TYPE => (
+                CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
+                messages::handle_create_record(self, message).await,
+            ),
+            UPDATE_RECORD_MESSAGE_TYPE => (
+                UPDATE_RECORD_RESPONSE_MESSAGE_TYPE,
+                messages::handle_update_record(self, message).await,
+            ),
+            DELETE_RECORD_MESSAGE_TYPE => (
+                DELETE_RECORD_RESPONSE_MESSAGE_TYPE,
+                messages::handle_delete_record(self, message).await,
+            ),
+            READ_RECORD_MESSAGE_TYPE => (
+                READ_RECORD_RESPONSE_MESSAGE_TYPE,
+                messages::handle_read_record(self, message).await,
+            ),
+            LIST_RECORDS_MESSAGE_TYPE => (
+                LIST_RECORDS_RESPONSE_MESSAGE_TYPE,
+                messages::handle_list_records(self).await,
+            ),
             _ => {
                 warn!("Unknown admin message type: {}", message_type);
                 let report = problem_report::ProblemReport::bad_request(format!(
@@ -201,12 +274,12 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> MessageHandler for AdminM
                     message_type
                 ));
                 if let Err(e) = problem_report::send_problem_report(
-                    atm,
-                    profile,
+                    &ctx.atm,
+                    &ctx.profile,
                     report,
-                    &sender_did,
-                    thid.clone(),
-                    pthid.clone(),
+                    &ctx.sender_did,
+                    ctx.thid.clone(),
+                    ctx.pthid.clone(),
                 )
                 .await
                 {
@@ -216,25 +289,22 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> MessageHandler for AdminM
             }
         };
 
-        if let Err(error_msg) = result {
-            error!(
-                "[profile = {}] Admin operation failed: {}",
-                &profile.inner.alias, error_msg
-            );
-            let report = problem_report::ProblemReport::internal_error(error_msg);
-            if let Err(send_err) = problem_report::send_problem_report(
-                atm,
-                profile,
-                report,
-                &sender_did,
-                thid.clone(),
-                pthid.clone(),
-            )
-            .await
-            {
-                error!("Failed to send problem report: {}", send_err);
+        match handler_result {
+            Ok(response_body) => {
+                self.handle_success(
+                    ctx,
+                    response_message_type.to_string(),
+                    response_body,
+                    operation,
+                    resource,
+                )
+                .await
             }
-        }
+            Err(error_msg) => {
+                self.handle_failure(ctx, error_msg, operation, resource)
+                    .await
+            }
+        };
 
         Ok(())
     }
@@ -250,5 +320,22 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> ProtocolHandler for Admin
             READ_RECORD_MESSAGE_TYPE.to_string(),
             LIST_RECORDS_MESSAGE_TYPE.to_string(),
         ]
+    }
+
+    async fn handle(
+        &self,
+        ctx: &Arc<HandlerContext>,
+        message: Message,
+        _meta: UnpackMetadata,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let message_type = message.type_.clone();
+
+        if let Err(auth_error) = self.validate_admin_did(&ctx.sender_did) {
+            self.handle_unauthorized(ctx, auth_error, &message_type)
+                .await;
+            return Ok(());
+        }
+
+        self.handle_request(ctx, message, &message_type).await
     }
 }

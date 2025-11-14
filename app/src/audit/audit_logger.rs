@@ -1,14 +1,12 @@
 use crate::{
-    audit::audit::{AuditLogger, AuditOperation, AuditResource},
+    audit::audit::{AuditLog, AuditLogger, AuditOperation, AuditResource},
     configs::AuditConfig,
 };
 use chrono::Utc;
 use serde_json::{Value, json};
-use tracing::{
-    Level, event,
-    field::{self, AsField, DisplayValue},
-    info,
-};
+use tracing::info;
+
+pub use crate::audit::audit::{AuditLogBuilder, AuditStatus};
 
 pub const AUDIT_ROLE_ADMIN: &str = "ADMIN";
 pub const NA: &str = "N/A";
@@ -152,106 +150,25 @@ impl BaseAuditLogger {
 
 #[async_trait::async_trait]
 impl AuditLogger for BaseAuditLogger {
-    async fn log_success(
-        &self,
-        operation: AuditOperation,
-        actor_did: &str,
-        resource: AuditResource,
-        thread_id: Option<String>,
-    ) {
-        let timestamp = Utc::now();
-        match self.config.log_format {
-            crate::configs::AuditLogFormat::Json => self.emit_json(&EmitInput {
-                target: AUDIT_ROLE_ADMIN.to_string(),
-                operation: operation,
-                actor: actor_did.to_string(),
-                status: "SUCCESS".to_string(),
-                resource: resource,
-                extra: None,
-                thread_id,
-                timestamp,
-            }),
-            crate::configs::AuditLogFormat::Text => self.emit_text(&EmitInput {
-                target: AUDIT_ROLE_ADMIN.to_string(),
-                operation: operation,
-                actor: actor_did.to_string(),
-                status: "SUCCESS".to_string(),
-                resource: resource,
-                extra: None,
-                thread_id,
-                timestamp,
-            }),
-        }
-    }
+    async fn log(&self, audit_log: AuditLog) {
+        let emit_input = EmitInput {
+            target: audit_log.target,
+            operation: audit_log.operation,
+            actor: audit_log.actor,
+            status: audit_log.status.to_string(),
+            resource: audit_log.resource,
+            extra: audit_log.extra,
+            thread_id: audit_log.thread_id,
+            timestamp: audit_log.timestamp,
+        };
 
-    async fn log_failure(
-        &self,
-        operation: AuditOperation,
-        actor_did: &str,
-        resource: AuditResource,
-        error_message: &str,
-        thread_id: Option<String>,
-    ) {
-        let timestamp = Utc::now();
         match self.config.log_format {
-            crate::configs::AuditLogFormat::Json => self.emit_json(&EmitInput {
-                target: AUDIT_ROLE_ADMIN.to_string(),
-                operation: operation,
-                actor: actor_did.to_string(),
-                status: "FAILURE".to_string(),
-                resource: resource,
-                extra: Some(format!("audit.error={}", error_message)),
-                thread_id,
-                timestamp,
-            }),
-            crate::configs::AuditLogFormat::Text => self.emit_text(&EmitInput {
-                target: AUDIT_ROLE_ADMIN.to_string(),
-                operation: operation,
-                actor: actor_did.to_string(),
-                status: "FAILURE".to_string(),
-                resource: resource,
-                extra: Some(format!("audit.error={}", error_message)),
-                thread_id,
-                timestamp,
-            }),
-        }
-    }
-
-    async fn log_unauthorized(
-        &self,
-        operation: AuditOperation,
-        actor_did: &str,
-        resource: AuditResource,
-        reason: &str,
-        thread_id: Option<String>,
-    ) {
-        let timestamp = Utc::now();
-        match self.config.log_format {
-            crate::configs::AuditLogFormat::Json => self.emit_json(&EmitInput {
-                target: AUDIT_ROLE_ADMIN.to_string(),
-                operation: operation,
-                actor: actor_did.to_string(),
-                status: "UNAUTHORIZED".to_string(),
-                resource: resource,
-                extra: Some(format!("audit.reason={}", reason)),
-                thread_id,
-                timestamp,
-            }),
-            crate::configs::AuditLogFormat::Text => self.emit_text(&EmitInput {
-                target: AUDIT_ROLE_ADMIN.to_string(),
-                operation: operation,
-                actor: actor_did.to_string(),
-                status: "UNAUTHORIZED".to_string(),
-                resource: resource,
-                extra: Some(format!("audit.reason={}", reason)),
-                thread_id,
-                timestamp,
-            }),
+            crate::configs::AuditLogFormat::Json => self.emit_json(&emit_input),
+            crate::configs::AuditLogFormat::Text => self.emit_text(&emit_input),
         }
     }
 }
 
-// Tests pass if no panic occurs
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,14 +190,17 @@ mod tests {
         );
 
         logger
-            .log_success(
-                AuditOperation::Create,
-                "did:example:admin",
-                resource,
-                Some("thread-1".to_string()),
+            .log(
+                AuditLogBuilder::new()
+                    .operation(AuditOperation::Create)
+                    .actor("did:example:admin")
+                    .resource(resource)
+                    .thread_id(Some("thread-1".to_string()))
+                    .build_success(),
             )
             .await;
     }
+
     #[tokio::test]
     async fn test_log_success_json() {
         let config = AuditConfig {
@@ -296,11 +216,13 @@ mod tests {
         );
 
         logger
-            .log_success(
-                AuditOperation::Create,
-                "did:example:admin",
-                resource,
-                Some("thread-1".to_string()),
+            .log(
+                AuditLogBuilder::new()
+                    .operation(AuditOperation::Create)
+                    .actor("did:example:admin")
+                    .resource(resource)
+                    .thread_id(Some("thread-1".to_string()))
+                    .build_success(),
             )
             .await;
     }
@@ -315,15 +237,16 @@ mod tests {
         let resource = AuditResource::empty();
 
         logger
-            .log_failure(
-                AuditOperation::Delete,
-                "did:example:admin",
-                resource,
-                "Record not found",
-                None,
+            .log(
+                AuditLogBuilder::new()
+                    .operation(AuditOperation::Delete)
+                    .actor("did:example:admin")
+                    .resource(resource)
+                    .build_failure("Record not found"),
             )
             .await;
     }
+
     #[tokio::test]
     async fn test_log_failure_json() {
         let config = AuditConfig {
@@ -334,12 +257,12 @@ mod tests {
         let resource = AuditResource::empty();
 
         logger
-            .log_failure(
-                AuditOperation::Delete,
-                "did:example:admin",
-                resource,
-                "Record not found",
-                None,
+            .log(
+                AuditLogBuilder::new()
+                    .operation(AuditOperation::Delete)
+                    .actor("did:example:admin")
+                    .resource(resource)
+                    .build_failure("Record not found"),
             )
             .await;
     }
@@ -354,15 +277,16 @@ mod tests {
         let resource = AuditResource::empty();
 
         logger
-            .log_unauthorized(
-                AuditOperation::Update,
-                "did:example:unauthorized",
-                resource,
-                "Not in admin list",
-                None,
+            .log(
+                AuditLogBuilder::new()
+                    .operation(AuditOperation::Update)
+                    .actor("did:example:unauthorized")
+                    .resource(resource)
+                    .build_unauthorized("Not in admin list"),
             )
             .await;
     }
+
     #[tokio::test]
     async fn test_log_unauthorized_json() {
         let config = AuditConfig {
@@ -373,12 +297,12 @@ mod tests {
         let resource = AuditResource::empty();
 
         logger
-            .log_unauthorized(
-                AuditOperation::Update,
-                "did:example:unauthorized",
-                resource,
-                "Not in admin list",
-                None,
+            .log(
+                AuditLogBuilder::new()
+                    .operation(AuditOperation::Update)
+                    .actor("did:example:unauthorized")
+                    .resource(resource)
+                    .build_unauthorized("Not in admin list"),
             )
             .await;
     }
