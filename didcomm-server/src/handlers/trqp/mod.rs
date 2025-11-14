@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use affinidi_tdk::{
     didcomm::{Message, UnpackMetadata},
     messaging::{ATM, profiles::ATMProfile},
@@ -5,7 +7,6 @@ use affinidi_tdk::{
 use app::storage::repository::{TrustRecordQuery, TrustRecordRepository};
 use async_trait::async_trait;
 use serde_json::json;
-use std::sync::Arc;
 use tracing::{debug, error, info};
 use uuid::Uuid;
 

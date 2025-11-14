@@ -1,8 +1,59 @@
+use serde::{Deserialize, Serialize};
 use std::env;
+use std::fmt;
 
 const DEFAULT_TRUST_REGISTRY_FILE_PATH: &str = "trust_records.csv";
 const DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC: u64 = 60;
 const DEFAULT_REGION: &str = "ap-southeast-1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuditLogFormat {
+    Text,
+    Json,
+}
+
+impl Default for AuditLogFormat {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
+impl fmt::Display for AuditLogFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text => write!(f, "text"),
+            Self::Json => write!(f, "json"),
+        }
+    }
+}
+
+impl std::str::FromStr for AuditLogFormat {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "text" => Ok(Self::Text),
+            "json" => Ok(Self::Json),
+            _ => Err(format!("Invalid audit log format: {}", s)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditConfig {
+    pub log_format: AuditLogFormat,
+}
+
+impl Configs for AuditConfig {
+    fn load() -> Result<Self, Box<dyn std::error::Error>> {
+        let log_format = env::var("AUDIT_LOG_FORMAT")
+            .unwrap_or_else(|_| "text".to_string())
+            .parse::<AuditLogFormat>()?;
+
+        Ok(AuditConfig { log_format })
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum TrustStorageBackend {

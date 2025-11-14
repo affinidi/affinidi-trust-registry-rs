@@ -1,7 +1,6 @@
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct EntityId(String);
