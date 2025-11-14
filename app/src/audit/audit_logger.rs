@@ -4,17 +4,31 @@ use crate::{
 };
 use chrono::Utc;
 use serde_json::{Value, json};
-use tracing::info;
+use tracing::{
+    Level, event,
+    field::{self, AsField, DisplayValue},
+    info,
+};
 
 pub const AUDIT_ROLE_ADMIN: &str = "ADMIN";
 pub const NA: &str = "N/A";
 
+pub struct EmitInput {
+    pub target: String,
+    pub operation: AuditOperation,
+    pub actor: String,
+    pub status: String,
+    pub resource: AuditResource,
+    pub extra: Option<String>,
+    pub thread_id: Option<String>,
+    pub timestamp: chrono::DateTime<Utc>,
+}
 #[derive(Clone)]
-pub struct LoggingAuditLogger {
+pub struct BaseAuditLogger {
     config: AuditConfig,
 }
 
-impl LoggingAuditLogger {
+impl BaseAuditLogger {
     pub fn new(config: AuditConfig) -> Self {
         Self { config }
     }
@@ -23,163 +37,121 @@ impl LoggingAuditLogger {
         thread_id.unwrap_or_else(|| NA.to_string())
     }
 
+    fn opt_to_string<T: ToString>(&self, opt: &Option<T>) -> String {
+        opt.as_ref()
+            .map_or_else(|| NA.to_string(), |v| v.to_string())
+    }
+
     fn resource_json_value(&self, resource: &AuditResource) -> Value {
         json!({
-            "entity_id": resource.entity_id.as_ref().map(|id| id.to_string()).unwrap_or(NA.to_string()),
-            "authority_id": resource.authority_id.as_ref().map(|id| id.to_string()).unwrap_or(NA.to_string()),
-            "action": resource.action.as_ref().map(|id| id.to_string()).unwrap_or(NA.to_string()),
-            "resource": resource.resource.as_ref().map(|id| id.to_string()).unwrap_or(NA.to_string()),
+            "entity_id": self.opt_to_string(&resource.entity_id),
+            "authority_id": self.opt_to_string(&resource.authority_id),
+            "action": self.opt_to_string(&resource.action),
+            "resource": self.opt_to_string(&resource.resource),
         })
     }
 
     fn resource_text_fields(&self, resource: &AuditResource) -> (String, String, String, String) {
         (
-            resource
-                .entity_id
-                .as_ref()
-                .map(|id| id.to_string())
-                .unwrap_or(NA.to_string()),
-            resource
-                .authority_id
-                .as_ref()
-                .map(|id| id.to_string())
-                .unwrap_or(NA.to_string()),
-            resource
-                .action
-                .as_ref()
-                .map(|id| id.to_string())
-                .unwrap_or(NA.to_string()),
-            resource
-                .resource
-                .as_ref()
-                .map(|id| id.to_string())
-                .unwrap_or(NA.to_string()),
+            self.opt_to_string(&resource.entity_id),
+            self.opt_to_string(&resource.authority_id),
+            self.opt_to_string(&resource.action),
+            self.opt_to_string(&resource.resource),
         )
     }
 
-    fn emit_json(
-        &self,
-        target: &str,
-        operation: &AuditOperation,
-        actor: &str,
-        status: &str,
-        resource: &AuditResource,
-        extra: Option<(&str, &str)>,
-        thread_id: Option<String>,
-        timestamp: chrono::DateTime<Utc>,
-    ) {
+    fn emit_json(&self, input: &EmitInput) {
         let mut map = serde_json::Map::new();
-        let op_value = serde_json::to_value(operation).unwrap_or(json!(format!("{:?}", operation)));
+        let op_value = serde_json::to_value(input.operation)
+            .unwrap_or(json!(format!("{:?}", input.operation)));
         map.insert("role".to_string(), json!(AUDIT_ROLE_ADMIN));
-        map.insert("actor".to_string(), json!(actor));
+        map.insert("actor".to_string(), json!(input.actor));
         map.insert("operation".to_string(), op_value);
-        map.insert("status".to_string(), json!(status));
-        map.insert("resource".to_string(), self.resource_json_value(resource));
-        if let Some((k, v)) = extra {
-            map.insert(k.to_string(), json!(v));
+        map.insert("status".to_string(), json!(input.status));
+        map.insert(
+            "resource".to_string(),
+            self.resource_json_value(&input.resource),
+        );
+        if let Some(extra_field) = input.extra.clone() {
+            let ex = extra_field.split("=").collect::<Vec<&str>>()[..2]
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<String>>();
+            map.insert(ex[0].to_string(), json!(ex[1]));
         }
-        map.insert("timestamp".to_string(), json!(timestamp.to_rfc3339()));
+        map.insert("timestamp".to_string(), json!(input.timestamp.to_rfc3339()));
         map.insert(
             "thread_id".to_string(),
-            json!(self.thread_id_or_na(thread_id)),
+            json!(self.thread_id_or_na(input.thread_id.clone())),
         );
         let value = Value::Object(map);
-        info!(target = ?target, "{}", value);
+        info!(target = ?input.target, "{}", value);
     }
 
-    fn emit_text(
-        &self,
-        operation: &AuditOperation,
-        actor: &str,
-        status: &str,
-        resource: &AuditResource,
-        extra: Option<&str>,
-        thread_id: Option<String>,
-        timestamp: chrono::DateTime<Utc>,
-    ) {
-        let (entity_id, authority_id, action, resource_id) = self.resource_text_fields(resource);
-        let thread_id_str = self.thread_id_or_na(thread_id);
-
-        match (status, extra) {
-            ("SUCCESS", None) => {
-                info!(
-                    audit.role=AUDIT_ROLE_ADMIN,
-                    audit.actor = %actor,
-                    audit.operation = ?operation,
-                    audit.status = "SUCCESS",
-                    audit.resource.entity_id = ?entity_id,
-                    audit.resource.authority_id = ?authority_id,
-                    audit.resource.action = ?action,
-                    audit.resource.resource = ?resource_id,
-                    audit.timestamp = %timestamp.to_rfc3339(),
-                    audit.thread_id = ?thread_id_str,
+    fn emit_text(&self, input: &EmitInput) {
+        let (entity_id, authority_id, action, resource_id) =
+            self.resource_text_fields(&input.resource);
+        let thread_id_str = self.thread_id_or_na(input.thread_id.clone());
+        let (_status, text, extra) = match (input.status.as_str(), input.extra.clone()) {
+            ("SUCCESS", None) => (
+                "SUCCESS",
+                format!(
                     "{}: {} operation by {} - SUCCESS",
-                    AUDIT_ROLE_ADMIN,
-                    operation,
-                    actor
-                );
-            }
-            ("FAILURE", Some(err)) => {
-                info!(
-                    audit.role=AUDIT_ROLE_ADMIN,
-                    audit.actor = %actor,
-                    audit.operation = ?operation,
-                    audit.status = "FAILURE",
-                    audit.resource.entity_id = ?entity_id,
-                    audit.resource.authority_id = ?authority_id,
-                    audit.resource.action = ?action,
-                    audit.resource.resource = ?resource_id,
-                    audit.error = %err,
-                    audit.timestamp = %timestamp.to_rfc3339(),
-                    audit.thread_id = ?thread_id_str,
+                    AUDIT_ROLE_ADMIN, input.operation, input.actor,
+                ),
+                None,
+            ),
+            ("FAILURE", Some(err)) => (
+                "FAILURE",
+                format!(
                     "{}: {} operation by {} - FAILURE: {}",
-                    AUDIT_ROLE_ADMIN,
-                    operation,
-                    actor,
-                    err
-                );
-            }
-            ("UNAUTHORIZED", Some(reason)) => {
-                info!(
-                    audit.role=AUDIT_ROLE_ADMIN,
-                    audit.actor = %actor,
-                    audit.operation = ?operation,
-                    audit.status = "UNAUTHORIZED",
-                    audit.resource.entity_id = ?entity_id,
-                    audit.resource.authority_id = ?authority_id,
-                    audit.resource.action = ?action,
-                    audit.resource.resource = ?resource_id,
-                    audit.reason = %reason,
-                    audit.timestamp = %timestamp.to_rfc3339(),
-                    audit.thread_id = ?thread_id_str,
+                    AUDIT_ROLE_ADMIN, input.operation, input.actor, err,
+                ),
+                Some(("audit.error", err)),
+            ),
+            ("UNAUTHORIZED", Some(reason)) => (
+                "UNAUTHORIZED",
+                format!(
                     "{}: {} operation by {} - UNAUTHORIZED: {}",
-                    AUDIT_ROLE_ADMIN,
-                    operation,
-                    actor,
-                    reason
-                );
-            }
-            _ => {
-                info!(
-                    audit.role=AUDIT_ROLE_ADMIN,
-                    audit.actor = %actor,
-                    audit.operation = ?operation,
-                    audit.status = %status,
-                    audit.timestamp = %timestamp.to_rfc3339(),
-                    audit.thread_id = ?thread_id_str,
+                    AUDIT_ROLE_ADMIN, input.operation, input.actor, reason
+                ),
+                Some(("audit.reason", reason)),
+            ),
+            _ => (
+                input.status.as_str(),
+                format!(
                     "{}: {} operation by {} - {}",
-                    AUDIT_ROLE_ADMIN,
-                    operation,
-                    actor,
-                    status
-                );
-            }
+                    AUDIT_ROLE_ADMIN, input.operation, input.actor, input.status
+                ),
+                None,
+            ),
+        };
+
+        let mut log_parts = vec![
+            format!("audit.role={}", AUDIT_ROLE_ADMIN),
+            format!("audit.actor={}", input.actor),
+            format!("audit.operation={}", input.operation.to_string()),
+            format!("audit.status={}", input.status),
+            format!("audit.resource.entity_id={}", entity_id),
+            format!("audit.resource.authority_id={}", authority_id),
+            format!("audit.resource.action={}", action),
+            format!("audit.resource.resource={}", resource_id),
+            format!("audit.timestamp={}", input.timestamp.to_rfc3339()),
+            format!("audit.thread_id={}", thread_id_str),
+        ];
+
+        if let Some((key, val)) = extra {
+            log_parts.push(format!("{}={}", key, val));
         }
+
+        let structured_log = log_parts.join(" ");
+
+        info!("{} | {}", text, structured_log);
     }
 }
 
 #[async_trait::async_trait]
-impl AuditLogger for LoggingAuditLogger {
+impl AuditLogger for BaseAuditLogger {
     async fn log_success(
         &self,
         operation: AuditOperation,
@@ -189,19 +161,26 @@ impl AuditLogger for LoggingAuditLogger {
     ) {
         let timestamp = Utc::now();
         match self.config.log_format {
-            crate::configs::AuditLogFormat::Json => self.emit_json(
-                AUDIT_ROLE_ADMIN,
-                &operation,
-                actor_did,
-                "SUCCESS",
-                &resource,
-                None,
+            crate::configs::AuditLogFormat::Json => self.emit_json(&EmitInput {
+                target: AUDIT_ROLE_ADMIN.to_string(),
+                operation: operation,
+                actor: actor_did.to_string(),
+                status: "SUCCESS".to_string(),
+                resource: resource,
+                extra: None,
                 thread_id,
                 timestamp,
-            ),
-            crate::configs::AuditLogFormat::Text => self.emit_text(
-                &operation, actor_did, "SUCCESS", &resource, None, thread_id, timestamp,
-            ),
+            }),
+            crate::configs::AuditLogFormat::Text => self.emit_text(&EmitInput {
+                target: AUDIT_ROLE_ADMIN.to_string(),
+                operation: operation,
+                actor: actor_did.to_string(),
+                status: "SUCCESS".to_string(),
+                resource: resource,
+                extra: None,
+                thread_id,
+                timestamp,
+            }),
         }
     }
 
@@ -215,25 +194,26 @@ impl AuditLogger for LoggingAuditLogger {
     ) {
         let timestamp = Utc::now();
         match self.config.log_format {
-            crate::configs::AuditLogFormat::Json => self.emit_json(
-                AUDIT_ROLE_ADMIN,
-                &operation,
-                actor_did,
-                "FAILURE",
-                &resource,
-                Some(("error", error_message)),
+            crate::configs::AuditLogFormat::Json => self.emit_json(&EmitInput {
+                target: AUDIT_ROLE_ADMIN.to_string(),
+                operation: operation,
+                actor: actor_did.to_string(),
+                status: "FAILURE".to_string(),
+                resource: resource,
+                extra: Some(format!("audit.error={}", error_message)),
                 thread_id,
                 timestamp,
-            ),
-            crate::configs::AuditLogFormat::Text => self.emit_text(
-                &operation,
-                actor_did,
-                "FAILURE",
-                &resource,
-                Some(error_message),
+            }),
+            crate::configs::AuditLogFormat::Text => self.emit_text(&EmitInput {
+                target: AUDIT_ROLE_ADMIN.to_string(),
+                operation: operation,
+                actor: actor_did.to_string(),
+                status: "FAILURE".to_string(),
+                resource: resource,
+                extra: Some(format!("audit.error={}", error_message)),
                 thread_id,
                 timestamp,
-            ),
+            }),
         }
     }
 
@@ -247,25 +227,26 @@ impl AuditLogger for LoggingAuditLogger {
     ) {
         let timestamp = Utc::now();
         match self.config.log_format {
-            crate::configs::AuditLogFormat::Json => self.emit_json(
-                AUDIT_ROLE_ADMIN,
-                &operation,
-                actor_did,
-                "UNAUTHORIZED",
-                &resource,
-                Some(("reason", reason)),
+            crate::configs::AuditLogFormat::Json => self.emit_json(&EmitInput {
+                target: AUDIT_ROLE_ADMIN.to_string(),
+                operation: operation,
+                actor: actor_did.to_string(),
+                status: "UNAUTHORIZED".to_string(),
+                resource: resource,
+                extra: Some(format!("audit.reason={}", reason)),
                 thread_id,
                 timestamp,
-            ),
-            crate::configs::AuditLogFormat::Text => self.emit_text(
-                &operation,
-                actor_did,
-                "UNAUTHORIZED",
-                &resource,
-                Some(reason),
+            }),
+            crate::configs::AuditLogFormat::Text => self.emit_text(&EmitInput {
+                target: AUDIT_ROLE_ADMIN.to_string(),
+                operation: operation,
+                actor: actor_did.to_string(),
+                status: "UNAUTHORIZED".to_string(),
+                resource: resource,
+                extra: Some(format!("audit.reason={}", reason)),
                 thread_id,
                 timestamp,
-            ),
+            }),
         }
     }
 }
@@ -282,7 +263,7 @@ mod tests {
         let config = AuditConfig {
             log_format: AuditLogFormat::Text,
         };
-        let logger = LoggingAuditLogger::new(config);
+        let logger = BaseAuditLogger::new(config);
 
         let resource = AuditResource::new(
             Some(EntityId::new("entity-1")),
@@ -305,7 +286,7 @@ mod tests {
         let config = AuditConfig {
             log_format: AuditLogFormat::Json,
         };
-        let logger = LoggingAuditLogger::new(config);
+        let logger = BaseAuditLogger::new(config);
 
         let resource = AuditResource::new(
             Some(EntityId::new("entity-1")),
@@ -329,7 +310,7 @@ mod tests {
         let config = AuditConfig {
             log_format: AuditLogFormat::Text,
         };
-        let logger = LoggingAuditLogger::new(config);
+        let logger = BaseAuditLogger::new(config);
 
         let resource = AuditResource::empty();
 
@@ -348,7 +329,7 @@ mod tests {
         let config = AuditConfig {
             log_format: AuditLogFormat::Json,
         };
-        let logger = LoggingAuditLogger::new(config);
+        let logger = BaseAuditLogger::new(config);
 
         let resource = AuditResource::empty();
 
@@ -368,7 +349,7 @@ mod tests {
         let config = AuditConfig {
             log_format: AuditLogFormat::Text,
         };
-        let logger = LoggingAuditLogger::new(config);
+        let logger = BaseAuditLogger::new(config);
 
         let resource = AuditResource::empty();
 
@@ -387,7 +368,7 @@ mod tests {
         let config = AuditConfig {
             log_format: AuditLogFormat::Json,
         };
-        let logger = LoggingAuditLogger::new(config);
+        let logger = BaseAuditLogger::new(config);
 
         let resource = AuditResource::empty();
 

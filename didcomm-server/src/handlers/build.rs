@@ -5,9 +5,7 @@ use crate::{
         trqp::TRQPMessagesHandler,
     },
 };
-use app::{
-    audit::audit_logger::LoggingAuditLogger, storage::repository::TrustRecordAdminRepository,
-};
+use app::{audit::audit_logger::BaseAuditLogger, storage::repository::TrustRecordAdminRepository};
 use std::sync::Arc;
 
 impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
@@ -16,7 +14,7 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
             repository: repository.clone(),
         };
 
-        let audit_logger = Arc::new(LoggingAuditLogger::new(
+        let audit_logger = Arc::new(BaseAuditLogger::new(
             config.admin_api_config.audit_config.clone(),
         ));
         let tradmin = AdminMessagesHandler {
