@@ -34,7 +34,7 @@ jobs:
           rustflags: ''
           toolchain: stable
           override: true
-      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - uses: ./.github/actions/rust-dependencies
       - run: cargo check
 
   test:
@@ -50,7 +50,7 @@ jobs:
           rustflags: ''
           toolchain: stable
           override: true
-      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - uses: ./.github/actions/rust-dependencies
       - name: Setup environment
         run: cp .env.pipeline .env
       - run: cargo test
@@ -69,7 +69,7 @@ jobs:
           toolchain: stable
           override: true
           components: rustfmt
-      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - uses: ./.github/actions/rust-dependencies
       - name: Rustfmt Check
         uses: actions-rust-lang/rustfmt@v1
 
@@ -87,7 +87,7 @@ jobs:
           toolchain: stable
           override: true
           components: clippy
-      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - uses: ./.github/actions/rust-dependencies
       - run: cargo clippy --no-deps
 
   coverage:
@@ -103,7 +103,7 @@ jobs:
           rustflags: ''
           toolchain: stable
           override: true
-      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - uses: ./.github/actions/rust-dependencies
       - name: Setup environment
         run: cp .env.pipeline .env
       - name: Generate code coverage
@@ -111,10 +111,4 @@ jobs:
           if ! cargo llvm-cov --version; then
             cargo install cargo-llvm-cov
           fi
-
-          for crate_name in $(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.source == null) | .name'); do
-            echo "Generating coverage for crate at $crate_name"
-
-            local_version=$(cargo info ${crate_name} | grep "version" | grep --invert-match "rust-version" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-            cargo llvm-cov --package ${crate_name}@${local_version} --summary-only --fail-under-lines=70
-          done
+          cargo llvm-cov --all-features --workspace --summary-only --fail-under-lines=70
