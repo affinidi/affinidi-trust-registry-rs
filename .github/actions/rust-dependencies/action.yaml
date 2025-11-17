@@ -1,0 +1,12 @@
+name: 'Install Rust Dependencies'
+description: 'install Rust dependencies'
+inputs: {}
+outputs: {}
+runs:
+  using: 'composite'
+  steps:
+    - name: 'install required Rust dependencies'
+      shell: bash
+      run: |
+        sudo apt update
+        sudo apt install build-essential libdbus-1-dev libssl-dev
