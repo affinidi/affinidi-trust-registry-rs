@@ -1,7 +1,6 @@
 [advisories]
 # Ignore advisories for specific vulnerabilities
-# Add RUSTSEC IDs here as needed, e.g.:
-# ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2024-0001"]
+# Add RUSTSEC IDs here as needed:
 ignore = ["RUSTSEC-2022-0040"]
 
 # Warn instead of error for these severity levels
