@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 static SERVER_INIT: OnceCell<()> = OnceCell::const_new();
 static TEST_CONTEXT: OnceCell<Arc<TestConfig>> = OnceCell::const_new();
+static CLEAR_MESSAGES: OnceCell<()> = OnceCell::const_new();
 
 pub const ENTITY_ID: &str = "did:example:entityYW";
 pub const AUTHORITY_ID: &str = "did:example:authorityWY";
@@ -82,15 +83,28 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
     )
 }
 
+async fn clear_messages(atm: &Arc<ATM>, profile: &Arc<ATMProfile>) {
+    CLEAR_MESSAGES
+        .get_or_init(|| async {
+            atm.fetch_messages(
+                &profile,
+                &FetchOptions {
+                    limit: INITIAL_FETCH_LIMIT,
+                    start_id: None,
+                    delete_policy: FetchDeletePolicy::Optimistic,
+                },
+            )
+            .await
+            .unwrap();
+        })
+        .await
+        .clone()
+}
 async fn init_didcomm_server() {
     SERVER_INIT
         .get_or_init(|| async {
             tokio::spawn(async move {
                 start().await;
-                // Keep the task alive indefinitely to prevent server shutdown for ci
-                loop {
-                    tokio::time::sleep(Duration::from_secs(3600)).await;
-                }
             });
         })
         .await;
@@ -208,16 +222,7 @@ async fn setup_test_environment(
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Clear any existing messages
-    atm.fetch_messages(
-        &profile,
-        &FetchOptions {
-            limit: INITIAL_FETCH_LIMIT,
-            start_id: None,
-            delete_policy: FetchDeletePolicy::Optimistic,
-        },
-    )
-    .await
-    .unwrap();
+    clear_messages(&atm, &profile).await;
 
     (atm, profile, protocols)
 }
