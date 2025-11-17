@@ -85,7 +85,13 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
 async fn init_didcomm_server() {
     SERVER_INIT
         .get_or_init(|| async {
-            tokio::spawn(async move { start().await });
+            tokio::spawn(async move {
+                start().await;
+                // Keep the task alive indefinitely to prevent server shutdown for ci
+                loop {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+            });
         })
         .await;
 }
