@@ -19,6 +19,8 @@ jobs:
           ref: ${{ github.head_ref }}
       - uses: actions-rust-lang/audit@v1
         name: Audit Rust Dependencies
+        with:
+          file: audit.toml
   cargo-deny:
     name: 'License check'
     runs-on: ubuntu-24.04
