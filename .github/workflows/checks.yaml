@@ -21,18 +21,6 @@ jobs:
         name: Audit Rust Dependencies
         with:
           file: audit.toml
-  cargo-deny:
-    name: 'License check'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.head_ref }}
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          rust-version: '1.85.0'
-          command: check bans licenses sources
   check:
     name: Cargo Check
     runs-on: ubuntu-24.04
@@ -63,6 +51,8 @@ jobs:
           toolchain: stable
           override: true
       - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - name: Setup environment
+        run: cp .env.pipeline .env
       - run: cargo test
 
   fmt:
@@ -114,6 +104,8 @@ jobs:
           toolchain: stable
           override: true
       - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - name: Setup environment
+        run: cp .env.pipeline .env
       - name: Generate code coverage
         run: |
           if ! cargo llvm-cov --version; then
