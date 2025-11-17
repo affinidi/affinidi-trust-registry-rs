@@ -52,7 +52,7 @@ jobs:
           override: true
       - uses: ./.github/actions/rust-dependencies
       - name: Setup environment
-        run: cp .env.pipeline .env
+        run: cp .env.pipeline .env.test
       - run: cargo test
 
   fmt:
@@ -105,7 +105,7 @@ jobs:
           override: true
       - uses: ./.github/actions/rust-dependencies
       - name: Setup environment
-        run: cp .env.pipeline .env
+        run: cp .env.pipeline .env.test
       - name: Generate code coverage
         run: |
           if ! cargo llvm-cov --version; then
