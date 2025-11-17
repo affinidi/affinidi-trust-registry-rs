@@ -1,30 +1,10 @@
 on:
-  workflow_call:
-    inputs:
-      toolchain:
-        required: false
-        type: string
-        default: stable
-      rustflags:
-        required: false
-        type: string
-        default: ''
-      cargoDenyRustVersion:
-        required: false
-        type: string
-        default: '1.85.0'
-      auditIgnore:
-        required: false
-        type: string
-        default: ''
-      coverage:
-        required: false
-        type: number
-        default: 70
-      repo-path:
-        required: false
-        default: '.'
-        type: string
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
 
 jobs:
   audit:
@@ -39,9 +19,6 @@ jobs:
           ref: ${{ github.head_ref }}
       - uses: actions-rust-lang/audit@v1
         name: Audit Rust Dependencies
-        with:
-          # Comma separated list of issues to ignore (or configure in audit.toml)
-          ignore: ${{ inputs.auditIgnore }}
   cargo-deny:
     name: 'License check'
     runs-on: ubuntu-24.04
@@ -52,7 +29,7 @@ jobs:
           ref: ${{ github.head_ref }}
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          rust-version: ${{ inputs.cargoDenyRustVersion }}
+          rust-version: '1.85.0'
           command: check bans licenses sources
   check:
     name: Cargo Check
@@ -64,8 +41,7 @@ jobs:
           ref: ${{ github.head_ref }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ inputs.toolchain }}
-          rustflags: ${{ inputs.rustflags }}
+          toolchain: stable
           override: true
       - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
       - run: cargo check
@@ -73,17 +49,6 @@ jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-24.04
-    services:
-      localstack:
-        image: localstack/localstack:3.6.0
-        container_name: localstack
-        restart: always
-        ports:
-          - 4566:4566
-        environment:
-          - SERVICES=dynamodb,firehose,kms,secretsmanager,sqs,events,s3,eventbridge,iot
-          - DEBUG=1
-          - DEFAULT_REGION=ap-southeast-1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,14 +56,9 @@ jobs:
           ref: ${{ github.head_ref }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ inputs.toolchain }}
-          rustflags: ${{ inputs.rustflags }}
+          toolchain: stable
           override: true
       - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
-      - run: |
-          if [ -f .env.pipeline ]; then
-            cp .env.pipeline .env
-          fi
       - run: cargo test
 
   fmt:
@@ -111,8 +71,7 @@ jobs:
           ref: ${{ github.head_ref }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ inputs.toolchain }}
-          rustflags: ${{ inputs.rustflags }}
+          toolchain: stable
           override: true
           components: rustfmt
       - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
@@ -129,8 +88,7 @@ jobs:
           ref: ${{ github.head_ref }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ inputs.toolchain }}
-          rustflags: ${{ inputs.rustflags }}
+          toolchain: stable
           override: true
           components: clippy
       - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
@@ -146,8 +104,7 @@ jobs:
           ref: ${{ github.head_ref }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ inputs.toolchain }}
-          rustflags: ${{ inputs.rustflags }}
+          toolchain: stable
           override: true
       - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
       - name: Generate code coverage
@@ -160,5 +117,5 @@ jobs:
             echo "Generating coverage for crate at $crate_name"
 
             local_version=$(cargo info ${crate_name} | grep "version" | grep --invert-match "rust-version" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-            cargo llvm-cov --package ${crate_name}@${local_version} --summary-only --fail-under-lines=${{ inputs.coverage }}
+            cargo llvm-cov --package ${crate_name}@${local_version} --summary-only --fail-under-lines=70
           done
