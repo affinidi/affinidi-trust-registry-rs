@@ -1,17 +1,164 @@
-name: checks
-
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
+  workflow_call:
+    inputs:
+      toolchain:
+        required: false
+        type: string
+        default: stable
+      rustflags:
+        required: false
+        type: string
+        default: ''
+      cargoDenyRustVersion:
+        required: false
+        type: string
+        default: '1.85.0'
+      auditIgnore:
+        required: false
+        type: string
+        default: ''
+      coverage:
+        required: false
+        type: number
+        default: 70
+      repo-path:
+        required: false
+        default: '.'
+        type: string
+
 jobs:
-  rust-pipeline:
-    uses: affinidi/pipeline-rust/.github/workflows/checks.yaml@main
-    secrets: inherit
-    with:
-      toolchain: '1.88.0'
-      rustflags: '--cfg tracing_unstable'
-      auditIgnore: 'RUSTSEC-2022-0040,RUSTSEC-2023-0071,RUSTSEC-2024-0373'
-      coverage: 0
-      useRedis: true
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+      - uses: actions-rust-lang/audit@v1
+        name: Audit Rust Dependencies
+        with:
+          # Comma separated list of issues to ignore (or configure in audit.toml)
+          ignore: ${{ inputs.auditIgnore }}
+  cargo-deny:
+    name: 'License check'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: ${{ inputs.cargoDenyRustVersion }}
+          command: check bans licenses sources
+  check:
+    name: Cargo Check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          rustflags: ${{ inputs.rustflags }}
+          override: true
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - run: cargo check
+
+  test:
+    name: Test Suite
+    runs-on: ubuntu-24.04
+    services:
+      localstack:
+        image: localstack/localstack:3.6.0
+        container_name: localstack
+        restart: always
+        ports:
+          - 4566:4566
+        environment:
+          - SERVICES=dynamodb,firehose,kms,secretsmanager,sqs,events,s3,eventbridge,iot
+          - DEBUG=1
+          - DEFAULT_REGION=ap-southeast-1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          rustflags: ${{ inputs.rustflags }}
+          override: true
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - run: |
+          if [ -f .env.pipeline ]; then
+            cp .env.pipeline .env
+          fi
+      - run: cargo test
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          rustflags: ${{ inputs.rustflags }}
+          override: true
+          components: rustfmt
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - name: Rustfmt Check
+        uses: actions-rust-lang/rustfmt@v1
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          rustflags: ${{ inputs.rustflags }}
+          override: true
+          components: clippy
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - run: cargo clippy --no-deps
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          rustflags: ${{ inputs.rustflags }}
+          override: true
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - name: Generate code coverage
+        run: |
+          if ! cargo llvm-cov --version; then
+            cargo install cargo-llvm-cov
+          fi
+
+          for crate_name in $(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.source == null) | .name'); do
+            echo "Generating coverage for crate at $crate_name"
+
+            local_version=$(cargo info ${crate_name} | grep "version" | grep --invert-match "rust-version" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+            cargo llvm-cov --package ${crate_name}@${local_version} --summary-only --fail-under-lines=${{ inputs.coverage }}
+          done
