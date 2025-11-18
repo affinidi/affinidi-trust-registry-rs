@@ -18,7 +18,7 @@ affinidi-tdk = "0.2.4"
 anyhow = "1.0.71"
 async-trait = "0.1.89"
 base64 = "0.22"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 csv = "1.4.0"
 dotenvy = "0.15.7"
 axum = "0.8.1"

@@ -53,22 +53,6 @@ impl Configs for DidcommServerConfigs {
             _ => TrustStorageBackend::Csv,
         };
 
-        let use_file_storage = env::var("FILE_STORAGE_ENABLED")
-            .unwrap_or("false".to_string())
-            .to_lowercase()
-            == "true";
-        let file_storage_config = if use_file_storage {
-            Some(FileStorageConfig {
-                enabled: true,
-                file_path: env::var("FILE_STORAGE_PATH").unwrap_or("trust_records.csv".to_string()),
-                update_interval_sec: env::var("FILE_STORAGE_UPDATE_INTERVAL_SEC")
-                    .unwrap_or("60".to_string())
-                    .parse::<u64>()?,
-            })
-        } else {
-            None
-        };
-
         let admin_dids_str = env::var("ADMIN_DIDS").unwrap_or_default();
         let admin_dids: Vec<String> = admin_dids_str
             .split(',')
