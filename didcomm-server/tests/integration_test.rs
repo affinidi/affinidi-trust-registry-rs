@@ -241,8 +241,8 @@ async fn setup_test_environment(
 
 #[tokio::test]
 #[serial]
-async fn test_keep_server_alive() {
-    init_didcomm_server().await;
+async fn test_aa_keep_server_alive() {
+    get_test_context().await;
     let timeout_secs = 120; // 2 minutes max wait
     let start = std::time::Instant::now();
 
