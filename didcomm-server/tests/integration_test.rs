@@ -23,7 +23,7 @@ use didcomm_server::{
     server::start,
 };
 use serde_json::{Value, json};
-use serial_test::serial;
+use serial_test::{parallel, serial};
 use std::{
     env,
     fs::File,
@@ -240,6 +240,26 @@ async fn setup_test_environment(
 }
 
 #[tokio::test]
+#[serial]
+async fn test_keep_server_alive() {
+    init_didcomm_server().await;
+    let timeout_secs = 120; // 2 minutes max wait
+    let start = std::time::Instant::now();
+
+    while TEST_COUNTER.load(Ordering::SeqCst) < TOTAL_TESTS {
+        let current = TEST_COUNTER.load(Ordering::SeqCst);
+        println!("Monitor: {}/{} tests completed", current, TOTAL_TESTS);
+
+        if start.elapsed().as_secs() > timeout_secs {
+            panic!("Timeout: Only {}/{} tests completed", current, TOTAL_TESTS);
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+#[tokio::test]
+#[parallel]
 async fn test_admin_read() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -314,6 +334,7 @@ async fn test_admin_read() {
 }
 
 #[tokio::test]
+#[parallel]
 async fn test_admin_update() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -388,6 +409,7 @@ async fn test_admin_update() {
 }
 
 #[tokio::test]
+#[parallel]
 async fn test_admin_list() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -474,6 +496,7 @@ async fn test_admin_list() {
 }
 
 #[tokio::test]
+#[parallel]
 async fn test_admin_delete() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -546,6 +569,7 @@ async fn test_admin_delete() {
 }
 
 #[tokio::test]
+#[parallel]
 async fn test_trqp_handler() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -617,25 +641,6 @@ async fn test_trqp_handler() {
     assert_eq!(response_body["recognized"].as_bool(), Some(true));
     assert_eq!(response_body["authorized"].as_bool(), Some(true));
     TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_keep_server_alive() {
-    init_didcomm_server().await;
-    let timeout_secs = 120; // 2 minutes max wait
-    let start = std::time::Instant::now();
-
-    while TEST_COUNTER.load(Ordering::SeqCst) < TOTAL_TESTS {
-        let current = TEST_COUNTER.load(Ordering::SeqCst);
-        println!("Monitor: {}/{} tests completed", current, TOTAL_TESTS);
-
-        if start.elapsed().as_secs() > timeout_secs {
-            panic!("Timeout: Only {}/{} tests completed", current, TOTAL_TESTS);
-        }
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
 }
 
 async fn send_message(
