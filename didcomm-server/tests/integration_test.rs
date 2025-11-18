@@ -240,7 +240,6 @@ async fn setup_test_environment(
 }
 
 #[tokio::test]
-#[serial]
 async fn test_aa_keep_server_alive() {
     get_test_context().await;
     let timeout_secs = 120; // 2 minutes max wait
@@ -259,7 +258,7 @@ async fn test_aa_keep_server_alive() {
 }
 
 #[tokio::test]
-#[parallel]
+// #[parallel]
 async fn test_admin_read() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -334,7 +333,7 @@ async fn test_admin_read() {
 }
 
 #[tokio::test]
-#[parallel]
+// #[parallel]
 async fn test_admin_update() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -409,7 +408,7 @@ async fn test_admin_update() {
 }
 
 #[tokio::test]
-#[parallel]
+// #[parallel]
 async fn test_admin_list() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -496,7 +495,7 @@ async fn test_admin_list() {
 }
 
 #[tokio::test]
-#[parallel]
+// #[parallel]
 async fn test_admin_delete() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -569,7 +568,7 @@ async fn test_admin_delete() {
 }
 
 #[tokio::test]
-#[parallel]
+// #[parallel]
 async fn test_trqp_handler() {
     let (atm_test_context, config) = get_test_context().await;
 
