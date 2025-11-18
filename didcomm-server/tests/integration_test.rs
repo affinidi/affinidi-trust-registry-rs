@@ -23,7 +23,7 @@ use didcomm_server::{
     server::start,
 };
 use serde_json::{Value, json};
-use serial_test::{parallel, serial};
+use serial_test::parallel;
 use std::{
     env,
     fs::File,
