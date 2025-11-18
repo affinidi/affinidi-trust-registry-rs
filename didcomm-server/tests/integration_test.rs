@@ -47,7 +47,7 @@ pub const AUTHORITY_ID: &str = "did:example:authorityWY";
 pub const ACTION: &str = "action";
 pub const RESOURCE: &str = "resource";
 pub const PROBLEM_REPORT_TYPE: &str = "https://didcomm.org/report-problem/2.0/problem-report";
-pub const TOTAL_TESTS: usize = 5; // adjust if number of test cases change
+pub const TOTAL_TESTS: usize = 5; // adjust if number of test cases changes
 
 const INITIAL_FETCH_LIMIT: usize = 100;
 const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
@@ -109,9 +109,9 @@ async fn clear_messages(atm: &Arc<ATM>, profile: &Arc<ATMProfile>) {
             .await
             .unwrap();
         })
-        .await
-        .clone()
+        .await;
 }
+
 async fn init_didcomm_server() {
     SERVER_INIT
         .get_or_init(|| async {
@@ -239,8 +239,10 @@ async fn setup_test_environment(
     (atm, profile, protocols)
 }
 
-// Only added to keep server alive during tests
-// Needed for pipeline
+// This test exists to keep the server alive during parallel test execution in the CI pipeline.
+// In the pipeline, all parallel tests share a single server instance. Without this test,
+// the server could shut down before all tests have finished, causing test failures.
+// This mechanism ensures the server remains running until all tests have completed.
 #[tokio::test]
 #[parallel]
 async fn test_aa_keep_server_alive() {
