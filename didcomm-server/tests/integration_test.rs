@@ -23,19 +23,30 @@ use didcomm_server::{
     server::start,
 };
 use serde_json::{Value, json};
-use std::{env, fs::File, sync::Arc, time::Duration, vec};
+use std::{
+    env,
+    fs::File,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+    vec,
+};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 static SERVER_INIT: OnceCell<()> = OnceCell::const_new();
 static TEST_CONTEXT: OnceCell<Arc<TestConfig>> = OnceCell::const_new();
 static CLEAR_MESSAGES: OnceCell<()> = OnceCell::const_new();
+static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub const ENTITY_ID: &str = "did:example:entityYW";
 pub const AUTHORITY_ID: &str = "did:example:authorityWY";
 pub const ACTION: &str = "action";
 pub const RESOURCE: &str = "resource";
 pub const PROBLEM_REPORT_TYPE: &str = "https://didcomm.org/report-problem/2.0/problem-report";
+pub const TOTAL_TESTS: usize = 5; // adjust if number of test cases change
 
 const INITIAL_FETCH_LIMIT: usize = 100;
 const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
@@ -298,6 +309,7 @@ async fn test_admin_read() {
     assert_eq!(response_body["resource"], expected_resource);
     assert_eq!(response_body["recognized"], true);
     assert_eq!(response_body["authorized"], true);
+    TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
 }
 
 #[tokio::test]
@@ -371,6 +383,7 @@ async fn test_admin_update() {
     assert_eq!(response_body["authority_id"], expected_authority_id);
     assert_eq!(response_body["action"], expected_action);
     assert_eq!(response_body["resource"], expected_resource);
+    TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
 }
 
 #[tokio::test]
@@ -456,6 +469,7 @@ async fn test_admin_list() {
     assert_eq!(our_record["authority_id"], expected_authority_id);
     assert_eq!(our_record["action"], expected_action);
     assert_eq!(our_record["resource"], expected_resource);
+    TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
 }
 
 #[tokio::test]
@@ -527,6 +541,7 @@ async fn test_admin_delete() {
     assert_eq!(response_body["action"], expected_action);
     assert_eq!(response_body["resource"], expected_resource);
     assert_eq!(response_body["entity_id"], expected_entity_id);
+    TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
 }
 
 #[tokio::test]
@@ -600,6 +615,25 @@ async fn test_trqp_handler() {
     assert_eq!(response_body["resource"], expected_resource);
     assert_eq!(response_body["recognized"].as_bool(), Some(true));
     assert_eq!(response_body["authorized"].as_bool(), Some(true));
+    TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+}
+
+#[tokio::test]
+async fn test_keep_server_alive() {
+    init_didcomm_server().await;
+    let timeout_secs = 120; // 2 minutes max wait
+    let start = std::time::Instant::now();
+
+    while TEST_COUNTER.load(Ordering::SeqCst) < TOTAL_TESTS {
+        let current = TEST_COUNTER.load(Ordering::SeqCst);
+        println!("Monitor: {}/{} tests completed", current, TOTAL_TESTS);
+
+        if start.elapsed().as_secs() > timeout_secs {
+            panic!("Timeout: Only {}/{} tests completed", current, TOTAL_TESTS);
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 async fn send_message(
