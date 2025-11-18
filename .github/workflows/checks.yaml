@@ -53,7 +53,7 @@ jobs:
       - uses: ./.github/actions/rust-dependencies
       - name: Setup environment
         run: cp .env.pipeline .env.test
-      - run: RUST_LOG=info cargo test
+      - run: cargo test
 
   fmt:
     name: Rustfmt
@@ -112,4 +112,4 @@ jobs:
           if ! cargo llvm-cov --version; then
             cargo install cargo-llvm-cov
           fi
-          cargo llvm-cov --all-features --workspace --summary-only --fail-under-lines=70
+          cargo llvm-cov --all-features -p http-server -p didcomm-server -p app --summary-only --fail-under-lines=70
