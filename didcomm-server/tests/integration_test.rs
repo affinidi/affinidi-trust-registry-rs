@@ -239,6 +239,8 @@ async fn setup_test_environment(
     (atm, profile, protocols)
 }
 
+// Only added to keep server alive during tests
+// Needed for pipeline
 #[tokio::test]
 #[parallel]
 async fn test_aa_keep_server_alive() {
