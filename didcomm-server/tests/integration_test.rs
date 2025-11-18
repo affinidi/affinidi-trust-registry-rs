@@ -23,6 +23,7 @@ use didcomm_server::{
     server::start,
 };
 use serde_json::{Value, json};
+use serial_test::serial;
 use std::{
     env,
     fs::File,
@@ -619,6 +620,7 @@ async fn test_trqp_handler() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_keep_server_alive() {
     init_didcomm_server().await;
     let timeout_secs = 120; // 2 minutes max wait
