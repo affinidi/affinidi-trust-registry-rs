@@ -1,0 +1,16 @@
+target
+**/target
+**/*.rlib
+**/*.d
+.git
+.gitignore
+.github
+.vscode
+.idea
+.env
+.env.*
+*.local
+*.pem
+*.key
+*.log
+tmp/
