@@ -446,7 +446,7 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(5)).await;
 
         let query = TrustRecordQuery::new(
             EntityId::new("e2"),
