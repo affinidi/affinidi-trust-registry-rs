@@ -218,14 +218,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         insert_env_vars("./.env.pipeline", vars)?;
         Ok(())
     } else {
+        // Server vars
         let mut server_vars = HashMap::new();
-        let mut test_vars = HashMap::new();
         server_vars.insert(
             "PROFILE_CONFIGS".to_string(),
             format!("'[{}]'", serde_json::to_string(&tr_profile_configs)?),
         );
         insert_env_vars("./.env.example", server_vars)?;
-
+        // Testing vars
+        let mut test_vars = HashMap::new();
         test_vars.insert("TRUST_REGISTRY_DID".to_string(), test_tr_did.0);
         test_vars.insert("CLIENT_DID".to_string(), test_client_did.0.clone());
         test_vars.insert("ADMIN_DIDS".to_string(), test_client_did.0.clone());
