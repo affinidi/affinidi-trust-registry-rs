@@ -13,8 +13,9 @@
   - [Requirements](#requirements)
   - [Installation](#installation)
 - [Usage](#usage)
-  - [Run Locally](#run-locally)
-  - [Run in Docker](#run-in-docker)
+  - [Setup Environment](#setup-environment)
+  - [Run on Local Machine](#run-on-local-machine)
+  - [Run on Docker](#run-on-docker)
 - [Testing](#testing)
 - [Contributing](#contributing)
 - [Support & feedback](#support--feedback)
@@ -76,29 +77,70 @@ cargo --version
 
 ## Usage
 
-### Run locally
+### Setup Environment
 
-Clone env:
+#### 1. Generate Environment Secrets
+
+Generate the required DIDs and keys for local development. This command will inject secrets into `.env.example` and `testing/.env.test.example`.
+
+```bash
+cargo run --bin generate-secrets --features dev-tools
+```
+
+**What this generates:**
+
+- 3 DIDs and their corresponding keys
+- Didcomm Server Environment variables:
+  - `PROFILE_CONFIGS`
+- Testing Environment variables:
+  - `PROFILE_CONFIGS`
+  - `TRUST_REGISTRY_DID`
+  - `CLIENT_DID`
+  - `CLIENT_SECRETS`
+  - `ADMIN_DIDS`
+
+**Default mediator configuration:**
+
+- URL: `https://66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io`
+- DID: `did:web:66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io`
+
+**Using a custom mediator:**
+
+```bash
+MEDIATOR_URL="https://your-mediator-url.io" MEDIATOR_DID="did:web:your-mediator-did.io" cargo run --bin generate-secrets --features dev-tools
+```
+
+#### 2. Setup Environment File
+
+Copy the example environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-Run http-server:
+### Run on Local Machine
+
+#### 1.Start the Servers
+
+**Note:** All commands should be run from the root of the repository.
+
+Start the HTTP server:
 
 ```bash
 RUST_LOG=info cargo run --bin http-server
 ```
 
-Run didcomm-server:
+Start the DIDComm server:
 
 ```bash
 RUST_LOG=info cargo run --bin didcomm-server
 ```
 
-Note: run from root of repo.
+#### 2. Test the API
 
-Query data that is stored in `./sample-data/data.csv`
+Query the sample data stored in `./sample-data/data.csv`:
+
+**Recognition query example:**
 
 ```bash
 curl --location 'http://localhost:3232/recognition' \
@@ -107,9 +149,11 @@ curl --location 'http://localhost:3232/recognition' \
     "authority_id": "did:example:authority1",
     "entity_id": "did:example:entity1",
     "action": "action1",
-    "resource" : "resource1"
+    "resource": "resource1"
 }'
 ```
+
+**Authorization query example:**
 
 ```bash
 curl --location 'http://localhost:3232/authorization' \
@@ -118,30 +162,27 @@ curl --location 'http://localhost:3232/authorization' \
     "authority_id": "did:example:authority1",
     "entity_id": "did:example:entity1",
     "action": "action1",
-    "resource" : "resource1"
+    "resource": "resource1"
 }'
 ```
 
-Test with defined and non-defined ids.  
-Add more records to `./sample-data/data.csv` (context is base64 encoded VALID JSON).
+**Testing tips:**
 
-### Run in docker
+- Test with both defined and undefined IDs to verify error handling
+- Add more records to `./sample-data/data.csv` to expand test coverage
+- Note: The `context` field should contain base64-encoded valid JSON
 
-#### docker compose
+### Run on Docker
 
-Clone env:
+#### Using Docker Compose
 
-```bash
-cp .env.example .env
-```
-
-Review env vars in ./docker-compose.yaml and run:
+Review environment variables in `./docker-compose.yaml` and start the containers:
 
 ```bash
 docker compose up --build
 ```
 
-In that scenario, sample-data folder is linked as an volume for container, data.csv changes is synced by the container.
+**Note:** The `sample-data` folder is mounted as a volume, so changes to `data.csv` are automatically synchronized with the container.
 
 ## Testing
 
