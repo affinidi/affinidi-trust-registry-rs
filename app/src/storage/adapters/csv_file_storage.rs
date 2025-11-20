@@ -447,7 +447,7 @@ mod tests {
         file.flush().unwrap();
         // Give some time for the sync task to pick up the changes
         // pipeline CI machines can be slow
-        sleep(Duration::from_millis(7)).await;
+        sleep(Duration::from_millis(15)).await;
 
         let query = TrustRecordQuery::new(
             EntityId::new("e2"),
