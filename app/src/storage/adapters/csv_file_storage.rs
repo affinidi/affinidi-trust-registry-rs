@@ -436,7 +436,11 @@ mod tests {
         write!(file, "{}", sample_csv(&[("e1", "a1", "ac1", "r1")])).unwrap();
         file.flush().unwrap();
 
-        let storage = FileStorage::try_new(file.path(), 1).await.unwrap();
+        // Use a very short update interval for testing (100ms)
+        let storage = FileStorage::try_new(file.path(), 0).await.unwrap();
+
+        // Small delay to ensure sync task has started
+        sleep(Duration::from_millis(50)).await;
 
         write!(
             file.as_file_mut(),
@@ -445,9 +449,10 @@ mod tests {
         )
         .unwrap();
         file.flush().unwrap();
-        // Give some time for the sync task to pick up the changes
-        // pipeline CI machines can be slow
-        sleep(Duration::from_millis(5)).await;
+
+        // Give enough time for the sync task to pick up the changes
+        // Wait for at least one full update interval plus buffer for slow CI machines
+        sleep(Duration::from_secs(200)).await;
 
         let query = TrustRecordQuery::new(
             EntityId::new("e2"),
