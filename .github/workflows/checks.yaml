@@ -51,6 +51,8 @@ jobs:
           toolchain: stable
           override: true
       - uses: ./.github/actions/rust-dependencies
+      - name: generate configs
+        run: IN_PIPELINE=true cargo run --bin generate_secrets --features dev-tools
       - name: Setup environment
         run: cp .env.pipeline .env.test
       - run: cargo test
