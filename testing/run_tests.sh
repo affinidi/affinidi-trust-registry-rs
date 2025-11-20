@@ -24,7 +24,7 @@ export PROFILE_CONFIGS="$PROFILE_CONFIGS"
 echo "Using TR_STORAGE_BACKEND=$TR_STORAGE_BACKEND"
 # echo "Using PROFILE_CONFIGS=$PROFILE_CONFIGS"
 
-cp testing/.env.example .env.test
+cp testing/.env.test.example .env.test
 if [ $? -ne 0 ]; then
     echo "Failed to copy .env.example to .env.test. Please ensure the file exists and the destination is writable."
     exit 1
