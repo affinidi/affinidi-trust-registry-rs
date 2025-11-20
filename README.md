@@ -84,10 +84,16 @@ Clone env:
 cp .env.example .env
 ```
 
-Run http-server (instructions for didcomm-server will be added later):
+Run http-server:
 
 ```bash
 RUST_LOG=info cargo run --bin http-server
+```
+
+Run didcomm-server:
+
+```bash
+RUST_LOG=info cargo run --bin didcomm-server
 ```
 
 Note: run from root of repo.
@@ -121,32 +127,13 @@ Add more records to `./sample-data/data.csv` (context is base64 encoded VALID JS
 
 ### Run in docker
 
-#### Build and run
-
-Build:
-
-```bash
-docker buildx build \
-  --platform linux/arm64 \
-  -f http-server/Dockerfile \
-  -t trust-registry-http \
-  --load \
-  .
-```
-
-Run:
-
-```bash
-docker run \
-  -e LISTEN_ADDRESS=0.0.0.0:3232 \
-  -e RUST_LOG=debug,http_server=trace \
-  -e TR_STORAGE_BACKEND=csv \
-  -e FILE_STORAGE_PATH="/usr/local/bin/sample-data/data.csv" \
-  -p 3232:3232 \
-  trust-registry-http
-```
-
 #### docker compose
+
+Clone env:
+
+```bash
+cp .env.example .env
+```
 
 Review env vars in ./docker-compose.yaml and run:
 
