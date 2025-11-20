@@ -14,7 +14,7 @@ readme = "README.md"
 
 app = { path = "./app", version = "*" }
 
-affinidi-tdk = "0.2.4"
+affinidi-tdk = "0.2.7"
 anyhow = "1.0.71"
 async-trait = "0.1.89"
 base64 = "0.22"
