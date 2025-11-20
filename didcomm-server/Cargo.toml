@@ -45,6 +45,7 @@ path = "src/main.rs"
 [[bin]]
 name = "generate-secrets"
 path = "bin/generate_secrets.rs"
+required-features = ["dev-tools"]
 
 
 [features]
