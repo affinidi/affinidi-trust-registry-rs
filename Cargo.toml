@@ -9,6 +9,7 @@ publish = false
 rust-version = "1.88.0"
 description = "Trust Registry"
 readme = "README.md"
+license = "Apache-2.0"
 
 [workspace.dependencies]
 
