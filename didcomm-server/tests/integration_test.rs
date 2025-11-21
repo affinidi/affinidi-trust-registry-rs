@@ -245,9 +245,9 @@ async fn setup_test_environment(
 // This mechanism ensures the server remains running until all tests have completed.
 #[tokio::test]
 #[parallel]
-async fn test_aa_keep_server_alive() {
+async fn test_a_a_keep_server_alive() {
     get_test_context().await;
-    let timeout_secs = 120; // 2 minutes max wait
+    let timeout_secs = 60; // 2 minutes max wait
     let start = std::time::Instant::now();
 
     while TEST_COUNTER.load(Ordering::SeqCst) < TOTAL_TESTS {
@@ -315,13 +315,19 @@ async fn test_admin_read() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Receive read record response
-    let response_body = fetch_and_verify_response(
+    let response_body = match fetch_and_verify_response(
         &atm_test_context.atm,
         &atm_test_context.profile,
         READ_RECORD_RESPONSE_MESSAGE_TYPE,
     )
     .await
-    .unwrap();
+    {
+        Ok(body) => body,
+        Err(err) => {
+            TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+            panic!("Failed to fetch read record response: {}", err)
+        }
+    };
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "read");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "read");
@@ -392,13 +398,19 @@ async fn test_admin_update() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Receive update record response
-    let response_body = fetch_and_verify_response(
+    let response_body = match fetch_and_verify_response(
         &atm_test_context.atm,
         &atm_test_context.profile,
         UPDATE_RECORD_RESPONSE_MESSAGE_TYPE,
     )
     .await
-    .unwrap();
+    {
+        Ok(body) => body,
+        Err(err) => {
+            TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+            panic!("Failed to fetch update record response: {}", err)
+        }
+    };
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "update");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "update");
@@ -465,13 +477,19 @@ async fn test_admin_list() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Receive list records response
-    let response_body = fetch_and_verify_response(
+    let response_body = match fetch_and_verify_response(
         &atm_test_context.atm,
         &atm_test_context.profile,
         LIST_RECORDS_RESPONSE_MESSAGE_TYPE,
     )
     .await
-    .unwrap();
+    {
+        Ok(body) => body,
+        Err(err) => {
+            TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+            panic!("Failed to fetch list records response: {}", err)
+        }
+    };
     let count = response_body["count"].as_u64().unwrap_or(0);
     let records = response_body["records"]
         .as_array()
@@ -552,13 +570,19 @@ async fn test_admin_delete() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Receive delete record response
-    let response_body = fetch_and_verify_response(
+    let response_body = match fetch_and_verify_response(
         &atm_test_context.atm,
         &atm_test_context.profile,
         DELETE_RECORD_RESPONSE_MESSAGE_TYPE,
     )
     .await
-    .unwrap();
+    {
+        Ok(body) => body,
+        Err(err) => {
+            TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+            panic!("Failed to fetch delete record response: {}", err)
+        }
+    };
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "delete");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "delete");
@@ -625,13 +649,19 @@ async fn test_trqp_handler() {
     tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
 
     // Receive recognition record response
-    let response_body = fetch_and_verify_response(
+    let response_body = match fetch_and_verify_response(
         &atm_test_context.atm,
         &atm_test_context.profile,
         QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE,
     )
     .await
-    .unwrap();
+    {
+        Ok(body) => body,
+        Err(err) => {
+            TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+            panic!("Failed to fetch read record response: {}", err)
+        }
+    };
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "trqp");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "trqp");

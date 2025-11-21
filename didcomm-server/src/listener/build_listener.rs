@@ -36,7 +36,7 @@ impl<H: MessageHandler> Listener<H> {
         let atm = tdk.atm.clone().ok_or("Value is missing")?;
 
         let listener_profile = timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(10),
             atm.profile_add(
                 &ATMProfile::from_tdk_profile(&atm, &listener_profile_tdk).await?,
                 live_stream,
