@@ -81,7 +81,7 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
     let message_wait_duration_secs = in_pipeline
         .then(|| PIPELINE_MESSAGE_WAIT_DURATION_SECS)
         .unwrap_or(MESSAGE_WAIT_DURATION_SECS);
-    let server_timeout_secs = in_pipeline.then(|| 120).unwrap_or(60);
+    let server_timeout_secs = in_pipeline.then(|| 160).unwrap_or(60);
     let (atm, profile, protocols) =
         setup_test_environment(&client_did, &client_secrets, &mediator_did).await;
 
@@ -259,7 +259,7 @@ async fn setup_test_environment(
 // This mechanism ensures the server remains running until all tests have completed.
 #[tokio::test]
 #[parallel]
-async fn test_a_a_keep_server_alive() {
+async fn test_aa_keep_server_alive() {
     let config = get_test_context().await; // 2 minutes max wait
     let start = std::time::Instant::now();
 
