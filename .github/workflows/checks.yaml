@@ -103,7 +103,9 @@ jobs:
           components: clippy
       - uses: ./.github/actions/rust-dependencies
       - run: cargo clippy --no-deps
-
+  wiz-scan:
+    uses: affinidi/pipeline-security/.github/workflows/wizcli-dirscan.yml@main
+    secrets: inherit
   coverage:
     name: Coverage
     runs-on: ubuntu-24.04
