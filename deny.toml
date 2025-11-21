@@ -16,14 +16,11 @@ allow = [
     "BSD-1-Clause",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    "0BSD",
     "CC0-1.0",
     "ISC",
     "MIT-0",
     "MIT",
-    "NCSA",
     "Unlicense",
-    "Zlib",
     # As stated here https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html#spdx-identifiers
     # 3.11 versions of SPDX License List was used and below licenses are not included there.
     # They are commented to avoid "[license-not-encountered]" warnings.
@@ -47,87 +44,32 @@ allow = [
 
 exceptions = [
     # changed from: { allow = ["MPL-2.0"], crate = "webpki-root-certs" },
-    { allow = [
-        "CDLA-Permissive-2.0",
-    ], crate = "webpki-root-certs" },
-    { allow = [
-        "OpenSSL",
-    ], crate = "aws-lc-sys" },
-    { allow = [
-        "MPL-2.0",
-    ], crate = "bitmaps" },
-    { allow = [
-        "MPL-2.0",
-    ], crate = "im" },
-    { allow = [
-        "MPL-2.0",
-    ], crate = "webpki-roots" },
-    { allow = [
-        "CC-BY-SA-3.0",
-        "MPL-2.0",
-    ], crate = "sized-chunks" },
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
+    { allow = ["OpenSSL"], crate = "aws-lc-sys" },
+    { allow = ["MPL-2.0"], crate = "bitmaps" },
+    { allow = ["MPL-2.0"], crate = "im" },
+    { allow = ["MPL-2.0"], crate = "webpki-roots" },
+    { allow = ["CC-BY-SA-3.0", "MPL-2.0"], crate = "sized-chunks" },
     # TODO: align
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "icu_collections" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "icu_locale_core" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "icu_normalizer" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "icu_normalizer_data" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "icu_properties" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "icu_properties_data" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "icu_provider" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "litemap" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "potential_utf" },
-    { allow = [
-        "Apache-2.0 WITH LLVM-exception",
-        "Unicode-3.0",
-    ], crate = "target-lexicon" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "tinystr" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "unicode-ident" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "writeable" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "yoke" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "yoke-derive" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "zerofrom" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "zerofrom-derive" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "zerotrie" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "zerovec" },
-    { allow = [
-        "Unicode-3.0",
-    ], crate = "zerovec-derive" },
+    { allow = ["Unicode-3.0"], crate = "icu_collections" },
+    { allow = ["Unicode-3.0"], crate = "icu_locale_core" },
+    { allow = ["Unicode-3.0"], crate = "icu_normalizer" },
+    { allow = ["Unicode-3.0"], crate = "icu_normalizer_data" },
+    { allow = ["Unicode-3.0"], crate = "icu_properties" },
+    { allow = ["Unicode-3.0"], crate = "icu_properties_data" },
+    { allow = ["Unicode-3.0"], crate = "icu_provider" },
+    { allow = ["Unicode-3.0"], crate = "litemap" },
+    { allow = ["Unicode-3.0"], crate = "potential_utf" },
+    { allow = ["Unicode-3.0"], crate = "tinystr" },
+    { allow = ["Unicode-3.0"], crate = "unicode-ident" },
+    { allow = ["Unicode-3.0"], crate = "writeable" },
+    { allow = ["Unicode-3.0"], crate = "yoke" },
+    { allow = ["Unicode-3.0"], crate = "yoke-derive" },
+    { allow = ["Unicode-3.0"], crate = "zerofrom" },
+    { allow = ["Unicode-3.0"], crate = "zerofrom-derive" },
+    { allow = ["Unicode-3.0"], crate = "zerotrie" },
+    { allow = ["Unicode-3.0"], crate = "zerovec" },
+    { allow = ["Unicode-3.0"], crate = "zerovec-derive" },
 ]
 
 # Sigh
