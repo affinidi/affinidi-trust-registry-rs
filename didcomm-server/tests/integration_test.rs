@@ -51,12 +51,16 @@ pub const TOTAL_TESTS: usize = 5; // adjust if number of test cases changes
 
 const INITIAL_FETCH_LIMIT: usize = 100;
 const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
+const PIPELINE_MESSAGE_WAIT_DURATION_SECS: u64 = 10;
 
 pub struct TestConfig {
     pub client_did: String,
     pub client_secrets: String,
     pub mediator_did: String,
     pub trust_registry_did: String,
+    pub in_pipeline: bool,
+    pub message_wait_duration_secs: u64,
+    pub server_timeout_secs: u64,
 }
 
 pub struct AtmTestContext {
@@ -70,7 +74,14 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
     let client_did = env::var("CLIENT_DID").expect("CLIENT_DID not set in .env");
     let client_secrets = env::var("CLIENT_SECRETS").expect("CLIENT_SECRETS not set in .env");
     let mediator_did = env::var("MEDIATOR_DID").expect("MEDIATOR_DID not set in .env");
-
+    let in_pipeline = env::var("IN_PIPELINE")
+        .unwrap_or("false".to_string())
+        .to_lowercase()
+        == "true";
+    let message_wait_duration_secs = in_pipeline
+        .then(|| PIPELINE_MESSAGE_WAIT_DURATION_SECS)
+        .unwrap_or(MESSAGE_WAIT_DURATION_SECS);
+    let server_timeout_secs = in_pipeline.then(|| 120).unwrap_or(60);
     let (atm, profile, protocols) =
         setup_test_environment(&client_did, &client_secrets, &mediator_did).await;
 
@@ -88,6 +99,9 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
                     mediator_did: env::var("MEDIATOR_DID").expect("MEDIATOR_DID not set in .env"),
                     trust_registry_did: env::var("TRUST_REGISTRY_DID")
                         .expect("TRUST_REGISTRY_DID not set in .env"),
+                    in_pipeline,
+                    message_wait_duration_secs,
+                    server_timeout_secs,
                 })
             })
             .await
@@ -246,15 +260,14 @@ async fn setup_test_environment(
 #[tokio::test]
 #[parallel]
 async fn test_a_a_keep_server_alive() {
-    get_test_context().await;
-    let timeout_secs = 60; // 2 minutes max wait
+    let config = get_test_context().await; // 2 minutes max wait
     let start = std::time::Instant::now();
 
     while TEST_COUNTER.load(Ordering::SeqCst) < TOTAL_TESTS {
         let current = TEST_COUNTER.load(Ordering::SeqCst);
         println!("Monitor: {}/{} tests completed", current, TOTAL_TESTS);
 
-        if start.elapsed().as_secs() > timeout_secs {
+        if start.elapsed().as_secs() > config.1.server_timeout_secs {
             panic!("Timeout: Only {}/{} tests completed", current, TOTAL_TESTS);
         }
 
@@ -288,7 +301,7 @@ async fn test_admin_read() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
     let _ = fetch_and_verify_response(
@@ -312,7 +325,7 @@ async fn test_admin_read() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive read record response
     let response_body = match fetch_and_verify_response(
@@ -369,7 +382,7 @@ async fn test_admin_update() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
     let _ = fetch_and_verify_response(
@@ -395,7 +408,7 @@ async fn test_admin_update() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive update record response
     let response_body = match fetch_and_verify_response(
@@ -450,7 +463,7 @@ async fn test_admin_list() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
     let _ = fetch_and_verify_response(
@@ -474,7 +487,7 @@ async fn test_admin_list() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive list records response
     let response_body = match fetch_and_verify_response(
@@ -543,7 +556,7 @@ async fn test_admin_delete() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
     let _ = fetch_and_verify_response(
@@ -567,7 +580,7 @@ async fn test_admin_delete() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive delete record response
     let response_body = match fetch_and_verify_response(
@@ -622,7 +635,7 @@ async fn test_trqp_handler() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
     let _ = fetch_and_verify_response(
@@ -646,7 +659,7 @@ async fn test_trqp_handler() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(MESSAGE_WAIT_DURATION_SECS)).await;
+    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive recognition record response
     let response_body = match fetch_and_verify_response(
