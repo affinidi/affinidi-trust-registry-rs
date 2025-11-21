@@ -204,7 +204,10 @@ async fn fetch_and_verify_response(
     // Find the expected message
     let result = unpacked_messages
         .into_iter()
-        .find(|(msg, _)| msg.type_ == expected_message_type)
+        .find(|(msg, _)| {
+            println!("Checking message type: {}", msg.type_);
+            msg.type_ == expected_message_type
+        })
         .map(|(msg, meta)| {
             // Delete the message we found
             let hash = meta.sha256_hash.clone();
@@ -265,7 +268,6 @@ async fn test_aa_keep_server_alive() {
 
     while TEST_COUNTER.load(Ordering::SeqCst) < TOTAL_TESTS {
         let current = TEST_COUNTER.load(Ordering::SeqCst);
-        println!("Monitor: {}/{} tests completed", current, TOTAL_TESTS);
 
         if start.elapsed().as_secs() > config.1.server_timeout_secs {
             panic!("Timeout: Only {}/{} tests completed", current, TOTAL_TESTS);
@@ -328,19 +330,13 @@ async fn test_admin_read() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive read record response
-    let response_body = match fetch_and_verify_response(
+    let response_body = fetch_and_verify_response(
         &atm_test_context.atm,
         &atm_test_context.profile,
         READ_RECORD_RESPONSE_MESSAGE_TYPE,
     )
     .await
-    {
-        Ok(body) => body,
-        Err(err) => {
-            TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            panic!("Failed to fetch read record response: {}", err)
-        }
-    };
+    .unwrap();
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "read");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "read");
@@ -411,19 +407,13 @@ async fn test_admin_update() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive update record response
-    let response_body = match fetch_and_verify_response(
+    let response_body = fetch_and_verify_response(
         &atm_test_context.atm,
         &atm_test_context.profile,
         UPDATE_RECORD_RESPONSE_MESSAGE_TYPE,
     )
     .await
-    {
-        Ok(body) => body,
-        Err(err) => {
-            TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            panic!("Failed to fetch update record response: {}", err)
-        }
-    };
+    .unwrap();
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "update");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "update");
@@ -490,19 +480,14 @@ async fn test_admin_list() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive list records response
-    let response_body = match fetch_and_verify_response(
+    let response_body = fetch_and_verify_response(
         &atm_test_context.atm,
         &atm_test_context.profile,
         LIST_RECORDS_RESPONSE_MESSAGE_TYPE,
     )
     .await
-    {
-        Ok(body) => body,
-        Err(err) => {
-            TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            panic!("Failed to fetch list records response: {}", err)
-        }
-    };
+    .unwrap();
+
     let count = response_body["count"].as_u64().unwrap_or(0);
     let records = response_body["records"]
         .as_array()
@@ -583,19 +568,13 @@ async fn test_admin_delete() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive delete record response
-    let response_body = match fetch_and_verify_response(
+    let response_body = fetch_and_verify_response(
         &atm_test_context.atm,
         &atm_test_context.profile,
         DELETE_RECORD_RESPONSE_MESSAGE_TYPE,
     )
     .await
-    {
-        Ok(body) => body,
-        Err(err) => {
-            TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            panic!("Failed to fetch delete record response: {}", err)
-        }
-    };
+    .unwrap();
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "delete");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "delete");
@@ -662,19 +641,13 @@ async fn test_trqp_handler() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive recognition record response
-    let response_body = match fetch_and_verify_response(
+    let response_body = fetch_and_verify_response(
         &atm_test_context.atm,
         &atm_test_context.profile,
         QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE,
     )
     .await
-    {
-        Ok(body) => body,
-        Err(err) => {
-            TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            panic!("Failed to fetch read record response: {}", err)
-        }
-    };
+    .unwrap();
 
     let expected_entity_id = format!("{}_{}", ENTITY_ID, "trqp");
     let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "trqp");
