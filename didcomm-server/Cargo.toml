@@ -6,6 +6,7 @@ publish.workspace = true
 rust-version.workspace = true
 description.workspace = true
 readme.workspace = true
+license.workspace = true
 default-run = "didcomm-server"
 
 [dependencies]
