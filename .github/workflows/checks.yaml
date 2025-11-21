@@ -22,8 +22,8 @@ jobs:
         with:
           file: audit.toml
   cargo-deny:
-    name: 'License check'
     runs-on: ubuntu-24.04
+    name: 'License check'
     steps:
       - uses: actions/checkout@v4
         with:
