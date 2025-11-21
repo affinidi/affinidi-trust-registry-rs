@@ -437,7 +437,7 @@ mod tests {
         write!(file, "{}", sample_csv(&[("e1", "a1", "ac1", "r1")])).unwrap();
         file.flush().unwrap();
 
-        let storage = FileStorage::try_new(file.path(), 1).await.unwrap();
+        let storage = FileStorage::try_new(file.path(), 0).await.unwrap();
 
         write!(
             file.as_file_mut(),
@@ -459,6 +459,7 @@ mod tests {
         );
 
         let result = storage.find_by_query(query).await.unwrap();
+
         assert!(result.is_some());
         assert_eq!(result.unwrap().entity_id().as_str(), "e2");
     }
