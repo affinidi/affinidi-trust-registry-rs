@@ -23,7 +23,6 @@ use didcomm_server::{
     server::start,
 };
 use serde_json::{Value, json};
-use serial_test::parallel;
 use std::{
     env,
     fs::File,
@@ -40,6 +39,7 @@ use uuid::Uuid;
 static SERVER_INIT: OnceCell<()> = OnceCell::const_new();
 static TEST_CONTEXT: OnceCell<Arc<TestConfig>> = OnceCell::const_new();
 static CLEAR_MESSAGES: OnceCell<()> = OnceCell::const_new();
+static CREATE_RECORDS: OnceCell<()> = OnceCell::const_new();
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub const ENTITY_ID: &str = "did:example:entityYW";
@@ -78,12 +78,19 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
         .unwrap_or("false".to_string())
         .to_lowercase()
         == "true";
+    let trust_registry_did =
+        env::var("TRUST_REGISTRY_DID").expect("TRUST_REGISTRY_DID not set in .env");
     let message_wait_duration_secs = in_pipeline
         .then(|| PIPELINE_MESSAGE_WAIT_DURATION_SECS)
         .unwrap_or(MESSAGE_WAIT_DURATION_SECS);
     let server_timeout_secs = in_pipeline.then(|| 160).unwrap_or(60);
-    let (atm, profile, protocols) =
-        setup_test_environment(&client_did, &client_secrets, &mediator_did).await;
+    let (atm, profile, protocols) = setup_test_environment(
+        &client_did,
+        &client_secrets,
+        &mediator_did,
+        &trust_registry_did,
+    )
+    .await;
 
     (
         AtmTestContext {
@@ -97,8 +104,7 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
                     client_did: client_did.to_string(),
                     client_secrets: client_secrets.to_string(),
                     mediator_did: env::var("MEDIATOR_DID").expect("MEDIATOR_DID not set in .env"),
-                    trust_registry_did: env::var("TRUST_REGISTRY_DID")
-                        .expect("TRUST_REGISTRY_DID not set in .env"),
+                    trust_registry_did: trust_registry_did,
                     in_pipeline,
                     message_wait_duration_secs,
                     server_timeout_secs,
@@ -109,6 +115,32 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
     )
 }
 
+async fn create_records(
+    atm: &Arc<ATM>,
+    profile: &Arc<ATMProfile>,
+    protocols: Arc<Protocols>,
+    trust_registry_did: &str,
+    mediator_did: &str,
+    messages: Vec<Value>,
+) {
+    CREATE_RECORDS
+        .get_or_init(|| async {
+            for msg in messages {
+                send_message(
+                    atm,
+                    profile.clone(),
+                    &trust_registry_did,
+                    &protocols,
+                    &mediator_did,
+                    &msg,
+                    CREATE_RECORD_MESSAGE_TYPE,
+                )
+                .await
+                .unwrap();
+            }
+        })
+        .await;
+}
 async fn clear_messages(atm: &Arc<ATM>, profile: &Arc<ATMProfile>) {
     CLEAR_MESSAGES
         .get_or_init(|| async {
@@ -149,7 +181,7 @@ fn create_test_record_body(test_name: &str) -> Value {
         "entity_id": format!("{}_{}", ENTITY_ID, test_name),
         "authority_id": format!("{}_{}", AUTHORITY_ID, test_name),
         "action": format!("{}_{}", ACTION, test_name),
-        "resource": format!("{}_{}", RESOURCE, test_name)
+        "resource": format!("{}_{}", RESOURCE, test_name),
     })
 }
 
@@ -240,11 +272,30 @@ async fn fetch_and_verify_response_with_retry(
     Err(format!("Expected message type not found: {}", expected_message_type).into())
 }
 
+fn create_message_with_defaults(test_name: &str) -> Value {
+    let mut body = create_test_record_body(test_name);
+    body["recognized"] = serde_json::Value::Bool(true);
+    body["authorized"] = serde_json::Value::Bool(true);
+    body["context"] = json!({
+        "description": "Test credential type",
+        "version": "1.0",
+        "tags": ["test", "demo"]
+    });
+    body
+}
+fn get_create_record_messages() -> Vec<Value> {
+    ["read", "update", "list", "delete", "trqp"]
+        .iter()
+        .map(|name| create_message_with_defaults(name))
+        .collect()
+}
+
 // Helper function to set up test environment for admin handlers
 async fn setup_test_environment(
     client_did: &str,
     secrets: &str,
     mediator_did: &str,
+    trust_registry_did: &str,
 ) -> (Arc<ATM>, Arc<ATMProfile>, Arc<Protocols>) {
     let temp_file = std::env::temp_dir().join("integration_test_data.csv");
     File::create(temp_file.clone()).unwrap();
@@ -268,6 +319,16 @@ async fn setup_test_environment(
 
     // Clear any existing messages
     clear_messages(&atm, &profile).await;
+    let create_messages = get_create_record_messages();
+    create_records(
+        &atm,
+        &profile,
+        protocols.clone(),
+        trust_registry_did,
+        mediator_did,
+        create_messages,
+    )
+    .await;
 
     (atm, profile, protocols)
 }
@@ -277,7 +338,6 @@ async fn setup_test_environment(
 // the server could shut down before all tests have finished, causing test failures.
 // This mechanism ensures the server remains running until all tests have completed.
 #[tokio::test]
-#[parallel]
 async fn test_aa_keep_server_alive() {
     let config = get_test_context().await; // 2 minutes max wait
     let start = std::time::Instant::now();
@@ -294,32 +354,8 @@ async fn test_aa_keep_server_alive() {
 }
 
 #[tokio::test]
-#[parallel]
 async fn test_admin_read() {
     let (atm_test_context, config) = get_test_context().await;
-
-    // First create a record to read with unique IDs for this test
-    let mut create_body = create_test_record_body("read");
-    create_body["recognized"] = serde_json::Value::Bool(true);
-    create_body["authorized"] = serde_json::Value::Bool(true);
-    create_body["context"] = json!({
-        "description": "Test credential type",
-        "version": "1.0",
-        "tags": ["test", "demo"]
-    });
-
-    send_message(
-        &atm_test_context.atm,
-        atm_test_context.profile.clone(),
-        &config.trust_registry_did,
-        &atm_test_context.protocols,
-        &config.mediator_did,
-        &create_body,
-        CREATE_RECORD_MESSAGE_TYPE,
-    )
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
     let _ = fetch_and_verify_response_with_retry(
@@ -369,32 +405,8 @@ async fn test_admin_read() {
 }
 
 #[tokio::test]
-#[parallel]
 async fn test_admin_update() {
     let (atm_test_context, config) = get_test_context().await;
-
-    // First create a record to update with unique IDs for this test
-    let mut create_body = create_test_record_body("update");
-    create_body["recognized"] = serde_json::Value::Bool(true);
-    create_body["authorized"] = serde_json::Value::Bool(true);
-    create_body["context"] = json!({
-        "description": "Test credential type",
-        "version": "1.0",
-        "tags": ["test", "demo"]
-    });
-
-    send_message(
-        &atm_test_context.atm,
-        atm_test_context.profile.clone(),
-        &config.trust_registry_did,
-        &atm_test_context.protocols,
-        &config.mediator_did,
-        &create_body,
-        CREATE_RECORD_MESSAGE_TYPE,
-    )
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
     let _ = fetch_and_verify_response_with_retry(
@@ -444,33 +456,8 @@ async fn test_admin_update() {
 }
 
 #[tokio::test]
-#[parallel]
 async fn test_admin_list() {
     let (atm_test_context, config) = get_test_context().await;
-
-    // First create a record to list with unique IDs for this test
-    let mut create_body = create_test_record_body("list");
-    create_body["recognized"] = serde_json::Value::Bool(true);
-    create_body["authorized"] = serde_json::Value::Bool(true);
-    create_body["context"] = json!({
-        "description": "Test credential type",
-        "version": "1.0",
-        "tags": ["test", "demo"]
-    });
-
-    send_message(
-        &atm_test_context.atm,
-        atm_test_context.profile.clone(),
-        &config.trust_registry_did,
-        &atm_test_context.protocols,
-        &config.mediator_did,
-        &create_body,
-        CREATE_RECORD_MESSAGE_TYPE,
-    )
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
-
     // Clear create response
     let _ = fetch_and_verify_response_with_retry(
         &atm_test_context.atm,
@@ -532,32 +519,8 @@ async fn test_admin_list() {
 }
 
 #[tokio::test]
-#[parallel]
 async fn test_admin_delete() {
     let (atm_test_context, config) = get_test_context().await;
-
-    // First create a record to delete with unique IDs for this test
-    let mut create_body = create_test_record_body("delete");
-    create_body["recognized"] = serde_json::Value::Bool(true);
-    create_body["authorized"] = serde_json::Value::Bool(true);
-    create_body["context"] = json!({
-        "description": "Test credential type",
-        "version": "1.0",
-        "tags": ["test", "demo"]
-    });
-
-    send_message(
-        &atm_test_context.atm,
-        atm_test_context.profile.clone(),
-        &config.trust_registry_did,
-        &atm_test_context.protocols,
-        &config.mediator_did,
-        &create_body,
-        CREATE_RECORD_MESSAGE_TYPE,
-    )
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
     let _ = fetch_and_verify_response_with_retry(
@@ -605,32 +568,8 @@ async fn test_admin_delete() {
 }
 
 #[tokio::test]
-#[parallel]
 async fn test_trqp_handler() {
     let (atm_test_context, config) = get_test_context().await;
-
-    // First create a record to query with unique IDs for this test
-    let mut create_body = create_test_record_body("trqp");
-    create_body["recognized"] = serde_json::Value::Bool(true);
-    create_body["authorized"] = serde_json::Value::Bool(true);
-    create_body["context"] = json!({
-        "description": "Test credential type",
-        "version": "1.0",
-        "tags": ["test", "demo"]
-    });
-
-    send_message(
-        &atm_test_context.atm,
-        atm_test_context.profile.clone(),
-        &config.trust_registry_did,
-        &atm_test_context.protocols,
-        &config.mediator_did,
-        &create_body,
-        CREATE_RECORD_MESSAGE_TYPE,
-    )
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
     let _ = fetch_and_verify_response_with_retry(
@@ -704,28 +643,51 @@ async fn send_message(
         )
         .await?;
 
-    let sending_result = atm
-        .forward_and_send_message(
-            &profile,
-            false,
-            &packed_msg.0,
-            Some(&message_id),
-            &profile.to_tdk_profile().mediator.unwrap(),
-            trust_registry_did,
-            None,
-            None,
-            false,
-        )
-        .await;
+    let retries = 3;
+    let mut last_error = None;
 
-    match sending_result {
-        Ok(_) => {
-            println!("Message sent successfully");
-            Ok(())
-        }
-        Err(err) => {
-            println!("Failed to send message: {:?}", err);
-            Err(err.into())
+    for attempt in 0..retries {
+        let sending_result = atm
+            .forward_and_send_message(
+                &profile,
+                false,
+                &packed_msg.0,
+                Some(&message_id),
+                &profile.to_tdk_profile().mediator.unwrap(),
+                trust_registry_did,
+                None,
+                None,
+                false,
+            )
+            .await;
+
+        match sending_result {
+            Ok(_) => {
+                if attempt > 0 {
+                    println!(
+                        "Message sent successfully on attempt {}/{}",
+                        attempt + 1,
+                        retries
+                    );
+                } else {
+                    println!("Message sent successfully");
+                }
+                return Ok(());
+            }
+            Err(err) => {
+                println!(
+                    "Failed to send message (attempt {}/{}): {:?}",
+                    attempt + 1,
+                    retries,
+                    err
+                );
+                last_error = Some(err);
+                if attempt < retries - 1 {
+                    tokio::time::sleep(Duration::from_secs((attempt + 1) as u64 * 2)).await;
+                }
+            }
         }
     }
+
+    Err(last_error.unwrap().into())
 }
