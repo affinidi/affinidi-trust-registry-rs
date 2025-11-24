@@ -73,6 +73,10 @@ jobs:
           sudo apt-get install -y docker-compose
       - name: Start services
         run: RUST_LOG=info docker compose -f docker-compose.test.yaml up -d
+      - name: Wait for server to be ready
+      - run: |
+          timeout 30 bash -c 'until docker compose -f docker-compose.test.yaml logs didcomm-server 2>&1 | grep -q "Listener started"; do sleep 2; done'
+          echo "Server is ready"
       - run: cargo test
       - name: Stop services
         if: always()
