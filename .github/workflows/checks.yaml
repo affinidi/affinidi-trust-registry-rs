@@ -67,7 +67,16 @@ jobs:
         run: IN_PIPELINE=true cargo run --bin generate-secrets --features dev-tools
       - name: Setup environment
         run: cp .env.pipeline .env.test
+      - name: Install Docker Compose
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker-compose
+      - name: Start services
+        run: docker compose -f docker-compose.test.yaml up -d
       - run: cargo test
+      - name: Stop services
+        if: always()
+        run: docker compose -f docker-compose.test.yaml down
 
   fmt:
     name: Rustfmt

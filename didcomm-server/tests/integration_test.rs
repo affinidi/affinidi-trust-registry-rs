@@ -20,27 +20,15 @@ use didcomm_server::{
         },
         trqp::{QUERY_RECOGNITION_MESSAGE_TYPE, QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE},
     },
-    server::start,
 };
 use serde_json::{Value, json};
-use std::{
-    env,
-    fs::File,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-    vec,
-};
+use std::{env, fs::File, sync::Arc, time::Duration, vec};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-static SERVER_INIT: OnceCell<()> = OnceCell::const_new();
 static TEST_CONTEXT: OnceCell<Arc<TestConfig>> = OnceCell::const_new();
 static CLEAR_MESSAGES: OnceCell<()> = OnceCell::const_new();
 static CREATE_RECORDS: OnceCell<()> = OnceCell::const_new();
-static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub const ENTITY_ID: &str = "did:example:entityYW";
 pub const AUTHORITY_ID: &str = "did:example:authorityWY";
@@ -154,16 +142,6 @@ async fn clear_messages(atm: &Arc<ATM>, profile: &Arc<ATMProfile>) {
             )
             .await
             .unwrap();
-        })
-        .await;
-}
-
-async fn init_didcomm_server() {
-    SERVER_INIT
-        .get_or_init(|| async {
-            tokio::spawn(async move {
-                start().await;
-            });
         })
         .await;
 }
@@ -300,13 +278,6 @@ async fn setup_test_environment(
     let temp_file = std::env::temp_dir().join("integration_test_data.csv");
     File::create(temp_file.clone()).unwrap();
 
-    if env::var("TR_STORAGE_BACKEND").unwrap_or("csv".to_owned()) == "csv" {
-        unsafe {
-            env::set_var("FILE_STORAGE_PATH", temp_file.to_str().unwrap());
-        }
-    }
-
-    init_didcomm_server().await;
     let protocols = Arc::new(Protocols::new());
     let secrets: Vec<Secret> = serde_json::from_str(secrets).unwrap();
     let (atm, profile) =
@@ -381,7 +352,6 @@ async fn test_admin_read() {
     assert_eq!(response_body["resource"], expected_resource);
     assert_eq!(response_body["recognized"], true);
     assert_eq!(response_body["authorized"], true);
-    TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
 }
 
 #[tokio::test]
@@ -432,7 +402,6 @@ async fn test_admin_update() {
     assert_eq!(response_body["authority_id"], expected_authority_id);
     assert_eq!(response_body["action"], expected_action);
     assert_eq!(response_body["resource"], expected_resource);
-    TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
 }
 
 #[tokio::test]
@@ -491,11 +460,9 @@ async fn test_admin_list() {
                 && record["resource"] == expected_resource
         })
         .expect("Our test record not found in list");
-
     assert_eq!(our_record["authority_id"], expected_authority_id);
     assert_eq!(our_record["action"], expected_action);
     assert_eq!(our_record["resource"], expected_resource);
-    TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
 }
 
 #[tokio::test]
@@ -544,7 +511,6 @@ async fn test_admin_delete() {
     assert_eq!(response_body["action"], expected_action);
     assert_eq!(response_body["resource"], expected_resource);
     assert_eq!(response_body["entity_id"], expected_entity_id);
-    TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
 }
 
 #[tokio::test]
@@ -595,27 +561,6 @@ async fn test_trqp_handler() {
     assert_eq!(response_body["resource"], expected_resource);
     assert_eq!(response_body["recognized"].as_bool(), Some(true));
     assert_eq!(response_body["authorized"].as_bool(), Some(true));
-    TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-}
-
-// This test exists to keep the server alive during parallel test execution in the CI pipeline.
-// In the pipeline, all parallel tests share a single server instance. Without this test,
-// the server could shut down before all tests have finished, causing test failures.
-// This mechanism ensures the server remains running until all tests have completed.
-#[tokio::test]
-async fn test_aa_keep_server_alive() {
-    let config = get_test_context().await; // 2 minutes max wait
-    let start = std::time::Instant::now();
-
-    while TEST_COUNTER.load(Ordering::SeqCst) < TOTAL_TESTS {
-        let current = TEST_COUNTER.load(Ordering::SeqCst);
-
-        if start.elapsed().as_secs() > config.1.server_timeout_secs {
-            panic!("Timeout: Only {}/{} tests completed", current, TOTAL_TESTS);
-        }
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
 }
 
 async fn send_message(
