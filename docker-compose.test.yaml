@@ -10,7 +10,7 @@ services:
       - .env.test
     environment:
       LISTEN_ADDRESS: 0.0.0.0:3131
-      FILE_STORAGE_PATH: ./didcomm-server/tests/tmp/data.csv
+      FILE_STORAGE_PATH: /tmp/data.csv
     ports:
       - "3131:3131"
     volumes:

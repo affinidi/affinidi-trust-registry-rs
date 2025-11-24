@@ -275,9 +275,6 @@ async fn setup_test_environment(
     mediator_did: &str,
     trust_registry_did: &str,
 ) -> (Arc<ATM>, Arc<ATMProfile>, Arc<Protocols>) {
-    let temp_file = std::env::temp_dir().join("integration_test_data.csv");
-    File::create(temp_file.clone()).unwrap();
-
     let protocols = Arc::new(Protocols::new());
     let secrets: Vec<Secret> = serde_json::from_str(secrets).unwrap();
     let (atm, profile) =
