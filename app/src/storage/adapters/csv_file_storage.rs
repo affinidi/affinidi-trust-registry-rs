@@ -439,7 +439,7 @@ mod tests {
 
         let storage = FileStorage::try_new(file.path(), 1).await.unwrap();
 
-        sleep(Duration::from_millis(1000)).await;
+        sleep(Duration::from_secs(1)).await;
         write!(
             file.as_file_mut(),
             "{}",
@@ -450,7 +450,7 @@ mod tests {
 
         // Wait for sync task to detect and process changes
         // Using a reasonable buffer for slow CI machines
-        sleep(Duration::from_millis(2000)).await;
+        sleep(Duration::from_secs(2)).await;
 
         let query = TrustRecordQuery::new(
             EntityId::new("e2"),

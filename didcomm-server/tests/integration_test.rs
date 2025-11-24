@@ -35,7 +35,6 @@ pub const AUTHORITY_ID: &str = "did:example:authorityWY";
 pub const ACTION: &str = "action";
 pub const RESOURCE: &str = "resource";
 pub const PROBLEM_REPORT_TYPE: &str = "https://didcomm.org/report-problem/2.0/problem-report";
-pub const TOTAL_TESTS: usize = 5; // adjust if number of test cases changes
 
 const INITIAL_FETCH_LIMIT: usize = 100;
 const MESSAGE_WAIT_DURATION_SECS: u64 = 5;

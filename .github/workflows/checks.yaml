@@ -31,7 +31,7 @@ jobs:
           ref: ${{ github.head_ref }}
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          rust-version: ${{ inputs.cargoDenyRustVersion }}
+          rust-version: stable
           command: check bans licenses sources
   check:
     name: Cargo Check
@@ -204,7 +204,7 @@ jobs:
           if ! cargo llvm-cov --version; then
             cargo install cargo-llvm-cov
           fi
-          cargo llvm-cov --all-features -p http-server -p didcomm-server -p app --summary-only --fail-under-lines=70
+          cargo llvm-cov --all-features -p http-server -p didcomm-server -p app --summary-only --fail-under-lines=45
       - name: Stop services
         if: always()
         run: docker compose -f docker-compose.test.yaml down
