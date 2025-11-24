@@ -10,10 +10,10 @@ ARG TARGETPLATFORM
 WORKDIR /app
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     pkg-config \
     libdbus-1-dev \
- && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
 COPY app/Cargo.toml app/
@@ -31,13 +31,13 @@ RUN set -eux; \
 ###############################
 # Runtime stage
 ###############################
-FROM --platform=linux/arm64 debian:trixie-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     ca-certificates \
     libdbus-1-3 \
- && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=builder /app/dist/didcomm-server /usr/local/bin/didcomm-server
