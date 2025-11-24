@@ -164,51 +164,60 @@ async fn delete_message(atm: &Arc<ATM>, profile: &Arc<ATMProfile>, msg_ids: Vec<
         .await;
 }
 
-async fn fetch_and_verify_response(
+async fn fetch_and_verify_response_with_retry(
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
     expected_message_type: &str,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let problem_report_type = "https://didcomm.org/report-problem/2.0/problem-report";
-    let fetched_messages = atm
-        .fetch_messages(profile, &create_fetch_options(INITIAL_FETCH_LIMIT))
-        .await?;
+    let retries = 3;
+    let mut i = 0;
 
-    println!("Fetched {} messages", fetched_messages.success.len());
+    while i < retries {
+        tokio::time::sleep(Duration::from_secs(i * 2)).await;
+        let fetched_messages = atm
+            .fetch_messages(profile, &create_fetch_options(INITIAL_FETCH_LIMIT))
+            .await?;
 
-    if fetched_messages.success.is_empty() {
-        return Err("No response received".into());
-    }
-    // Collect all messages and unpack them
-    let mut unpacked_messages = Vec::new();
-    for msg_elem in &fetched_messages.success {
-        if let Some(message) = &msg_elem.msg {
-            let unpacked = atm.unpack(message).await?;
-            unpacked_messages.push(unpacked);
-        }
-    }
-    // Collect problem report hashes and log them
-    let problem_report_hashes: Vec<String> = unpacked_messages
-        .iter()
-        .filter(|(msg, _)| msg.type_ == problem_report_type)
-        .map(|(msg, meta)| {
-            if let Ok(json) = serde_json::to_string_pretty(&msg.body) {
-                println!("Received problem report: {}", json);
+        println!("Fetched {} messages", fetched_messages.success.len());
+
+        if fetched_messages.success.is_empty() {
+            i += 1;
+            if i >= retries {
+                return Err("No response received".into());
             }
-            meta.sha256_hash.clone()
-        })
-        .collect();
-    if !problem_report_hashes.is_empty() {
-        delete_message(atm, profile, problem_report_hashes).await;
-    }
-    // Find the expected message
-    let result = unpacked_messages
-        .into_iter()
-        .find(|(msg, _)| {
+            continue;
+        }
+
+        // Collect all messages and unpack them
+        let mut unpacked_messages = Vec::new();
+        for msg_elem in &fetched_messages.success {
+            if let Some(message) = &msg_elem.msg {
+                let unpacked = atm.unpack(message).await?;
+                unpacked_messages.push(unpacked);
+            }
+        }
+
+        // Collect problem report hashes and log them
+        let problem_report_hashes: Vec<String> = unpacked_messages
+            .iter()
+            .filter(|(msg, _)| msg.type_ == problem_report_type)
+            .map(|(msg, meta)| {
+                if let Ok(json) = serde_json::to_string_pretty(&msg.body) {
+                    println!("Received problem report: {}", json);
+                }
+                meta.sha256_hash.clone()
+            })
+            .collect();
+        if !problem_report_hashes.is_empty() {
+            delete_message(atm, profile, problem_report_hashes).await;
+        }
+
+        // Find the expected message
+        if let Some((msg, meta)) = unpacked_messages.into_iter().find(|(msg, _)| {
             println!("Checking message type: {}", msg.type_);
             msg.type_ == expected_message_type
-        })
-        .map(|(msg, meta)| {
+        }) {
             // Delete the message we found
             let hash = meta.sha256_hash.clone();
             let atm = atm.clone();
@@ -216,12 +225,19 @@ async fn fetch_and_verify_response(
             tokio::spawn(async move {
                 delete_message(&atm, &profile, vec![hash]).await;
             });
-            msg.body
-        })
-        .ok_or_else(|| {
-            format!("Expected message type not found: {}", expected_message_type).into()
-        });
-    result
+            return Ok(msg.body);
+        }
+
+        i += 1;
+        if i < retries {
+            println!(
+                "Retry {}/{}: Expected message type not found: {}",
+                i, retries, expected_message_type
+            );
+        }
+    }
+
+    Err(format!("Expected message type not found: {}", expected_message_type).into())
 }
 
 // Helper function to set up test environment for admin handlers
@@ -306,7 +322,7 @@ async fn test_admin_read() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
-    let _ = fetch_and_verify_response(
+    let _ = fetch_and_verify_response_with_retry(
         &atm_test_context.atm,
         &atm_test_context.profile,
         CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
@@ -330,7 +346,7 @@ async fn test_admin_read() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive read record response
-    let response_body = fetch_and_verify_response(
+    let response_body = fetch_and_verify_response_with_retry(
         &atm_test_context.atm,
         &atm_test_context.profile,
         READ_RECORD_RESPONSE_MESSAGE_TYPE,
@@ -381,7 +397,7 @@ async fn test_admin_update() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
-    let _ = fetch_and_verify_response(
+    let _ = fetch_and_verify_response_with_retry(
         &atm_test_context.atm,
         &atm_test_context.profile,
         CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
@@ -407,7 +423,7 @@ async fn test_admin_update() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive update record response
-    let response_body = fetch_and_verify_response(
+    let response_body = fetch_and_verify_response_with_retry(
         &atm_test_context.atm,
         &atm_test_context.profile,
         UPDATE_RECORD_RESPONSE_MESSAGE_TYPE,
@@ -456,7 +472,7 @@ async fn test_admin_list() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
-    let _ = fetch_and_verify_response(
+    let _ = fetch_and_verify_response_with_retry(
         &atm_test_context.atm,
         &atm_test_context.profile,
         CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
@@ -480,7 +496,7 @@ async fn test_admin_list() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive list records response
-    let response_body = fetch_and_verify_response(
+    let response_body = fetch_and_verify_response_with_retry(
         &atm_test_context.atm,
         &atm_test_context.profile,
         LIST_RECORDS_RESPONSE_MESSAGE_TYPE,
@@ -544,7 +560,7 @@ async fn test_admin_delete() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
-    let _ = fetch_and_verify_response(
+    let _ = fetch_and_verify_response_with_retry(
         &atm_test_context.atm,
         &atm_test_context.profile,
         CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
@@ -568,7 +584,7 @@ async fn test_admin_delete() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive delete record response
-    let response_body = fetch_and_verify_response(
+    let response_body = fetch_and_verify_response_with_retry(
         &atm_test_context.atm,
         &atm_test_context.profile,
         DELETE_RECORD_RESPONSE_MESSAGE_TYPE,
@@ -617,7 +633,7 @@ async fn test_trqp_handler() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Clear create response
-    let _ = fetch_and_verify_response(
+    let _ = fetch_and_verify_response_with_retry(
         &atm_test_context.atm,
         &atm_test_context.profile,
         CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
@@ -641,7 +657,7 @@ async fn test_trqp_handler() {
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
     // Receive recognition record response
-    let response_body = fetch_and_verify_response(
+    let response_body = fetch_and_verify_response_with_retry(
         &atm_test_context.atm,
         &atm_test_context.profile,
         QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE,
@@ -704,11 +720,11 @@ async fn send_message(
 
     match sending_result {
         Ok(_) => {
-            println!("Admin message sent successfully");
+            println!("Message sent successfully");
             Ok(())
         }
         Err(err) => {
-            println!("Failed to send admin message: {:?}", err);
+            println!("Failed to send message: {:?}", err);
             Err(err.into())
         }
     }
