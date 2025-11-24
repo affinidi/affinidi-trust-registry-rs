@@ -2,13 +2,10 @@ version: "3.9"
 
 services:
   didcomm-server:
-    platform: linux/arm64
     image: trust-registry-didcomm:local
     build:
       context: .
       dockerfile: didcomm-server/Dockerfile
-      platforms:
-        - linux/arm64
     env_file:
       - .env.test
     environment:
