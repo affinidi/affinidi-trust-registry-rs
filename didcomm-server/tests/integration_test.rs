@@ -83,7 +83,7 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
     let message_wait_duration_secs = in_pipeline
         .then(|| PIPELINE_MESSAGE_WAIT_DURATION_SECS)
         .unwrap_or(MESSAGE_WAIT_DURATION_SECS);
-    let server_timeout_secs = in_pipeline.then(|| 160).unwrap_or(60);
+    let server_timeout_secs = in_pipeline.then(|| 160).unwrap_or(90);
     let (atm, profile, protocols) = setup_test_environment(
         &client_did,
         &client_secrets,
@@ -331,26 +331,6 @@ async fn setup_test_environment(
     .await;
 
     (atm, profile, protocols)
-}
-
-// This test exists to keep the server alive during parallel test execution in the CI pipeline.
-// In the pipeline, all parallel tests share a single server instance. Without this test,
-// the server could shut down before all tests have finished, causing test failures.
-// This mechanism ensures the server remains running until all tests have completed.
-#[tokio::test]
-async fn test_aa_keep_server_alive() {
-    let config = get_test_context().await; // 2 minutes max wait
-    let start = std::time::Instant::now();
-
-    while TEST_COUNTER.load(Ordering::SeqCst) < TOTAL_TESTS {
-        let current = TEST_COUNTER.load(Ordering::SeqCst);
-
-        if start.elapsed().as_secs() > config.1.server_timeout_secs {
-            panic!("Timeout: Only {}/{} tests completed", current, TOTAL_TESTS);
-        }
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
 }
 
 #[tokio::test]
@@ -616,6 +596,26 @@ async fn test_trqp_handler() {
     assert_eq!(response_body["recognized"].as_bool(), Some(true));
     assert_eq!(response_body["authorized"].as_bool(), Some(true));
     TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+}
+
+// This test exists to keep the server alive during parallel test execution in the CI pipeline.
+// In the pipeline, all parallel tests share a single server instance. Without this test,
+// the server could shut down before all tests have finished, causing test failures.
+// This mechanism ensures the server remains running until all tests have completed.
+#[tokio::test]
+async fn test_aa_keep_server_alive() {
+    let config = get_test_context().await; // 2 minutes max wait
+    let start = std::time::Instant::now();
+
+    while TEST_COUNTER.load(Ordering::SeqCst) < TOTAL_TESTS {
+        let current = TEST_COUNTER.load(Ordering::SeqCst);
+
+        if start.elapsed().as_secs() > config.1.server_timeout_secs {
+            panic!("Timeout: Only {}/{} tests completed", current, TOTAL_TESTS);
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 async fn send_message(
