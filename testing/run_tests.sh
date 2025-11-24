@@ -26,7 +26,7 @@ echo "Using TR_STORAGE_BACKEND=$TR_STORAGE_BACKEND"
 
 cp testing/.env.test.example .env.test
 if [ $? -ne 0 ]; then
-    echo "Failed to copy .env.example to .env.test. Please ensure the file exists and the destination is writable."
+    echo "Failed to copy .env.test.example to .env.test. Please ensure the file exists and the destination is writable."
     exit 1
 fi
 source .env.test
@@ -111,16 +111,20 @@ fi
 echo "Running cargo tests..."
 if [ "$COVERAGE" == "true" ]; then
     docker compose -f docker-compose.test.yaml up -d
-    cargo llvm-cov --html   -p http-server -p didcomm-server -p app
+    sleep 10 # wait for services to be up
+    cargo llvm-cov --html   -p http-server -p didcomm-server -p app 
 elif [ "$TEST_TYPE" == "all" ]; then
     docker compose -f docker-compose.test.yaml up -d
+    sleep 10
     cargo test 
 elif [ "$TEST_TYPE" == "unit" ]; then
     cargo test --lib
 elif [ "$TEST_TYPE" == "int" ]; then
     docker compose -f docker-compose.test.yaml up -d
+    sleep 10
     cargo test --test integration_test
 else
     echo "Unknown TEST_TYPE: $TEST_TYPE. Valid options are 'all', 'unit', 'int'."
     exit 1
 fi
+docker compose -f docker-compose.test.yaml down
