@@ -47,6 +47,10 @@ jobs:
           toolchain: stable
           override: true
       - uses: ./.github/actions/rust-dependencies
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: 'rust-cache'
       - run: cargo check
 
   test:
@@ -63,6 +67,10 @@ jobs:
           toolchain: stable
           override: true
       - uses: ./.github/actions/rust-dependencies
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: 'rust-cache'
       - name: generate configs
         run: IN_PIPELINE=true cargo run --bin generate-secrets --features dev-tools
       - name: Setup environment
@@ -77,27 +85,16 @@ jobs:
           sudo apt-get install -y docker-compose
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Cache Docker layers
-        uses: actions/cache@v4
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ hashFiles('**/Dockerfile', '**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
       - name: Build and start services
         run: |
           docker buildx build \
-            --cache-from type=local,src=/tmp/.buildx-cache \
-            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             -f didcomm-server/Dockerfile \
             -t trust-registry-didcomm:local \
             --load \
             .
           RUST_LOG=info docker compose -f docker-compose.test.yaml up -d
-      - name: Move cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
       - name: Check server logs
         run: docker compose -f docker-compose.test.yaml logs didcomm-server
       - run: cargo test
@@ -120,6 +117,10 @@ jobs:
           override: true
           components: rustfmt
       - uses: ./.github/actions/rust-dependencies
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: 'rust-cache'
       - name: Rustfmt Check
         uses: actions-rust-lang/rustfmt@v1
 
@@ -138,6 +139,10 @@ jobs:
           override: true
           components: clippy
       - uses: ./.github/actions/rust-dependencies
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: 'rust-cache'
       - run: cargo clippy --no-deps
   wiz-scan:
     uses: affinidi/pipeline-security/.github/workflows/wizcli-dirscan.yml@main
@@ -162,6 +167,10 @@ jobs:
           toolchain: stable
           override: true
       - uses: ./.github/actions/rust-dependencies
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: 'rust-cache'
       - name: generate configs
         run: IN_PIPELINE=true cargo run --bin generate-secrets --features dev-tools
       - name: Setup environment
@@ -176,35 +185,22 @@ jobs:
           sudo apt-get install -y docker-compose
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Cache Docker layers
-        uses: actions/cache@v4
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ hashFiles('**/Dockerfile', '**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
       - name: Build and start services
         run: |
           docker buildx build \
-            --cache-from type=local,src=/tmp/.buildx-cache \
-            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             -f didcomm-server/Dockerfile \
             -t trust-registry-didcomm:local \
             --load \
             .
           RUST_LOG=info docker compose -f docker-compose.test.yaml up -d
-      - name: Move cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
       - name: Check server logs
         run: docker compose -f docker-compose.test.yaml logs didcomm-server
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate code coverage
-        run: |
-          if ! cargo llvm-cov --version; then
-            cargo install cargo-llvm-cov
-          fi
-          cargo llvm-cov --all-features -p http-server -p didcomm-server -p app --summary-only --fail-under-lines=45
+        run: cargo llvm-cov --all-features -p http-server -p didcomm-server -p app --summary-only --fail-under-lines=45
       - name: Stop services
         if: always()
         run: docker compose -f docker-compose.test.yaml down
