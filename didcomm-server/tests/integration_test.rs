@@ -22,7 +22,7 @@ use didcomm_server::{
     },
 };
 use serde_json::{Value, json};
-use std::{env, fs::File, sync::Arc, time::Duration, vec};
+use std::{env, sync::Arc, time::Duration, vec};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -37,8 +37,8 @@ pub const RESOURCE: &str = "resource";
 pub const PROBLEM_REPORT_TYPE: &str = "https://didcomm.org/report-problem/2.0/problem-report";
 
 const INITIAL_FETCH_LIMIT: usize = 100;
-const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
-const PIPELINE_MESSAGE_WAIT_DURATION_SECS: u64 = 10;
+const MESSAGE_WAIT_DURATION_SECS: u64 = 2;
+const PIPELINE_MESSAGE_WAIT_DURATION_SECS: u64 = 5;
 
 pub struct TestConfig {
     pub client_did: String,
@@ -47,7 +47,6 @@ pub struct TestConfig {
     pub trust_registry_did: String,
     pub in_pipeline: bool,
     pub message_wait_duration_secs: u64,
-    pub server_timeout_secs: u64,
 }
 
 pub struct AtmTestContext {
@@ -70,7 +69,7 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
     let message_wait_duration_secs = in_pipeline
         .then(|| PIPELINE_MESSAGE_WAIT_DURATION_SECS)
         .unwrap_or(MESSAGE_WAIT_DURATION_SECS);
-    let server_timeout_secs = in_pipeline.then(|| 160).unwrap_or(90);
+
     let (atm, profile, protocols) = setup_test_environment(
         &client_did,
         &client_secrets,
@@ -94,7 +93,6 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
                     trust_registry_did: trust_registry_did,
                     in_pipeline,
                     message_wait_duration_secs,
-                    server_timeout_secs,
                 })
             })
             .await
