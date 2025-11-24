@@ -98,12 +98,8 @@ jobs:
         run: |
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-      - name: Wait for server to be ready
-        run: sleep 30
       - name: Check server logs
         run: docker compose -f docker-compose.test.yaml logs didcomm-server
-      - name: Check server status
-        run: docker compose -f docker-compose.test.yaml ps
       - run: cargo test
       - name: Stop services
         if: always()
@@ -170,9 +166,45 @@ jobs:
         run: IN_PIPELINE=true cargo run --bin generate-secrets --features dev-tools
       - name: Setup environment
         run: cp .env.pipeline .env.test
+      - name: Prepare test data
+        run: |
+          mkdir -p didcomm-server/tests/tmp
+          cp sample-data/data.csv didcomm-server/tests/tmp/data.csv
+      - name: Install Docker Compose
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker-compose
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ hashFiles('**/Dockerfile', '**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+      - name: Build and start services
+        run: |
+          docker buildx build \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            -f didcomm-server/Dockerfile \
+            -t trust-registry-didcomm:local \
+            --load \
+            .
+          RUST_LOG=info docker compose -f docker-compose.test.yaml up -d
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+      - name: Check server logs
+        run: docker compose -f docker-compose.test.yaml logs didcomm-server
       - name: Generate code coverage
         run: |
           if ! cargo llvm-cov --version; then
             cargo install cargo-llvm-cov
           fi
           cargo llvm-cov --all-features -p http-server -p didcomm-server -p app --summary-only --fail-under-lines=70
+      - name: Stop services
+        if: always()
+        run: docker compose -f docker-compose.test.yaml down
