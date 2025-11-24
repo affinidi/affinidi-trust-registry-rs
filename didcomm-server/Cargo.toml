@@ -35,9 +35,6 @@ uuid.workspace = true
 did-peer = { version = "0.7.5", optional = true }
 affinidi-did-key = { version = "0.1.4", optional = true }
 
-[dev-dependencies]
-serial_test = "3.2.0"
-
 
 [[bin]]
 name = "didcomm-server"
