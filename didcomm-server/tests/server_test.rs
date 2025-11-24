@@ -4,6 +4,7 @@ use tokio::time::timeout;
 
 #[tokio::test]
 async fn test_start_sever() {
+    dotenvy::from_filename(".env.test").ok();
     let temp_file = std::env::temp_dir().join("integration_test_data.csv");
     File::create(temp_file.clone()).unwrap();
 
