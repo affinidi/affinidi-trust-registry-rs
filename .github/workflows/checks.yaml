@@ -67,6 +67,10 @@ jobs:
         run: IN_PIPELINE=true cargo run --bin generate-secrets --features dev-tools
       - name: Setup environment
         run: cp .env.pipeline .env.test
+      - name: Prepare test data
+        run: |
+          mkdir -p didcomm-server/tests/tmp
+          cp sample-data/data.csv didcomm-server/tests/tmp/data.csv
       - name: Install Docker Compose
         run: |
           sudo apt-get update
