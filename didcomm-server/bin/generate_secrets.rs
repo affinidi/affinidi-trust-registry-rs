@@ -28,9 +28,22 @@ use std::{
     sync::Arc,
 };
 
-fn insert_env_vars(file_path: &str, new_vars: HashMap<String, String>) -> std::io::Result<()> {
+fn insert_env_vars(
+    file_path: &str,
+    new_vars: HashMap<String, String>,
+    example_file_path: Option<&str>,
+) -> std::io::Result<()> {
     let path = Path::new(file_path);
     let mut existing_vars = HashMap::new();
+
+    if !path.exists() {
+        if let Some(example_path) = example_file_path {
+            let example = Path::new(example_path);
+            if example.exists() {
+                fs::copy(example, path)?;
+            }
+        }
+    }
 
     if path.exists() {
         let file = fs::File::open(path)?;
@@ -215,7 +228,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             format!("'[{}]'", test_profile_configs_stringified),
         );
 
-        insert_env_vars("./.env.pipeline", vars)?;
+        insert_env_vars("./.env.pipeline", vars, None)?;
         Ok(())
     } else {
         // Server vars
@@ -224,7 +237,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "PROFILE_CONFIGS".to_string(),
             format!("'[{}]'", serde_json::to_string(&tr_profile_configs)?),
         );
-        insert_env_vars("./.env.example", server_vars)?;
+        insert_env_vars("./.env", server_vars, Some("./.env.example"))?;
         // Testing vars
         let mut test_vars = HashMap::new();
         test_vars.insert("TRUST_REGISTRY_DID".to_string(), test_tr_did.0);
@@ -235,7 +248,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "PROFILE_CONFIGS".to_string(),
             format!("'[{}]'", test_profile_configs_stringified),
         );
-        insert_env_vars("testing/.env.test.example", test_vars)?;
+        insert_env_vars(
+            "./.env.test",
+            test_vars,
+            Some("./testing/.env.test.example"),
+        )?;
 
         Ok(())
     }

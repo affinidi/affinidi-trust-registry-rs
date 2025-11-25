@@ -196,6 +196,26 @@ Want to contribute?
 
 Head over to our [CONTRIBUTING](CONTRIBUTING.md) guidelines.
 
+### Pre-commit checks
+
+Please run the formatter and lints before committing to keep the codebase consistent and to catch common issues early.
+
+Run locally:
+
+```bash
+# Format code (modify files)
+cargo fmt
+
+# Check formatting (CI-friendly; fails if unformatted)
+cargo fmt -- --check
+
+# Run Clippy
+cargo clippy
+
+# Optionally apply fixable Clippy suggestions locally
+cargo fix --clippy
+```
+
 ## Support & feedback
 
 If you face any issues or have suggestions, please don't hesitate to contact us using [this link](https://share.hsforms.com/1i-4HKZRXSsmENzXtPdIG4g8oa2v).
