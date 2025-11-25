@@ -81,7 +81,7 @@ cargo --version
 
 #### 1. Generate Environment Secrets
 
-Generate the required DIDs and keys for local development. This command will inject secrets into `.env.example` and `testing/.env.test.example`.
+Generate the required DIDs and keys for local development. This command will inject secrets into `.env` and `.env.test`.
 
 ```bash
 cargo run --bin generate-secrets --features dev-tools
