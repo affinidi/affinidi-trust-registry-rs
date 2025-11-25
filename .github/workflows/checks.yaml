@@ -1,154 +1,18 @@
+name: checks
+
 on:
   pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
+    types:
+      - opened
+      - synchronize
 jobs:
-  audit:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.head_ref }}
-      - uses: actions-rust-lang/audit@v1
-        name: Audit Rust Dependencies
-        with:
-          file: audit.toml
-  cargo-deny:
-    runs-on: ubuntu-24.04
-    name: 'License check'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.head_ref }}
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          rust-version: stable
-          command: check bans licenses sources
-  check:
-    name: Cargo Check
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.head_ref }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          rustflags: ''
-          toolchain: stable
-          override: true
-      - uses: ./.github/actions/rust-dependencies
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: 'rust-cache'
-      - run: cargo check
-  fmt:
-    name: Rustfmt
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.head_ref }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          rustflags: ''
-          toolchain: stable
-          override: true
-          components: rustfmt
-      - uses: ./.github/actions/rust-dependencies
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: 'rust-cache'
-      - name: Rustfmt Check
-        uses: actions-rust-lang/rustfmt@v1
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.head_ref }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          rustflags: ''
-          toolchain: stable
-          override: true
-          components: clippy
-      - uses: ./.github/actions/rust-dependencies
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: 'rust-cache'
-      - run: cargo clippy --no-deps
-  wiz-scan:
-    uses: affinidi/pipeline-security/.github/workflows/wizcli-dirscan.yml@main
+  rust-pipeline:
+    uses: affinidi/pipeline-rust/.github/workflows/checks.yaml@FTL-24205
     secrets: inherit
-  rust-scan:
-    uses: affinidi/pipeline-security/.github/workflows/rust-scanner.yml@main
     with:
-      repo-path: '.'
-    secrets: inherit
-  test:
-    name: Test Suite
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.head_ref }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          rustflags: ''
-          toolchain: stable
-          override: true
-      - uses: ./.github/actions/rust-dependencies
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: 'rust-cache'
-      - name: generate configs
-        run: IN_PIPELINE=true cargo run --bin generate-secrets --features dev-tools
-      - name: Setup environment
-        run: cp .env.pipeline .env.test
-      - name: Prepare test data
-        run: |
-          mkdir -p didcomm-server/tests/tmp
-          cp sample-data/data.csv didcomm-server/tests/tmp/data.csv
-      - name: Install Docker Compose
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y docker-compose
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Build and start services
-        run: |
-          docker buildx build \
-            --cache-from type=gha \
-            --cache-to type=gha,mode=max \
-            -f didcomm-server/Dockerfile \
-            -t trust-registry-didcomm:local \
-            --load \
-            .
-          RUST_LOG=info docker compose -f docker-compose.test.yaml up -d
-      - name: Check server logs
-        run: docker compose -f docker-compose.test.yaml logs didcomm-server
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Generate code coverage
-        run: cargo llvm-cov --all-features -p http-server -p didcomm-server -p app --summary-only --fail-under-lines=45
-      - name: Stop services
-        if: always()
-        run: docker compose -f docker-compose.test.yaml down
+      toolchain: '1.88.0'
+      rustflags: ' --cfg tracing_unstable'
+      auditIgnore: 'RUSTSEC-2022-0040,RUSTSEC-2023-0071,RUSTSEC-2024-0373'
+      coverage: 50
+      useRedis: false
+      doNotInherit: 'test,coverage'
