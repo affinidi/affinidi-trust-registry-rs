@@ -7,7 +7,7 @@ on:
       - synchronize
 jobs:
   rust-pipeline:
-    uses: affinidi/pipeline-rust/.github/workflows/checks.yaml@FTL-24205
+    uses: affinidi/pipeline-rust/.github/workflows/checks-no-test.yaml@FTL-24205
     secrets: inherit
     with:
       toolchain: '1.88.0'
@@ -16,3 +16,54 @@ jobs:
       coverage: 45
       useRedis: false
       doNotInherit: 'test,coverage'
+  test:
+    name: Test Suite
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ''
+          toolchain: stable
+          override: true
+      - uses: ./.github/actions/rust-dependencies
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: 'rust-cache'
+      - name: generate configs
+        run: IN_PIPELINE=true cargo run --bin generate-secrets --features dev-tools
+      - name: Setup environment
+        run: cp .env.pipeline .env.test
+      - name: Prepare test data
+        run: |
+          mkdir -p didcomm-server/tests/tmp
+          cp sample-data/data.csv didcomm-server/tests/tmp/data.csv
+      - name: Install Docker Compose
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker-compose
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and start services
+        run: |
+          docker buildx build \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            -f didcomm-server/Dockerfile \
+            -t trust-registry-didcomm:local \
+            --load \
+            .
+          RUST_LOG=info docker compose -f docker-compose.test.yaml up -d
+      - name: Check server logs
+        run: docker compose -f docker-compose.test.yaml logs didcomm-server
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate code coverage
+        run: cargo llvm-cov --all-features -p http-server -p didcomm-server -p app --summary-only --fail-under-lines=45
+      - name: Stop services
+        if: always()
+        run: docker compose -f docker-compose.test.yaml down
