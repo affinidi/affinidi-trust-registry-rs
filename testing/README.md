@@ -24,6 +24,8 @@ FILE_STORAGE_ENABLED=false
 
 ## Run All Tests
 
+If you have not setup your environment, please refer to [Setup Environment](../README.md#usage)
+
 To run all tests (unit and integration):
 
 ```bash
@@ -37,7 +39,7 @@ bash run_tests.sh --profile-configs <PROFILE_CONFIGS>
 To run only unit tests with the CSV storage backend:
 
 ```bash
-bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --test-type unit
+bash run_tests.sh  --test-type unit
 ```
 
 ---
@@ -47,13 +49,13 @@ bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --test-type unit
 To run only integration tests with the CSV storage backend:
 
 ```bash
-bash run_tests.sh --profile-configs <PROFILE_CONFIGS> --test-type int
+bash run_tests.sh  --test-type int
 ```
 
 To run only integration tests with the DynamoDB storage backend:
 
 ```bash
-bash run_tests.sh --profile-configs <PROFILE_CONFIGS>  --test-type int
+bash run_tests.sh   --test-type int --storage-backend ddb
 ```
 
 ---
@@ -63,7 +65,7 @@ bash run_tests.sh --profile-configs <PROFILE_CONFIGS>  --test-type int
 To generate a coverage report:
 
 ```bash
-bash run_tests.sh --profile-configs <PROFILE_CONFIGS>  --coverage true
+bash run_tests.sh  --coverage true
 ```
 
 To see the coverage report run:
@@ -73,5 +75,3 @@ open  target/llvm-cov/html/index.html
 ```
 
 ---
-
-Replace `<PROFILE_CONFIGS>` with the appropriate configuration file path for your environment.

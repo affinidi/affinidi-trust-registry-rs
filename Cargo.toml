@@ -9,12 +9,13 @@ publish = false
 rust-version = "1.88.0"
 description = "Trust Registry"
 readme = "README.md"
+license = "Apache-2.0"
 
 [workspace.dependencies]
 
 app = { path = "./app", version = "*" }
 
-affinidi-tdk = "0.2.4"
+affinidi-tdk = "0.2.7"
 anyhow = "1.0.71"
 async-trait = "0.1.89"
 base64 = "0.22"

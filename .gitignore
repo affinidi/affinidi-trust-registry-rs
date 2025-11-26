@@ -54,6 +54,8 @@ pubspec.lock
 # env files
 .env*
 !.env.example
+!.env.test.example
+!.env.pipeline
 
 # FVM Version Cache
 .fvm/

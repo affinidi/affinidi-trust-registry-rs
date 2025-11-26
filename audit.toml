@@ -1,0 +1,23 @@
+[advisories]
+# Ignore advisories for specific vulnerabilities
+# Add RUSTSEC IDs here as needed:
+ignore = ["RUSTSEC-2022-0040"]
+
+# Warn instead of error for these severity levels
+# Options: "none", "low", "medium", "high", "critical"
+# severity-threshold = "medium"
+
+[licenses]
+# Don't check licenses (handled by cargo-deny)
+unlicensed = "allow"
+allow = []
+deny = []
+
+[bans]
+# Multiple versions of the same crate
+multiple-versions = "allow"
+
+[sources]
+# Warn for crates from unknown sources
+unknown-registry = "warn"
+unknown-git = "warn"

@@ -6,6 +6,8 @@ publish.workspace = true
 rust-version.workspace = true
 description.workspace = true
 readme.workspace = true
+license.workspace = true
+default-run = "didcomm-server"
 
 [dependencies]
 app.workspace = true
@@ -30,3 +32,20 @@ axum-server.workspace = true
 tower-http.workspace = true
 
 uuid.workspace = true
+did-peer = { version = "0.7.5", optional = true }
+affinidi-did-key = { version = "0.1.4", optional = true }
+
+
+[[bin]]
+name = "didcomm-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "generate-secrets"
+path = "bin/generate_secrets.rs"
+required-features = ["dev-tools"]
+
+
+[features]
+default = []
+dev-tools = ["did-peer", "affinidi-did-key"]

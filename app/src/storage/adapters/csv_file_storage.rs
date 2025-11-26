@@ -89,8 +89,9 @@ impl FileStorage {
 
         tokio::spawn(async move {
             loop {
-                info!(path = %file_path.display(), "Syncing trust records from file");
                 sleep(update_interval).await;
+
+                info!(path = %file_path.display(), "Syncing trust records from file");
 
                 let previous = { last_modified.read().unwrap().clone() };
 
@@ -438,6 +439,7 @@ mod tests {
 
         let storage = FileStorage::try_new(file.path(), 1).await.unwrap();
 
+        sleep(Duration::from_secs(1)).await;
         write!(
             file.as_file_mut(),
             "{}",
@@ -446,6 +448,8 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
+        // Wait for sync task to detect and process changes
+        // Using a reasonable buffer for slow CI machines
         sleep(Duration::from_secs(2)).await;
 
         let query = TrustRecordQuery::new(
@@ -456,6 +460,7 @@ mod tests {
         );
 
         let result = storage.find_by_query(query).await.unwrap();
+
         assert!(result.is_some());
         assert_eq!(result.unwrap().entity_id().as_str(), "e2");
     }
