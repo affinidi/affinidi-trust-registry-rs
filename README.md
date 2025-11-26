@@ -110,14 +110,6 @@ cargo run --bin generate-secrets --features dev-tools
 MEDIATOR_URL="https://your-mediator-url.io" MEDIATOR_DID="did:web:your-mediator-did.io" cargo run --bin generate-secrets --features dev-tools
 ```
 
-#### 2. Setup Environment File
-
-Copy the example environment file:
-
-```bash
-cp .env.example .env
-```
-
 ### Run on Local Machine
 
 #### 1.Start the Servers
