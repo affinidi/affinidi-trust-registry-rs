@@ -2,11 +2,11 @@ use std::env;
 
 use affinidi_tdk::secrets_resolver::secrets::Secret;
 use app::configs::{AuditConfig, AuditLogFormat, Configs, TrustStorageBackend};
+use async_trait::async_trait;
 use serde_derive::{Deserialize, Serialize};
 
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3131";
 
-// TODO: is this place good enough to define this struct?
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileConfig {
     pub did: String,
@@ -30,7 +30,7 @@ pub struct AdminApiConfig {
 #[derive(Debug, Clone)]
 pub struct DidcommServerConfigs {
     pub(crate) listen_address: String,
-    pub(crate) profile_configs: Vec<ProfileConfig>,
+    pub(crate) profile_config: ProfileConfig,
     pub(crate) mediator_did: String,
     pub(crate) admin_api_config: AdminApiConfig,
     pub(crate) storage_backend: TrustStorageBackend,
@@ -38,13 +38,14 @@ pub struct DidcommServerConfigs {
 
 pub(crate) fn parse_profile_config_from_str(
     did_and_secrets_as_str: &str,
-) -> Result<Vec<ProfileConfig>, Box<dyn std::error::Error>> {
-    let profile_configs: Vec<ProfileConfig> = serde_json::from_str(did_and_secrets_as_str)?;
-    Ok(profile_configs)
+) -> Result<ProfileConfig, Box<dyn std::error::Error>> {
+    let profile_config: ProfileConfig = serde_json::from_str(did_and_secrets_as_str)?;
+    Ok(profile_config)
 }
 
+#[async_trait]
 impl Configs for DidcommServerConfigs {
-    fn load() -> Result<Self, Box<dyn std::error::Error>> {
+    async fn load() -> Result<Self, Box<dyn std::error::Error>> {
         let storage_backend_str = env::var("TR_STORAGE_BACKEND")
             .unwrap_or("csv".to_string())
             .to_lowercase();
@@ -77,7 +78,7 @@ impl Configs for DidcommServerConfigs {
             listen_address: env::var("LISTEN_ADDRESS")
                 .unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string()),
             mediator_did: env::var("MEDIATOR_DID")?,
-            profile_configs: parse_profile_config_from_str(&env::var("PROFILE_CONFIGS")?)?,
+            profile_config: parse_profile_config_from_str(&env::var("PROFILE_CONFIG")?)?,
             admin_api_config,
             storage_backend,
         })

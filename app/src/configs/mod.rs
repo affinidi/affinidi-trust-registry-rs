@@ -1,6 +1,9 @@
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fmt;
+
+pub mod did_document_loader;
 
 const DEFAULT_TRUST_REGISTRY_FILE_PATH: &str = "trust_records.csv";
 const DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC: u64 = 60;
@@ -45,8 +48,9 @@ pub struct AuditConfig {
     pub log_format: AuditLogFormat,
 }
 
+#[async_trait]
 impl Configs for AuditConfig {
-    fn load() -> Result<Self, Box<dyn std::error::Error>> {
+    async fn load() -> Result<Self, Box<dyn std::error::Error>> {
         let log_format = env::var("AUDIT_LOG_FORMAT")
             .unwrap_or_else(|_| "text".to_string())
             .parse::<AuditLogFormat>()?;
@@ -75,22 +79,26 @@ pub struct DynamoDbStorageConfig {
     pub endpoint_url: Option<String>,
 }
 
+#[async_trait]
 impl Configs for FileStorageConfig {
-    fn load() -> Result<Self, Box<dyn std::error::Error>> {
+    async fn load() -> Result<Self, Box<dyn std::error::Error>> {
         Ok(FileStorageConfig {
             path: env::var("FILE_STORAGE_PATH")
                 .unwrap_or_else(|_| DEFAULT_TRUST_REGISTRY_FILE_PATH.to_string()),
             update_interval_sec: env::var("FILE_STORAGE_UPDATE_INTERVAL_SEC")
                 .unwrap_or_else(|_| DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC.to_string())
-                .parse::<u64>()?,
+                .parse::<u64>()
+                .map_err(|_| "FILE_STORAGE_UPDATE_INTERVAL_SEC must be a valid number")?,
         })
     }
 }
 
+#[async_trait]
 impl Configs for DynamoDbStorageConfig {
-    fn load() -> Result<Self, Box<dyn std::error::Error>> {
+    async fn load() -> Result<Self, Box<dyn std::error::Error>> {
         Ok(DynamoDbStorageConfig {
-            table_name: env::var("DDB_TABLE_NAME")?,
+            table_name: env::var("DDB_TABLE_NAME")
+                .map_err(|_| "Missing required environment variable: DDB_TABLE_NAME")?,
             region: Some(env::var("AWS_REGION").unwrap_or_else(|_| DEFAULT_REGION.to_string())),
             profile: env::var("AWS_PROFILE").ok(),
             endpoint_url: env::var("AWS_ENDPOINT")
@@ -100,6 +108,7 @@ impl Configs for DynamoDbStorageConfig {
     }
 }
 
+#[async_trait]
 pub trait Configs: Sized {
-    fn load() -> Result<Self, Box<dyn std::error::Error>>;
+    async fn load() -> Result<Self, Box<dyn std::error::Error>>;
 }

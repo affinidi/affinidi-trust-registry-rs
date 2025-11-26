@@ -23,14 +23,14 @@ impl TrustStorageRepoFactory {
     ) -> Result<Arc<dyn TrustRecordAdminRepository>, Box<dyn std::error::Error>> {
         let repository: Arc<dyn TrustRecordAdminRepository> = match self.storage_backend {
             TrustStorageBackend::Csv => {
-                let config = FileStorageConfig::load()?;
+                let config = FileStorageConfig::load().await?;
                 let file_storage = FileStorage::try_new(config.path, config.update_interval_sec)
                     .await
                     .map_err(|e| anyhow!(e.to_string()))?;
                 Arc::new(file_storage)
             }
             TrustStorageBackend::DynamoDb => {
-                let ddb_config = DynamoDbStorageConfig::load()?;
+                let ddb_config = DynamoDbStorageConfig::load().await?;
                 let ddb = DynamoDbStorage::new(ddb_config)
                     .await
                     .map_err(|e| anyhow!(e.to_string()))?;

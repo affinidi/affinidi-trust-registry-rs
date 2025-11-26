@@ -1,10 +1,11 @@
+use app::configs::Configs;
 use axum::{Json, Router, routing::get};
 use dotenvy::dotenv;
 use serde_json::json;
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
-use crate::{CONFIG, configs::DidcommServerConfigs, listener::start_didcomm_listeners};
+use crate::{configs::DidcommServerConfigs, listener::start_didcomm_listeners};
 
 fn setup_logging() {
     tracing_subscriber::fmt()
@@ -17,17 +18,14 @@ fn setup_logging() {
         .init();
 }
 
-async fn start_didcomm_server() -> Result<(), std::io::Error> {
-    let config: DidcommServerConfigs = CONFIG.clone();
-
+async fn start_didcomm_server(config: DidcommServerConfigs) -> Result<(), std::io::Error> {
     start_didcomm_listeners(config).await?;
 
     Ok(())
 }
 
 /// The main purpose is just to handle health check of container
-async fn start_http_server_healthcheck() -> Result<(), std::io::Error> {
-    let config: DidcommServerConfigs = CONFIG.clone();
+async fn start_http_server_healthcheck(config: DidcommServerConfigs) -> Result<(), std::io::Error> {
     let listen_address = &config.listen_address.clone();
 
     let service_start_timestamp = chrono::Utc::now().timestamp_millis();
@@ -53,9 +51,17 @@ pub async fn start() {
 
     setup_logging();
 
-    let http_task = tokio::spawn(start_http_server_healthcheck());
+    let config = match DidcommServerConfigs::load().await {
+        Ok(config) => config,
+        Err(e) => {
+            error!("Failed to load configuration: {}", e);
+            panic!("Failed to load configuration: {}", e);
+        }
+    };
 
-    let didcomm_task = tokio::spawn(start_didcomm_server());
+    let http_task = tokio::spawn(start_http_server_healthcheck(config.clone()));
+
+    let didcomm_task = tokio::spawn(start_didcomm_server(config));
 
     tokio::select! {
         result = didcomm_task => {

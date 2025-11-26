@@ -1,4 +1,4 @@
-use app::storage::factory::TrustStorageRepoFactory;
+use app::{configs::Configs, storage::factory::TrustStorageRepoFactory};
 use axum::{Json, Router, routing::get};
 use dotenvy::dotenv;
 use serde_json::{Value, json};
@@ -6,7 +6,7 @@ use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-use crate::{CONFIG, SharedData, configs::HttpServerConfigs, handlers::application_routes};
+use crate::{SharedData, configs::HttpServerConfigs, handlers::application_routes};
 
 fn setup_logging() {
     tracing_subscriber::fmt()
@@ -54,7 +54,14 @@ pub async fn start() {
     dotenv().ok();
     setup_logging();
 
-    let config: HttpServerConfigs = CONFIG.clone();
+    let config = match HttpServerConfigs::load().await {
+        Ok(config) => config,
+        Err(e) => {
+            error!("Failed to load configuration: {}", e);
+            panic!("Failed to load configuration: {}", e);
+        }
+    };
+
     let listen_address = config.listen_address.clone();
 
     let repository_factory = TrustStorageRepoFactory::new(config.storage_backend);

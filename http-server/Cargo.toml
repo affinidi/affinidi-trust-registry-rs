@@ -10,6 +10,7 @@ license.workspace = true
 
 [dependencies]
 app.workspace = true
+async-trait.workspace = true
 axum.workspace = true
 anyhow.workspace = true
 chrono.workspace = true

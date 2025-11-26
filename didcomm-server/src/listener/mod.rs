@@ -53,7 +53,7 @@ impl<H: MessageHandler> Listener<H> {
     }
 }
 
-pub(crate) async fn start_one_did_listener(
+pub(crate) async fn start_did_listener_for_profile(
     profile_config: ProfileConfig,
     config: Arc<DidcommServerConfigs>,
 ) {
@@ -94,26 +94,12 @@ pub(crate) async fn start_one_did_listener(
         .unwrap()
 }
 
-/// starts DIDComm listeners
-/// the amount of listeners depends on amount of dids configured
-/// for each did a separate listener will be configured
-/// for now, one mediator for all.
-/// TODO: each did may have its own mediator
+/// starts DIDComm listener for the configured profile
 pub(crate) async fn start_didcomm_listeners(config: DidcommServerConfigs) -> Result<(), JoinError> {
     let config = Arc::new(config);
-    let handles: Vec<_> = config
-        .profile_configs
-        .clone()
-        .into_iter()
-        .map(|e| tokio::spawn(start_one_did_listener(e, config.clone())))
-        .collect();
-
-    for handle in handles {
-        if let Err(e) = handle.await {
-            error!("Service failed: {}", e);
-            return Err(e);
-        }
-    }
+    let profile_config = config.profile_config.clone();
+    
+    start_did_listener_for_profile(profile_config, config).await;
 
     Ok(())
 }
