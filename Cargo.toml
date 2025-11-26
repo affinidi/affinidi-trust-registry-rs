@@ -1,5 +1,5 @@
 [workspace]
-members = ["app", "didcomm-server", "http-server", "test-client"]
+members = ["app", "didcomm-server", "http-server", "test-client", "trust-registry"]
 resolver = "3"
 
 [workspace.package]
