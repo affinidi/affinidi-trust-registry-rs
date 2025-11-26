@@ -145,7 +145,7 @@ curl --location 'http://localhost:3232/recognition' \
 }'
 ```
 
-**Authorization query example:**
+**Authorisation query example:**
 
 ```bash
 curl --location 'http://localhost:3232/authorization' \
@@ -174,7 +174,7 @@ Review environment variables in `./docker-compose.yaml` and start the containers
 docker compose up --build
 ```
 
-**Note:** The `sample-data` folder is mounted as a volume, so changes to `data.csv` are automatically synchronized with the container.
+**Note:** The `sample-data` folder is mounted as a volume, so changes to `data.csv` are automatically synchronised with the container.
 
 ## Testing
 
