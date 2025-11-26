@@ -1,6 +1,6 @@
 # Affinidi Trust Registry
 
-[![License: Apache](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![Licence: Apache](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENCE)
 
 > A high-performance, specification-compliant Trust Registry implementation in Rust, supporting the Trust Registry Query Protocol (TRQP) v2.0.
 
@@ -21,36 +21,36 @@
 
 ## Overview
 
-A **Trust Registry** is a decentralized system that maintains authoritative records about which entities (identified by DIDs - Decentralized Identifiers) are authorized to perform specific actions on specific resources within a trust framework. This project provides a production-ready implementation that enables verification of trust relationships in decentralized identity ecosystems.
+A **Trust Registry** is a decentralised system that maintains authoritative records about which entities (identified by DIDs - Decentralised Identifiers) are authorised to perform specific actions on specific resources within a trust framework. This project provides a production-ready implementation that enables verification of trust relationships in decentralised identity ecosystems.
 
 ### What Problem Does It Solve?
 
-In decentralized identity systems, verifiers need to answer critical questions like:
+In decentralised identity systems, verifiers need to answer critical questions like:
 
-- "Is this issuer authorized to issue driver's licenses?"
-- "Is this credential verifier recognized by the appropriate authority?"
+- "Is this issuer authorised to issue driver's licences?"
+- "Is this credential verifier recognised by the appropriate authority?"
 - "Can this entity perform a specific action within this trust framework?"
 
-Authorization Queries: “Has Authority A authorized Entity B to take Action X on Resource Y?”
+Authorisation Queries: “Has Authority A authorised Entity B to take Action X on Resource Y?”
 
-Recognition Queries: "Does Authority X recognize Entity B as an authority to authorize taking Action X on Resource Y?”
+Recognition Queries: "Does Authority X recognise Entity B as an authority to authorise taking Action X on Resource Y?”
 
-The Trust Registry provides a standardized, queryable database that answers these questions by maintaining trust records that link:
+The Trust Registry provides a standardised, queryable database that answers these questions by maintaining trust records that link:
 
 - **Entity IDs** (who) - DIDs representing issuers, verifiers, or other participants
 - **Authority IDs** (governed by whom) - DIDs of governing authorities
 - **Actions** (what) - Operations like "issue", "verify", "revoke"
-- **Resources** (on what) - Credential types like "driverlicense", "diploma"
-- **Context** - Additional metadata for authorization decisions
+- **Resources** (on what) - Credential types like "driverlicence", "diploma"
+- **Context** - Additional metadata for authorisation decisions
 
 ### Key Use Cases
 
-1. **Credential Issuance Verification**: Verify that an issuer is authorized by a government or regulatory body to issue specific credential types
-2. **Trust Framework Compliance**: Ensure participants in a digital trust ecosystem are recognized by the appropriate governance authorities
+1. **Credential Issuance Verification**: Verify that an issuer is authorised by a government or regulatory body to issue specific credential types
+2. **Trust Framework Compliance**: Ensure participants in a digital trust ecosystem are recognised by the appropriate governance authorities
 
-**Components:**
+### Components
 
-- **`http-server`**: RESTful API server implementing TRQP endpoints for recognition and authorization queries
+- **`http-server`**: RESTful API server implementing TRQP endpoints for recognition and authorisation queries
 - **`didcomm-server`**: Secure, encrypted messaging interface using DIDComm protocol for CRUD admin operations
 - **`app`**: Core domain logic and storage abstractions
 - **Storage backends**:
