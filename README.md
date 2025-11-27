@@ -127,27 +127,17 @@ Replace the `MEDIATOR_URL` and `MEDIATOR_DID` with your own mediator instance.
 
 ### 1. Start the Servers
 
-**NOTE:** Run all commands from the root directory of the repository.
-
-#### Start the HTTP Server
-
-On your terminal, run the following command.
+To start the Trust Registry HTTP and DIDComm servers, run the following command from the root directory of the repository:
 
 ```bash
-RUST_LOG=info cargo run --bin http-server
+RUST_LOG=info cargo run --bin trust-registry
 ```
 
-#### Start the DIDComm Server
-
-On another terminal, run the following command.
-
-```bash
-RUST_LOG=info cargo run --bin didcomm-server
-```
+The command will launch the service with logging enabled at the info level.
 
 ### 2. Test the API
 
-Query the sample data stored in `./sample-data/data.csv`:
+You can test the Trust Registry by querying the sample data stored in `./sample-data/data.csv`:
 
 #### Recognition Query Example
 
@@ -162,7 +152,9 @@ curl --location 'http://localhost:3232/recognition' \
 }'
 ```
 
-#### Authorization Ruery Example:
+The API will return whether the specified entity is recognised by the given authority for the requested action and resource.
+
+#### Authorization Query Example:
 
 ```bash
 curl --location 'http://localhost:3232/authorization' \
@@ -174,6 +166,8 @@ curl --location 'http://localhost:3232/authorization' \
     "resource": "resource1"
 }'
 ```
+
+The API will return whether the specified entity is authorised under the given authority for the requested action and resource.
 
 **Testing Tips:**
 
