@@ -65,9 +65,8 @@ This ensures **security**, **compliance**, and **interoperability** across decen
 
 - **`http-server`**: RESTful API server implementing TRQP endpoints for recognition and authorisation queries.
 - **`didcomm-server`**: Secure, encrypted messaging interface using DIDComm protocol for CRUD admin operations.
-- **`app`**: Core domain logic and storage abstractions.
 
-  **Storage backends**:
+- **Storage backends**: Storing authoritative records about the entities for querying. It supports the following storage types:
   - CSV file storage
   - AWS DynamoDB
 
