@@ -75,9 +75,8 @@ pub fn parse_profile_config_from_str(
 impl Configs for DidcommConfig {
     async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let admin_dids_str = env::var("ADMIN_DIDS")
-            .map_err(|e| {
+            .inspect_err(|_| {
                 warn!("Missing environment variable: ADMIN_DIDS. The admin list is empty");
-                e
             })
             .unwrap_or_default();
         let admin_dids: Vec<String> = admin_dids_str

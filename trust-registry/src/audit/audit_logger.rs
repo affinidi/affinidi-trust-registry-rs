@@ -1,12 +1,12 @@
 use crate::{
-    audit::audit::{AuditLog, AuditLogger, AuditOperation, AuditResource},
+    audit::model::{AuditLog, AuditLogger, AuditOperation, AuditResource},
     configs::AuditConfig,
 };
 use chrono::Utc;
 use serde_json::{Value, json};
 use tracing::info;
 
-pub use crate::audit::audit::{AuditLogBuilder, AuditStatus};
+pub use crate::audit::model::{AuditLogBuilder, AuditStatus};
 
 pub const AUDIT_ROLE_ADMIN: &str = "ADMIN";
 pub const NA: &str = "N/A";

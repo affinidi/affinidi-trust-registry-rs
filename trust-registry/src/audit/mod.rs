@@ -1,2 +1,2 @@
-pub mod audit;
+pub mod model;
 pub mod audit_logger;

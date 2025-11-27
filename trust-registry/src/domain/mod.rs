@@ -193,11 +193,7 @@ impl TrustRecord {
     }
 
     pub fn is_recognized(&self) -> bool {
-        if let Some(b) = self.recognized {
-            b
-        } else {
-            false
-        }
+        self.recognized.unwrap_or_default()
     }
 
     pub fn context(&self) -> &Context {
@@ -205,11 +201,7 @@ impl TrustRecord {
     }
 
     pub fn is_authorized(&self) -> bool {
-        if let Some(b) = self.authorized {
-            b
-        } else {
-            false
-        }
+        self.authorized.unwrap_or_default()
     }
 
     /// Merges additional_context into the given one.

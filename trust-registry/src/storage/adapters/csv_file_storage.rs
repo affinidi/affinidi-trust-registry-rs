@@ -93,7 +93,7 @@ impl FileStorage {
 
                 info!(path = %file_path.display(), "Syncing trust records from file");
 
-                let previous = { last_modified.read().unwrap().clone() };
+                let previous = { *last_modified.read().unwrap() };
 
                 match Self::load_if_modified(&file_path, previous).await {
                     Ok(Some((new_records, modified))) => {
@@ -129,15 +129,14 @@ impl FileStorage {
         let metadata = tokio::fs::metadata(path).await?;
         let modified = metadata.modified()?;
 
-        if let Some(previous) = last_seen {
-            if modified <= previous {
+        if let Some(previous) = last_seen
+            && modified <= previous {
                 info!(
                     path = %path.display(),
                     "No changes detected in trust records file"
                 );
                 return Ok(None);
             }
-        }
 
         info!(
             path = %path.display(),
@@ -229,9 +228,7 @@ impl TrustRecordRepository for FileStorage {
 
         let guard = records.read().unwrap();
         let result = guard
-            .values()
-            .cloned()
-            .find(|record| FileStorage::matches_query(record, &query));
+            .values().find(|&record| FileStorage::matches_query(record, &query)).cloned();
 
         Ok(result)
     }
@@ -303,9 +300,7 @@ impl TrustRecordAdminRepository for FileStorage {
     async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
         let records = self.records.read().unwrap();
         let result = records
-            .values()
-            .cloned()
-            .find(|record| FileStorage::matches_query(record, &query));
+            .values().find(|&record| FileStorage::matches_query(record, &query)).cloned();
 
         result.ok_or_else(|| {
             RepositoryError::RecordNotFound(format!(
