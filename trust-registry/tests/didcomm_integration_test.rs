@@ -8,8 +8,10 @@ use affinidi_tdk::{
     },
     secrets_resolver::secrets::Secret,
 };
+use serde_json::{Value, json};
+use std::{env, sync::Arc, time::Duration, vec};
+use tokio::sync::OnceCell;
 use trust_registry::didcomm::{
-    prepare_atm_and_profile,
     handlers::{
         admin::{
             CREATE_RECORD_MESSAGE_TYPE, CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
@@ -20,10 +22,8 @@ use trust_registry::didcomm::{
         },
         trqp::{QUERY_RECOGNITION_MESSAGE_TYPE, QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE},
     },
+    prepare_atm_and_profile,
 };
-use serde_json::{Value, json};
-use std::{env, sync::Arc, time::Duration, vec};
-use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 static TEST_CONTEXT: OnceCell<Arc<TestConfig>> = OnceCell::const_new();
