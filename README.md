@@ -88,7 +88,7 @@ cargo --version
 
 ## Set up Environment
 
-Generate the required DIDs and keys for local deployment. The command will populate the secrets to the `.env.example` and `testing/.env.test.example`.
+Generate the required DIDs and keys for local deployment. The command will populate the secrets to the `.env` and `.env.test`.
 
 ```bash
 cargo run --bin generate-secrets --features dev-tools
