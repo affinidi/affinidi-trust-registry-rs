@@ -1,9 +1,47 @@
 # Contributing
 
-When contributing to this repository, please first discuss the change you wish to make by creating a new [GitHub issue](https://github.com/affinidi/affinidi-tdk/issues/new).
+When contributing to this repository, please first discuss the change you wish to make by creating a new [GitHub issue](https://github.com/affinidi/affinidi-trust-registry-rs/issues/new).
 
 ## Developement Requirements
 
+### Installation
+
+Install Rust on your machine.
+
+- **Rust**: 1.88.0 or higher
+- **Edition**: 2024
+- **Cargo**: Latest version bundled with Rust
+
+Verify that your Rust installation meets the requirements.
+
+```bash
+rustc --version
+cargo --version
+```
+
+### Testing
+
+This project includes comprehensive unit and integration tests with support for multiple storage backends.
+
+For detailed testing instructions, refer to the [TESTING](testing/README.md) document.
+
+### Pre-commit checks
+
+Run the formatter and lints before committing to maintain code consistency and catch common issues early.
+
+```bash
+# Format code (modify files)
+cargo fmt
+
+# Check formatting (CI-friendly; fails if unformatted)
+cargo fmt -- --check
+
+# Run Clippy
+cargo clippy
+
+# Optionally apply fixable Clippy suggestions locally
+cargo fix --clippy
+```
 
 ### Code quality expectations
 
