@@ -1,5 +1,5 @@
 [workspace]
-members = ["app", "didcomm-server", "http-server", "test-client", "trust-registry"]
+members = ["test-client", "trust-registry"]
 resolver = "3"
 
 [workspace.package]
@@ -13,7 +13,6 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 
-app = { path = "./app", version = "*" }
 
 affinidi-tdk = "0.2.7"
 anyhow = "1.0.71"
