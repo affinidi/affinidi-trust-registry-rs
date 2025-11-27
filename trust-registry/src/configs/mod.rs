@@ -2,7 +2,7 @@ pub mod didcomm;
 pub mod server;
 pub mod storage;
 
-pub use didcomm::{AdminConfig, AuditConfig, AuditLogFormat, DidcommConfig};
+pub use didcomm::{AdminConfig, AuditConfig, AuditLogFormat, DidcommConfig, ProfileConfig};
 pub use server::ServerConfig;
 pub use storage::{DynamoDbStorageConfig, FileStorageConfig, TrustStorageBackend};
 

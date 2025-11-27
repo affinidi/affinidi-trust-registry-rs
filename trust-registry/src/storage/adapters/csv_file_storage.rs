@@ -126,17 +126,20 @@ impl FileStorage {
         Option<(HashMap<RecordKey, TrustRecord>, SystemTime)>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        let metadata = tokio::fs::metadata(path).await?;
+        let metadata = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| format!("file_path: {:?}, error: {}", path, e))?;
         let modified = metadata.modified()?;
 
         if let Some(previous) = last_seen
-            && modified <= previous {
-                info!(
-                    path = %path.display(),
-                    "No changes detected in trust records file"
-                );
-                return Ok(None);
-            }
+            && modified <= previous
+        {
+            info!(
+                path = %path.display(),
+                "No changes detected in trust records file"
+            );
+            return Ok(None);
+        }
 
         info!(
             path = %path.display(),
@@ -228,7 +231,9 @@ impl TrustRecordRepository for FileStorage {
 
         let guard = records.read().unwrap();
         let result = guard
-            .values().find(|&record| FileStorage::matches_query(record, &query)).cloned();
+            .values()
+            .find(|&record| FileStorage::matches_query(record, &query))
+            .cloned();
 
         Ok(result)
     }
@@ -300,7 +305,9 @@ impl TrustRecordAdminRepository for FileStorage {
     async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
         let records = self.records.read().unwrap();
         let result = records
-            .values().find(|&record| FileStorage::matches_query(record, &query)).cloned();
+            .values()
+            .find(|&record| FileStorage::matches_query(record, &query))
+            .cloned();
 
         result.ok_or_else(|| {
             RepositoryError::RecordNotFound(format!(

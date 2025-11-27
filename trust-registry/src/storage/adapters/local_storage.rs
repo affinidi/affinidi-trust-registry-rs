@@ -80,7 +80,9 @@ impl TrustRecordRepository for LocalStorage {
     ) -> Result<Option<TrustRecord>, RepositoryError> {
         let records = self.records.read().unwrap();
         let result = records
-            .values().find(|&record| Self::matches_query(record, &query)).cloned();
+            .values()
+            .find(|&record| Self::matches_query(record, &query))
+            .cloned();
         Ok(result)
     }
 }
@@ -145,7 +147,9 @@ impl TrustRecordAdminRepository for LocalStorage {
     async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
         let records = self.records.read().unwrap();
         let result = records
-            .values().find(|&record| Self::matches_query(record, &query)).cloned();
+            .values()
+            .find(|&record| Self::matches_query(record, &query))
+            .cloned();
 
         result.ok_or_else(|| {
             RepositoryError::RecordNotFound(format!(
