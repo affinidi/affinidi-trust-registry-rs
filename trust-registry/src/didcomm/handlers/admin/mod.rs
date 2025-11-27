@@ -63,19 +63,19 @@ fn extract_audit_resource(message: &Message) -> AuditResource {
             let entity_id = body
                 .get("entity_id")
                 .and_then(|v| v.as_str())
-                .map(|s| crate::domain::EntityId::new(s));
+                .map(crate::domain::EntityId::new);
             let authority_id = body
                 .get("authority_id")
                 .and_then(|v| v.as_str())
-                .map(|s| crate::domain::AuthorityId::new(s));
+                .map(crate::domain::AuthorityId::new);
             let action = body
                 .get("action")
                 .and_then(|v| v.as_str())
-                .map(|s| crate::domain::Action::new(s));
+                .map(crate::domain::Action::new);
             let resource = body
                 .get("resource")
                 .and_then(|v| v.as_str())
-                .map(|s| crate::domain::Resource::new(s));
+                .map(crate::domain::Resource::new);
 
             if entity_id.is_some()
                 || authority_id.is_some()

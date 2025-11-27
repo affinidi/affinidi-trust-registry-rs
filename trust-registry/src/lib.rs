@@ -35,7 +35,7 @@ where
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
-            service_start_timestamp: self.service_start_timestamp.clone(),
+            service_start_timestamp: self.service_start_timestamp,
             repository: Arc::clone(&self.repository),
         }
     }

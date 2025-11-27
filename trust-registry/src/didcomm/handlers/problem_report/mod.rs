@@ -10,6 +10,12 @@ const PROBLEM_REPORT_TYPE: &str = "https://didcomm.org/report-problem/2.0/proble
 
 pub struct ProblemReportHandler;
 
+impl Default for ProblemReportHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProblemReportHandler {
     pub fn new() -> Self {
         Self
