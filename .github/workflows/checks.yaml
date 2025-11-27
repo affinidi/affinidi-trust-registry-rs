@@ -32,13 +32,13 @@ jobs:
         with:
           shared-key: 'rust-cache'
       - name: generate configs
-        run: IN_PIPELINE=true cargo run --bin generate-secrets --features dev-tools
+        run: IN_PIPELINE=true cargo run --bin generate-secrets --features dev-tools -p trust-registry
       - name: Setup environment
         run: cp .env.pipeline .env.test
       - name: Prepare test data
         run: |
-          mkdir -p didcomm-server/tests/tmp
-          cp sample-data/data.csv didcomm-server/tests/tmp/data.csv
+          mkdir -p trust-registry/tests/tmp
+          cp sample-data/data.csv trust-registry/tests/tmp/data.csv
       - name: Install Docker Compose
         run: |
           sudo apt-get update
@@ -50,17 +50,17 @@ jobs:
           docker buildx build \
             --cache-from type=gha \
             --cache-to type=gha,mode=max \
-            -f didcomm-server/Dockerfile \
-            -t trust-registry-didcomm:local \
+            -f trust-registry/Dockerfile \
+            -t trust-registry:local \
             --load \
             .
           RUST_LOG=info docker compose -f docker-compose.test.yaml up -d
       - name: Check server logs
-        run: docker compose -f docker-compose.test.yaml logs didcomm-server
+        run: docker compose -f docker-compose.test.yaml logs trust-registry
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate code coverage
-        run: cargo llvm-cov --all-features -p http-server -p didcomm-server -p app --summary-only --fail-under-lines=45
+        run: cargo llvm-cov --all-features -p trust-registry --summary-only --fail-under-lines=45
       - name: Stop services
         if: always()
         run: docker compose -f docker-compose.test.yaml down

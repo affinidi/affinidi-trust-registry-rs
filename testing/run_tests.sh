@@ -24,9 +24,9 @@ export PROFILE_CONFIGS="$PROFILE_CONFIGS"
 echo "Using TR_STORAGE_BACKEND=$TR_STORAGE_BACKEND"
 # echo "Using PROFILE_CONFIGS=$PROFILE_CONFIGS"
 
-cp testing/.env.test.example .env.test
-if [ $? -ne 0 ]; then
-    echo "Failed to copy .env.test.example to .env.test. Please ensure the file exists and the destination is writable."
+if [ ! -f .env.test ]; then
+    echo ".env.test not found. Please run the following command to generate credentials:"
+    echo "  cargo run --bin generate-secrets --features dev-tools -p trust-registry"
     exit 1
 fi
 source .env.test
@@ -111,18 +111,18 @@ fi
 echo "Running cargo tests..."
 if [ "$COVERAGE" == "true" ]; then
     docker compose -f docker-compose.test.yaml up -d
-    sleep 10 # wait for services to be up
-    cargo llvm-cov --html   -p http-server -p didcomm-server -p app 
+    sleep 5
+    cargo llvm-cov --html -p trust-registry
 elif [ "$TEST_TYPE" == "all" ]; then
     docker compose -f docker-compose.test.yaml up -d
-    sleep 10
-    cargo test 
+    sleep 5
+    cargo test -p trust-registry
 elif [ "$TEST_TYPE" == "unit" ]; then
-    cargo test --lib
+    cargo test --lib -p trust-registry
 elif [ "$TEST_TYPE" == "int" ]; then
     docker compose -f docker-compose.test.yaml up -d
-    sleep 10
-    cargo test --test integration_test
+    sleep 5
+    cargo test --test http_integration_test -p trust-registry --no-capture
 else
     echo "Unknown TEST_TYPE: $TEST_TYPE. Valid options are 'all', 'unit', 'int'."
     exit 1

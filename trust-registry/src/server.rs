@@ -19,14 +19,14 @@ use crate::{
 };
 
 fn setup_logging() {
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         // .with_max_level(tracing::Level::DEBUG)
         .with_env_filter(EnvFilter::from_default_env()) // reads RUST_LOG
         .with_target(false)
         .with_level(true)
         .with_thread_ids(true)
-        .init();
+        .try_init();
 }
 
 async fn start_didcomm_server(
