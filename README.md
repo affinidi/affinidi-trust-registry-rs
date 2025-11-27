@@ -2,145 +2,144 @@
 
 [![Licence: Apache](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENCE)
 
-> A high-performance, specification-compliant Trust Registry implementation in Rust, supporting the Trust Registry Query Protocol (TRQP) v2.0.
+A high-performance, Rust-based implementation of a Trust Registry, fully compliant with the [Trust Registry Query Protocol (TRQP) v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/) specification. Built for scalability and reliability, it enables secure, standards-based verification of trusted entities within decentralised identity ecosystems.
 
 ## Table of Contents
 
-- [Overview](#overview)
-  - [What Problem Does It Solve?](#what-problem-does-it-solve)
-  - [Key Use Cases](#key-use-cases)
-- [Getting Started](#getting-started)
-  - [Requirements](#requirements)
-  - [Installation](#installation)
-- [Usage](#usage)
-  - [Setup Environment](#setup-environment)
-  - [Run on Local Machine](#run-on-local-machine)
-  - [Run on Docker](#run-on-docker)
-- [Testing](#testing)
+- [What is Trust Registry](#what-is-trust-registry)
+  - [Why a Trust Registry Matters](#why-a-trust-registry-matters)
+  - [Sample Use Cases](#sample-use-cases)
+- [Key Components](#key-components)
+- [Requirements](#requirements)
+- [Set up Environment](#set-up-environment)
+- [Run on Local Machine](#run-on-local-machine)
+  - [1. Start the Servers](#1-start-the-servers)
+  - [2. Test the API](#2-test-the-api)
+- [Run on Docker](#run-on-docker)
+- [Development](#development)
+  - [Testing](#testing)
+  - [Pre-commit checks](#pre-commit-checks)
+- [Support \& feedback](#support--feedback)
+  - [Reporting technical issues](#reporting-technical-issues)
 - [Contributing](#contributing)
-- [Support & feedback](#support--feedback)
 
-## Overview
+## What is Trust Registry
 
-A **Trust Registry** is a decentralised system that maintains authoritative records about which entities (identified by DIDs - Decentralised Identifiers) are authorised to perform specific actions on specific resources within a trust framework. This project provides a production-ready implementation that enables verification of trust relationships in decentralised identity ecosystems.
+A **Trust Registry** is a system that maintains and provides authoritative information about which entities, such as organisations, issuers, verifiers, are authorised to perform specific actions on defined resources within a trust framework. Each entity is identified by its Decentralised Identifier (DID), ensuring cryptographic integrity and interoperability across decentralised identity ecosystems.
 
-### What Problem Does It Solve?
+### Why a Trust Registry Matters
 
-In decentralised identity systems, verifiers need to answer critical questions like:
+In decentralised identity and verifiable credentials, verifiers need to answer critical trust questions before accepting or validating credentials, such as:
 
 - "Is this issuer authorised to issue driver's licences?"
 - "Is this credential verifier recognised by the appropriate authority?"
 - "Can this entity perform a specific action within this trust framework?"
 
-Authorisation Queries: “Has Authority A authorised Entity B to take Action X on Resource Y?”
+The Trust Registry provides a standardised, queryable database that answers these trust questions by maintaining trust records and their permitted roles within a governance framework.
 
-Recognition Queries: "Does Authority X recognise Entity B as an authority to authorise taking Action X on Resource Y?”
+**Authorisation Queries:** “Has Authority A authorised Entity B to take Action X on Resource Y?”
 
-The Trust Registry provides a standardised, queryable database that answers these questions by maintaining trust records that link:
+**Recognition Queries:** "Does Authority X recognise Entity B as an authority to authorise taking Action X on Resource Y?”
 
-- **Entity IDs** (who) - DIDs representing issuers, verifiers, or other participants
-- **Authority IDs** (governed by whom) - DIDs of governing authorities
-- **Actions** (what) - Operations like "issue", "verify", "revoke"
-- **Resources** (on what) - Credential types like "driverlicence", "diploma"
-- **Context** - Additional metadata for authorisation decisions
+The Trust Registry links:
 
-### Key Use Cases
+- **Entity IDs** (who) - DIDs representing issuers, verifiers, or other participants.
+- **Authority IDs** (governed by whom) - DIDs of governing authorities.
+- **Actions** (what) - Operations like "issue", "verify", "revoke".
+- **Resources** (on what) - Credential types like "driverlicence", "diploma".
+- **Context** - Additional metadata for authorisation decisions.
 
-1. **Credential Issuance Verification**: Verify that an issuer is authorised by a government or regulatory body to issue specific credential types
-2. **Trust Framework Compliance**: Ensure participants in a digital trust ecosystem are recognised by the appropriate governance authorities
+This ensures **security**, **compliance**, and **interoperability** across decentralised identity systems.
 
-### Components
+### Sample Use Cases
 
-- **`http-server`**: RESTful API server implementing TRQP endpoints for recognition and authorisation queries
-- **`didcomm-server`**: Secure, encrypted messaging interface using DIDComm protocol for CRUD admin operations
-- **`app`**: Core domain logic and storage abstractions
-- **Storage backends**:
+- **Credential Issuance Verification**
+
+  Verifies whether an issuer is authorised by a government or regulatory body to issue specific credential types (e.g., driver’s licences, professional certifications).
+
+- **Trust Framework Compliance**
+
+  Ensure that all participants in a digital trust ecosystem, such as issuers, verifiers, and relying parties, are recognised and approved by the appropriate governance authorities.
+
+## Key Components
+
+- **`http-server`**: RESTful API server implementing TRQP endpoints for recognition and authorisation queries.
+- **`didcomm-server`**: Secure, encrypted messaging interface using DIDComm protocol for CRUD admin operations.
+- **`app`**: Core domain logic and storage abstractions.
+
+  **Storage backends**:
   - CSV file storage
   - AWS DynamoDB
 
-## Getting Started
+## Requirements
 
-### Requirements
+Install Rust on your machine.
 
 - **Rust**: 1.88.0 or higher
 - **Edition**: 2024
 - **Cargo**: Latest version bundled with Rust
 
-### Installation
-
-Install rust or validate that it is installed.
+Verify that your Rust installation meets the requirements.
 
 ```bash
 rustc --version
 cargo --version
 ```
 
-## Usage
+## Set up Environment
 
-### Setup Environment
-
-#### 1. Generate Environment Secrets
-
-Generate the required DIDs and keys for local development. This command will inject secrets into `.env.example` and `testing/.env.test.example`.
+Generate the required DIDs and keys for local deployment. The command will populate the secrets to the `.env.example` and `testing/.env.test.example`.
 
 ```bash
 cargo run --bin generate-secrets --features dev-tools
 ```
 
-**What this generates:**
+The command generates:
 
-- 3 DIDs and their corresponding keys
-- Didcomm Server Environment variables:
+- **3 DIDs** and their corresponding keys.
+- DIDComm server environment variables:
   - `PROFILE_CONFIGS`
-- Testing Environment variables:
+- Testing environment variables:
   - `PROFILE_CONFIGS`
   - `TRUST_REGISTRY_DID`
   - `CLIENT_DID`
   - `CLIENT_SECRETS`
   - `ADMIN_DIDS`
 
-**Default mediator configuration:**
+**Default DIDComm Mediator**
 
-- URL: `https://66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io`
-- DID: `did:web:66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io`
+The default setup provides a default DIDComm mediator configuration with the following details:
 
-**Using a custom mediator:**
+  - URL: `https://66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io`
+  - DID: `did:web:66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io`
+
+**Custom DIDComm Mediator**
+
+To use a custom DIDComm mediator on your setup, use the following command:
 
 ```bash
 MEDIATOR_URL="https://your-mediator-url.io" MEDIATOR_DID="did:web:your-mediator-did.io" cargo run --bin generate-secrets --features dev-tools
 ```
 
-#### 2. Setup Environment File
+Replace the `MEDIATOR_URL` and `MEDIATOR_DID` with your own mediator instance.
 
-Copy the example environment file:
+## Run on Local Machine
 
-```bash
-cp .env.example .env
-```
+### 1. Start the Servers
 
-### Run on Local Machine
-
-#### 1.Start the Servers
-
-**Note:** All commands should be run from the root of the repository.
-
-Start the HTTP server:
+To start the Trust Registry HTTP and DIDComm servers, run the following command from the root directory of the repository:
 
 ```bash
-RUST_LOG=info cargo run --bin http-server
+RUST_LOG=info cargo run --bin trust-registry
 ```
 
-Start the DIDComm server:
+The command will launch the service with logging enabled at the info level.
 
-```bash
-RUST_LOG=info cargo run --bin didcomm-server
-```
+### 2. Test the API
 
-#### 2. Test the API
+You can test the Trust Registry by querying the sample data stored in `./sample-data/data.csv`:
 
-Query the sample data stored in `./sample-data/data.csv`:
-
-**Recognition query example:**
+#### Recognition Query Example
 
 ```bash
 curl --location 'http://localhost:3232/recognition' \
@@ -153,7 +152,9 @@ curl --location 'http://localhost:3232/recognition' \
 }'
 ```
 
-**Authorization query example:**
+The API will return whether the specified entity is recognised by the given authority for the requested action and resource.
+
+#### Authorization Query Example:
 
 ```bash
 curl --location 'http://localhost:3232/authorization' \
@@ -166,15 +167,15 @@ curl --location 'http://localhost:3232/authorization' \
 }'
 ```
 
-**Testing tips:**
+The API will return whether the specified entity is authorised under the given authority for the requested action and resource.
 
-- Test with both defined and undefined IDs to verify error handling
-- Add more records to `./sample-data/data.csv` to expand test coverage
-- Note: The `context` field should contain base64-encoded valid JSON
+**Testing Tips:**
 
-### Run on Docker
+- Add more records to `./sample-data/data.csv` to expand test coverage.
+- Test with both defined and undefined IDs to ensure the system correctly handles invalid or missing identifiers.
+- Ensure the `context` field contains a valid JSON object encoded in Base64. Invalid or malformed data should trigger appropriate error responses.
 
-#### Using Docker Compose
+## Run on Docker
 
 Review environment variables in `./docker-compose.yaml` and start the containers:
 
@@ -182,25 +183,19 @@ Review environment variables in `./docker-compose.yaml` and start the containers
 docker compose up --build
 ```
 
-**Note:** The `sample-data` folder is mounted as a volume, so changes to `data.csv` are automatically synchronized with the container.
+**NOTE:** The `sample-data` folder is mounted as a volume to synchronise the changes from data.csv to the container automatically.
 
-## Testing
+## Development
+
+### Testing
 
 This project includes comprehensive unit and integration tests with support for multiple storage backends.
 
-For detailed testing instructions, see [TESTING](testing/README.md).
-
-## Contributing
-
-Want to contribute?
-
-Head over to our [CONTRIBUTING](CONTRIBUTING.md) guidelines.
+For detailed testing instructions, refer to the [TESTING](testing/README.md) document.
 
 ### Pre-commit checks
 
-Please run the formatter and lints before committing to keep the codebase consistent and to catch common issues early.
-
-Run locally:
+Run the formatter and lints before committing to maintain code consistency and catch common issues early.
 
 ```bash
 # Format code (modify files)
@@ -231,3 +226,9 @@ If you have a technical issue with the project's codebase, you can also create a
    [open a new one](https://github.com/affinidi/trust-registry-rs/issues/new).
    Be sure to include a **title and clear description**, as much relevant information as possible,
    and a **code sample** or an **executable test case** demonstrating the expected behaviour that is not occurring.
+
+## Contributing
+
+Want to contribute?
+
+Head over to our [CONTRIBUTING](CONTRIBUTING.md) guidelines.
