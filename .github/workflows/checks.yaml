@@ -35,7 +35,7 @@ jobs:
         with:
           shared-key: 'rust-cache'
       - name: generate configs
-        run: IN_PIPELINE=true cargo run --bin generate-secrets --features dev-tools -p trust-registry
+        run: IN_PIPELINE=true cargo run --release --bin generate-secrets --features dev-tools -p trust-registry
       - name: Setup environment
         run: cp .env.pipeline .env.test
       - name: Prepare test data
@@ -48,7 +48,7 @@ jobs:
           echo $! > server.pid
       - name: Wait for server to be ready
         run: |
-          timeout 60 bash -c 'until curl -f http://127.0.0.1:3233/health 2>/dev/null; do sleep 2; done' || (
+          timeout 240 bash -c 'until curl -f http://0.0.0.0:3232/health 2>/dev/null; do sleep 2; done' || (
             echo "Server failed to start. Logs:"
             cat server.log
             exit 1
