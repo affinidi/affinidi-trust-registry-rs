@@ -182,12 +182,8 @@ pub fn create_did(service: Option<Vec<String>>, auth_service: bool) -> (String, 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut dids_and_secrets: Vec<(String, Vec<Secret>)> = vec![];
-    let mediator_url = std::env::var("MEDIATOR_URL")
-        .unwrap()
-        .expect("MEDIATOR_URL not set");
-    let mediator_did = std::env::var("MEDIATOR_DID")
-        .unwrap()
-        .expect("MEDIATOR_DID not set");
+    let mediator_url = std::env::var("MEDIATOR_URL").expect("MEDIATOR_URL not set");
+    let mediator_did = std::env::var("MEDIATOR_DID").expect("MEDIATOR_DID not set");
     let in_pipeline = std::env::var("IN_PIPELINE")
         .unwrap_or("false".to_string())
         .to_lowercase()
