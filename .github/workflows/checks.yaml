@@ -44,6 +44,7 @@ jobs:
           cp sample-data/data.csv trust-registry/tests/tmp/data.csv
       - name: Run trust-registry server
         run: |
+          source .env
           RUST_LOG=info nohup cargo run --bin trust-registry > server.log 2>&1 &
           echo $! > server.pid
       - name: Wait for server to be ready
