@@ -105,16 +105,9 @@ The command generates:
   - `CLIENT_SECRETS`
   - `ADMIN_DIDS`
 
-**Default DIDComm Mediator**
+**DIDComm Mediator**
 
-The default setup provides a default DIDComm mediator configuration with the following details:
-
-  - URL: `https://66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io`
-  - DID: `did:web:66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io`
-
-**Custom DIDComm Mediator**
-
-To use a custom DIDComm mediator on your setup, use the following command:
+To use a your DIDComm mediator on your setup, use the following command:
 
 ```bash
 MEDIATOR_URL="https://your-mediator-url.io" MEDIATOR_DID="did:web:your-mediator-did.io" cargo run --bin generate-secrets --features dev-tools
