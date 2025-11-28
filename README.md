@@ -107,7 +107,7 @@ The command generates:
 
 **DIDComm Mediator**
 
-To use a your DIDComm mediator on your setup, use the following command:
+To use a DIDComm mediator on your setup, use the following command:
 
 ```bash
 MEDIATOR_URL="https://your-mediator-url.io" MEDIATOR_DID="did:web:your-mediator-did.io" cargo run --bin generate-secrets --features dev-tools
