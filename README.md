@@ -115,6 +115,8 @@ MEDIATOR_URL="https://your-mediator-url.io" MEDIATOR_DID="did:web:your-mediator-
 
 Replace the `MEDIATOR_URL` and `MEDIATOR_DID` with your own mediator instance.
 
+For more information on running your own DIDComm mediator, refer to the [deployment options](https://docs.affinidi.com/products/affinidi-messaging/didcomm-mediator/deployment-options/) page in the documentation.
+
 ## Run on Local Machine
 
 ### 1. Start the Servers
