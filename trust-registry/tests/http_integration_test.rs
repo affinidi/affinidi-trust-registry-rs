@@ -1,11 +1,11 @@
 use serde_json::{Value, json};
-use serial_test::serial;
-use std::{env, time::Duration};
+use std::env;
 
 async fn setup_test_environment() -> String {
     dotenvy::from_filename(".env.test").ok();
-    let port = 3233;
-
+    let address = env::var("LISTEN_ADDRESS")
+        .map(|address| format!("http://{}", address))
+        .unwrap_or("http://0.0.0.0:3232".to_string());
     let test_data = "entity_id,authority_id,action,resource,recognized,authorized,context
 did:example:entity1,did:example:authority1,action1,resource1,true,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
 did:example:entity2,did:example:authority2,action2,resource2,false,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
@@ -18,36 +18,7 @@ did:example:entity3,did:example:authority3,action3,resource3,true,false,eyJ0ZXN0
         }
     }
 
-    tokio::spawn(async move {
-        trust_registry::server::start().await;
-    });
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-    let base_url = format!("http://127.0.0.1:{}", port);
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-
-    for attempt in 0..30 {
-        match client.get(&format!("{}/health", base_url)).send().await {
-            Ok(response) if response.status() == 200 => {
-                println!("Test server ready on attempt {}", attempt + 1);
-                return base_url;
-            }
-            Ok(_) => {
-                println!(
-                    "Server responded but not with 200 status, attempt {}",
-                    attempt + 1
-                );
-            }
-            Err(e) => {
-                println!("Connection failed on attempt {}: {}", attempt + 1, e);
-            }
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-    }
-    panic!("Failed to start test server after 30 attempts");
+    address
 }
 
 async fn get_test_server_url() -> String {
@@ -55,7 +26,6 @@ async fn get_test_server_url() -> String {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_health_endpoint() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
@@ -73,7 +43,6 @@ async fn test_health_endpoint() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_recognition_endpoint_success() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
@@ -112,7 +81,6 @@ async fn test_recognition_endpoint_success() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_authorization_endpoint_success() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
@@ -152,7 +120,6 @@ async fn test_authorization_endpoint_success() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_authorization_endpoint_not_found() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
@@ -182,7 +149,6 @@ async fn test_authorization_endpoint_not_found() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_recognition_endpoint_not_found() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
@@ -212,7 +178,6 @@ async fn test_recognition_endpoint_not_found() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_authorization_endpoint_bad_request() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
@@ -240,7 +205,6 @@ async fn test_authorization_endpoint_bad_request() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_recognition_endpoint_bad_request() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
@@ -265,7 +229,6 @@ async fn test_recognition_endpoint_bad_request() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_context_merging_authorization() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
@@ -299,7 +262,6 @@ async fn test_context_merging_authorization() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_context_merging_recognition() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
@@ -331,7 +293,6 @@ async fn test_context_merging_recognition() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_cors_headers_present() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
@@ -349,7 +310,6 @@ async fn test_cors_headers_present() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_method_not_allowed() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
@@ -364,7 +324,6 @@ async fn test_method_not_allowed() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_invalid_endpoint() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
