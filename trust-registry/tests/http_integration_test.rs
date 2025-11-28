@@ -3,7 +3,9 @@ use std::env;
 
 async fn setup_test_environment() -> String {
     dotenvy::from_filename(".env.test").ok();
-    let address = env::var("LISTEN_ADDRESS").unwrap_or("http://127.0.0.1:3233".to_string());
+    let address = env::var("LISTEN_ADDRESS")
+        .map(|address| format!("http://{}", address))
+        .unwrap_or("http://0.0.0.0:3232".to_string());
     let test_data = "entity_id,authority_id,action,resource,recognized,authorized,context
 did:example:entity1,did:example:authority1,action1,resource1,true,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
 did:example:entity2,did:example:authority2,action2,resource2,false,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
