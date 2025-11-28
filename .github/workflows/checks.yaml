@@ -17,8 +17,8 @@ jobs:
     name: Test Suite
     runs-on: ubuntu-24.04
     env:
-      MEDIATOR_DID: { { vars.MEDIATOR_DID } }
-      MEDIATOR_URL: { { vars.MEDIATOR_URL } }
+      MEDIATOR_DID: ${{ vars.MEDIATOR_DID }}
+      MEDIATOR_URL: ${{ vars.MEDIATOR_URL }}
     steps:
       - uses: actions/checkout@v4
         with:
