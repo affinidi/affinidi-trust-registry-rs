@@ -5,7 +5,7 @@
 A high-performance, Rust-based implementation of a Trust Registry, fully compliant with the [Trust Registry Query Protocol (TRQP) v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/) specification. Built for scalability and reliability, it enables secure, standards-based verification of trusted entities within decentralised identity ecosystems.
 
 ## Table of Contents
-
+something
 - [What is Trust Registry](#what-is-trust-registry)
   - [Why a Trust Registry Matters](#why-a-trust-registry-matters)
   - [Sample Use Cases](#sample-use-cases)
