@@ -57,9 +57,9 @@ pub struct AtmTestContext {
 
 async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
     dotenvy::from_filename(".env.test").ok();
-    let client_did = env::var("CLIENT_DID").expect("CLIENT_DID not set in .env");
-    let client_secrets = env::var("CLIENT_SECRETS").expect("CLIENT_SECRETS not set in .env");
-    let mediator_did = env::var("MEDIATOR_DID").expect("MEDIATOR_DID not set in .env");
+    let client_did = env::var("CLIENT_DID").expect("CLIENT_DID not set in .env.test");
+    let client_secrets = env::var("CLIENT_SECRETS").expect("CLIENT_SECRETS not set in .env.test");
+    let mediator_did = env::var("MEDIATOR_DID").expect("MEDIATOR_DID not set in .env.test");
     let in_pipeline = env::var("IN_PIPELINE")
         .unwrap_or("false".to_string())
         .to_lowercase()
