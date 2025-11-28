@@ -35,7 +35,7 @@ jobs:
         with:
           shared-key: 'rust-cache'
       - name: generate configs
-        run: IN_PIPELINE=true cargo run --release --bin generate-secrets --features dev-tools -p trust-registry
+        run: IN_PIPELINE=true cargo run --bin generate-secrets --features dev-tools -p trust-registry
       - name: Setup environment
         run: cp .env.pipeline .env.test
       - name: Prepare test data
@@ -44,7 +44,7 @@ jobs:
           cp sample-data/data.csv trust-registry/tests/tmp/data.csv
       - name: Run trust-registry server
         run: |
-          RUST_LOG=info nohup cargo run --release --bin trust-registry > server.log 2>&1 &
+          RUST_LOG=info nohup cargo run --bin trust-registry > server.log 2>&1 &
           echo $! > server.pid
       - name: Wait for server to be ready
         run: |
