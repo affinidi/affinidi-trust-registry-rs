@@ -182,10 +182,8 @@ pub fn create_did(service: Option<Vec<String>>, auth_service: bool) -> (String, 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut dids_and_secrets: Vec<(String, Vec<Secret>)> = vec![];
-    let mediator_url = std::env::var("MEDIATOR_URL")
-        .unwrap_or("https://66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io".to_string());
-    let mediator_did = std::env::var("MEDIATOR_DID")
-        .unwrap_or("did:web:66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io".to_string());
+    let mediator_url = std::env::var("MEDIATOR_URL").expect("MEDIATOR_URL not set");
+    let mediator_did = std::env::var("MEDIATOR_DID").expect("MEDIATOR_DID not set");
     let in_pipeline = std::env::var("IN_PIPELINE")
         .unwrap_or("false".to_string())
         .to_lowercase()
