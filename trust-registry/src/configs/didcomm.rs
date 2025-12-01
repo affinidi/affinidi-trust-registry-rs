@@ -39,19 +39,19 @@ impl std::str::FromStr for AuditLogFormat {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AuditConfig {
     pub log_format: AuditLogFormat,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProfileConfig {
     pub did: String,
     pub alias: String,
     pub secrets: Vec<Secret>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AdminConfig {
     pub admin_dids: Vec<String>,
     pub audit_config: AuditConfig,
@@ -59,6 +59,7 @@ pub struct AdminConfig {
 
 #[derive(Debug, Clone)]
 pub struct DidcommConfig {
+    pub is_enabled: bool,
     pub profile_configs: Vec<ProfileConfig>,
     pub mediator_did: String,
     pub admin_config: AdminConfig,
@@ -74,6 +75,18 @@ pub fn parse_profile_config_from_str(
 #[async_trait::async_trait]
 impl Configs for DidcommConfig {
     async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let didcomm_is_enabled = env::var("DIDCOMM_IS_ENABLED").unwrap_or("true".to_string());
+        if &didcomm_is_enabled != "true" {
+            return Ok(DidcommConfig {
+                is_enabled: false,
+                mediator_did: "".to_string(),
+                profile_configs: vec![],
+                admin_config: Default::default(),
+            });
+        }
+
+        // when enabled
+
         let admin_dids_str = env::var("ADMIN_DIDS")
             .inspect_err(|_| {
                 warn!("Missing environment variable: ADMIN_DIDS. The admin list is empty");
@@ -100,6 +113,7 @@ impl Configs for DidcommConfig {
         let profile_configs_str = env::var("PROFILE_CONFIGS")
             .map_err(|_| "Missing required environment variable: PROFILE_CONFIGS")?;
         Ok(DidcommConfig {
+            is_enabled: true,
             mediator_did,
             profile_configs: parse_profile_config_from_str(&profile_configs_str)?,
             admin_config,
