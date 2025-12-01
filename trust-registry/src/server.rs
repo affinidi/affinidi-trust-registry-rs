@@ -8,7 +8,7 @@ use axum::{Json, Router, routing::get};
 use dotenvy::dotenv;
 use serde_json::json;
 use tower_http::cors::CorsLayer;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::{
@@ -94,6 +94,7 @@ fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
 }
 
 pub async fn start() {
+    // resources section
     dotenv().ok();
 
     setup_logging();
@@ -119,22 +120,31 @@ pub async fn start() {
         }
     };
 
+    // tasks section
     let http_task = tokio::spawn(start_http_server(
         config.server_config.clone(),
         repository.clone(),
     ));
 
-    let didcomm_task = tokio::spawn(start_didcomm_server(
-        config.didcomm_config.clone(),
-        repository,
-    ));
+    if config.didcomm_config.is_enabled {
+        let didcomm_task = tokio::spawn(start_didcomm_server(
+            config.didcomm_config.clone(),
+            repository,
+        ));
 
-    tokio::select! {
-        result = didcomm_task => {
-            error!("didcomm_task failed: {:?}", result);
+        tokio::select! {
+            result = didcomm_task => {
+                error!("didcomm_task failed: {:?}", result);
+            }
+            result = http_task => {
+                error!("http_task failed: {:?}", result);
+            }
         }
-        result = http_task => {
-            error!("http_task failed: {:?}", result);
+    } else {
+        warn!("DIDComm server is disabled.");
+
+        if let Err(e) = http_task.await {
+            error!("http_task failed: {:?}", e);
         }
     }
 
