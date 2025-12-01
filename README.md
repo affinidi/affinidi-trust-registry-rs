@@ -128,10 +128,10 @@ RUST_LOG=info cargo run --bin trust-registry
 
 The command will launch the service with logging enabled at the info level.
 
-To run only the HTTP server without DIDComm functionality:
+To run Trust Registry without DIDComm functionality:
 
 ```bash
-DIDCOMM_IS_ENABLED=false RUST_LOG=info cargo run --bin trust-registry
+ENABLE_DIDCOMM=false RUST_LOG=info cargo run --bin trust-registry
 ```
 
 ### 2. Test the API

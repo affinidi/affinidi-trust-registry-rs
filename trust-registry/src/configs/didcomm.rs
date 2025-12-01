@@ -75,8 +75,8 @@ pub fn parse_profile_config_from_str(
 #[async_trait::async_trait]
 impl Configs for DidcommConfig {
     async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let didcomm_is_enabled = env::var("DIDCOMM_IS_ENABLED").unwrap_or("true".to_string());
-        if &didcomm_is_enabled != "true" {
+        let enable_didcomm = env::var("ENABLE_DIDCOMM").unwrap_or("true".to_string());
+        if &enable_didcomm != "true" {
             return Ok(DidcommConfig {
                 is_enabled: false,
                 mediator_did: "".to_string(),
