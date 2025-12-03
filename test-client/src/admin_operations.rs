@@ -195,7 +195,7 @@ async fn send_admin_message(
 
     println!(
         "\nSending admin message: {}",
-        message_type.split('/').last().unwrap_or(message_type)
+        message_type.split('/').next_back().unwrap_or(message_type)
     );
     println!("   Message ID: {}", message_id);
     println!("   Body: {}", serde_json::to_string_pretty(body)?);

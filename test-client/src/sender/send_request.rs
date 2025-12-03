@@ -1,4 +1,4 @@
-use crate::common::common::build_message;
+use crate::common::didcomm::build_message;
 use affinidi_tdk::messaging::{ATM, errors::ATMError, profiles::ATMProfile, protocols::Protocols};
 use serde_json::Value;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ pub async fn send_request(
     let (forward_id, forward_msg) = protocols
         .routing
         .forward_message(
-            &atm,
+            atm,
             &issuer_profile,
             false,
             &packed_msg.0,

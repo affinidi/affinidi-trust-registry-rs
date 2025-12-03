@@ -40,7 +40,6 @@ export AWS_REGION
 # Create DynamoDB table if backend is ddb
 if [ "$TR_STORAGE_BACKEND" == "ddb" ]; then
     echo "Setting up DynamoDB localstack..."
-    export FILE_STORAGE_ENABLED=false
     # Check if localstack is already built
     if ! docker image inspect localstack_localstack >/dev/null 2>&1; then
         echo "Building localstack..."
