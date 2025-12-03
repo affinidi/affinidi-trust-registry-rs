@@ -110,17 +110,17 @@ fi
 # Run tests
 echo "Running cargo tests..."
 if [ "$COVERAGE" == "true" ]; then
-    docker compose -f docker-compose.test.yaml up -d
+    docker compose -f docker-compose.test.yaml up build --no-cache
     sleep 5
     cargo llvm-cov --html -p trust-registry
 elif [ "$TEST_TYPE" == "all" ]; then
-    docker compose -f docker-compose.test.yaml up -d
+    docker compose -f docker-compose.test.yaml up build --no-cache
     sleep 5
     cargo test -p trust-registry
 elif [ "$TEST_TYPE" == "unit" ]; then
     cargo test --lib -p trust-registry
 elif [ "$TEST_TYPE" == "int" ]; then
-    docker compose -f docker-compose.test.yaml up -d
+    docker compose -f docker-compose.test.yaml up build --no-cache
     sleep 5
     cargo test --test integration_test -p trust-registry --no-capture
 else

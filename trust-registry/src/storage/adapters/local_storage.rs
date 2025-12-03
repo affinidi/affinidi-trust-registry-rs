@@ -162,6 +162,8 @@ impl TrustRecordAdminRepository for LocalStorage {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
 
     fn create_test_record(
@@ -171,6 +173,7 @@ mod tests {
         resource: &str,
         recognized: bool,
         verified: bool,
+        record_type: &str,
     ) -> TrustRecord {
         TrustRecordBuilder::new()
             .entity_id(EntityId::new(entity))
@@ -179,6 +182,7 @@ mod tests {
             .resource(Resource::new(resource))
             .recognized(recognized)
             .authorized(verified)
+            .record_type(RecordType::from_str(record_type).unwrap())
             .build()
             .unwrap()
     }
@@ -193,6 +197,7 @@ mod tests {
                 "resource-1",
                 true,
                 true,
+                "assertion",
             ),
             create_test_record(
                 "entity-2",
@@ -201,6 +206,7 @@ mod tests {
                 "resource-2",
                 false,
                 false,
+                "recognition",
             ),
         ]);
 

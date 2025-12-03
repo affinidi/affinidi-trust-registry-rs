@@ -114,10 +114,12 @@ mod tests {
             .resource(Resource::new("resource-112"))
             .recognized(true)
             .authorized(true)
+            .record_type(RecordType::Authorization)
             .build()
             .unwrap();
 
         assert_eq!(record.entity_id().as_str(), "entity-123");
+        assert_eq!(record.record_type().to_string(), "assertion")
     }
 
     #[test]

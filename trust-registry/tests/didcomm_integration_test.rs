@@ -158,6 +158,7 @@ fn create_test_record_body(test_name: &str) -> Value {
         "authority_id": format!("{}_{}", AUTHORITY_ID, test_name),
         "action": format!("{}_{}", ACTION, test_name),
         "resource": format!("{}_{}", RESOURCE, test_name),
+        "record_type": "assertion"
     })
 }
 
