@@ -9,13 +9,11 @@ For choosing the storage backend for any of the tests:
 **CSV Storage (default):**
 ```bash
 TR_STORAGE_BACKEND=csv
-FILE_STORAGE_ENABLED=true
 ```
 
 **DynamoDB Storage:**
 ```bash
 TR_STORAGE_BACKEND=ddb
-FILE_STORAGE_ENABLED=false
 ```
 
 ## Run All Tests

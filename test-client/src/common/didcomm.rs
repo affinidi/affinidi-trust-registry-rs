@@ -15,7 +15,7 @@ pub fn build_message(
         .unwrap()
         .as_secs();
     let id = msg_id.unwrap_or(Uuid::new_v4().into());
-    let m = Message::build(id, message_type, serde_json::from_str(&body).unwrap())
+    let m = Message::build(id, message_type, serde_json::from_str(body).unwrap())
         .to(service_did)
         .from(issuer_profile_did)
         .created_time(now)

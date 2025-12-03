@@ -89,7 +89,7 @@ cargo --version
 Generate the required DIDs and keys for local deployment. The command will populate the secrets to the `.env` and `.env.test`.
 
 ```bash
-cargo run --bin generate-secrets --features dev-tools
+MEDIATOR_URL=https://url MEDIATOR_DID=did:web: cargo run --bin generate-secrets --features dev-tools
 ```
 
 The command generates:
