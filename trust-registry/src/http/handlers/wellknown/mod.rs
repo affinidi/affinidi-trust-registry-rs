@@ -1,3 +1,3 @@
-pub mod profile_dids;
+pub mod did_json;
 
-pub use profile_dids::handle_wellknown_profile_dids;
+pub use did_json::handle_wellknown_did_json;

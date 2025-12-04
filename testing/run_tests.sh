@@ -2,14 +2,14 @@
 
 # Default values
 
-PROFILE_CONFIGS=""
+PROFILE_CONFIG=""
 TEST_TYPE="all"
 COVERAGE="false"
 
 # Parse flags
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        --profile-configs) PROFILE_CONFIGS="$2"; shift ;;
+        --profile-configs) PROFILE_CONFIG="$2"; shift ;;
         --test-type) TEST_TYPE="$2"; shift ;;
         --coverage) COVERAGE="$2"; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
@@ -19,10 +19,10 @@ done
 
 # Export required environment variables
 
-export PROFILE_CONFIGS="$PROFILE_CONFIGS"
+export PROFILE_CONFIG="$PROFILE_CONFIG"
 
 echo "Using TR_STORAGE_BACKEND=$TR_STORAGE_BACKEND"
-# echo "Using PROFILE_CONFIGS=$PROFILE_CONFIGS"
+# echo "Using PROFILE_CONFIG=$PROFILE_CONFIG"
 
 if [ ! -f .env.test ]; then
     echo ".env.test not found. Please run the following command to generate credentials:"
@@ -121,7 +121,7 @@ elif [ "$TEST_TYPE" == "unit" ]; then
 elif [ "$TEST_TYPE" == "int" ]; then
     docker compose -f docker-compose.test.yaml up -d
     sleep 5
-    cargo test --test integration_test -p trust-registry -- --no-capture
+    cargo test --test didcomm_integration_test --test http_integration_test -p trust-registry -- --no-capture
 else
     echo "Unknown TEST_TYPE: $TEST_TYPE. Valid options are 'all', 'unit', 'int'."
     exit 1

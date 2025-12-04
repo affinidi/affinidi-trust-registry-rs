@@ -1,4 +1,5 @@
 pub mod didcomm;
+pub mod loaders;
 pub mod server;
 pub mod storage;
 
@@ -13,6 +14,7 @@ pub trait Configs: Sized {
     async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>>;
 }
 
+#[derive(Debug)]
 pub struct TrsutRegistryConfig {
     pub server_config: ServerConfig,
     pub storage_config: StorageConfig,

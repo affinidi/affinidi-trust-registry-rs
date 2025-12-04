@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::env;
 
-use super::Configs;
+use super::{Configs, loaders::environment::*};
 
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3232";
 
@@ -19,11 +18,10 @@ pub struct ServerConfig {
 #[async_trait::async_trait]
 impl Configs for ServerConfig {
     async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let listen_address =
-            env::var("LISTEN_ADDRESS").unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string());
+        let listen_address = env_or("LISTEN_ADDRESS", DEFAULT_LISTEN_ADDRESS);
 
-        let cors_allowed_origins = env::var("CORS_ALLOWED_ORIGINS")
-            .unwrap_or_else(|_| String::new())
+        let cors_allowed_origins = optional_env("CORS_ALLOWED_ORIGINS")
+            .unwrap_or_default()
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())

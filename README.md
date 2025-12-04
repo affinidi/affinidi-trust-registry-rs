@@ -101,9 +101,9 @@ The command generates:
 
 - **3 DIDs** and their corresponding keys.
 - DIDComm server environment variables:
-  - `PROFILE_CONFIGS`
+  - `PROFILE_CONFIG`
 - Testing environment variables:
-  - `PROFILE_CONFIGS`
+  - `PROFILE_CONFIG`
   - `TRUST_REGISTRY_DID`
   - `CLIENT_DID`
   - `CLIENT_SECRETS`

@@ -16,8 +16,8 @@ where
         .route("/authorization", post(trqp::handle_trqp_authorization::<R>))
         .route("/recognition", post(trqp::handle_trqp_recognition::<R>))
         .route(
-            "/.well-known/profile-dids.json",
-            get(wellknown::handle_wellknown_profile_dids::<R>),
+            "/.well-known/did.json",
+            get(wellknown::handle_wellknown_did_json::<R>),
         );
 
     let router = if api_prefix.is_empty() || api_prefix == "/" {

@@ -1,6 +1,4 @@
-use std::env;
-
-use super::Configs;
+use super::{Configs, loaders::environment::*};
 
 const DEFAULT_TRUST_REGISTRY_FILE_PATH: &str = "trust_records.csv";
 const DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC: u64 = 60;
@@ -36,9 +34,7 @@ pub struct StorageConfig {
 }
 
 fn load_storage_backend() -> TrustStorageBackend {
-    let storage_backend_str = env::var("TR_STORAGE_BACKEND")
-        .unwrap_or("csv".to_string())
-        .to_lowercase();
+    let storage_backend_str = env_or("TR_STORAGE_BACKEND", "csv").to_lowercase();
     match storage_backend_str.as_str() {
         "dynamodb" | "ddb" => TrustStorageBackend::DynamoDb,
         _ => TrustStorageBackend::Csv,
@@ -51,11 +47,12 @@ impl Configs for FileStorageConfig {
         if load_storage_backend() == TrustStorageBackend::Csv {
             Ok(FileStorageConfig {
                 is_enabled: true,
-                path: env::var("FILE_STORAGE_PATH")
-                    .unwrap_or_else(|_| DEFAULT_TRUST_REGISTRY_FILE_PATH.to_string()),
-                update_interval_sec: env::var("FILE_STORAGE_UPDATE_INTERVAL_SEC")
-                    .unwrap_or_else(|_| DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC.to_string())
-                    .parse::<u64>()?,
+                path: env_or("FILE_STORAGE_PATH", DEFAULT_TRUST_REGISTRY_FILE_PATH),
+                update_interval_sec: env_or(
+                    "FILE_STORAGE_UPDATE_INTERVAL_SEC",
+                    &DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC.to_string(),
+                )
+                .parse::<u64>()?,
             })
         } else {
             Ok(Default::default())
@@ -69,13 +66,11 @@ impl Configs for DynamoDbStorageConfig {
         if load_storage_backend() == TrustStorageBackend::DynamoDb {
             Ok(DynamoDbStorageConfig {
                 is_enabled: true,
-                table_name: env::var("DDB_TABLE_NAME")
-                    .map_err(|_| "Missing required environment variable: DDB_TABLE_NAME")?,
-                region: Some(env::var("AWS_REGION").unwrap_or_else(|_| DEFAULT_REGION.to_string())),
-                profile: env::var("AWS_PROFILE").ok(),
-                endpoint_url: env::var("AWS_ENDPOINT")
-                    .or_else(|_| env::var("DYNAMODB_ENDPOINT"))
-                    .ok(),
+                table_name: required_env("DDB_TABLE_NAME")?,
+                region: Some(env_or("AWS_REGION", DEFAULT_REGION)),
+                profile: optional_env("AWS_PROFILE"),
+                endpoint_url: optional_env("AWS_ENDPOINT")
+                    .or_else(|| optional_env("DYNAMODB_ENDPOINT")),
             })
         } else {
             Ok(Default::default())

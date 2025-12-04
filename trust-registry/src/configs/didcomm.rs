@@ -1,9 +1,14 @@
 use affinidi_tdk::secrets_resolver::secrets::Secret;
 use serde_derive::{Deserialize, Serialize};
-use std::{env, fmt};
+use std::fmt;
 use tracing::warn;
 
-use super::Configs;
+use crate::didcomm::did_document::build_did_document;
+
+use super::{
+    Configs,
+    loaders::{environment::*, load},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -57,48 +62,40 @@ pub struct AdminConfig {
     pub audit_config: AuditConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DidcommConfig {
     pub is_enabled: bool,
-    pub profile_configs: Vec<ProfileConfig>,
+    pub profile_config: ProfileConfig,
     pub mediator_did: String,
+    pub did_document: String,
     pub admin_config: AdminConfig,
 }
 
-pub fn parse_profile_config_from_str(
+pub fn parse_profile_from_secrets_str(
     did_and_secrets_as_str: &str,
-) -> Result<Vec<ProfileConfig>, Box<dyn std::error::Error + Send + Sync>> {
-    let profile_configs: Vec<ProfileConfig> = serde_json::from_str(did_and_secrets_as_str)?;
-    Ok(profile_configs)
+) -> Result<ProfileConfig, Box<dyn std::error::Error + Send + Sync>> {
+    let profile_config: ProfileConfig = serde_json::from_str(did_and_secrets_as_str)?;
+    Ok(profile_config)
 }
 
 #[async_trait::async_trait]
 impl Configs for DidcommConfig {
     async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let enable_didcomm = env::var("ENABLE_DIDCOMM").unwrap_or("true".to_string());
-        if &enable_didcomm != "true" {
-            return Ok(DidcommConfig {
-                is_enabled: false,
-                mediator_did: "".to_string(),
-                profile_configs: vec![],
-                admin_config: Default::default(),
-            });
+        let enable_didcomm = env_or("ENABLE_DIDCOMM", "true");
+        if enable_didcomm != "true" {
+            return Ok(Default::default());
         }
 
-        // when enabled
-
-        let admin_dids_str = env::var("ADMIN_DIDS")
-            .inspect_err(|_| {
-                warn!("Missing environment variable: ADMIN_DIDS. The admin list is empty");
-            })
-            .unwrap_or_default();
+        let admin_dids_str = optional_env("ADMIN_DIDS").unwrap_or_else(|| {
+            warn!("Missing environment variable: ADMIN_DIDS. The admin list is empty");
+            String::new()
+        });
         let admin_dids: Vec<String> = admin_dids_str
             .split(',')
             .map(|e| e.trim().to_string())
             .collect();
 
-        let log_format = env::var("AUDIT_LOG_FORMAT")
-            .unwrap_or_else(|_| "text".to_string())
+        let log_format = env_or("AUDIT_LOG_FORMAT", "text")
             .parse::<AuditLogFormat>()
             .unwrap_or(AuditLogFormat::Text);
 
@@ -107,15 +104,23 @@ impl Configs for DidcommConfig {
             audit_config: AuditConfig { log_format },
         };
 
-        let mediator_did = env::var("MEDIATOR_DID")
-            .map_err(|_| "Missing required environment variable: MEDIATOR_DID")?;
+        let mediator_did = required_env("MEDIATOR_DID")?;
 
-        let profile_configs_str = env::var("PROFILE_CONFIGS")
-            .map_err(|_| "Missing required environment variable: PROFILE_CONFIGS")?;
+        let profile_configs_uri = required_env("PROFILE_CONFIG")?;
+        let profile_configs_str = load(&profile_configs_uri).await?;
+        let profile_config = parse_profile_from_secrets_str(&profile_configs_str)?;
+
+        let did_document = if let Some(doc) = optional_env("DID_DOCUMENT") {
+            load(&doc).await?
+        } else {
+            build_did_document(&profile_config, &mediator_did)
+        };
+
         Ok(DidcommConfig {
             is_enabled: true,
             mediator_did,
-            profile_configs: parse_profile_config_from_str(&profile_configs_str)?,
+            profile_config,
+            did_document,
             admin_config,
         })
     }

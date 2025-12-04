@@ -41,6 +41,8 @@ uuid = { version = "1.18", features = ["v4"] }
 aws-types = { version = "1.3" }
 aws-config = { version = "1.5" }
 aws-sdk-dynamodb = { version = "1.47" }
+aws-sdk-ssm = { version = "1.47" }
+aws-sdk-secretsmanager = { version = "1.47" }
 serde_dynamo = { version = "4.3", features = ["aws-sdk-dynamodb+1"] }
 
 # Test dependencies

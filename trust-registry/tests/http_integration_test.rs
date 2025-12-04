@@ -336,3 +336,142 @@ async fn test_invalid_endpoint() {
 
     assert_eq!(response.status(), 404);
 }
+
+#[tokio::test]
+async fn test_wellknown_did_endpoint_returns_valid_json() {
+    let server_url = get_test_server_url().await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(&format!("{}/.well-known/did.json", server_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let doc: Value = response.json().await.unwrap();
+
+    assert!(
+        doc.get("id").is_some(),
+        "DID document should have an 'id' field"
+    );
+    assert!(
+        doc["@context"].is_array(),
+        "DID document should have '@context' as array"
+    );
+    assert!(
+        doc["verificationMethod"].is_array(),
+        "DID document should have 'verificationMethod' array"
+    );
+    assert!(
+        doc["authentication"].is_array(),
+        "DID document should have 'authentication' array"
+    );
+    assert!(
+        doc["assertionMethod"].is_array(),
+        "DID document should have 'assertionMethod' array"
+    );
+    assert!(
+        doc["keyAgreement"].is_array(),
+        "DID document should have 'keyAgreement' array"
+    );
+    assert!(
+        doc["service"].is_array(),
+        "DID document should have 'service' array"
+    );
+}
+
+#[tokio::test]
+async fn test_wellknown_did_document_no_private_keys() {
+    let server_url = get_test_server_url().await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(&format!("{}/.well-known/did.json", server_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let doc: Value = response.json().await.unwrap();
+
+    // Check all verification methods don't contain private keys
+    if let Some(methods) = doc["verificationMethod"].as_array() {
+        for method in methods {
+            if let Some(jwk) = method.get("publicKeyJwk") {
+                assert!(
+                    jwk.get("d").is_none(),
+                    "Private key 'd' field should not be present in public JWK"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_wellknown_did_document_structure() {
+    let server_url = get_test_server_url().await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(&format!("{}/.well-known/did.json", server_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let doc: Value = response.json().await.unwrap();
+
+    // Verify DIDComm service is present
+    if let Some(services) = doc["service"].as_array() {
+        let didcomm_service = services.iter().find(|s| s["type"] == "DIDCommMessaging");
+        assert!(
+            didcomm_service.is_some(),
+            "DID document should have a DIDComm service"
+        );
+
+        if let Some(service) = didcomm_service {
+            assert!(service.get("id").is_some(), "Service should have an id");
+            assert_eq!(service["type"], "DIDCommMessaging");
+            assert!(
+                service["serviceEndpoint"].get("uri").is_some(),
+                "Service endpoint should have a uri"
+            );
+            assert!(
+                service["serviceEndpoint"]["accept"].is_array(),
+                "Service endpoint should have accept array"
+            );
+        }
+    }
+
+    // Verify verification methods have correct structure
+    if let Some(methods) = doc["verificationMethod"].as_array() {
+        for method in methods {
+            assert!(
+                method.get("id").is_some(),
+                "Verification method should have an id"
+            );
+            assert!(
+                method.get("type").is_some(),
+                "Verification method should have a type"
+            );
+            assert!(
+                method.get("controller").is_some(),
+                "Verification method should have a controller"
+            );
+            assert!(
+                method.get("publicKeyJwk").is_some(),
+                "Verification method should have publicKeyJwk"
+            );
+
+            // Verify publicKeyJwk structure
+            let jwk = &method["publicKeyJwk"];
+            assert!(jwk.get("kty").is_some(), "JWK should have kty field");
+            assert!(jwk.get("crv").is_some(), "JWK should have crv field");
+            assert!(jwk.get("x").is_some(), "JWK should have x coordinate");
+        }
+    }
+}

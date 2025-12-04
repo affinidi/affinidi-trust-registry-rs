@@ -219,8 +219,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         vars.insert("ADMIN_DIDS".to_string(), test_client_did.0.clone());
         vars.insert("CLIENT_SECRETS".to_string(), client_secrets);
         vars.insert(
-            "PROFILE_CONFIGS".to_string(),
-            format!("'[{}]'", test_profile_configs_stringified),
+            "PROFILE_CONFIG".to_string(),
+            format!("'{}'", test_profile_configs_stringified),
         );
 
         insert_env_vars("./.env.pipeline", vars, None)?;
@@ -228,18 +228,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } else {
         let mut server_vars = HashMap::new();
         server_vars.insert(
-            "PROFILE_CONFIGS".to_string(),
-            format!("'[{}]'", serde_json::to_string(&tr_profile_configs)?),
+            "PROFILE_CONFIG".to_string(),
+            format!("'{}'", serde_json::to_string(&tr_profile_configs)?),
         );
+        server_vars.insert("MEDIATOR_DID".to_string(), mediator_did.clone());
         insert_env_vars("./.env", server_vars, Some("./.env.example"))?;
         let mut test_vars = HashMap::new();
         test_vars.insert("TRUST_REGISTRY_DID".to_string(), test_tr_did.0);
         test_vars.insert("CLIENT_DID".to_string(), test_client_did.0.clone());
         test_vars.insert("ADMIN_DIDS".to_string(), test_client_did.0.clone());
         test_vars.insert("CLIENT_SECRETS".to_string(), client_secrets);
+        test_vars.insert("MEDIATOR_DID".to_string(), mediator_did.clone());
         test_vars.insert(
-            "PROFILE_CONFIGS".to_string(),
-            format!("'[{}]'", test_profile_configs_stringified),
+            "PROFILE_CONFIG".to_string(),
+            format!("'{}'", test_profile_configs_stringified),
         );
         insert_env_vars(
             "./.env.test",
