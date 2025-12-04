@@ -1,6 +1,8 @@
+use std::str::FromStr;
+
 // TODO: refactor function signatures to reduce amount of input params
 use crate::{
-    domain::{Action, AuthorityId, Context, EntityId, Resource, TrustRecordBuilder},
+    domain::{Action, AuthorityId, Context, EntityId, RecordType, Resource, TrustRecordBuilder},
     storage::repository::{TrustRecordAdminRepository, TrustRecordQuery},
 };
 use affinidi_tdk::didcomm::Message;
@@ -20,6 +22,7 @@ struct CreateRecordRequest {
     authorized: bool,
     #[serde(default)]
     context: Option<serde_json::Value>,
+    record_type: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +35,7 @@ struct UpdateRecordRequest {
     authorized: bool,
     #[serde(default)]
     context: Option<serde_json::Value>,
+    record_type: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,13 +66,16 @@ pub async fn handle_create_record<R: ?Sized + TrustRecordAdminRepository>(
         request.entity_id, request.authority_id, request.action, request.resource
     );
 
+    let record_type = RecordType::from_str(&request.record_type).map_err(|e| e.to_string())?;
+
     let mut builder = TrustRecordBuilder::new()
         .entity_id(EntityId::new(request.entity_id.clone()))
         .authority_id(AuthorityId::new(request.authority_id.clone()))
         .action(Action::new(request.action.clone()))
         .resource(Resource::new(request.resource.clone()))
         .recognized(request.recognized)
-        .authorized(request.authorized);
+        .authorized(request.authorized)
+        .record_type(record_type);
 
     if let Some(ctx) = request.context {
         builder = builder.context(Context::new(ctx));
@@ -101,14 +108,15 @@ pub async fn handle_update_record<R: ?Sized + TrustRecordAdminRepository>(
         "Updating record: {}|{}|{}|{}",
         request.entity_id, request.authority_id, request.action, request.resource
     );
-
+    let record_type = RecordType::from_str(&request.record_type).map_err(|e| e.to_string())?;
     let mut builder = TrustRecordBuilder::new()
         .entity_id(EntityId::new(request.entity_id.clone()))
         .authority_id(AuthorityId::new(request.authority_id.clone()))
         .action(Action::new(request.action.clone()))
         .resource(Resource::new(request.resource.clone()))
         .recognized(request.recognized)
-        .authorized(request.authorized);
+        .authorized(request.authorized)
+        .record_type(record_type);
 
     if let Some(ctx) = request.context {
         builder = builder.context(Context::new(ctx));
