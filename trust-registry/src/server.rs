@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     SharedData,
-    configs::{Configs, DidcommConfig, ServerConfig, TrsutRegistryConfig},
+    configs::{Configs, DidcommConfig, TrsutRegistryConfig},
     didcomm::listener::start_didcomm_listener,
     http::application_routes,
 };
