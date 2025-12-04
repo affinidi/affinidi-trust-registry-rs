@@ -86,42 +86,44 @@ mod tests {
     use super::*;
     use affinidi_tdk::secrets_resolver::{jwk::JWK, secrets::Secret};
     use serde_json::json;
-    
+
     #[test]
     fn test_build_public_jwk_ec() {
         // Create a test EC JWK and verify d field is removed
         let jwk: JWK = serde_json::from_value(json!({
-        "crv": "P-256",
-        "kty": "EC",
-        "x": "DEtsdJXfi7IuqaZFkRW_aBwHHpID1jQjPqN_Y46zlZM",
-        "y": "LQs6Q-gGqgtrUW2iEfb9YRyvPAuNALceHqGYs4sNwh4",
-        "d": "private part"
-      })).unwrap();
+          "crv": "P-256",
+          "kty": "EC",
+          "x": "DEtsdJXfi7IuqaZFkRW_aBwHHpID1jQjPqN_Y46zlZM",
+          "y": "LQs6Q-gGqgtrUW2iEfb9YRyvPAuNALceHqGYs4sNwh4",
+          "d": "private part"
+        }))
+        .unwrap();
         let result = build_public_jwk(&jwk);
-        
+
         assert_eq!(result["kty"], "EC");
         assert!(result.get("x").is_some());
         assert!(result.get("y").is_some());
         assert!(result.get("d").is_none()); // Private key removed
     }
-    
+
     #[test]
     fn test_build_public_jwk_okp() {
         // Create a test OKP JWK
-        
+
         let jwk: JWK = serde_json::from_value(json!({
             "crv": "Ed25519",
             "kty": "OKP",
             "x": "DfRiO5mCASvWyPxr20GQEfzOmFFh50spyP7KHMjvGQo",
             "d": "private part"
-        })).unwrap();
+        }))
+        .unwrap();
         let result = build_public_jwk(&jwk);
-        
+
         assert_eq!(result["kty"], "OKP");
         assert!(result.get("x").is_some());
         assert!(result.get("d").is_none()); // Private key removed
     }
-    
+
     #[test]
     fn test_build_verification_methods_single_key() {
         let secret: Secret = serde_json::from_value(json!({
@@ -135,14 +137,15 @@ mod tests {
                 "x": "ctKLNB9cXUO3yD-jMCaRi680RmHOFuS30nVogmEhkx4",
                 "y": "1GDFw4zkTPdVWwqxRhSnEVCdkZyfmViJR8Nq5ad2V9w"
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
         let profile = ProfileConfig {
             did: "did:web:example.com".to_string(),
             alias: "test".to_string(),
             secrets: vec![secret],
         };
-        
+
         let methods = build_verification_methods(&profile);
         assert_eq!(methods.len(), 1);
         assert_eq!(methods[0]["id"], "did:web:example.com#key-0");
@@ -152,7 +155,7 @@ mod tests {
         assert_eq!(methods[0]["publicKeyJwk"]["crv"], "P-256");
         assert!(methods[0]["publicKeyJwk"].get("d").is_none());
     }
-    
+
     #[test]
     fn test_build_verification_methods_multiple_keys() {
         let secret1: Secret = serde_json::from_value(json!({
@@ -166,7 +169,8 @@ mod tests {
                 "x": "ctKLNB9cXUO3yD-jMCaRi680RmHOFuS30nVogmEhkx4",
                 "y": "1GDFw4zkTPdVWwqxRhSnEVCdkZyfmViJR8Nq5ad2V9w"
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
         let secret2: Secret = serde_json::from_value(json!({
             "id": "did:web:example.com#key-1",
@@ -179,7 +183,8 @@ mod tests {
                 "x": "rJcdID8WLUt3Fby5ZsVgyVtrkaEXv050hISLxwY5RrI",
                 "y": "eKiDGeJExattkEmEBbOBOBuzvCB9YnfFaZ6xMzYpIMM"
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
         let secret3: Secret = serde_json::from_value(json!({
             "id": "did:web:example.com#key-2",
@@ -191,36 +196,37 @@ mod tests {
                 "kty": "OKP",
                 "x": "DfRiO5mCASvWyPxr20GQEfzOmFFh50spyP7KHMjvGQo"
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
         let profile = ProfileConfig {
             did: "did:web:example.com".to_string(),
             alias: "test".to_string(),
             secrets: vec![secret1, secret2, secret3],
         };
-        
+
         let methods = build_verification_methods(&profile);
         assert_eq!(methods.len(), 3);
         assert_eq!(methods[0]["id"], "did:web:example.com#key-0");
         assert_eq!(methods[1]["id"], "did:web:example.com#key-1");
         assert_eq!(methods[2]["id"], "did:web:example.com#key-2");
-        
+
         // Verify all are JsonWebKey2020
         assert_eq!(methods[0]["type"], "JsonWebKey2020");
         assert_eq!(methods[1]["type"], "JsonWebKey2020");
         assert_eq!(methods[2]["type"], "JsonWebKey2020");
-        
+
         // Verify all have controller set
         assert_eq!(methods[0]["controller"], "did:web:example.com");
         assert_eq!(methods[1]["controller"], "did:web:example.com");
         assert_eq!(methods[2]["controller"], "did:web:example.com");
-        
+
         // Verify no private keys
         assert!(methods[0]["publicKeyJwk"].get("d").is_none());
         assert!(methods[1]["publicKeyJwk"].get("d").is_none());
         assert!(methods[2]["publicKeyJwk"].get("d").is_none());
     }
-    
+
     #[test]
     fn test_build_did_document_structure() {
         let profile = ProfileConfig {
@@ -228,10 +234,10 @@ mod tests {
             alias: "local-test".to_string(),
             secrets: vec![/* test secret */],
         };
-        
+
         let doc = build_did_document(&profile, "did:web:mediator.example.com");
         let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
-        
+
         assert_eq!(parsed["id"], "did:web:localhost%3A3232");
         assert!(parsed["@context"].is_array());
         assert!(parsed["verificationMethod"].is_array());
@@ -240,7 +246,7 @@ mod tests {
         assert!(parsed["keyAgreement"].is_array());
         assert!(parsed["service"].is_array());
     }
-    
+
     #[test]
     fn test_did_document_didcomm_service() {
         let profile = ProfileConfig {
@@ -248,10 +254,10 @@ mod tests {
             alias: "test".to_string(),
             secrets: vec![],
         };
-        
+
         let doc = build_did_document(&profile, "did:web:mediator.com");
         let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
-        
+
         let service = &parsed["service"][0];
         assert_eq!(service["type"], "DIDCommMessaging");
         assert_eq!(service["serviceEndpoint"]["uri"], "did:web:mediator.com");

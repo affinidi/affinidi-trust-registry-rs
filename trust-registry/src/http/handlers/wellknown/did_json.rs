@@ -3,9 +3,7 @@ use crate::storage::repository::TrustRecordRepository;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use tracing::warn;
 
-pub async fn handle_wellknown_did_json<R>(
-    State(state): State<SharedData<R>>,
-) -> impl IntoResponse
+pub async fn handle_wellknown_did_json<R>(State(state): State<SharedData<R>>) -> impl IntoResponse
 where
     R: TrustRecordRepository + Send + ?Sized + 'static,
 {
