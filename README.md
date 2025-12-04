@@ -12,13 +12,13 @@ A high-performance, Rust-based implementation of a Trust Registry, fully complia
 - [Key Components](#key-components)
 - [Requirements](#requirements)
 - [Set up Environment](#set-up-environment)
-- [Run on Local Machine](#run-on-local-machine)
-  - [1. Start the Servers](#1-start-the-servers)
-  - [2. Test the API](#2-test-the-api)
-- [Run on Docker](#run-on-docker)
-- [Development](#development)
-  - [Testing](#testing)
-  - [Pre-commit checks](#pre-commit-checks)
+- [Start the Server](#start-the-server)
+  - [Run on Local Machine](#run-on-local-machine)
+  - [Run on Docker](#run-on-docker)
+- [Test the API](#test-the-api)
+  - [Recognition Query](#recognition-query)
+  - [Authorization Query](#authorization-query)
+- [Additional Resources](#additional-resources)
 - [Support \& feedback](#support--feedback)
   - [Reporting technical issues](#reporting-technical-issues)
 - [Contributing](#contributing)
@@ -89,8 +89,12 @@ cargo --version
 Generate the required DIDs and keys for local deployment. The command will populate the secrets to the `.env` and `.env.test`.
 
 ```bash
-MEDIATOR_URL=https://url MEDIATOR_DID=did:web: cargo run --bin generate-secrets --features dev-tools
+MEDIATOR_URL="https://your-mediator-url.io" MEDIATOR_DID="did:web:your-mediator-did.io" cargo run --bin generate-secrets --features dev-tools
 ```
+
+Replace the `MEDIATOR_URL` and `MEDIATOR_DID` with your own mediator instance.
+
+For more information on running your own DIDComm mediator, refer to the [deployment options](https://docs.affinidi.com/products/affinidi-messaging/didcomm-mediator/deployment-options/) page in the documentation.
 
 The command generates:
 
@@ -104,21 +108,9 @@ The command generates:
   - `CLIENT_SECRETS`
   - `ADMIN_DIDS`
 
-**DIDComm Mediator**
+## Start the Server
 
-To use a DIDComm mediator on your setup, use the following command:
-
-```bash
-MEDIATOR_URL="https://your-mediator-url.io" MEDIATOR_DID="did:web:your-mediator-did.io" cargo run --bin generate-secrets --features dev-tools
-```
-
-Replace the `MEDIATOR_URL` and `MEDIATOR_DID` with your own mediator instance.
-
-For more information on running your own DIDComm mediator, refer to the [deployment options](https://docs.affinidi.com/products/affinidi-messaging/didcomm-mediator/deployment-options/) page in the documentation.
-
-## Run on Local Machine
-
-### 1. Start the Servers
+### Run on Local Machine
 
 To start the Trust Registry HTTP and DIDComm servers, run the following command from the root directory of the repository:
 
@@ -134,11 +126,21 @@ To run Trust Registry without DIDComm functionality:
 ENABLE_DIDCOMM=false RUST_LOG=info cargo run --bin trust-registry
 ```
 
-### 2. Test the API
+### Run on Docker
+
+Review environment variables in `./docker-compose.yaml` and start the containers:
+
+```bash
+docker compose up --build
+```
+
+**Note:** The `sample-data` folder is mounted as a volume to synchronise the changes from data.csv to the container automatically.
+
+## Test the API
 
 You can test the Trust Registry by querying the sample data stored in `./sample-data/data.csv`:
 
-#### Recognition Query Example
+### Recognition Query
 
 ```bash
 curl --location 'http://localhost:3232/recognition' \
@@ -153,7 +155,7 @@ curl --location 'http://localhost:3232/recognition' \
 
 The API will return whether the specified entity is recognised by the given authority for the requested action and resource.
 
-#### Authorization Query Example:
+### Authorization Query
 
 ```bash
 curl --location 'http://localhost:3232/authorization' \
@@ -174,41 +176,9 @@ The API will return whether the specified entity is authorised under the given a
 - Test with both defined and undefined IDs to ensure the system correctly handles invalid or missing identifiers.
 - Ensure the `context` field contains a valid JSON object encoded in Base64. Invalid or malformed data should trigger appropriate error responses.
 
-## Run on Docker
+## Additional Resources
 
-Review environment variables in `./docker-compose.yaml` and start the containers:
-
-```bash
-docker compose up --build
-```
-
-**NOTE:** The `sample-data` folder is mounted as a volume to synchronise the changes from data.csv to the container automatically.
-
-## Development
-
-### Testing
-
-This project includes comprehensive unit and integration tests with support for multiple storage backends.
-
-For detailed testing instructions, refer to the [TESTING](testing/README.md) document.
-
-### Pre-commit checks
-
-Run the formatter and lints before committing to maintain code consistency and catch common issues early.
-
-```bash
-# Format code (modify files)
-cargo fmt
-
-# Check formatting (CI-friendly; fails if unformatted)
-cargo fmt -- --check
-
-# Run Clippy
-cargo clippy
-
-# Optionally apply fixable Clippy suggestions locally
-cargo fix --clippy
-```
+- [DIDComm Protocols Used](./DIDCOMM_PROTOCOLS.md)
 
 ## Support & feedback
 
