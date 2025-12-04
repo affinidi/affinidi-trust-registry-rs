@@ -177,6 +177,8 @@ impl AuditResource {
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::RecordType;
+
     use super::*;
 
     #[test]
@@ -190,6 +192,7 @@ mod tests {
             .resource(Resource::new("resource-1"))
             .recognized(true)
             .authorized(true)
+            .record_type(RecordType::Authorization)
             .build()
             .unwrap();
 

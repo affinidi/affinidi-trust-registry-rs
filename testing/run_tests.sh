@@ -121,7 +121,7 @@ elif [ "$TEST_TYPE" == "unit" ]; then
 elif [ "$TEST_TYPE" == "int" ]; then
     docker compose -f docker-compose.test.yaml up -d
     sleep 5
-    cargo test --test integration_test -p trust-registry --no-capture
+    cargo test --test integration_test -p trust-registry -- --no-capture
 else
     echo "Unknown TEST_TYPE: $TEST_TYPE. Valid options are 'all', 'unit', 'int'."
     exit 1

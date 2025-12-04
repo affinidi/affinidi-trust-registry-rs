@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::{Arc, RwLock},
     time::{Duration, SystemTime},
 };
@@ -327,6 +328,7 @@ struct TrustRecordCsvRow {
     recognized: bool,
     authorized: bool,
     context: Option<String>,
+    record_type: String,
 }
 
 impl TrustRecordCsvRow {
@@ -363,6 +365,7 @@ impl TrustRecordCsvRow {
             recognized: record.is_recognized(),
             authorized: record.is_authorized(),
             context,
+            record_type: record.record_type().to_string(),
         }
     }
 
@@ -374,7 +377,8 @@ impl TrustRecordCsvRow {
             .action(Action::new(self.action))
             .resource(Resource::new(self.resource))
             .recognized(self.recognized)
-            .authorized(self.authorized);
+            .authorized(self.authorized)
+            .record_type(RecordType::from_str(&self.record_type)?);
 
         if let Some(c) = ctx {
             builder = builder.context(Context::new(c));
@@ -394,14 +398,16 @@ mod tests {
     use tokio::time::{Duration, sleep};
 
     fn csv_header() -> String {
-        String::from("entity_id,authority_id,action,resource,recognized,authorized,context\n")
+        String::from(
+            "entity_id,authority_id,action,resource,recognized,authorized,context,record_type\n",
+        )
     }
 
-    fn sample_csv(records: &[(&str, &str, &str, &str)]) -> String {
+    fn sample_csv(records: &[(&str, &str, &str, &str, &str)]) -> String {
         let mut csv = String::new();
-        for (entity, authority, action, resource) in records {
+        for (entity, authority, action, resource, record_type) in records {
             csv.push_str(&format!(
-                "{entity},{authority},{action},{resource},true,true,e30=\n"
+                "{entity},{authority},{action},{resource},true,true,e30=,{record_type}\n"
             ));
         }
         csv
@@ -417,7 +423,12 @@ mod tests {
     async fn finds_records_from_initial_load() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "{}", csv_header()).unwrap();
-        write!(file, "{}", sample_csv(&[("e1", "a1", "ac1", "r1")])).unwrap();
+        write!(
+            file,
+            "{}",
+            sample_csv(&[("e1", "a1", "ac1", "r1", "assertion")])
+        )
+        .unwrap();
 
         let storage = FileStorage::try_new(file.path(), 1).await.unwrap();
 
@@ -430,13 +441,20 @@ mod tests {
 
         let result = storage.find_by_query(query).await.unwrap();
         assert!(result.is_some());
+        let record = result.unwrap();
+        assert_eq!(*record.record_type(), RecordType::Authorization);
     }
 
     #[tokio::test]
     async fn reloads_when_file_changes() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "{}", csv_header()).unwrap();
-        write!(file, "{}", sample_csv(&[("e1", "a1", "ac1", "r1")])).unwrap();
+        write!(
+            file,
+            "{}",
+            sample_csv(&[("e1", "a1", "ac1", "r1", "recognition")])
+        )
+        .unwrap();
         file.flush().unwrap();
 
         let storage = FileStorage::try_new(file.path(), 1).await.unwrap();
@@ -445,7 +463,7 @@ mod tests {
         write!(
             file.as_file_mut(),
             "{}",
-            sample_csv(&[("e2", "a2", "ac2", "r2")])
+            sample_csv(&[("e2", "a2", "ac2", "r2", "recognition")])
         )
         .unwrap();
         file.flush().unwrap();
@@ -464,6 +482,7 @@ mod tests {
         let result = storage.find_by_query(query).await.unwrap();
 
         assert!(result.is_some());
-        assert_eq!(result.unwrap().entity_id().as_str(), "e2");
+        assert_eq!(result.clone().unwrap().entity_id().as_str(), "e2");
+        assert_eq!(*result.unwrap().record_type(), RecordType::Recognition);
     }
 }

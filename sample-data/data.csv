@@ -1,3 +1,3 @@
-entity_id,authority_id,action, resource,recognized,authorized,context
-did:example:entity1,did:example:authority1,action1,resource1,true,true,eyJhZGRpdGlvbmFsIjogImNvbnRleHQifQ==
-did:example:entity3,did:example:authority3,action3,resource3,true,true,
+entity_id,authority_id,action,resource,recognized,authorized,context,record_type
+did:example:entity1,did:example:authority1,action1,resource1,true,true,eyJhZGRpdGlvbmFsIjogImNvbnRleHQifQ==,assertion
+did:example:entity3,did:example:authority3,action3,resource3,true,true,eyJhZGRpdGlvbmFsIjogImN0eCJ9,recognition

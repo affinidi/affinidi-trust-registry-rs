@@ -142,6 +142,33 @@ impl TrustRecordIds {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RecordType {
+    Authorization,
+    Recognition,
+}
+
+impl std::str::FromStr for RecordType {
+    type Err = TrustRecordError;
+
+    fn from_str(s: &str) -> Result<Self, TrustRecordError> {
+        match s.to_lowercase().as_str() {
+            "assertion" => Ok(Self::Authorization),
+            "recognition" => Ok(Self::Recognition),
+            _ => Err(TrustRecordError::InvalidRecordType),
+        }
+    }
+}
+
+impl fmt::Display for RecordType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authorization => write!(f, "assertion"),
+            Self::Recognition => write!(f, "recognition"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrustRecord {
     entity_id: EntityId,
     authority_id: AuthorityId,
@@ -152,6 +179,7 @@ pub struct TrustRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     authorized: Option<bool>,
     context: Context,
+    record_type: RecordType,
 }
 
 impl TrustRecord {
@@ -164,6 +192,7 @@ impl TrustRecord {
         recognized: bool,
         authorized: bool,
         context: Context,
+        record_type: RecordType,
     ) -> Self {
         Self {
             entity_id,
@@ -173,6 +202,7 @@ impl TrustRecord {
             recognized: Some(recognized),
             authorized: Some(authorized),
             context,
+            record_type,
         }
     }
 
@@ -198,6 +228,10 @@ impl TrustRecord {
 
     pub fn context(&self) -> &Context {
         &self.context
+    }
+
+    pub fn record_type(&self) -> &RecordType {
+        &self.record_type
     }
 
     pub fn is_authorized(&self) -> bool {
@@ -247,6 +281,7 @@ pub struct TrustRecordBuilder {
     recognized: Option<bool>,
     context: Context,
     authorized: Option<bool>,
+    record_type: Option<RecordType>,
 }
 
 impl TrustRecordBuilder {
@@ -259,6 +294,7 @@ impl TrustRecordBuilder {
             recognized: None,
             context: Context::empty(),
             authorized: None,
+            record_type: None,
         }
     }
 
@@ -296,6 +332,11 @@ impl TrustRecordBuilder {
         self
     }
 
+    pub fn record_type(mut self, record_type: RecordType) -> Self {
+        self.record_type = Some(record_type);
+        self
+    }
+
     pub fn build(self) -> Result<TrustRecord, TrustRecordError> {
         Ok(TrustRecord {
             entity_id: self.entity_id.ok_or(TrustRecordError::MissingEntityId)?,
@@ -307,6 +348,9 @@ impl TrustRecordBuilder {
             recognized: self.recognized,
             context: self.context,
             resource: self.resource.ok_or(TrustRecordError::MissingResource)?,
+            record_type: self
+                .record_type
+                .ok_or(TrustRecordError::MissingRecordType)?,
         })
     }
 }
@@ -325,6 +369,8 @@ pub enum TrustRecordError {
     MissingResource,
     MissingTimeRequested,
     MissingTimeEvaluated,
+    MissingRecordType,
+    InvalidRecordType,
 }
 
 impl fmt::Display for TrustRecordError {
@@ -336,6 +382,8 @@ impl fmt::Display for TrustRecordError {
             Self::MissingResource => write!(f, "Resource is required"),
             Self::MissingTimeRequested => write!(f, "Time requested is required"),
             Self::MissingTimeEvaluated => write!(f, "Time evaluated is required"),
+            Self::MissingRecordType => write!(f, "Record type is required"),
+            Self::InvalidRecordType => write!(f, "Record type is invalid"),
         }
     }
 }
@@ -355,10 +403,12 @@ mod tests {
             .resource(Resource::new("resource-112"))
             .recognized(true)
             .authorized(true)
+            .record_type(RecordType::Authorization)
             .build()
             .unwrap();
 
         assert_eq!(record.entity_id().as_str(), "entity-123");
+        assert_eq!(record.record_type().to_string(), "assertion");
     }
 
     #[test]
@@ -420,6 +470,7 @@ mod tests {
                     "override": false
                 }
             })),
+            RecordType::Authorization,
         );
 
         let merged_record = record.merge_contexts(Context::new(json!({
@@ -632,5 +683,26 @@ mod tests {
                 "new": null
             })
         );
+    }
+
+    #[test]
+    fn test_record_type_from_str() {
+        use std::str::FromStr;
+
+        assert_eq!(
+            RecordType::from_str("assertion").unwrap(),
+            RecordType::Authorization
+        );
+        assert_eq!(
+            RecordType::from_str("recognition").unwrap(),
+            RecordType::Recognition
+        );
+        assert!(RecordType::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn test_record_type_display() {
+        assert_eq!(RecordType::Authorization.to_string(), "assertion");
+        assert_eq!(RecordType::Recognition.to_string(), "recognition");
     }
 }
