@@ -104,7 +104,11 @@ The command generates:
   - `CLIENT_SECRETS`
   - `ADMIN_DIDS`
 
-**DIDComm Mediator**
+## Set-up a DIDComm Mediator
+
+A DIDComm Mediator is a messaging server that securely processes and forwards DIDComm messages between parties. Also it manages access control, provides temporary message storage, and forwards messages to other mediators without accessing their content.
+
+Recipients can fetch, decrypt, and verify messages sent to their DID using DIDComm libraries such as DIDComm for Dart, Meeting Place SDK for Dart, or Mediator SDK for Rust.
 
 To use a DIDComm mediator on your setup, use the following command:
 
@@ -114,7 +118,7 @@ MEDIATOR_URL="https://your-mediator-url.io" MEDIATOR_DID="did:web:your-mediator-
 
 Replace the `MEDIATOR_URL` and `MEDIATOR_DID` with your own mediator instance.
 
-For more information on running your own DIDComm mediator, refer to the [deployment options](https://docs.affinidi.com/products/affinidi-messaging/didcomm-mediator/deployment-options/) page in the documentation.
+In order to set-up your own DIDComm mediator, checkout [DIDComm Mediator Documentation](https://docs.affinidi.com/products/affinidi-messaging/didcomm-mediator/) or create one via [Affinidi Portal](https://portal.affinidi.com/login).  
 
 ## Run on Local Machine
 
