@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 use crate::{
     SharedData,
     configs::{Configs, DidcommConfig, ServerConfig, TrsutRegistryConfig},
-    didcomm::listener::start_didcomm_listeners,
+    didcomm::listener::start_didcomm_listener,
     http::application_routes,
 };
 
@@ -33,17 +33,17 @@ async fn start_didcomm_server(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    start_didcomm_listeners(config, repository).await?;
+    start_didcomm_listener(config, repository).await?;
 
     Ok(())
 }
 
 /// The main purpose is just to handle health check of container
 async fn start_http_server(
-    config: ServerConfig,
+    config: Arc<TrsutRegistryConfig>,
     repository: Arc<dyn TrustRecordRepository>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let listen_address = config.listen_address.clone();
+    let listen_address = config.server_config.listen_address.clone();
 
     let shared_data = SharedData {
         config: config.clone(),
@@ -51,7 +51,7 @@ async fn start_http_server(
         repository,
     };
 
-    let cors = build_cors_layer(&config.cors_allowed_origins);
+    let cors = build_cors_layer(&config.server_config.cors_allowed_origins);
 
     let health_route =
         Router::new().route("/health", get(|| async { Json(json!({ "status": "OK" })) }));
@@ -121,10 +121,7 @@ pub async fn start() {
     };
 
     // tasks section
-    let http_task = tokio::spawn(start_http_server(
-        config.server_config.clone(),
-        repository.clone(),
-    ));
+    let http_task = tokio::spawn(start_http_server(config.clone(), repository.clone()));
 
     if config.didcomm_config.is_enabled {
         let didcomm_task = tokio::spawn(start_didcomm_server(

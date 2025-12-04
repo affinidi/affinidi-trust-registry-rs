@@ -10,6 +10,7 @@ use tokio::time::timeout;
 use tracing::error;
 use uuid::Uuid;
 
+pub mod did_document;
 pub mod handlers;
 pub mod listener;
 pub mod problem_report;

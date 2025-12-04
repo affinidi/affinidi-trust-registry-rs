@@ -85,35 +85,15 @@ pub(crate) async fn start_one_did_listener(
         .unwrap()
 }
 
-/// starts DIDComm listeners
-/// the amount of listeners depends on amount of dids configured
-/// for each did a separate listener will be configured
-/// for now, one mediator for all.
-/// TODO: each did may have its own mediator
-pub(crate) async fn start_didcomm_listeners(
+/// starts DIDComm listener for the configured DID profile
+pub(crate) async fn start_didcomm_listener(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
 ) -> Result<(), JoinError> {
+    let profile_config = config.profile_config.clone();
     let config = Arc::new(config);
-    let handles: Vec<_> = config
-        .profile_configs
-        .clone()
-        .into_iter()
-        .map(|profile_config| {
-            tokio::spawn(start_one_did_listener(
-                profile_config,
-                config.clone(),
-                repository.clone(),
-            ))
-        })
-        .collect();
 
-    for handle in handles {
-        if let Err(e) = handle.await {
-            error!("Service failed: {}", e);
-            return Err(e);
-        }
-    }
+    let handle = tokio::spawn(start_one_did_listener(profile_config, config, repository));
 
-    Ok(())
+    handle.await
 }

@@ -96,9 +96,9 @@ The command generates:
 
 - **3 DIDs** and their corresponding keys.
 - DIDComm server environment variables:
-  - `PROFILE_CONFIGS`
+  - `PROFILE_CONFIG`
 - Testing environment variables:
-  - `PROFILE_CONFIGS`
+  - `PROFILE_CONFIG`
   - `TRUST_REGISTRY_DID`
   - `CLIENT_DID`
   - `CLIENT_SECRETS`
@@ -109,7 +109,7 @@ The command generates:
 To use a DIDComm mediator on your setup, use the following command:
 
 ```bash
-MEDIATOR_URL="https://your-mediator-url.io" MEDIATOR_DID="did:web:your-mediator-did.io" cargo run --bin generate-secrets --features dev-tools
+MEDIATOR_URL="https://66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io/" MEDIATOR_DID="did:web:66a6ec69-0646-4a8d-ae08-94e959855fa9.atlas.affinidi.io" cargo run --bin generate-secrets --features dev-tools
 ```
 
 Replace the `MEDIATOR_URL` and `MEDIATOR_DID` with your own mediator instance.
