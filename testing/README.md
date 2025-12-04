@@ -18,9 +18,9 @@ TR_STORAGE_BACKEND=csv
 TR_STORAGE_BACKEND=ddb
 ```
 
-## Option 1: Run tests using testing script
+## Option 1: Run Tests Using Testing Script
 
-If you have not setup your environment, please refer to [Setup Environment](../README.md#usage)
+If you have not setup your environment, please refer to [Setup Environment](../README.md#set-up-environment)
 
 ### To run all tests (unit and integration):
 
