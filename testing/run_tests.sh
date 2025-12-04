@@ -109,19 +109,19 @@ fi
 # Run tests
 echo "Running cargo tests..."
 if [ "$COVERAGE" == "true" ]; then
-    docker compose -f docker-compose.test.yaml up build --no-cache
+    docker compose -f docker-compose.test.yaml up -d
     sleep 5
     cargo llvm-cov --html -p trust-registry
 elif [ "$TEST_TYPE" == "all" ]; then
-    docker compose -f docker-compose.test.yaml up build --no-cache
+    docker compose -f docker-compose.test.yaml up -d
     sleep 5
     cargo test -p trust-registry
 elif [ "$TEST_TYPE" == "unit" ]; then
     cargo test --lib -p trust-registry
 elif [ "$TEST_TYPE" == "int" ]; then
-    docker compose -f docker-compose.test.yaml up build --no-cache
+    docker compose -f docker-compose.test.yaml up -d
     sleep 5
-    cargo test --test integration_test -p trust-registry --no-capture
+    cargo test --test integration_test -p trust-registry -- --no-capture
 else
     echo "Unknown TEST_TYPE: $TEST_TYPE. Valid options are 'all', 'unit', 'int'."
     exit 1
