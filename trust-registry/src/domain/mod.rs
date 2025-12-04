@@ -408,7 +408,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(record.entity_id().as_str(), "entity-123");
-        assert_eq!(record.record_type.to_string(), "assertion");
+        assert_eq!(record.record_type().to_string(), "assertion");
     }
 
     #[test]

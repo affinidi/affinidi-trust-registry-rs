@@ -441,7 +441,8 @@ mod tests {
 
         let result = storage.find_by_query(query).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(*result.unwrap().record_type(), RecordType::Authorization);
+        let record = result.unwrap();
+        assert_eq!(*record.record_type(), RecordType::Authorization);
     }
 
     #[tokio::test]
