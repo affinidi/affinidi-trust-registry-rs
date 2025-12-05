@@ -199,14 +199,14 @@ See the list of environment variables and their usage.
 
 Variable Name | Description | Required |
 --------------|-------------|----------|
-`TR_STORAGE_BACKEND` | Storage to use to store trust records. Options: `csv`, `ddb`. | Yes |
-`FILE_STORAGE_PATH` | Path to the file if using CSV as the storage. | Only when `TR_STORAGE_BACKEND` = 'csv' |
-`DDB_TABLE_NAME` | Table name to store the trust records if using DDB as the storage. | Only when `TR_STORAGE_BACKEND` = 'ddb' |
-`CORS_ALLOWED_ORIGINS` | List of URLs separated by comma to allow for CORS. | Yes |
-`AUDIT_LOG_FORMAT` | Format to store the audit logs. Options: `text`, `json`. | Yes |
-`MEDIATOR_DID` | Decentralised Identifier (DID) of the mediator. If DIDComm is enabled, managing trust records uses DIDComm mediator as a transport layer to send payloads. | Only when DIDComm is enabled. |
-`ADMIN_DIDS` | List of DIDs authorised to manage the trust records of the Trust Registry. | Only when DIDComm is enabled. |
-`PROFILE_CONFIG` | DID and DID secret of the Trust Registry for DIDComm communication. ***Sensitive information, do not share.*** | Only when DIDComm is enabled. |
+`TR_STORAGE_BACKEND` | Storage backend for trust records. Options: `csv`, `ddb`. | Yes |
+`FILE_STORAGE_PATH` | Path to the CSV file when using CSV as the storage backend. | Required when `TR_STORAGE_BACKEND` = `csv` |
+`DDB_TABLE_NAME` | DynamoDB table name for storing trust records when using DDB as the storage backend. | Required when `TR_STORAGE_BACKEND` = `ddb` |
+`CORS_ALLOWED_ORIGINS` | Comma-separated list of allowed URLs for CORS. | Yes |
+`AUDIT_LOG_FORMAT` | Output format for audit logs. Options: `text`, `json`. | Yes |
+`MEDIATOR_DID` | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records. | Required when DIDComm is enabled |
+`ADMIN_DIDS` | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry. | Required when DIDComm is enabled |
+`PROFILE_CONFIG` | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. ***Sensitive information, do not share.*** | Required when DIDComm is enabled |
 
 ### Profile Config Options
 
