@@ -19,6 +19,8 @@ A high-performance, Rust-based implementation of a Trust Registry, fully complia
   - [Recognition Query](#recognition-query)
   - [Authorization Query](#authorization-query)
 - [Manage Trust Records](#manage-trust-records)
+- [Environment Variables](#environment-variables)
+  - [Profile Config Options](#profile-config-options)
 - [Additional Resources](#additional-resources)
 - [Support \& feedback](#support--feedback)
   - [Reporting technical issues](#reporting-technical-issues)
@@ -190,6 +192,87 @@ MEDIATOR_DID="<TRUST_REGISTRY_MEDIATOR_DID>" TRUST_REGISTRY_DID="<TRUST_REGISTRY
 ```
 
 See [DIDComm Protocols](./DIDCOMM_PROTOCOLS.md) for more details.
+
+## Environment Variables
+
+See the list of environment variables and their usage.
+
+Variable Name | Description | Required |
+--------------|-------------|----------|
+`TR_STORAGE_BACKEND` | Storage backend for trust records. Options: `csv`, `ddb`. | Yes |
+`FILE_STORAGE_PATH` | Path to the CSV file when using CSV as the storage backend. | Required when `TR_STORAGE_BACKEND` = `csv` |
+`DDB_TABLE_NAME` | DynamoDB table name for storing trust records when using DDB as the storage backend. | Required when `TR_STORAGE_BACKEND` = `ddb` |
+`CORS_ALLOWED_ORIGINS` | Comma-separated list of allowed URLs for CORS. | Yes |
+`AUDIT_LOG_FORMAT` | Output format for audit logs. Options: `text`, `json`. | Yes |
+`MEDIATOR_DID` | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records. | Required when DIDComm is enabled |
+`ADMIN_DIDS` | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry. | Required when DIDComm is enabled |
+`PROFILE_CONFIG` | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. ***Sensitive information, do not share.*** | Required when DIDComm is enabled |
+
+### Profile Config Options
+
+The `PROFILE_CONFIG` environment variable uses a URI-based loader that supports multiple configuration options. The loader allows you to store DID and DID secrets securely according to your deployment requirements.
+
+
+| Scheme | Format | Description |
+|--------|--------|-------------|
+| Direct Value | `PROFILE_CONFIG='<JSON_STRING>'` | Store the configuration directly as an inline JSON string in the environment variable. Recommended for local development. |
+| String Protocol | `PROFILE_CONFIG='string://<JSON_STRING>'` | Explicitly specify the value as a string literal. Same functionality as the direct value option. |
+| File System | `PROFILE_CONFIG='file:///absolute/path/to/config.json'` | Load configuration from a JSON file on the local filesystem. The path must be absolute and accessible by the application. |
+| AWS Secrets Manager | `PROFILE_CONFIG='aws_secrets://<SECRET_NAME>'` | Retrieve configuration from AWS Secrets Manager. The secret value must be stored in plaintext format as a JSON string. |
+| AWS Parameter Store | `PROFILE_CONFIG='aws_parameter_store://<PARAMETER_NAME>'` | Load configuration from AWS Systems Manager Parameter Store. The parameter value must be a JSON string. |
+
+**Expected Value:**
+
+All options must provide the Trust Registry DID and DID secrets in the following JSON structure:
+
+```json
+{
+  "alias": "Trust Registry",
+  "did": "did:peer:2.VzDna...",
+  "secrets": [
+    {
+      "id": "did:peer:2.VzDna...#key-1",
+      "privateKeyJwk": {
+        "crv": "P-256",
+        "kty": "EC",
+        "x": "RgvVBx01Mva...",
+        "y": "U5pT2A5WdIkD..."
+      },
+      "type": "JsonWebKey2020"
+    },
+    {
+      "id": "did:peer:2.VzDna...#key-2",
+      "privateKeyJwk": {
+        "crv": "secp256k1",
+        "d": "...",
+        "kty": "EC",
+        "x": "O9pWQXY...",
+        "y": "TQk8LY_BcY..."
+      },
+      "type": "JsonWebKey2020"
+    }
+  ]
+}
+```
+
+**Examples:**
+
+```bash
+# Direct value (local development)
+PROFILE_CONFIG='{"alias":"Trust Registry","did":"did:peer:2.VzDna...","secrets":[...]}'
+
+# File-based configuration
+PROFILE_CONFIG='file:///etc/trust-registry/config.json'
+
+# AWS Secrets Manager
+PROFILE_CONFIG='aws_secrets://prod/trust-registry/profile'
+
+# AWS Parameter Store
+PROFILE_CONFIG='aws_parameter_store:///trust-registry/profile'
+```
+
+**Note:** If no URI scheme is specified, the loader parses the value as a direct string literal by default.
+
 
 ## Additional Resources
 
