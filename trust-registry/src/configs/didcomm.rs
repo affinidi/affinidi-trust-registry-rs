@@ -10,17 +10,12 @@ use super::{
     loaders::{environment::*, load},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuditLogFormat {
+    #[default]
     Text,
     Json,
-}
-
-impl Default for AuditLogFormat {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 impl fmt::Display for AuditLogFormat {
