@@ -36,12 +36,12 @@ fn insert_env_vars(
     let path = Path::new(file_path);
     let mut existing_vars = HashMap::new();
 
-    if !path.exists() {
-        if let Some(example_path) = example_file_path {
-            let example = Path::new(example_path);
-            if example.exists() {
-                fs::copy(example, path)?;
-            }
+    if !path.exists()
+        && let Some(example_path) = example_file_path
+    {
+        let example = Path::new(example_path);
+        if example.exists() {
+            fs::copy(example, path)?;
         }
     }
 

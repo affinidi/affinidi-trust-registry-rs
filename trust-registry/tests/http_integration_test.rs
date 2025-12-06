@@ -31,7 +31,7 @@ async fn test_health_endpoint() {
     let client = reqwest::Client::new();
 
     let response = client
-        .get(&format!("{}/health", server_url))
+        .get(format!("{}/health", server_url))
         .send()
         .await
         .unwrap();
@@ -55,7 +55,7 @@ async fn test_recognition_endpoint_success() {
     });
 
     let response = client
-        .post(&format!("{}/recognition", server_url))
+        .post(format!("{}/recognition", server_url))
         .header("content-type", "application/json")
         .json(&request_body)
         .send()
@@ -93,7 +93,7 @@ async fn test_authorization_endpoint_success() {
     });
 
     let response = client
-        .post(&format!("{}/authorization", server_url))
+        .post(format!("{}/authorization", server_url))
         .header("content-type", "application/json")
         .json(&request_body)
         .send()
@@ -132,7 +132,7 @@ async fn test_authorization_endpoint_not_found() {
     });
 
     let response = client
-        .post(&format!("{}/authorization", server_url))
+        .post(format!("{}/authorization", server_url))
         .header("content-type", "application/json")
         .json(&request_body)
         .send()
@@ -161,7 +161,7 @@ async fn test_recognition_endpoint_not_found() {
     });
 
     let response = client
-        .post(&format!("{}/recognition", server_url))
+        .post(format!("{}/recognition", server_url))
         .header("content-type", "application/json")
         .json(&request_body)
         .send()
@@ -188,7 +188,7 @@ async fn test_authorization_endpoint_bad_request() {
     });
 
     let response = client
-        .post(&format!("{}/authorization", server_url))
+        .post(format!("{}/authorization", server_url))
         .header("content-type", "application/json")
         .json(&request_body)
         .send()
@@ -212,7 +212,7 @@ async fn test_recognition_endpoint_bad_request() {
     let invalid_json = "{ invalid json";
 
     let response = client
-        .post(&format!("{}/recognition", server_url))
+        .post(format!("{}/recognition", server_url))
         .header("content-type", "application/json")
         .body(invalid_json)
         .send()
@@ -245,7 +245,7 @@ async fn test_context_merging_authorization() {
     });
 
     let response = client
-        .post(&format!("{}/authorization", server_url))
+        .post(format!("{}/authorization", server_url))
         .header("content-type", "application/json")
         .json(&request_body)
         .send()
@@ -277,7 +277,7 @@ async fn test_context_merging_recognition() {
     });
 
     let response = client
-        .post(&format!("{}/recognition", server_url))
+        .post(format!("{}/recognition", server_url))
         .header("content-type", "application/json")
         .json(&request_body)
         .send()
@@ -298,7 +298,7 @@ async fn test_cors_headers_present() {
     let client = reqwest::Client::new();
 
     let response = client
-        .request(reqwest::Method::OPTIONS, &format!("{}/health", server_url))
+        .request(reqwest::Method::OPTIONS, format!("{}/health", server_url))
         .header("Origin", "http://localhost:3000")
         .header("Access-Control-Request-Method", "GET")
         .send()
@@ -315,7 +315,7 @@ async fn test_method_not_allowed() {
     let client = reqwest::Client::new();
 
     let response = client
-        .get(&format!("{}/authorization", server_url))
+        .get(format!("{}/authorization", server_url))
         .send()
         .await
         .expect("Failed to send method not allowed request");
@@ -329,7 +329,7 @@ async fn test_invalid_endpoint() {
     let client = reqwest::Client::new();
 
     let response = client
-        .get(&format!("{}/nonexistent", server_url))
+        .get(format!("{}/nonexistent", server_url))
         .send()
         .await
         .unwrap();
@@ -343,7 +343,7 @@ async fn test_wellknown_did_endpoint_returns_valid_json() {
     let client = reqwest::Client::new();
 
     let response = client
-        .get(&format!("{}/.well-known/did.json", server_url))
+        .get(format!("{}/.well-known/did.json", server_url))
         .send()
         .await
         .unwrap();
@@ -388,7 +388,7 @@ async fn test_wellknown_did_document_no_private_keys() {
     let client = reqwest::Client::new();
 
     let response = client
-        .get(&format!("{}/.well-known/did.json", server_url))
+        .get(format!("{}/.well-known/did.json", server_url))
         .send()
         .await
         .unwrap();
@@ -416,7 +416,7 @@ async fn test_wellknown_did_document_structure() {
     let client = reqwest::Client::new();
 
     let response = client
-        .get(&format!("{}/.well-known/did.json", server_url))
+        .get(format!("{}/.well-known/did.json", server_url))
         .send()
         .await
         .unwrap();
