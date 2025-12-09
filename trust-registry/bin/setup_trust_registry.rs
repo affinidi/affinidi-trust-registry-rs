@@ -473,7 +473,7 @@ pub fn setup_did_web_tr(
     println!("✓ Trust Registry DID created: {}", tr_did);
     println!();
     println!(
-        "Saving DID document with method {} in the current directory...",
+        "Saving DID document with did:{} method in the current directory...",
         did_method
     );
     // Write DID configs to a file
