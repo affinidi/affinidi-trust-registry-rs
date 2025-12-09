@@ -30,6 +30,10 @@ use serde_json::json;
 use sha256::digest;
 use url::Url;
 // use base64;
+use crossterm::{
+    event::{self, Event},
+    terminal,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -39,10 +43,6 @@ use std::{
     path::Path,
     println,
     sync::Arc,
-};
-use crossterm::{
-    event::{self, Event},
-    terminal,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,11 +196,13 @@ pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Se
         Ok(p) => p,
         Err(e) => {
             println!("Error creating ATM profile: {:#?}", e);
-            println!("This might indicate an issue with DID resolution or service endpoint configuration");
+            println!(
+                "This might indicate an issue with DID resolution or service endpoint configuration"
+            );
             return;
         }
     };
-    
+
     let profile = match atm.profile_add(&atm_profile, true).await {
         Ok(p) => p,
         Err(e) => {
@@ -243,7 +245,8 @@ pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Se
 }
 
 fn create_keys() -> (Secret, Secret) {
-    let mut verification_key = Secret::generate_p256(None, None).expect("Failed to generate P256 key");
+    let mut verification_key =
+        Secret::generate_p256(None, None).expect("Failed to generate P256 key");
     let mut encryption_key =
         Secret::generate_secp256k1(None, None).expect("Failed to generate Secp256k1 key");
 
@@ -475,11 +478,19 @@ pub fn setup_did_web_tr(
     );
     // Write DID configs to a file
     File::create("did.json")?.write_all(serde_json::to_string_pretty(&did_document)?.as_bytes())?;
-    println!("✓ DID document saved to did.json and did.jsonl (for did:webvh) files in the current directory.");
+    println!(
+        "✓ DID document saved to did.json and did.jsonl (for did:webvh) files in the current directory."
+    );
     println!();
     println!("IMPORTANT: Before you continue...");
-    println!("For did:{} method, ensure the DID document is hosted correctly.", did_method);
-    println!("The DID document must be publicly accessible at the specified URL: {}", web_url);
+    println!(
+        "For did:{} method, ensure the DID document is hosted correctly.",
+        did_method
+    );
+    println!(
+        "The DID document must be publicly accessible at the specified URL: {}",
+        web_url
+    );
     println!();
 
     println!("Press any key to continue after hosting the DID document...");
@@ -628,7 +639,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!();
 
             profile = format!("'{}'", serde_json::to_string(&profile_config)?);
-
         } else if !did_method.is_empty() {
             // Mode 2: Generate new DID
 
