@@ -40,6 +40,10 @@ use std::{
     println,
     sync::Arc,
 };
+use crossterm::{
+    event::{self, Event},
+    terminal,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfileConfig {
@@ -188,13 +192,27 @@ pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Se
     tdk.add_profile(&profile).await;
     let atm = Arc::new(tdk.atm.clone().unwrap());
 
-    let profile = atm
-        .profile_add(
-            &ATMProfile::from_tdk_profile(&atm, &profile).await.unwrap(),
-            true,
-        )
-        .await
-        .unwrap();
+    let atm_profile = match ATMProfile::from_tdk_profile(&atm, &profile).await {
+        Ok(p) => p,
+        Err(e) => {
+            println!("Error creating ATM profile: {:#?}", e);
+            println!("This might indicate an issue with DID resolution or service endpoint configuration");
+            return;
+        }
+    };
+    
+    let profile = match atm.profile_add(&atm_profile, true).await {
+        Ok(p) => p,
+        Err(e) => {
+            println!("Error connecting to mediator (websocket timeout): {:#?}", e);
+            println!("Possible causes:");
+            println!("  - Mediator is not running or unreachable");
+            println!("  - DID document service endpoints are incorrect");
+            println!("  - Network connectivity issues");
+            println!("  - Authentication/key mismatch");
+            return;
+        }
+    };
     let protocols = Protocols::new();
     let account_get_result = protocols.mediator.account_get(&atm, &profile, None).await;
 
@@ -225,9 +243,9 @@ pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Se
 }
 
 fn create_keys() -> (Secret, Secret) {
-    let mut verification_key = Secret::generate_ed25519(None, None);
+    let mut verification_key = Secret::generate_p256(None, None).expect("Failed to generate P256 key");
     let mut encryption_key =
-        Secret::generate_x25519(None, None).expect("Failed to generate x25519 key");
+        Secret::generate_secp256k1(None, None).expect("Failed to generate Secp256k1 key");
 
     verification_key.id = verification_key.get_public_keymultibase().unwrap();
     encryption_key.id = encryption_key.get_public_keymultibase().unwrap();
@@ -302,14 +320,14 @@ pub fn setup_did_peer_tr(mediator_url: String) -> (String, Vec<Secret>) {
 pub fn setup_did_web_tr(
     mediator_url: String,
     web_url: String,
-    method: String,
+    did_method: String,
 ) -> Result<(String, Vec<Secret>), Box<dyn Error>> {
-    println!("Setting up did:{} for Trust Registry...", method);
+    println!("Setting up did:{} for Trust Registry...", did_method);
 
     let parsed_url = Url::parse(&web_url)?;
     let did_url_raw = WebVHURL::parse_url(&parsed_url)?;
     // remove webvh part for did:web
-    let mut tr_did = if method == "web" {
+    let mut tr_did = if did_method == "web" {
         did_url_raw.to_string().replace("webvh:{SCID}", "web")
     } else {
         did_url_raw.to_string()
@@ -387,7 +405,7 @@ pub fn setup_did_web_tr(
         service_endpoint: auth_endpoint,
     });
 
-    if method == "webvh" {
+    if did_method == "webvh" {
         // Create the WebVH Parameters
         let mut update_secret = Secret::generate_ed25519(None, None);
         update_secret.id = [
@@ -453,12 +471,32 @@ pub fn setup_did_web_tr(
     println!();
     println!(
         "Saving DID document with method {} in the current directory...",
-        method
+        did_method
     );
     // Write DID configs to a file
     File::create("did.json")?.write_all(serde_json::to_string_pretty(&did_document)?.as_bytes())?;
-    println!("✓ Saved. Ensure to host the did.json and did.jsonl (for did:webvh)");
-    println!("     at {} (must be publicly accessible).", web_url);
+    println!("✓ DID document saved to did.json and did.jsonl (for did:webvh) files in the current directory.");
+    println!();
+    println!("IMPORTANT: Before you continue...");
+    println!("For did:{} method, ensure the DID document is hosted correctly.", did_method);
+    println!("The DID document must be publicly accessible at the specified URL: {}", web_url);
+    println!();
+
+    println!("Press any key to continue after hosting the DID document...");
+    println!();
+    terminal::enable_raw_mode()?;
+    loop {
+        // Read the next event
+        match event::read()? {
+            // If it's a key event and a key press
+            Event::Key(key_event) if key_event.kind == event::KeyEventKind::Press => {
+                break;
+            }
+            _ => {} // Ignore other events (mouse, resize, etc.)
+        }
+    }
+    // Disable raw mode when done
+    terminal::disable_raw_mode()?;
 
     Ok((tr_did, secrets))
 }
@@ -591,16 +629,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             profile = format!("'{}'", serde_json::to_string(&profile_config)?);
 
-            println!("Configuring mediator ACLs for Trust Registry DID...");
-            println!("✓ Configured Trust Registry on mediator.");
-            // Configure ACLs in the mediator for the Trust Registry DID
-            set_acl(
-                "Trust Registry",
-                &existing_tr_did,
-                &mediator_did,
-                tr_secrets,
-            )
-            .await;
         } else if !did_method.is_empty() {
             // Mode 2: Generate new DID
 
