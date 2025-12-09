@@ -4,8 +4,8 @@ use affinidi_tdk::{
     TDK,
     common::{config::TDKConfig, profiles::TDKProfile},
     did_common::{
-        one_or_many::OneOrMany,
         Document,
+        one_or_many::OneOrMany,
         service::{Endpoint, Service},
         verification_method::{VerificationMethod, VerificationRelationship},
     },
@@ -13,27 +13,33 @@ use affinidi_tdk::{
         profiles::ATMProfile,
         protocols::{
             Protocols,
-            mediator::{acls::{AccessListModeType, MediatorACLSet}},
+            mediator::acls::{AccessListModeType, MediatorACLSet},
         },
     },
     secrets_resolver::secrets::{KeyType, Secret, SecretMaterial},
 };
 
+use clap::Parser;
 use did_peer::{
     DIDPeer, DIDPeerCreateKeys, DIDPeerKeyType, DIDPeerKeys, DIDPeerService, PeerServiceEndPoint,
     PeerServiceEndPointLong, PeerServiceEndPointLongMap,
 };
 use didwebvh_rs::{DIDWebVHState, parameters::Parameters, url::WebVHURL};
-use url::Url;
-use clap::Parser;
-use serde_json::json;
 use serde_json::Value;
+use serde_json::json;
 use sha256::digest;
+use url::Url;
 // use base64;
-use std::{
-    collections::HashMap, error::Error, fs::{self, OpenOptions, File}, io::{BufRead, BufReader, Write}, path::Path, println, sync::Arc
-};
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    error::Error,
+    fs::{self, File, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::Path,
+    println,
+    sync::Arc,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfileConfig {
@@ -62,19 +68,19 @@ struct Args {
     didweb_url: Option<String>,
 
     /// Profile configuration location using URI schemes:
-    /// 
+    ///
     /// - Direct value (default when not specified): '<JSON_STRING>'
-    /// 
+    ///
     /// - String protocol: 'string://<JSON_STRING>'
-    /// 
+    ///
     /// - File system: 'file:///absolute/path/to/config.json'
-    /// 
+    ///
     /// - AWS Secrets Manager: 'aws_secrets://<SECRET_NAME>'
-    /// 
+    ///
     /// - AWS Parameter Store: 'aws_parameter_store://<PARAMETER_NAME>'
-    /// 
+    ///
     /// When --did-method is used, this specifies where to save the generated profile.
-    /// 
+    ///
     /// When --did-method is not used, this specifies where to load an existing profile.
     #[arg(long, short = 'p')]
     profile: Option<String>,
@@ -84,11 +90,21 @@ struct Args {
     storage_backend: String,
 
     /// Path to CSV file (required when storage_backend is csv)
-    #[arg(long, short = 'f', required_if_eq("storage_backend", "csv"), default_value = "./sample-data/data.csv")]
+    #[arg(
+        long,
+        short = 'f',
+        required_if_eq("storage_backend", "csv"),
+        default_value = "./sample-data/data.csv"
+    )]
     file_storage_path: Option<String>,
 
     /// DynamoDB table name (required when storage_backend is ddb)
-    #[arg(long, short = 't', required_if_eq("storage_backend", "ddb"), default_value = "test")]
+    #[arg(
+        long,
+        short = 't',
+        required_if_eq("storage_backend", "ddb"),
+        default_value = "test"
+    )]
     ddb_table_name: Option<String>,
 
     /// Admin DIDs that can manage Trust Registry records (comma-separated)
@@ -100,17 +116,16 @@ struct Args {
     tr_did: Option<String>,
 
     /// Trust Registry DID secret (optional, used to set existing DID)
-    #[arg(long, short= 'e')]
+    #[arg(long, short = 'e')]
     tr_did_secret: Option<String>,
 
     /// Trust Registry test configuration
-    #[arg(long, short= 'l', default_value = "false")]
+    #[arg(long, short = 'l', default_value = "false")]
     test_in_pipeline: Option<bool>,
 
     /// Trust Registry audit log output format
-    #[arg(long, short= 'o', default_value = "json")]
+    #[arg(long, short = 'o', default_value = "json")]
     audit_log_format: Option<String>,
-
 }
 
 fn insert_env_vars(
@@ -211,7 +226,8 @@ pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Se
 
 fn create_keys() -> (Secret, Secret) {
     let mut verification_key = Secret::generate_ed25519(None, None);
-    let mut encryption_key = Secret::generate_x25519(None, None).expect("Failed to generate x25519 key");
+    let mut encryption_key =
+        Secret::generate_x25519(None, None).expect("Failed to generate x25519 key");
 
     verification_key.id = verification_key.get_public_keymultibase().unwrap();
     encryption_key.id = encryption_key.get_public_keymultibase().unwrap();
@@ -283,9 +299,13 @@ pub fn setup_did_peer_tr(mediator_url: String) -> (String, Vec<Secret>) {
     (tr_did.0, tr_did.1)
 }
 
-pub fn setup_did_web_tr(mediator_url: String, web_url: String, method: String) -> Result<(String, Vec<Secret>), Box<dyn Error>> {
+pub fn setup_did_web_tr(
+    mediator_url: String,
+    web_url: String,
+    method: String,
+) -> Result<(String, Vec<Secret>), Box<dyn Error>> {
     println!("Setting up did:{} for Trust Registry...", method);
-    
+
     let parsed_url = Url::parse(&web_url)?;
     let did_url_raw = WebVHURL::parse_url(&parsed_url)?;
     // remove webvh part for did:web
@@ -356,7 +376,8 @@ pub fn setup_did_web_tr(mediator_url: String, web_url: String, method: String) -
     });
 
     let mediator_auth_url = [mediator_url, "/authenticate".to_string()].concat();
-    let auth_endpoint = Endpoint::Map(json!([{"accept": ["didcomm/v2"], "uri": mediator_auth_url}]));
+    let auth_endpoint =
+        Endpoint::Map(json!([{"accept": ["didcomm/v2"], "uri": mediator_auth_url}]));
     did_document.service.push(Service {
         id: Some(Url::parse(
             &[tr_did.to_string(), "#auth".to_string()].concat(),
@@ -377,8 +398,7 @@ pub fn setup_did_web_tr(mediator_url: String, web_url: String, method: String) -
         ]
         .concat();
 
-        let next_update_secret =
-            Secret::generate_ed25519(None, None);
+        let next_update_secret = Secret::generate_ed25519(None, None);
 
         let parameters = Parameters::new()
             .with_key_pre_rotation(true)
@@ -414,7 +434,8 @@ pub fn setup_did_web_tr(mediator_url: String, web_url: String, method: String) -
             "id": jwk_v_id,
             "type": "JsonWebKey2020",
             "privateKeyJwk": jwk
-        })).expect("Failed to deserialize verification key");
+        }))
+        .expect("Failed to deserialize verification key");
         secrets.push(secret);
     }
 
@@ -423,23 +444,30 @@ pub fn setup_did_web_tr(mediator_url: String, web_url: String, method: String) -
             "id": jwk_e_id,
             "type": "JsonWebKey2020",
             "privateKeyJwk": jwk
-        })).expect("Failed to deserialize encryption key");
+        }))
+        .expect("Failed to deserialize encryption key");
         secrets.push(secret);
     }
 
     println!("✓ Trust Registry DID created: {}", tr_did);
     println!();
-    println!("Saving DID document with method {} in the current directory...", method);
+    println!(
+        "Saving DID document with method {} in the current directory...",
+        method
+    );
     // Write DID configs to a file
-    File::create("did.json")?
-        .write_all(serde_json::to_string_pretty(&did_document)?.as_bytes())?;
+    File::create("did.json")?.write_all(serde_json::to_string_pretty(&did_document)?.as_bytes())?;
     println!("✓ Saved. Ensure to host the did.json and did.jsonl (for did:webvh)");
     println!("     at {} (must be publicly accessible).", web_url);
 
     Ok((tr_did, secrets))
 }
 
-pub async fn setup_test_trust_registry(mediator_url: String, mediator_did: String, in_pipeline: bool) -> std::io::Result<()>  {
+pub async fn setup_test_trust_registry(
+    mediator_url: String,
+    mediator_did: String,
+    in_pipeline: bool,
+) -> std::io::Result<()> {
     println!("Generating test DIDs for Trust Registry...");
 
     let mut dids_and_secrets: Vec<(String, Vec<Secret>)> = vec![];
@@ -456,7 +484,7 @@ pub async fn setup_test_trust_registry(mediator_url: String, mediator_did: Strin
 
     let client_secrets = serde_json::to_string(&serde_json::to_string(&test_client_did.1)?)?;
     let test_profile_configs_stringified = serde_json::to_string(&test_tr_profile_configs)?;
-    
+
     if in_pipeline {
         let mut vars = HashMap::new();
         vars.insert("TRUST_REGISTRY_DID".to_string(), test_tr_did.0);
@@ -497,7 +525,6 @@ pub async fn setup_test_trust_registry(mediator_url: String, mediator_did: Strin
     Ok(())
 }
 
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
@@ -530,7 +557,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // If the user has provided mediator details, proceed with DID setup
     if enable_didcomm {
-
         // Initialise profile configuration
         let mut profile_config: Option<ProfileConfig> = None;
 
@@ -559,7 +585,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 did: existing_tr_did.clone(),
                 secrets: tr_secrets.clone(),
             });
-            
+
             println!("✓ Profile configuration configured.");
             println!();
 
@@ -568,8 +594,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("Configuring mediator ACLs for Trust Registry DID...");
             println!("✓ Configured Trust Registry on mediator.");
             // Configure ACLs in the mediator for the Trust Registry DID
-            set_acl("Trust Registry", &existing_tr_did, &mediator_did, tr_secrets).await;
-            
+            set_acl(
+                "Trust Registry",
+                &existing_tr_did,
+                &mediator_did,
+                tr_secrets,
+            )
+            .await;
         } else if !did_method.is_empty() {
             // Mode 2: Generate new DID
 
@@ -578,15 +609,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!();
 
             let (tr_did, tr_secrets) = match did_method.as_str() {
-                "peer" => {
-                    setup_did_peer_tr(parsed_mediator_url.to_string())
-                },
+                "peer" => setup_did_peer_tr(parsed_mediator_url.to_string()),
                 "web" | "webvh" => {
-                    let web_url = args.didweb_url
-                        .ok_or(format!("--didweb-url is required when using did:{} method.", did_method))?;
+                    let web_url = args.didweb_url.ok_or(format!(
+                        "--didweb-url is required when using did:{} method.",
+                        did_method
+                    ))?;
 
                     setup_did_web_tr(parsed_mediator_url.to_string(), web_url, did_method.clone())?
-                },
+                }
                 _ => {
                     return Err(format!("Unsupported DID method: {}.", did_method).into());
                 }
@@ -594,7 +625,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             println!("✓ Profile configuration configured.");
             println!();
-            
+
             profile_config = Some(ProfileConfig {
                 alias: "Trust Registry".to_string(),
                 did: tr_did.clone(),
@@ -608,68 +639,86 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 println!("Generated Profile Configuration:");
                 println!("{}", serde_json::to_string_pretty(&profile_config)?);
                 println!();
-                println!("Ensure to save the profile configuration to the specified location: {}.", profile);
+                println!(
+                    "Ensure to save the profile configuration to the specified location: {}.",
+                    profile
+                );
                 println!();
             }
-
         } else {
             // Mode 3: Use existing profile location
             println!("Mode: Using existing profile configuration.");
-            println!("✓ Profile location specified. The Trust Registry expects that the profile is already configured.");
-            println!("Ensure to save the profile configuration to the specified location: {}.", profile);
+            println!(
+                "✓ Profile location specified. The Trust Registry expects that the profile is already configured."
+            );
+            println!(
+                "Ensure to save the profile configuration to the specified location: {}.",
+                profile
+            );
             println!();
         }
 
         if let Some(config) = &profile_config {
             println!("Configuring mediator ACLs for Trust Registry DID...");
             // Configure ACLs in the mediator for the Trust Registry DID
-            set_acl(&config.alias, &config.did, &mediator_did, config.secrets.clone()).await;
+            set_acl(
+                &config.alias,
+                &config.did,
+                &mediator_did,
+                config.secrets.clone(),
+            )
+            .await;
             println!("✓ Configured Trust Registry on mediator.");
         }
-        
+
         // Configure test Trust Registry
-        setup_test_trust_registry(mediator_url.clone(), mediator_did.clone(), test_in_pipeline).await?;
+        setup_test_trust_registry(mediator_url.clone(), mediator_did.clone(), test_in_pipeline)
+            .await?;
     } else {
         println!("No Mediator configuration specified. Skipping Trust Registry DID configuration.");
     }
 
     // Set environment variables
     // Expected to be empty if DIDComm mediator is not specified
-    server_vars.insert(
-        "PROFILE_CONFIG".to_string(),
-        profile.clone(),
-    );
-    server_vars.insert(
-        "MEDIATOR_DID".to_string(),
-        mediator_did.clone(),
-    );
-    server_vars.insert(
-        "ADMIN_DIDS".to_string(),
-        admin_dids.clone(),
-    );
+    server_vars.insert("PROFILE_CONFIG".to_string(), profile.clone());
+    server_vars.insert("MEDIATOR_DID".to_string(), mediator_did.clone());
+    server_vars.insert("ADMIN_DIDS".to_string(), admin_dids.clone());
 
     // Storage configuration
     println!();
     println!("Trust Registry Storage Configuration");
     println!("✓ Storage Backend: {}", args.storage_backend);
     // Insert into the env file
-    server_vars.insert("TR_STORAGE_BACKEND".to_string(), args.storage_backend.clone());
+    server_vars.insert(
+        "TR_STORAGE_BACKEND".to_string(),
+        args.storage_backend.clone(),
+    );
     if args.storage_backend == "csv" {
-        let file_path = args.file_storage_path.as_ref()
+        let file_path = args
+            .file_storage_path
+            .as_ref()
             .ok_or("Error: --file-storage-path is required when using csv storage")?;
         println!("✓ File Storage Path: {}", file_path);
         // Insert into the env file
         server_vars.insert("FILE_STORAGE_PATH".to_string(), file_path.clone());
     } else if args.storage_backend == "ddb" {
-        let table_name = args.ddb_table_name.as_ref()
+        let table_name = args
+            .ddb_table_name
+            .as_ref()
             .ok_or("Error: --ddb-table-name is required when using ddb storage")?;
         println!("✓ DDB Table Name: {}", table_name);
         // Insert into the env file
         server_vars.insert("DDB_TABLE_NAME".to_string(), table_name.clone());
     }
     // Audit log format - default to json
-    server_vars.insert("AUDIT_LOG_FORMAT".to_string(), args.audit_log_format.as_ref().unwrap().to_string());
-    println!("✓ Audit Log Format: {}", args.audit_log_format.as_ref().unwrap());
+    server_vars.insert(
+        "AUDIT_LOG_FORMAT".to_string(),
+        args.audit_log_format.as_ref().unwrap().to_string(),
+    );
+    println!(
+        "✓ Audit Log Format: {}",
+        args.audit_log_format.as_ref().unwrap()
+    );
 
     // Display server configuration in JSON format
     println!();
