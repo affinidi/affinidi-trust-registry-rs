@@ -1,20 +1,21 @@
 # Affinidi Trust Registry
 
-[![Licence: Apache](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENCE)
+[![License: Apache](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
 A high-performance, Rust-based implementation of a Trust Registry, fully compliant with the [Trust Registry Query Protocol (TRQP) v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/) specification. Built for scalability and reliability, it enables secure, standards-based verification of trusted entities within decentralised identity ecosystems.
 
 ## Table of Contents
 
+- [Quickstart](#quickstart)
 - [What is Trust Registry](#what-is-trust-registry)
   - [Why a Trust Registry Matters](#why-a-trust-registry-matters)
   - [Sample Use Cases](#sample-use-cases)
 - [Key Components](#key-components)
 - [Requirements](#requirements)
-- [Set up Environment](#set-up-environment)
-- [Start the Server](#start-the-server)
-  - [Run on Local Machine](#run-on-local-machine)
-  - [Run on Docker](#run-on-docker)
+- [Set up Trust Registry](#set-up-trust-registry)
+  - [Run with DIDComm Enabled](#run-with-didcomm-enabled)
+  - [Run with DIDComm Disabled](#run-with-didcomm-disabled)
+- [Run Trust Registry on Docker](#run-trust-registry-on-docker)
 - [Test the API](#test-the-api)
   - [Recognition Query](#recognition-query)
   - [Authorization Query](#authorization-query)
@@ -26,9 +27,44 @@ A high-performance, Rust-based implementation of a Trust Registry, fully complia
   - [Reporting technical issues](#reporting-technical-issues)
 - [Contributing](#contributing)
 
+## Quickstart
+
+Get the Trust Registry up and running quickly with default settings (DIDComm disabled).
+
+1. Run the setup command to generate default configurations.
+
+```bash
+cargo run --bin setup-trust-registry --features="dev-tools"
+```
+
+2. Start the Trust Registry server.
+
+```bash
+ENABLE_DIDCOMM=false RUST_LOG=info cargo run --bin trust-registry
+```
+
+The Trust Registry will start on `http://localhost:3232` using CSV file storage with sample data from `./sample-data/data.csv`.
+
+3. Test your Trust Registry setup.
+
+```bash
+# Query authorization
+curl --location 'http://localhost:3232/authorization' \
+--header 'Content-Type: application/json' \
+--data '{
+    "authority_id": "did:example:authority1",
+    "entity_id": "did:example:entity1",
+    "action": "action1",
+    "resource": "resource1"
+}'
+```
+
+For more details on how to set up and run the Trust Registry, see the [Set up Trust Registry](#set-up-trust-registry) section.
+
+
 ## What is Trust Registry
 
-A **Trust Registry** is a system that maintains and provides authoritative information about which entities, such as organisations, issuers, verifiers, are authorised to perform specific actions on defined resources within a trust framework. Each entity is identified by its Decentralised Identifier (DID), ensuring cryptographic integrity and interoperability across decentralised identity ecosystems.
+A **Trust Registry** is a system that maintains and provides authoritative information about which entities, such as organisations, issuers, and verifiers, are authorised to perform specific actions on defined resources within a trust framework. Each entity is identified by its Decentralised Identifier (DID), ensuring cryptographic integrity and interoperability across decentralised identity ecosystems.
 
 ### Why a Trust Registry Matters
 
@@ -62,19 +98,19 @@ This ensures **security**, **compliance**, and **interoperability** across decen
 
 - **Trust Framework Compliance**
 
-  Ensure that all participants in a digital trust ecosystem, such as issuers, verifiers, and relying parties, are recognised and approved by the appropriate governance authorities.
+  Ensures that all participants in a digital trust ecosystem, such as issuers, verifiers, and relying parties, are recognised and approved by the appropriate governance authorities.
 
 ## Key Components
 
 - **`trust-registry`**: Unified server providing both RESTful API (TRQP endpoints for recognition and authorisation queries) and optional DIDComm messaging interface for CRUD admin operations.
 
-- **Storage backends**: Storing authoritative records about the entities for querying. It supports the following storage types:
+- **Storage backends**: Stores authoritative records about the entities for querying. It supports the following storage types:
   - CSV file storage
   - AWS DynamoDB
 
 ## Requirements
 
-Install Rust on your machine.
+1. Install Rust on your machine.
 
 - **Rust**: 1.88.0 or higher
 - **Edition**: 2024
@@ -87,57 +123,69 @@ rustc --version
 cargo --version
 ```
 
-## Set up Environment
+2. **Required for DIDComm-enabled.** DIDComm mediator instance is required if you want to enable DIDComm for secure trust record management and querying.
 
-Generate the required DIDs and keys for local deployment. The command will populate the secrets to the `.env` and `.env.test`.
+To deploy and run a DIDComm mediator, see the [deployment options](https://docs.affinidi.com/products/affinidi-messaging/didcomm-mediator/deployment-options/) page in the documentation.
+
+## Set up Trust Registry
+
+Configure the environment to run Trust Registry. The setup command creates the `.env` file with default configurations. For testing environments, it generates `.env.test` or `.env.pipeline` files with the appropriate test configurations.
+
+### Run with DIDComm Enabled
+
+**Prerequisites:** You must have a running and accessible DIDComm mediator instance before proceeding. The mediator provides the messaging layer for secure communication between administrators, verifiers, and the Trust Registry. 
+
+If you don't have a mediator yet, see [deployment options](https://docs.affinidi.com/products/affinidi-messaging/didcomm-mediator/deployment-options/).
+
+To enable DIDComm for managing and querying trust records, run the following command with your mediator's DID and URL:
 
 ```bash
-MEDIATOR_URL="https://your-mediator-url.io" MEDIATOR_DID="did:web:your-mediator-did.io" cargo run --bin generate-secrets --features dev-tools
+cargo run --bin setup-trust-registry --features="dev-tools" -- --mediator-did=<MEDIATOR_DID> --mediator-url=<MEDIATOR_URL>
 ```
 
-Replace the `MEDIATOR_URL` and `MEDIATOR_DID` with your own mediator instance.
+The command generates the following:
 
-For more information on running your own DIDComm mediator, refer to the [deployment options](https://docs.affinidi.com/products/affinidi-messaging/didcomm-mediator/deployment-options/) page in the documentation.
+- Creates a Decentralised Identifier (DID) for the Trust Registry using the **did:peer** method.
+- Creates Decentralised Identifiers (DIDs) for test users (Trust Registry and Admin) using the did:peer method.
+- Configures the appropriate DIDComm mediator ACLs for the Trust Registry and test user DIDs.
+- Populates the environment variables with default values, such as Storage Backend (`csv`) and audit log format (`json`).
 
-The command generates:
-
-- **3 DIDs** and their corresponding keys.
-- DIDComm server environment variables:
-  - `PROFILE_CONFIG`
-- Testing environment variables:
-  - `PROFILE_CONFIG`
-  - `TRUST_REGISTRY_DID`
-  - `CLIENT_DID`
-  - `CLIENT_SECRETS`
-  - `ADMIN_DIDS`
-
-## Start the Server
-
-### Run on Local Machine
-
-To start the Trust Registry HTTP and DIDComm servers, run the following command from the root directory of the repository:
+After successful setup, it displays the command to run the Trust Registry.
 
 ```bash
 RUST_LOG=info cargo run --bin trust-registry
 ```
 
-The command will launch the service with logging enabled at the info level.
+### Run with DIDComm Disabled
 
-To run Trust Registry without DIDComm functionality:
+To configure the Trust Registry without integration with DIDComm, run the following command:
+
+```bash
+cargo run --bin setup-trust-registry --features="dev-tools"
+```
+
+The command generates the following:
+
+- Populates the environment variables with default values, such as Storage Backend (`csv`) and audit log format (`json`).
+- Sets DIDComm-related environment variables to empty values.
+
+After successful setup, it displays the command to run the Trust Registry.
 
 ```bash
 ENABLE_DIDCOMM=false RUST_LOG=info cargo run --bin trust-registry
 ```
 
-### Run on Docker
+## Run Trust Registry on Docker
 
-Review environment variables in `./docker-compose.yaml` and start the containers:
+After setting up the Trust Registry, review the Docker settings in `./docker-compose.yaml`. Start the containers using the following command:
 
 ```bash
 docker compose up --build
 ```
 
-**Note:** The `sample-data` folder is mounted as a volume to synchronise the changes from data.csv to the container automatically.
+The Trust Registry will be available at `http://localhost:3232`.
+
+**Note:** The `sample-data` folder is mounted as a volume to synchronise the changes from data.csv to the container automatically. If you have configured a different path for the data using CSV as the storage backend, configure the Docker settings accordingly.
 
 ## Test the API
 
@@ -158,6 +206,8 @@ curl --location 'http://localhost:3232/recognition' \
 
 The API will return whether the specified entity is recognised by the given authority for the requested action and resource.
 
+To query Trust Registry using DIDComm, refer to the [Trust Registry Recognition Query](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/DIDCOMM_PROTOCOLS.md#query-recognition) protocol.
+
 ### Authorization Query
 
 ```bash
@@ -173,6 +223,8 @@ curl --location 'http://localhost:3232/authorization' \
 
 The API will return whether the specified entity is authorised under the given authority for the requested action and resource.
 
+To query Trust Registry using DIDComm, refer to the [Trust Registry Authorization Query](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/DIDCOMM_PROTOCOLS.md#query-authorization) protocol.
+
 **Testing Tips:**
 
 - Add more records to `./sample-data/data.csv` to expand test coverage.
@@ -181,9 +233,11 @@ The API will return whether the specified entity is authorised under the given a
 
 ## Manage Trust Records
 
-You can manage trust records stored in the Trust Registry using DIDComm by sending messages to the Trust Registry’s DID. DIDComm provides a secure, interoperable way to exchange messages between administrator and Trust Registry, making it ideal for trust record operations such as creating, updating, or querying records.
+**Note:** This section applies only when DIDComm is enabled. See [Run with DIDComm Enabled](#run-with-didcomm-enabled) for setup instructions.
 
-For reference, see the [test-client implementation](./test-client/), which demonstrates how to build DIDComm clients and send these messages.
+You can manage trust records stored in the Trust Registry using DIDComm by sending messages to the Trust Registry's DID. DIDComm provides a secure, interoperable way to exchange messages between an administrator and the Trust Registry, making it ideal for trust record operations such as creating, updating, or querying records.
+
+For reference, see the [test-client implementation](https://github.com/affinidi/affinidi-trust-registry-rs/tree/main/test-client), which demonstrates how to build DIDComm clients and send these messages.
 
 To run the sample client and interact with the Trust Registry:
 
@@ -191,7 +245,7 @@ To run the sample client and interact with the Trust Registry:
 MEDIATOR_DID="<TRUST_REGISTRY_MEDIATOR_DID>" TRUST_REGISTRY_DID="<TRUST_REGISTRY_DID>" cargo run --bin test-client
 ```
 
-See [DIDComm Protocols](./DIDCOMM_PROTOCOLS.md) for more details.
+See [Trust Registry Administration](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/DIDCOMM_PROTOCOLS.md#trust-registry-administration) section for more details.
 
 ## Environment Variables
 
@@ -276,7 +330,7 @@ PROFILE_CONFIG='aws_parameter_store:///trust-registry/profile'
 
 ## Additional Resources
 
-- [DIDComm Protocols Used](./DIDCOMM_PROTOCOLS.md)
+- [DIDComm Protocols Used](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/DIDCOMM_PROTOCOLS.md)
 
 ## Support & feedback
 
@@ -287,10 +341,10 @@ If you face any issues or have suggestions, please don't hesitate to contact us 
 If you have a technical issue with the project's codebase, you can also create an issue directly in GitHub.
 
 1. Ensure the bug was not already reported by searching on GitHub under
-   [Issues](https://github.com/affinidi/trust-registry-rs/issues).
+   [Issues](https://github.com/affinidi/affinidi-trust-registry-rs/issues).
 
 2. If you're unable to find an open issue addressing the problem,
-   [open a new one](https://github.com/affinidi/trust-registry-rs/issues/new).
+   [open a new one](https://github.com/affinidi/affinidi-trust-registry-rs/issues/new).
    Be sure to include a **title and clear description**, as much relevant information as possible,
    and a **code sample** or an **executable test case** demonstrating the expected behaviour that is not occurring.
 
@@ -298,4 +352,4 @@ If you have a technical issue with the project's codebase, you can also create a
 
 Want to contribute?
 
-Head over to our [CONTRIBUTING](CONTRIBUTING.md) guidelines.
+Head over to our [CONTRIBUTING](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/CONTRIBUTING.md) guidelines.
