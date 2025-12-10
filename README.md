@@ -175,6 +175,8 @@ After successful setup, it displays the command to run the Trust Registry.
 ENABLE_DIDCOMM=false RUST_LOG=info cargo run --bin trust-registry
 ```
 
+For more details on setting up the Trust Registry, refer to the [setup guide](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/SETUP_COMMAND_REFERENCES.md) document.
+
 ## Run Trust Registry on Docker
 
 After setting up the Trust Registry, review the Docker settings in `./docker-compose.yaml`. Start the containers using the following command:
@@ -331,6 +333,7 @@ PROFILE_CONFIG='aws_parameter_store:///trust-registry/profile'
 ## Additional Resources
 
 - [DIDComm Protocols Used](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/DIDCOMM_PROTOCOLS.md)
+- [Trust Registry Setup Guide](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/SETUP_COMMAND_REFERENCES.md)
 
 ## Support & feedback
 
