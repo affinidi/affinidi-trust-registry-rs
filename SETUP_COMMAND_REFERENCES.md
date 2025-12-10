@@ -83,7 +83,7 @@ Profile configuration location using URI schemes. This option serves dual purpos
 **Expected Values:**
 - Direct value: `'{"alias":"Trust Registry","did":"did:peer:2.VzDna...","secrets":[...]}'`
 - String protocol: `'string://{"alias":"Trust Registry","did":"did:peer:2.VzDna...","secrets":[...]}'`
-- File system: `'file:///absolute/path/to/config.json'`
+- File system: `'file:///path/to/config.json'`
 - AWS Secrets Manager: `'aws_secrets://my-secret-name'`
 - AWS Parameter Store: `'aws_parameter_store:///my-parameter-name'`
 

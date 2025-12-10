@@ -271,7 +271,7 @@ The `PROFILE_CONFIG` environment variable uses a URI-based loader that supports 
 |--------|--------|-------------|
 | Direct Value | `PROFILE_CONFIG='<JSON_STRING>'` | Store the configuration directly as an inline JSON string in the environment variable. Recommended for local development. |
 | String Protocol | `PROFILE_CONFIG='string://<JSON_STRING>'` | Explicitly specify the value as a string literal. Same functionality as the direct value option. |
-| File System | `PROFILE_CONFIG='file:///absolute/path/to/config.json'` | Load configuration from a JSON file on the local filesystem. The path must be absolute and accessible by the application. |
+| File System | `PROFILE_CONFIG='file://path/to/config.json'` | Load configuration from a JSON file on the local filesystem. The path must be accessible by the application. |
 | AWS Secrets Manager | `PROFILE_CONFIG='aws_secrets://<SECRET_NAME>'` | Retrieve configuration from AWS Secrets Manager. The secret value must be stored in plaintext format as a JSON string. |
 | AWS Parameter Store | `PROFILE_CONFIG='aws_parameter_store://<PARAMETER_NAME>'` | Load configuration from AWS Systems Manager Parameter Store. The parameter value must be a JSON string. |
 
