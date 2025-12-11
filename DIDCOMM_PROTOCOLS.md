@@ -14,6 +14,13 @@ DIDComm offers a flexible messaging service that enables you to define higher-le
   - [Requirements](#requirements)
   - [Workflow](#workflow)
   - [Messages](#messages)
+- [Trust Registry Queries](#trust-registry-queries)
+  - [Summary](#summary-1)
+  - [Motivation](#motivation-1)
+  - [Roles](#roles-1)
+  - [Requirements](#requirements-1)
+  - [Workflow](#workflow-1)
+  - [Messages](#messages-1)
 - [Problem Reporting](#problem-reporting)
 - [Security Considerations](#security-considerations)
 - [Implementation](#implementation)
@@ -401,18 +408,18 @@ Response:
                 "context": {},
                 "entity_id": "did:example:entity3",
                 "recognized": true,
-                "resource": "resource3",
+                "resource": "resource3"
             },
             {
                 "action": "action1",
                 "authority_id": "did:example:authority1",
                 "authorized": true,
                 "context": {
-                    "additional": "context",
+                    "additional": "context"
                 },
                 "entity_id": "did:example:entity1",
                 "recognized": true,
-                "resource": "resource1",
+                "resource": "resource1"
             },
             {
                 "action": "action_xyz",
@@ -427,12 +434,217 @@ Response:
                 "entity_id": "did:example:entity123",
                 "recognized": false,
                 "resource": "resource_abc"
-            },
-        ],
+            }
+        ]
     },
     "from": "<TRUST_REGISTRY_DID>",
     "to": [
         "<ADMINISTRATOR_DID>",
+    ],
+    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
+}
+```
+
+## Trust Registry Queries
+
+### Summary
+
+A protocol to query trust records from the Trust Registry using TRQP 2.0.
+
+### Motivation
+
+To provide a secure, end-to-end encrypted query messages between Verifiers and Trust Registry.
+
+### Roles
+
+There are two roles defined in querying trust records:
+
+- **Verifier:** The DID that queries the Trust Registry to verify whether a particular DID is authorised or recognised by an authority based on governance framework.
+- **Trust Registry:** The DID that processes the request to query trust records and return the result to the requester.
+
+### Requirements
+
+- DIDComm v2.1 protocol.
+
+### Workflow
+
+When querying trust records, the user initiates the request by sending a query message to the Trust Registry's DID through the DIDComm mediator.
+
+*Sample query flow.*
+
+```mermaid
+sequenceDiagram
+    participant User as TR User
+    participant DM as DIDComm Mediator
+    participant TR as Trust Registry
+
+    User->>DM: User sends a message containing the message type and payload. <br />Authorization query request [didcomm/protocols/trqp/1.0/query-authorization]
+    Note over User, DM: User client starts listening to the response
+    TR->>DM: Trust Registry fetches the messages
+    TR->>TR: Processes the message with TRQP 2.0.
+    TR->>DM: Sends a response containing the result of the request <br />  Authorization query response [didcomm/protocols/trqp/1.0/query-authorization/response]
+    User->>DM: Fetches the response from the Trust Registry
+    Note over User, DM: User client terminates the listener
+
+```
+
+### Messages
+
+#### query-authorization
+
+A query message to the Trust Registry if a given entity is authorized by a particular authority through its governance framework.
+
+**Message Type URI:**
+
+Action | Message Type |
+-------|--------------|
+Request | `https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization` |
+Response | `https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization/response` |
+
+**Message Fields:**
+
+- **`authority_id` REQUIRED** - The DID of the authority who authorised the entity and publishes the governance framework.
+- **`entity_id` REQUIRED** - The DID of the entity who is the subject of verification whether it is authorised by the authority.
+- **`action` REQUIRED** - A published vocabulary of common actions that the entity is authorised to perform.
+- **`resource` REQUIRED** - The resource identifier where the entity can perform the stated action.
+
+**Additional Fields:**
+
+- **`record_type`** - Part of the query response. The type of record requested by the verifier.
+- **`time_requested`** - Part of the query response. The date and time the query is sent to the Trust Registry by the verifier.
+- **`time_evaluated`** - Part of the query response. The date and time the query is evaluated.
+- **`message`** - Part of the query response. A human-readable message about the result of the query.
+
+**Example:**
+
+Request:
+
+```json
+{
+    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff1",
+    "typ": "application/didcomm-plain+json",
+    "type_": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization",
+    "body": {
+      "action": "action_xyz",
+      "authority_id": "did:example:authority456",
+      "entity_id": "did:example:entity123",
+      "resource": "resource_abc"
+    },
+    "from": "<VERIFIER_DID>",
+    "to": [
+        "<TRUST_REGISTRY_DID>",
+    ],
+    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
+}
+```
+
+Response:
+
+```json
+{
+    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff2",
+    "typ": "application/didcomm-plain+json",
+    "type_": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization/response",
+    "body": {
+      "action": "action_xyz",
+      "authority_id": "did:example:authority456",
+      "authorized": true,
+      "context": {
+        "id": "https://governance.example.org/healthcare-framework",
+        "type": "GovernanceFramework",
+        "name": "Healthcare Trust Framework",
+        "version": "2.0"
+      },
+      "entity_id": "did:example:entity123",
+      "resource": "resource_abc",
+      "record_type":"Authorization",
+      "time_requested":"2025-12-09T05:33:52Z",
+      "time_evaluated":"2025-12-09T05:33:52Z",
+      "message": "did:example:entity123 authorized to action1+resource1 by did:example:authority456 to issue a certificate credential."
+    },
+    "from": "<TRUST_REGISTRY_DID>",
+    "to": [
+        "<VERIFIER_DID>",
+    ],
+    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
+}
+```
+
+#### query-recognition
+
+A query message to the Trust Registry if a given entity is recognised by a particular authority through its governance framework.
+
+**Message Type URI:**
+
+Action | Message Type |
+-------|--------------|
+Request | `https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition` |
+Response | `https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition/response` |
+
+**Message Fields:**
+
+- **`authority_id` REQUIRED** - The DID of the authority who recognised the entity and publishes the governance framework.
+- **`entity_id` REQUIRED** - The DID of the entity who is the subject of verification whether it is recognised by the authority.
+- **`action` REQUIRED** - A published vocabulary of common actions that the entity is recognised to perform.
+- **`resource` REQUIRED** - The resource identifier where the entity can perform the stated action.
+
+**Additional Fields:**
+
+- **`record_type`** - Part of the query response. The type of record requested by the verifier.
+- **`time_requested`** - Part of the query response. The date and time the query is sent to the Trust Registry by the verifier.
+- **`time_evaluated`** - Part of the query response. The date and time the query is evaluated.
+- **`message`** - Part of the query response. A human-readable message about the result of the query.
+
+**Example:**
+
+Request:
+
+```json
+{
+    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff1",
+    "typ": "application/didcomm-plain+json",
+    "type_": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition",
+    "body": {
+      "action": "action_xyz",
+      "authority_id": "did:example:authority456",
+      "entity_id": "did:example:entity123",
+      "resource": "resource_abc"
+    },
+    "from": "<VERIFIER_DID>",
+    "to": [
+        "<TRUST_REGISTRY_DID>",
+    ],
+    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
+}
+```
+
+Response:
+
+```json
+{
+    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff2",
+    "typ": "application/didcomm-plain+json",
+    "type_": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition/response",
+    "body": {
+      "action": "action_xyz",
+      "authority_id": "did:example:authority456",
+      "recognized": true,
+      "context": {
+        "id": "https://governance.example.org/healthcare-framework",
+        "type": "GovernanceFramework",
+        "name": "Healthcare Trust Framework",
+        "version": "2.0"
+      },
+      "entity_id": "did:example:entity123",
+      "resource": "resource_abc",
+      "record_type":"Recognition",
+      "time_requested":"2025-12-09T05:33:52Z",
+      "time_evaluated":"2025-12-09T05:33:52Z",
+      "message": "did:example:entity123 is recognized by did:example:authority456 to issue a certificate credential."
+    },
+    "from": "<TRUST_REGISTRY_DID>",
+    "to": [
+        "<VERIFIER_DID>",
     ],
     "thid": "6a627735-6743-4141-8cb7-1359d778936b"
 }
@@ -456,6 +668,8 @@ The [PIURI](https://identity.foundation/didcomm-messaging/spec/v2.1/#protocol-id
 }
 ```
 
+Aside from Trust Registry specific errors, the system also returns errors from the mediator, such as Access Control Lists (ACLs) and message routing issues.
+
 For more information, visit the [Problem Reports](https://identity.foundation/didcomm-messaging/spec/v2.1/#problem-reports) section.
 
 
@@ -464,6 +678,8 @@ For more information, visit the [Problem Reports](https://identity.foundation/di
 The protocol requires that all message exchanges between the Administrator and the Trust Registry **MUST** be encrypted and verifiable to ensure confidentiality, integrity, and authenticity.
 
 - All messages **MUST** use `authcrypt` encryption envelope (e.g., `authcrypt(plaintext)`) to verify the sender authority and the content remains confidential throughout transmission.
+
+**Trust Registry Administration**
 
 - The Trust Registry **MUST** assign an appropriate ACL to the Administrator's DID.
 

@@ -77,7 +77,7 @@ struct Args {
     ///
     /// - String protocol: 'string://<JSON_STRING>'
     ///
-    /// - File system: 'file:///absolute/path/to/config.json'
+    /// - File system: 'file:///path/to/config.json'
     ///
     /// - AWS Secrets Manager: 'aws_secrets://<SECRET_NAME>'
     ///
