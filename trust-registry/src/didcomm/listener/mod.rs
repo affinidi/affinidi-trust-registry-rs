@@ -76,7 +76,7 @@ pub(crate) async fn start_one_did_listener(
     );
 
     Arc::new(listener)
-        .start_listening()
+        .start_listening(config)
         .await
         .map_err(|e| {
             error!("Start listener error: {:?}", e);

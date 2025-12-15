@@ -14,6 +14,7 @@ pub const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
 impl<H: MessageHandler> Listener<H> {
     pub(crate) async fn set_public_acls_mode(
         self: Arc<Self>,
+        is_only_admin: bool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let protocols = Protocols::new();
 
@@ -26,8 +27,13 @@ impl<H: MessageHandler> Listener<H> {
             "[profile = {}] Failed to get account info",
             &self.profile.inner.alias
         ))?;
+        let mode = if is_only_admin {
+            AccessListModeType::ExplicitAllow
+        } else {
+            AccessListModeType::ExplicitDeny
+        };
         let mut acls = MediatorACLSet::from_u64(account_info.acls);
-        acls.set_access_list_mode(AccessListModeType::ExplicitDeny, true, false)?;
+        acls.set_access_list_mode(mode, true, false)?;
 
         protocols
             .mediator

@@ -5,8 +5,12 @@ use crate::didcomm::listener::*;
 impl<H: MessageHandler> Listener<H> {
     pub async fn start_listening(
         self: Arc<Self>,
+        config: Arc<DidcommConfig>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.clone().set_public_acls_mode().await?;
+        self.clone()
+            .set_public_acls_mode(config.only_admin_operations)
+            .await?;
+
         let cloned_self = self.clone();
         cloned_self.spawn_periodic_offline_sync().await;
 
