@@ -173,7 +173,7 @@ async fn send_admin_message(
         "\nSending admin message: {}",
         message_type.split('/').next_back().unwrap_or(message_type)
     );
-    println!("   Message ID: {message_id}",);
+    println!("   Message ID: {message_id}");
     println!("   Body: {}", serde_json::to_string_pretty(body)?);
 
     let packed_msg = atm
