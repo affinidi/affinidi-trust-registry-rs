@@ -729,7 +729,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     server_vars.insert("MEDIATOR_DID".to_string(), mediator_did.clone());
     server_vars.insert("ADMIN_DIDS".to_string(), admin_dids.clone());
     server_vars.insert(
-        "ONLY_ADMIN_OPS".to_string(),
+        "ONLY_ADMIN_OPERATIONS".to_string(),
         only_admin_operations.to_string(),
     );
 
