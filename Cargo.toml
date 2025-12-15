@@ -2,7 +2,6 @@
 members = ["test-client", "trust-registry"]
 resolver = "3"
 
-rustflags = ["-D warnings", "--cfg tracing_unstable"]
 [workspace.package]
 version = '0.1.0'
 edition = "2024"
