@@ -36,6 +36,7 @@ pub trait ProtocolHandler: Send + Sync + 'static {
 }
 
 pub struct BaseHandler<R: ?Sized + TrustRecordRepository> {
+    #[allow(dead_code)]
     repository: Arc<R>,
     protocols_handlers: Vec<Arc<dyn ProtocolHandler>>,
 }

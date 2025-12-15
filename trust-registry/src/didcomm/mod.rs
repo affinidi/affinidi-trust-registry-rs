@@ -72,8 +72,8 @@ pub async fn prepare_atm_and_profile(
     {
         Ok(profile) => profile.map_err(|e| e.to_string())?,
         Err(err) => {
-            error!("Failed to add profile: {:?}, error: {:#?}", alias, err);
-            return Err(format!("Failed to add profile: {:?}, error: {:#?}", alias, err).into());
+            error!("Failed to add profile: {alias:?}, error: {err:#?}");
+            return Err(format!("Failed to add profile: {alias:?}, error: {err:#?}").into());
         }
     };
 

@@ -18,25 +18,29 @@ pub const READ_RECORD_MESSAGE_TYPE: &str =
 pub const LIST_RECORDS_MESSAGE_TYPE: &str =
     "https://affinidi.com/didcomm/protocols/tr-admin/1.0/list-records";
 
+pub struct CommonCrudInput {
+    pub atm: Arc<ATM>,
+    pub profile: Arc<ATMProfile>,
+    pub trust_registry_did: String,
+    pub protocols: Arc<Protocols>,
+    pub mediator_did: String,
+    pub entity_id: String,
+    pub authority_id: String,
+    pub action: String,
+    pub resource: String,
+}
+
 pub async fn create_record(
-    atm: &Arc<ATM>,
-    profile: Arc<ATMProfile>,
-    trust_registry_did: &str,
-    protocols: &Arc<Protocols>,
-    mediator_did: &str,
-    entity_id: &str,
-    authority_id: &str,
-    action: &str,
-    resource: &str,
+    input: CommonCrudInput,
     recognized: bool,
     authorized: bool,
     context: Option<Value>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut body = json!({
-        "entity_id": entity_id,
-        "authority_id": authority_id,
-        "action": action,
-        "resource": resource,
+        "entity_id": input.entity_id,
+        "authority_id": input.authority_id,
+        "action": input.action,
+        "resource": input.resource,
         "recognized": recognized,
         "authorized": authorized,
     });
@@ -46,11 +50,11 @@ pub async fn create_record(
     }
 
     send_admin_message(
-        atm,
-        profile,
-        trust_registry_did,
-        protocols,
-        mediator_did,
+        &input.atm,
+        input.profile,
+        &input.trust_registry_did,
+        &input.protocols,
+        &input.mediator_did,
         &body,
         CREATE_RECORD_MESSAGE_TYPE,
     )
@@ -58,24 +62,16 @@ pub async fn create_record(
 }
 
 pub async fn update_record(
-    atm: &Arc<ATM>,
-    profile: Arc<ATMProfile>,
-    trust_registry_did: &str,
-    protocols: &Arc<Protocols>,
-    mediator_did: &str,
-    entity_id: &str,
-    authority_id: &str,
-    action: &str,
-    resource: &str,
+    input: CommonCrudInput,
     recognized: bool,
     authorized: bool,
     context: Option<Value>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut body = json!({
-        "entity_id": entity_id,
-        "authority_id": authority_id,
-        "action": action,
-        "resource": resource,
+        "entity_id": input.entity_id,
+        "authority_id": input.authority_id,
+        "action": input.action,
+        "resource": input.resource,
         "recognized": recognized,
         "authorized": authorized,
     });
@@ -85,71 +81,51 @@ pub async fn update_record(
     }
 
     send_admin_message(
-        atm,
-        profile,
-        trust_registry_did,
-        protocols,
-        mediator_did,
+        &input.atm,
+        input.profile,
+        &input.trust_registry_did,
+        &input.protocols,
+        &input.mediator_did,
         &body,
         UPDATE_RECORD_MESSAGE_TYPE,
     )
     .await
 }
 
-pub async fn delete_record(
-    atm: &Arc<ATM>,
-    profile: Arc<ATMProfile>,
-    trust_registry_did: &str,
-    protocols: &Arc<Protocols>,
-    mediator_did: &str,
-    entity_id: &str,
-    authority_id: &str,
-    action: &str,
-    resource: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn delete_record(input: CommonCrudInput) -> Result<(), Box<dyn std::error::Error>> {
     let body = json!({
-        "entity_id": entity_id,
-        "authority_id": authority_id,
-        "action": action,
-        "resource": resource,
+        "entity_id": input.entity_id,
+        "authority_id": input.authority_id,
+        "action": input.action,
+        "resource": input.resource,
     });
 
     send_admin_message(
-        atm,
-        profile,
-        trust_registry_did,
-        protocols,
-        mediator_did,
+        &input.atm,
+        input.profile,
+        &input.trust_registry_did,
+        &input.protocols,
+        &input.mediator_did,
         &body,
         DELETE_RECORD_MESSAGE_TYPE,
     )
     .await
 }
 
-pub async fn read_record(
-    atm: &Arc<ATM>,
-    profile: Arc<ATMProfile>,
-    trust_registry_did: &str,
-    protocols: &Arc<Protocols>,
-    mediator_did: &str,
-    entity_id: &str,
-    authority_id: &str,
-    action: &str,
-    resource: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn read_record(input: CommonCrudInput) -> Result<(), Box<dyn std::error::Error>> {
     let body = json!({
-        "entity_id": entity_id,
-        "authority_id": authority_id,
-        "action": action,
-        "resource": resource,
+        "entity_id": input.entity_id,
+        "authority_id": input.authority_id,
+        "action": input.action,
+        "resource": input.resource,
     });
 
     send_admin_message(
-        atm,
-        profile,
-        trust_registry_did,
-        protocols,
-        mediator_did,
+        &input.atm,
+        input.profile,
+        &input.trust_registry_did,
+        &input.protocols,
+        &input.mediator_did,
         &body,
         READ_RECORD_MESSAGE_TYPE,
     )
@@ -197,7 +173,7 @@ async fn send_admin_message(
         "\nSending admin message: {}",
         message_type.split('/').next_back().unwrap_or(message_type)
     );
-    println!("   Message ID: {}", message_id);
+    println!("   Message ID: {message_id}");
     println!("   Body: {}", serde_json::to_string_pretty(body)?);
 
     let packed_msg = atm
@@ -230,7 +206,7 @@ async fn send_admin_message(
             Ok(())
         }
         Err(err) => {
-            println!("Failed to send admin message: {:?}", err);
+            println!("Failed to send admin message: {err:?}");
             Err(err.into())
         }
     }

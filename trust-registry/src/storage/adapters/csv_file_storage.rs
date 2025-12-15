@@ -129,7 +129,7 @@ impl FileStorage {
     > {
         let metadata = tokio::fs::metadata(path)
             .await
-            .map_err(|e| format!("file_path: {:?}, error: {}", path, e))?;
+            .map_err(|e| format!("file_path: {path:?}, error: {e}"))?;
         let modified = metadata.modified()?;
 
         if let Some(previous) = last_seen
@@ -203,16 +203,14 @@ impl FileStorage {
 
         tokio::fs::write(&self.file_path, csv_data)
             .await
-            .map_err(|e| {
-                RepositoryError::QueryFailed(format!("Failed to write CSV file: {}", e))
-            })?;
+            .map_err(|e| RepositoryError::QueryFailed(format!("Failed to write CSV file: {e}")))?;
 
         // Update last_modified to prevent reload
         let metadata = tokio::fs::metadata(&self.file_path).await.map_err(|e| {
-            RepositoryError::QueryFailed(format!("Failed to get file metadata: {}", e))
+            RepositoryError::QueryFailed(format!("Failed to get file metadata: {e}"))
         })?;
         let modified = metadata.modified().map_err(|e| {
-            RepositoryError::QueryFailed(format!("Failed to get modified time: {}", e))
+            RepositoryError::QueryFailed(format!("Failed to get modified time: {e}"))
         })?;
 
         let mut guard = self.last_modified.write().unwrap();

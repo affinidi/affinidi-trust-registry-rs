@@ -39,7 +39,7 @@ impl std::str::FromStr for AuditLogFormat {
         match s.to_lowercase().as_str() {
             "text" => Ok(Self::Text),
             "json" => Ok(Self::Json),
-            _ => Err(format!("Invalid audit log format: {}", s)),
+            _ => Err(format!("Invalid audit log format: {s}")),
         }
     }
 }
@@ -86,7 +86,7 @@ impl Configs for DidcommConfig {
         if enable_didcomm != "true" {
             return Ok(Default::default());
         }
-        let only_admin_operations = env_or("ONLY_ADMIN_OPS", "false") == "true";
+        let only_admin_operations = env_or("ONLY_ADMIN_OPERATIONS", "false") == "true";
 
         let admin_dids_str = optional_env("ADMIN_DIDS").unwrap_or_else(|| {
             warn!("Missing environment variable: ADMIN_DIDS. The admin list is empty");

@@ -1,8 +1,7 @@
 use std::env;
 
 pub fn required_env(env_name: &str) -> Result<String, String> {
-    env::var(env_name)
-        .map_err(|_| format!("Required environment variable '{}' is not set", env_name))
+    env::var(env_name).map_err(|_| format!("Required environment variable '{env_name}' is not set"))
 }
 
 pub fn optional_env(env_name: &str) -> Option<String> {
