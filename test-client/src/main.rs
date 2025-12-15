@@ -18,7 +18,9 @@ use serde_json::json;
 use sha256::digest;
 
 use crate::{
-    admin_operations::{create_record, delete_record, list_records, read_record, update_record},
+    admin_operations::{
+        CommonCrudInput, create_record, delete_record, list_records, read_record, update_record,
+    },
     receivers::users_listener::user_listener,
     service_configs::load_user_config,
 };
@@ -58,7 +60,7 @@ async fn main() {
     let user_configs = match load_user_config() {
         Ok(uc) => uc,
         Err(err) => {
-            println!("Failed to get user config: {:#?}", err);
+            println!("Failed to get user config: {err:#?}");
             return;
         }
     };
@@ -69,9 +71,9 @@ async fn main() {
     let mediator_did = std::env::var("MEDIATOR_DID").unwrap_or(
         "did:web:afddf5a2-bb92-4b9d-a467-9f4b0a57e51f.atlas.dev.affinidi.io".to_string(),
     );
-    let mediator_did = Arc::new(mediator_did);
+    let mediator_did = mediator_did.clone();
     for (did, did_config) in user_configs {
-        let mediator_did_clone = Arc::clone(&mediator_did);
+        let mediator_did_clone = mediator_did.clone();
         let profile = TDKProfile::new(
             &did_config.alias,
             &did,
@@ -110,15 +112,17 @@ async fn main() {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
             match create_record(
-                &atm,
-                profile.clone(),
-                &trust_registry_did,
-                &protocols,
-                &mediator_did,
-                "did:example:entity123",
-                "did:example:authority456",
-                "action_xyz",
-                "resource_abc",
+                CommonCrudInput {
+                    atm: Arc::clone(&atm),
+                    profile: Arc::clone(&profile),
+                    trust_registry_did: trust_registry_did.clone(),
+                    protocols: Arc::clone(&protocols),
+                    mediator_did: mediator_did.clone(),
+                    entity_id: "did:example:entity123".to_string(),
+                    authority_id: "did:example:authority456".to_string(),
+                    action: "action_xyz".to_string(),
+                    resource: "resource_abc".to_string(),
+                },
                 true,
                 true,
                 Some(json!({
@@ -130,40 +134,42 @@ async fn main() {
             .await
             {
                 Ok(_) => println!("Create record completed"),
-                Err(err) => println!("Create record failed: {:#?}", err),
+                Err(err) => println!("Create record failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-            match read_record(
-                &atm,
-                profile.clone(),
-                &trust_registry_did,
-                &protocols,
-                &mediator_did,
-                "did:example:entity123",
-                "did:example:authority456",
-                "action_xyz",
-                "resource_abc",
-            )
+            match read_record(CommonCrudInput {
+                atm: Arc::clone(&atm),
+                profile: Arc::clone(&profile),
+                trust_registry_did: trust_registry_did.clone(),
+                protocols: Arc::clone(&protocols),
+                mediator_did: mediator_did.clone(),
+                entity_id: "did:example:entity123".to_string(),
+                authority_id: "did:example:authority456".to_string(),
+                action: "action_xyz".to_string(),
+                resource: "resource_abc".to_string(),
+            })
             .await
             {
                 Ok(_) => println!("Read record completed"),
-                Err(err) => println!("Read record failed: {:#?}", err),
+                Err(err) => println!("Read record failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
             match update_record(
-                &atm,
-                profile.clone(),
-                &trust_registry_did,
-                &protocols,
-                &mediator_did,
-                "did:example:entity123",
-                "did:example:authority456",
-                "action_xyz",
-                "resource_abc",
+                CommonCrudInput {
+                    atm: Arc::clone(&atm),
+                    profile: Arc::clone(&profile),
+                    trust_registry_did: trust_registry_did.clone(),
+                    protocols: Arc::clone(&protocols),
+                    mediator_did: mediator_did.clone(),
+                    entity_id: "did:example:entity123".to_string(),
+                    authority_id: "did:example:authority456".to_string(),
+                    action: "action_xyz".to_string(),
+                    resource: "resource_abc".to_string(),
+                },
                 false,
                 true,
                 Some(json!({
@@ -175,7 +181,7 @@ async fn main() {
             .await
             {
                 Ok(_) => println!("Update record completed"),
-                Err(err) => println!("Update record failed: {:#?}", err),
+                Err(err) => println!("Update record failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -190,45 +196,45 @@ async fn main() {
             .await
             {
                 Ok(_) => println!("List records completed"),
-                Err(err) => println!("List records failed: {:#?}", err),
+                Err(err) => println!("List records failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-            match delete_record(
-                &atm,
-                profile.clone(),
-                &trust_registry_did,
-                &protocols,
-                &mediator_did,
-                "did:example:entity123",
-                "did:example:authority456",
-                "action_xyz",
-                "resource_abc",
-            )
+            match delete_record(CommonCrudInput {
+                atm: Arc::clone(&atm),
+                profile: Arc::clone(&profile),
+                trust_registry_did: trust_registry_did.clone(),
+                protocols: Arc::clone(&protocols),
+                mediator_did: mediator_did.clone(),
+                entity_id: "did:example:entity123".to_string(),
+                authority_id: "did:example:authority456".to_string(),
+                action: "action_xyz".to_string(),
+                resource: "resource_abc".to_string(),
+            })
             .await
             {
                 Ok(_) => println!("Delete record completed"),
-                Err(err) => println!("Delete record failed: {:#?}", err),
+                Err(err) => println!("Delete record failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-            match read_record(
-                &atm,
-                profile.clone(),
-                &trust_registry_did,
-                &protocols,
-                &mediator_did,
-                "did:example:entity123",
-                "did:example:authority456",
-                "action_xyz",
-                "resource_abc",
-            )
+            match read_record(CommonCrudInput {
+                atm: Arc::clone(&atm),
+                profile: Arc::clone(&profile),
+                trust_registry_did: trust_registry_did.clone(),
+                protocols: Arc::clone(&protocols),
+                mediator_did: mediator_did.clone(),
+                entity_id: "did:example:entity123".to_string(),
+                authority_id: "did:example:authority456".to_string(),
+                action: "action_xyz".to_string(),
+                resource: "resource_abc".to_string(),
+            })
             .await
             {
                 Ok(_) => println!("Read record (after delete) completed"),
-                Err(err) => println!("Read record (after delete) failed: {:#?}", err),
+                Err(err) => println!("Read record (after delete) failed: {err:#?}"),
             }
 
             println!("\n{}", "=".repeat(60));
