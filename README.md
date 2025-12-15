@@ -279,6 +279,7 @@ See the list of environment variables and their usage.
 | `MEDIATOR_DID`         | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records.                                                                              | Required when DIDComm is enabled           |
 | `ADMIN_DIDS`           | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry.                                                                                                    | Required when DIDComm is enabled           |
 | `PROFILE_CONFIG`       | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. **_Sensitive information, do not share._** | Required when DIDComm is enabled           |
+| `ONLY_ADMIN_OPS`       | Trust Registry use DIDComm communication only for admin operations and not TRQP.                                                                                                          | default: `false`                           |
 
 ### Profile Config Options
 
