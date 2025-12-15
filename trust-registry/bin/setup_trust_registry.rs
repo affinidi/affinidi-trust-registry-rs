@@ -701,7 +701,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!();
         }
 
-        if let Some(config) = &profile_config {
+        if let Some(config) = &profile_config
+            && !only_admin_operations
+        {
             println!("Configuring mediator ACLs for Trust Registry DID...");
             // Configure ACLs in the mediator for the Trust Registry DID
             set_acl(
