@@ -149,13 +149,18 @@ The command generates the following:
 - Configures the appropriate DIDComm mediator ACLs for the Trust Registry and test user DIDs.
 - Populates the environment variables with default values, such as Storage Backend (`csv`) and audit log format (`json`).
 
-### Run with Didcomm Enabled Only for Admin Operations
+#### Run with DIDComm Enabled for Admin Operations Only
 
-This command performs the same setup as the previous one, but with an additional flag:
+To enable DIDComm for admin operations only, set the `--only-admin-operations=true` option:
 
-`--only-admin-operations=true`
+```bash
+cargo run --bin setup-trust-registry --features="dev-tools" -- \
+ --mediator-did=<MEDIATOR_DID> \
+ --mediator-url=<MEDIATOR_URL> \
+ --only-admin-operations=true
+```
 
-This flag ensures that the Trust Registry (TR) does **not** switch to _Explicit Deny_ on start. Instead, it will start in **Explicit Allow** mode. In this mode, only the admin DIDs specified will be explicitly allowed to perform operations.
+This option ensures that the Trust Registry (TR) starts with **Explicit Allow** mode. In this mode, it only allows the admin DIDs specified in the environment file to send messages to perform administrative operations, such as creating, updating, and deleting trust records. **Querying using TRQP is not accepted in this configuration**.
 
 Example:
 
