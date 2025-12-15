@@ -12,16 +12,13 @@ use super::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum AuditLogFormat {
+    #[default]
     Text,
     Json,
 }
 
-impl Default for AuditLogFormat {
-    fn default() -> Self {
-        Self::Text
-    }
-}
 
 impl fmt::Display for AuditLogFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

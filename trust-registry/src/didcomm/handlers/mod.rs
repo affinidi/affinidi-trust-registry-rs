@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::storage::repository::TrustRecordRepository;
 use affinidi_tdk::{
     didcomm::{Message, UnpackMetadata},
     messaging::{ATM, profiles::ATMProfile},
@@ -35,13 +34,12 @@ pub trait ProtocolHandler: Send + Sync + 'static {
     ) -> Result<(), Box<dyn std::error::Error>>;
 }
 
-pub struct BaseHandler<R: ?Sized + TrustRecordRepository> {
-    repository: Arc<R>,
+pub struct BaseHandler {
     protocols_handlers: Vec<Arc<dyn ProtocolHandler>>,
 }
 
 #[async_trait]
-impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for BaseHandler<R> {
+impl MessageHandler for BaseHandler {
     async fn handle(
         &self,
         atm: &Arc<ATM>,

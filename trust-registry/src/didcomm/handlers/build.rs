@@ -10,8 +10,11 @@ use crate::{
 };
 use std::sync::Arc;
 
-impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
-    pub fn build_from_arc(repository: Arc<R>, config: Arc<DidcommConfig>) -> BaseHandler<R> {
+impl BaseHandler {
+    pub fn build_from_arc<R: ?Sized + TrustRecordAdminRepository + 'static>(
+        repository: Arc<R>,
+        config: Arc<DidcommConfig>,
+    ) -> BaseHandler {
         let trqp = TRQPMessagesHandler {
             repository: repository.clone(),
         };
@@ -28,7 +31,6 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
         let problem_report_handler = ProblemReportHandler::new();
 
         BaseHandler {
-            repository,
             protocols_handlers: vec![
                 Arc::new(trqp),
                 Arc::new(tradmin),
