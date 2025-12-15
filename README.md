@@ -61,7 +61,6 @@ curl --location 'http://localhost:3232/authorization' \
 
 For more details on how to set up and run the Trust Registry, see the [Set up Trust Registry](#set-up-trust-registry) section.
 
-
 ## What is Trust Registry
 
 A **Trust Registry** is a system that maintains and provides authoritative information about which entities, such as organisations, issuers, and verifiers, are authorised to perform specific actions on defined resources within a trust framework. Each entity is identified by its Decentralised Identifier (DID), ensuring cryptographic integrity and interoperability across decentralised identity ecosystems.
@@ -133,7 +132,7 @@ Configure the environment to run Trust Registry. The setup command creates the `
 
 ### Run with DIDComm Enabled
 
-**Prerequisites:** You must have a running and accessible DIDComm mediator instance before proceeding. The mediator provides the messaging layer for secure communication between administrators, verifiers, and the Trust Registry. 
+**Prerequisites:** You must have a running and accessible DIDComm mediator instance before proceeding. The mediator provides the messaging layer for secure communication between administrators, verifiers, and the Trust Registry.
 
 If you don't have a mediator yet, see [deployment options](https://docs.affinidi.com/products/affinidi-messaging/didcomm-mediator/deployment-options/).
 
@@ -149,6 +148,23 @@ The command generates the following:
 - Creates Decentralised Identifiers (DIDs) for test users (Trust Registry and Admin) using the did:peer method.
 - Configures the appropriate DIDComm mediator ACLs for the Trust Registry and test user DIDs.
 - Populates the environment variables with default values, such as Storage Backend (`csv`) and audit log format (`json`).
+
+### Run with Didcomm Enabled Only for Admin Operations
+
+This command performs the same setup as the previous one, but with an additional flag:
+
+`--only-admin-operations=true`
+
+This flag ensures that the Trust Registry (TR) does **not** switch to _Explicit Deny_ on start. Instead, it will start in **Explicit Allow** mode. In this mode, only the admin DIDs specified will be explicitly allowed to perform operations.
+
+Example:
+
+```bash
+cargo run --bin setup-trust-registry --features="dev-tools" -- \
+  --mediator-did=<MEDIATOR_DID> \
+  --mediator-url=<MEDIATOR_URL> \
+  --only-admin-operations=true
+```
 
 After successful setup, it displays the command to run the Trust Registry.
 
@@ -253,29 +269,28 @@ See [Trust Registry Administration](https://github.com/affinidi/affinidi-trust-r
 
 See the list of environment variables and their usage.
 
-Variable Name | Description | Required |
---------------|-------------|----------|
-`TR_STORAGE_BACKEND` | Storage backend for trust records. Options: `csv`, `ddb`. | Yes |
-`FILE_STORAGE_PATH` | Path to the CSV file when using CSV as the storage backend. | Required when `TR_STORAGE_BACKEND` = `csv` |
-`DDB_TABLE_NAME` | DynamoDB table name for storing trust records when using DDB as the storage backend. | Required when `TR_STORAGE_BACKEND` = `ddb` |
-`CORS_ALLOWED_ORIGINS` | Comma-separated list of allowed URLs for CORS. | Yes |
-`AUDIT_LOG_FORMAT` | Output format for audit logs. Options: `text`, `json`. | Yes |
-`MEDIATOR_DID` | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records. | Required when DIDComm is enabled |
-`ADMIN_DIDS` | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry. | Required when DIDComm is enabled |
-`PROFILE_CONFIG` | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. ***Sensitive information, do not share.*** | Required when DIDComm is enabled |
+| Variable Name          | Description                                                                                                                                                                               | Required                                   |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `TR_STORAGE_BACKEND`   | Storage backend for trust records. Options: `csv`, `ddb`.                                                                                                                                 | Yes                                        |
+| `FILE_STORAGE_PATH`    | Path to the CSV file when using CSV as the storage backend.                                                                                                                               | Required when `TR_STORAGE_BACKEND` = `csv` |
+| `DDB_TABLE_NAME`       | DynamoDB table name for storing trust records when using DDB as the storage backend.                                                                                                      | Required when `TR_STORAGE_BACKEND` = `ddb` |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated list of allowed URLs for CORS.                                                                                                                                            | Yes                                        |
+| `AUDIT_LOG_FORMAT`     | Output format for audit logs. Options: `text`, `json`.                                                                                                                                    | Yes                                        |
+| `MEDIATOR_DID`         | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records.                                                                              | Required when DIDComm is enabled           |
+| `ADMIN_DIDS`           | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry.                                                                                                    | Required when DIDComm is enabled           |
+| `PROFILE_CONFIG`       | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. **_Sensitive information, do not share._** | Required when DIDComm is enabled           |
 
 ### Profile Config Options
 
 The `PROFILE_CONFIG` environment variable uses a URI-based loader that supports multiple configuration options. The loader allows you to store DID and DID secrets securely according to your deployment requirements.
 
-
-| Scheme | Format | Description |
-|--------|--------|-------------|
-| Direct Value | `PROFILE_CONFIG='<JSON_STRING>'` | Store the configuration directly as an inline JSON string in the environment variable. Recommended for local development. |
-| String Protocol | `PROFILE_CONFIG='string://<JSON_STRING>'` | Explicitly specify the value as a string literal. Same functionality as the direct value option. |
-| File System | `PROFILE_CONFIG='file://path/to/config.json'` | Load configuration from a JSON file on the local filesystem. The path must be accessible by the application. |
-| AWS Secrets Manager | `PROFILE_CONFIG='aws_secrets://<SECRET_NAME>'` | Retrieve configuration from AWS Secrets Manager. The secret value must be stored in plaintext format as a JSON string. |
-| AWS Parameter Store | `PROFILE_CONFIG='aws_parameter_store://<PARAMETER_NAME>'` | Load configuration from AWS Systems Manager Parameter Store. The parameter value must be a JSON string. |
+| Scheme              | Format                                                    | Description                                                                                                               |
+| ------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Direct Value        | `PROFILE_CONFIG='<JSON_STRING>'`                          | Store the configuration directly as an inline JSON string in the environment variable. Recommended for local development. |
+| String Protocol     | `PROFILE_CONFIG='string://<JSON_STRING>'`                 | Explicitly specify the value as a string literal. Same functionality as the direct value option.                          |
+| File System         | `PROFILE_CONFIG='file://path/to/config.json'`             | Load configuration from a JSON file on the local filesystem. The path must be accessible by the application.              |
+| AWS Secrets Manager | `PROFILE_CONFIG='aws_secrets://<SECRET_NAME>'`            | Retrieve configuration from AWS Secrets Manager. The secret value must be stored in plaintext format as a JSON string.    |
+| AWS Parameter Store | `PROFILE_CONFIG='aws_parameter_store://<PARAMETER_NAME>'` | Load configuration from AWS Systems Manager Parameter Store. The parameter value must be a JSON string.                   |
 
 **Expected Value:**
 
@@ -328,7 +343,6 @@ PROFILE_CONFIG='aws_parameter_store:///trust-registry/profile'
 ```
 
 **Note:** If no URI scheme is specified, the loader parses the value as a direct string literal by default.
-
 
 ## Additional Resources
 
