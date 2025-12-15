@@ -11,11 +11,11 @@ pub async fn load(param_name: &str) -> Result<String, String> {
         .with_decryption(true)
         .send()
         .await
-        .map_err(|e| format!("Failed to get parameter '{}': {}", param_name, e))?;
+        .map_err(|e| format!("Failed to get parameter '{param_name}': {e}"))?;
 
     result
         .parameter()
         .and_then(|p| p.value())
         .map(|v| v.to_string())
-        .ok_or_else(|| format!("Parameter '{}' has no value", param_name))
+        .ok_or_else(|| format!("Parameter '{param_name}' has no value"))
 }

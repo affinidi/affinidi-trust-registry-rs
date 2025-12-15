@@ -39,7 +39,7 @@ impl std::str::FromStr for AuditLogFormat {
         match s.to_lowercase().as_str() {
             "text" => Ok(Self::Text),
             "json" => Ok(Self::Json),
-            _ => Err(format!("Invalid audit log format: {}", s)),
+            _ => Err(format!("Invalid audit log format: {s}")),
         }
     }
 }

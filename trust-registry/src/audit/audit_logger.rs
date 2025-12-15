@@ -139,7 +139,7 @@ impl BaseAuditLogger {
         ];
 
         if let Some((key, val)) = extra {
-            log_parts.push(format!("{}={}", key, val));
+            log_parts.push(format!("{key}={val}"));
         }
 
         let structured_log = log_parts.join(" ");

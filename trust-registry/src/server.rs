@@ -115,8 +115,8 @@ pub async fn start() {
     let repository = match repository_factory.create().await {
         Ok(r) => r,
         Err(e) => {
-            error!("Failed to initialize trust record repository: {}", e);
-            panic!("Failed to initialize trust record repository: {}", e);
+            error!("Failed to initialize trust record repository: {e}");
+            panic!("Failed to initialize trust record repository: {e}");
         }
     };
 

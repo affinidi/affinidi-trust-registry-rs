@@ -118,8 +118,7 @@ impl<R: ?Sized + TrustRecordAdminRepository> AdminMessagesHandler<R> {
             Ok(())
         } else {
             Err(format!(
-                "Unauthorized: DID {} is not in admin list",
-                sender_did
+                "Unauthorized: DID {sender_did} is not in admin list"
             ))
         }
     }
@@ -272,8 +271,7 @@ impl<R: ?Sized + TrustRecordAdminRepository> AdminMessagesHandler<R> {
             _ => {
                 warn!("Unknown admin message type: {}", message_type);
                 let report = problem_report::ProblemReport::bad_request(format!(
-                    "Unknown message type: {}",
-                    message_type
+                    "Unknown message type: {message_type}"
                 ));
                 if let Err(e) = problem_report::send_problem_report(
                     &ctx.atm,
