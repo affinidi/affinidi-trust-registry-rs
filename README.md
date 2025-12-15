@@ -162,15 +162,6 @@ cargo run --bin setup-trust-registry --features="dev-tools" -- \
 
 This option ensures that the Trust Registry (TR) starts with **Explicit Allow** mode. In this mode, it only allows the admin DIDs specified in the environment file to send messages to perform administrative operations, such as creating, updating, and deleting trust records. **Querying using TRQP is not accepted in this configuration**.
 
-Example:
-
-```bash
-cargo run --bin setup-trust-registry --features="dev-tools" -- \
-  --mediator-did=<MEDIATOR_DID> \
-  --mediator-url=<MEDIATOR_URL> \
-  --only-admin-operations=true
-```
-
 After successful setup, it displays the command to run the Trust Registry.
 
 ```bash
