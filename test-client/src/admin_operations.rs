@@ -43,6 +43,7 @@ pub async fn create_record(
         "resource": input.resource,
         "recognized": recognized,
         "authorized": authorized,
+        "record_type": "assertion",
     });
 
     if let Some(ctx) = context {
@@ -74,6 +75,7 @@ pub async fn update_record(
         "resource": input.resource,
         "recognized": recognized,
         "authorized": authorized,
+        "record_type": "assertion",
     });
 
     if let Some(ctx) = context {
