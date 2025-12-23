@@ -5,7 +5,10 @@ use anyhow::anyhow;
 use crate::{
     configs::{TrsutRegistryConfig, TrustStorageBackend},
     storage::{
-        adapters::{csv_file_storage::FileStorage, ddb_storage::DynamoDbStorage, redis_storage::RedisStorage},
+        adapters::{
+            csv_file_storage::FileStorage, ddb_storage::DynamoDbStorage,
+            redis_storage::RedisStorage,
+        },
         repository::TrustRecordAdminRepository,
     },
 };

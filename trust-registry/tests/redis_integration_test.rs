@@ -108,8 +108,8 @@ async fn test_redis_full_crud_workflow() {
 
     let retrieved = storage.read(query1.clone()).await.unwrap();
     assert_eq!(retrieved.entity_id().as_str(), "did:example:clinic1");
-    assert_eq!(retrieved.is_authorized(), true);
-    assert_eq!(retrieved.is_recognized(), true);
+    assert!(retrieved.is_authorized());
+    assert!(retrieved.is_recognized());
 
     // Test UPDATE operation
     let updated_record = create_test_record(
@@ -125,8 +125,8 @@ async fn test_redis_full_crud_workflow() {
     storage.update(updated_record).await.unwrap();
 
     let retrieved_after_update = storage.read(query1.clone()).await.unwrap();
-    assert_eq!(retrieved_after_update.is_authorized(), false);
-    assert_eq!(retrieved_after_update.is_recognized(), false);
+    assert!(!retrieved_after_update.is_authorized());
+    assert!(!retrieved_after_update.is_recognized());
 
     // Test DELETE operation
     storage.delete(query1.clone()).await.unwrap();
@@ -326,4 +326,3 @@ async fn test_redis_context_serialization() {
 
     cleanup_test_data(&storage).await;
 }
-

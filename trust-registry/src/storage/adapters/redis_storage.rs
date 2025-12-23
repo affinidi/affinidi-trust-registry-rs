@@ -1,4 +1,4 @@
-use redis::{aio::MultiplexedConnection, AsyncCommands, Client};
+use redis::{AsyncCommands, Client, aio::MultiplexedConnection};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
@@ -309,8 +309,8 @@ mod tests {
 
         let retrieved = storage.read(query).await.unwrap();
         assert_eq!(retrieved.entity_id().as_str(), "did:example:entity1");
-        assert_eq!(retrieved.is_authorized(), true);
-        assert_eq!(retrieved.is_recognized(), true);
+        assert!(retrieved.is_authorized());
+        assert!(retrieved.is_recognized());
 
         cleanup_test_data(&storage).await;
     }
@@ -335,7 +335,10 @@ mod tests {
         storage.create(record.clone()).await.unwrap();
         let result = storage.create(record).await;
         assert!(result.is_err());
-        assert!(matches!(result, Err(RepositoryError::RecordAlreadyExists(_))));
+        assert!(matches!(
+            result,
+            Err(RepositoryError::RecordAlreadyExists(_))
+        ));
 
         cleanup_test_data(&storage).await;
     }
@@ -379,8 +382,8 @@ mod tests {
         );
 
         let retrieved = storage.read(query).await.unwrap();
-        assert_eq!(retrieved.is_authorized(), false);
-        assert_eq!(retrieved.is_recognized(), false);
+        assert!(!retrieved.is_authorized());
+        assert!(!retrieved.is_recognized());
 
         cleanup_test_data(&storage).await;
     }
@@ -489,4 +492,3 @@ mod tests {
         cleanup_test_data(&storage).await;
     }
 }
-
