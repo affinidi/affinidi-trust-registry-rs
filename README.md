@@ -106,6 +106,7 @@ This ensures **security**, **compliance**, and **interoperability** across decen
 - **Storage backends**: Stores authoritative records about the entities for querying. It supports the following storage types:
   - CSV file storage
   - AWS DynamoDB
+  - Redis
 
 ## Requirements
 
@@ -201,6 +202,179 @@ The Trust Registry will be available at `http://localhost:3232`.
 
 **Note:** The `sample-data` folder is mounted as a volume to synchronise the changes from data.csv to the container automatically. If you have configured a different path for the data using CSV as the storage backend, configure the Docker settings accordingly.
 
+## Using Redis as Storage Backend
+
+Redis is a high-performance, in-memory data store that can be used as a storage backend for Trust Registry. Redis provides fast read/write operations and is ideal for production deployments requiring low-latency access to trust records.
+
+### Prerequisites
+
+- Redis server 5.0 or higher
+- Network access to the Redis instance from the Trust Registry
+
+### Setup Redis Storage
+
+1. **Install Redis** (if not already available)
+
+   ```bash
+   # macOS
+   brew install redis
+   
+   # Ubuntu/Debian
+   sudo apt-get install redis-server
+   
+   # Docker
+   docker run -d -p 6379:6379 redis:7-alpine
+   ```
+
+2. **Start Redis** (if installed locally)
+
+   ```bash
+   redis-server
+   ```
+
+3. **Configure Trust Registry to use Redis**
+
+   Set the following environment variables:
+
+   ```bash
+   export TR_STORAGE_BACKEND=redis
+   export REDIS_URL="redis://localhost:6379"
+   ```
+
+   For Redis with authentication:
+
+   ```bash
+   export REDIS_URL="redis://username:password@localhost:6379"
+   ```
+
+   For Redis with a specific database:
+
+   ```bash
+   export REDIS_URL="redis://localhost:6379/0"
+   ```
+
+4. **Run Trust Registry**
+
+   ```bash
+   ENABLE_DIDCOMM=false RUST_LOG=info cargo run --bin trust-registry
+   ```
+
+### Redis Storage Features
+
+- **Fast Operations**: In-memory storage provides sub-millisecond response times
+- **Persistence**: Redis can be configured for data persistence using RDB snapshots or AOF (Append Only File)
+- **Scalability**: Supports clustering and replication for high availability
+- **Data Structure**: Trust records are stored as JSON strings with keys formatted as `entity_id|authority_id|action|resource`
+
+### Production Considerations
+
+For production deployments:
+
+1. **Enable Persistence**: Configure Redis persistence to prevent data loss
+
+   ```bash
+   # In redis.conf
+   save 900 1
+   save 300 10
+   save 60 10000
+   appendonly yes
+   ```
+
+2. **Use Authentication**: Always enable Redis authentication in production
+
+   ```bash
+   # In redis.conf
+   requirepass your_strong_password
+   ```
+
+3. **Configure Memory Limits**: Set appropriate memory limits and eviction policies
+
+   ```bash
+   # In redis.conf
+   maxmemory 2gb
+   maxmemory-policy noeviction
+   ```
+
+4. **Use TLS**: For secure connections, use Redis with TLS
+
+   ```bash
+   export REDIS_URL="rediss://username:password@host:6380"
+   ```
+
+5. **Monitor Performance**: Use Redis monitoring tools to track performance
+
+   ```bash
+   redis-cli INFO
+   redis-cli MONITOR
+   ```
+
+### Docker Compose with Redis
+
+Example `docker-compose.yaml` configuration:
+
+```yaml
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass your_password --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  trust-registry:
+    build: .
+    environment:
+      - TR_STORAGE_BACKEND=redis
+      - REDIS_URL=redis://:your_password@redis:6379
+      - ENABLE_DIDCOMM=false
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000
+      - AUDIT_LOG_FORMAT=json
+    ports:
+      - "3232:3232"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+```
+
+### Migrating from CSV/DynamoDB to Redis
+
+To migrate existing trust records to Redis:
+
+1. Export records from your current storage backend
+2. Use the DIDComm admin API to create records in Redis
+3. Verify all records are migrated correctly
+4. Update the `TR_STORAGE_BACKEND` environment variable to `redis`
+
+### Troubleshooting
+
+**Connection Issues:**
+```bash
+# Test Redis connectivity
+redis-cli -h localhost -p 6379 ping
+# Expected output: PONG
+```
+
+**View stored records:**
+```bash
+# List all keys
+redis-cli KEYS "*|*|*|*"
+
+# Get a specific record
+redis-cli GET "did:example:entity1|did:example:authority1|action1|resource1"
+```
+
+**Clear all test data:**
+```bash
+redis-cli FLUSHDB
+```
+
 ## Test the API
 
 You can test the Trust Registry by querying the sample data stored in `./sample-data/data.csv`:
@@ -265,17 +439,18 @@ See [Trust Registry Administration](https://github.com/affinidi/affinidi-trust-r
 
 See the list of environment variables and their usage.
 
-| Variable Name           | Description                                                                                                                                                                               | Required                                   |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `TR_STORAGE_BACKEND`    | Storage backend for trust records. Options: `csv`, `ddb`.                                                                                                                                 | Yes                                        |
-| `FILE_STORAGE_PATH`     | Path to the CSV file when using CSV as the storage backend.                                                                                                                               | Required when `TR_STORAGE_BACKEND` = `csv` |
-| `DDB_TABLE_NAME`        | DynamoDB table name for storing trust records when using DDB as the storage backend.                                                                                                      | Required when `TR_STORAGE_BACKEND` = `ddb` |
-| `CORS_ALLOWED_ORIGINS`  | Comma-separated list of allowed URLs for CORS.                                                                                                                                            | Yes                                        |
-| `AUDIT_LOG_FORMAT`      | Output format for audit logs. Options: `text`, `json`.                                                                                                                                    | Yes                                        |
-| `MEDIATOR_DID`          | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records.                                                                              | Required when DIDComm is enabled           |
-| `ADMIN_DIDS`            | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry.                                                                                                    | Required when DIDComm is enabled           |
-| `PROFILE_CONFIG`        | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. **_Sensitive information, do not share._** | Required when DIDComm is enabled           |
-| `ONLY_ADMIN_OPERATIONS` | Trust Registry use DIDComm communication only for admin operations and not TRQP.                                                                                                          | default: `false`                           |
+| Variable Name           | Description                                                                                                                                                                               | Required                                     |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `TR_STORAGE_BACKEND`    | Storage backend for trust records. Options: `csv`, `ddb`, `redis`.                                                                                                                       | Yes                                          |
+| `FILE_STORAGE_PATH`     | Path to the CSV file when using CSV as the storage backend.                                                                                                                               | Required when `TR_STORAGE_BACKEND` = `csv`   |
+| `DDB_TABLE_NAME`        | DynamoDB table name for storing trust records when using DDB as the storage backend.                                                                                                      | Required when `TR_STORAGE_BACKEND` = `ddb`   |
+| `REDIS_URL`             | Redis connection URL when using Redis as the storage backend. Format: `redis://host:port` or `redis://username:password@host:port/db`.                                                    | Required when `TR_STORAGE_BACKEND` = `redis` |
+| `CORS_ALLOWED_ORIGINS`  | Comma-separated list of allowed URLs for CORS.                                                                                                                                            | Yes                                          |
+| `AUDIT_LOG_FORMAT`      | Output format for audit logs. Options: `text`, `json`.                                                                                                                                    | Yes                                          |
+| `MEDIATOR_DID`          | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records.                                                                              | Required when DIDComm is enabled             |
+| `ADMIN_DIDS`            | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry.                                                                                                    | Required when DIDComm is enabled             |
+| `PROFILE_CONFIG`        | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. **_Sensitive information, do not share._** | Required when DIDComm is enabled             |
+| `ONLY_ADMIN_OPERATIONS` | Trust Registry use DIDComm communication only for admin operations and not TRQP.                                                                                                          | default: `false`                             |
 
 ### Profile Config Options
 

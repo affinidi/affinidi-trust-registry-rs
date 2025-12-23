@@ -44,6 +44,7 @@ aws-sdk-dynamodb = { version = "1.47" }
 aws-sdk-ssm = { version = "1.47" }
 aws-sdk-secretsmanager = { version = "1.47" }
 serde_dynamo = { version = "4.3", features = ["aws-sdk-dynamodb+1"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 # Test dependencies
 reqwest = { version = "0.12", features = ["json"] }

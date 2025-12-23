@@ -32,6 +32,7 @@ aws-sdk-ssm.workspace = true
 aws-sdk-secretsmanager.workspace = true
 serde_dynamo.workspace = true
 uuid.workspace = true
+redis.workspace = true
 
 did-peer = { version = "0.7.5", optional = true }
 affinidi-did-key = { version = "0.1.4", optional = true }
