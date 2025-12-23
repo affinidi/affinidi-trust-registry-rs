@@ -60,13 +60,13 @@ impl RedisStorage {
 
     fn serialize_record(record: &TrustRecord) -> Result<String, RepositoryError> {
         serde_json::to_string(record).map_err(|e| {
-            RepositoryError::SerializationFailed(format!("Failed to serialize record: {}", e))
+            RepositoryError::SerializationFailed(format!("Failed to serialize record: {e}"))
         })
     }
 
     fn deserialize_record(data: &str) -> Result<TrustRecord, RepositoryError> {
         serde_json::from_str(data).map_err(|e| {
-            RepositoryError::SerializationFailed(format!("Failed to deserialize record: {}", e))
+            RepositoryError::SerializationFailed(format!("Failed to deserialize record: {e}"))
         })
     }
 }
@@ -84,7 +84,7 @@ impl TrustRecordRepository for RedisStorage {
         let result: Option<String> = conn
             .get(&key)
             .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {}", e)))?;
+            .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {e}")))?;
 
         match result {
             Some(data) => {
@@ -107,7 +107,7 @@ impl TrustRecordAdminRepository for RedisStorage {
         let exists: bool = conn
             .exists(&key)
             .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis EXISTS failed: {}", e)))?;
+            .map_err(|e| RepositoryError::QueryFailed(format!("Redis EXISTS failed: {e}")))?;
 
         if exists {
             return Err(RepositoryError::RecordAlreadyExists(format!(
@@ -124,7 +124,7 @@ impl TrustRecordAdminRepository for RedisStorage {
         let _: () = conn
             .set(&key, value)
             .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis SET failed: {}", e)))?;
+            .map_err(|e| RepositoryError::QueryFailed(format!("Redis SET failed: {e}")))?;
 
         info!("Record created successfully: {}", key);
         Ok(())
@@ -139,7 +139,7 @@ impl TrustRecordAdminRepository for RedisStorage {
         let exists: bool = conn
             .exists(&key)
             .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis EXISTS failed: {}", e)))?;
+            .map_err(|e| RepositoryError::QueryFailed(format!("Redis EXISTS failed: {e}")))?;
 
         if !exists {
             return Err(RepositoryError::RecordNotFound(format!(
@@ -156,7 +156,7 @@ impl TrustRecordAdminRepository for RedisStorage {
         let _: () = conn
             .set(&key, value)
             .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis SET failed: {}", e)))?;
+            .map_err(|e| RepositoryError::QueryFailed(format!("Redis SET failed: {e}")))?;
 
         info!("Record updated successfully: {}", key);
         Ok(())
@@ -171,7 +171,7 @@ impl TrustRecordAdminRepository for RedisStorage {
         let deleted: i32 = conn
             .del(&key)
             .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis DEL failed: {}", e)))?;
+            .map_err(|e| RepositoryError::QueryFailed(format!("Redis DEL failed: {e}")))?;
 
         if deleted == 0 {
             return Err(RepositoryError::RecordNotFound(format!(
@@ -192,7 +192,7 @@ impl TrustRecordAdminRepository for RedisStorage {
         let keys: Vec<String> = conn
             .keys("*|*|*|*")
             .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis KEYS failed: {}", e)))?;
+            .map_err(|e| RepositoryError::QueryFailed(format!("Redis KEYS failed: {e}")))?;
 
         let mut records = Vec::new();
 
@@ -200,7 +200,7 @@ impl TrustRecordAdminRepository for RedisStorage {
             let data: Option<String> = conn
                 .get(&key)
                 .await
-                .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {}", e)))?;
+                .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {e}")))?;
 
             if let Some(data) = data {
                 match Self::deserialize_record(&data) {
@@ -225,7 +225,7 @@ impl TrustRecordAdminRepository for RedisStorage {
         let data: Option<String> = conn
             .get(&key)
             .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {}", e)))?;
+            .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {e}")))?;
 
         match data {
             Some(data) => {
