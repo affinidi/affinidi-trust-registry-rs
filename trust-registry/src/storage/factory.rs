@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use crate::{
     configs::{TrsutRegistryConfig, TrustStorageBackend},
     storage::{
-        adapters::{csv_file_storage::FileStorage, ddb_storage::DynamoDbStorage},
+        adapters::{csv_file_storage::FileStorage, ddb_storage::DynamoDbStorage, redis_storage::RedisStorage},
         repository::TrustRecordAdminRepository,
     },
 };
@@ -37,6 +37,13 @@ impl TrustStorageRepoFactory {
                         .await
                         .map_err(|e| anyhow!(e.to_string()))?;
                     Arc::new(ddb)
+                }
+                TrustStorageBackend::Redis => {
+                    let redis_config = self.config.storage_config.redis_storage_config.clone();
+                    let redis = RedisStorage::new(&redis_config.redis_url)
+                        .await
+                        .map_err(|e| anyhow!(e.to_string()))?;
+                    Arc::new(redis)
                 }
             };
 

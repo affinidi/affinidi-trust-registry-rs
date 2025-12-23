@@ -5,7 +5,7 @@ pub mod storage;
 
 pub use didcomm::{AdminConfig, AuditConfig, AuditLogFormat, DidcommConfig, ProfileConfig};
 pub use server::ServerConfig;
-pub use storage::{DynamoDbStorageConfig, FileStorageConfig, TrustStorageBackend};
+pub use storage::{DynamoDbStorageConfig, FileStorageConfig, RedisStorageConfig, TrustStorageBackend};
 
 use crate::configs::storage::StorageConfig;
 
