@@ -36,12 +36,12 @@ fn insert_env_vars(
     let path = Path::new(file_path);
     let mut existing_vars = HashMap::new();
 
-    if !path.exists() {
-        if let Some(example_path) = example_file_path {
-            let example = Path::new(example_path);
-            if example.exists() {
-                fs::copy(example, path)?;
-            }
+    if !path.exists()
+        && let Some(example_path) = example_file_path
+    {
+        let example = Path::new(example_path);
+        if example.exists() {
+            fs::copy(example, path)?;
         }
     }
 
@@ -88,13 +88,29 @@ pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Se
     tdk.add_profile(&profile).await;
     let atm = Arc::new(tdk.atm.clone().unwrap());
 
-    let profile = atm
-        .profile_add(
-            &ATMProfile::from_tdk_profile(&atm, &profile).await.unwrap(),
-            true,
-        )
-        .await
-        .unwrap();
+    let atm_profile = match ATMProfile::from_tdk_profile(&atm, &profile).await {
+        Ok(p) => p,
+        Err(e) => {
+            println!("Error creating ATM profile: {:#?}", e);
+            println!(
+                "This might indicate an issue with DID resolution or service endpoint configuration"
+            );
+            return;
+        }
+    };
+
+    let profile = match atm.profile_add(&atm_profile, true).await {
+        Ok(p) => p,
+        Err(e) => {
+            println!("Error connecting to mediator (websocket timeout): {:#?}", e);
+            println!("Possible causes:");
+            println!("  - Mediator is not running or unreachable");
+            println!("  - DID document service endpoints are incorrect");
+            println!("  - Network connectivity issues");
+            println!("  - Authentication/key mismatch");
+            return;
+        }
+    };
     let protocols = Protocols::new();
     let account_get_result = protocols.mediator.account_get(&atm, &profile, None).await;
 

@@ -66,9 +66,11 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
         == "true";
     let trust_registry_did =
         env::var("TRUST_REGISTRY_DID").expect("TRUST_REGISTRY_DID not set in .env");
-    let message_wait_duration_secs = in_pipeline
-        .then(|| PIPELINE_MESSAGE_WAIT_DURATION_SECS)
-        .unwrap_or(MESSAGE_WAIT_DURATION_SECS);
+    let message_wait_duration_secs = if in_pipeline {
+        PIPELINE_MESSAGE_WAIT_DURATION_SECS
+    } else {
+        MESSAGE_WAIT_DURATION_SECS
+    };
 
     let (atm, profile, protocols) = setup_test_environment(
         &client_did,
@@ -90,7 +92,7 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
                     client_did: client_did.to_string(),
                     client_secrets: client_secrets.to_string(),
                     mediator_did: env::var("MEDIATOR_DID").expect("MEDIATOR_DID not set in .env"),
-                    trust_registry_did: trust_registry_did,
+                    trust_registry_did,
                     in_pipeline,
                     message_wait_duration_secs,
                 })
@@ -114,9 +116,9 @@ async fn create_records(
                 send_message(
                     atm,
                     profile.clone(),
-                    &trust_registry_did,
+                    trust_registry_did,
                     &protocols,
-                    &mediator_did,
+                    mediator_did,
                     &msg,
                     CREATE_RECORD_MESSAGE_TYPE,
                 )
@@ -131,7 +133,7 @@ async fn clear_messages(atm: &Arc<ATM>, profile: &Arc<ATMProfile>) {
     CLEAR_MESSAGES
         .get_or_init(|| async {
             atm.fetch_messages(
-                &profile,
+                profile,
                 &FetchOptions {
                     limit: INITIAL_FETCH_LIMIT,
                     start_id: None,
