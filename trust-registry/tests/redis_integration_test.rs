@@ -52,7 +52,169 @@ fn create_test_record(
 }
 
 #[tokio::test]
-async fn test_redis_full_crud_workflow() {
+async fn test_redis_create_record() {
+    let Some(storage) = get_test_storage().await else {
+        return;
+    };
+    cleanup_test_data(&storage).await;
+
+    let record = create_test_record(
+        "did:example:clinic1",
+        "did:example:healthdept",
+        "issue",
+        "HealthCredential",
+        true,
+        true,
+        "assertion",
+    );
+
+    let result = storage.create(record.clone()).await;
+    assert!(result.is_ok());
+
+    // Verify the record was created
+    let query = TrustRecordQuery::new(
+        EntityId::new("did:example:clinic1"),
+        AuthorityId::new("did:example:healthdept"),
+        Action::new("issue"),
+        Resource::new("HealthCredential"),
+    );
+    let retrieved = storage.read(query).await;
+    assert!(retrieved.is_ok());
+
+    cleanup_test_data(&storage).await;
+}
+
+#[tokio::test]
+async fn test_redis_read_record() {
+    let Some(storage) = get_test_storage().await else {
+        return;
+    };
+    cleanup_test_data(&storage).await;
+
+    // Create a record
+    let record = create_test_record(
+        "did:example:clinic1",
+        "did:example:healthdept",
+        "issue",
+        "HealthCredential",
+        true,
+        true,
+        "assertion",
+    );
+    storage.create(record).await.unwrap();
+
+    // Test reading the record
+    let query = TrustRecordQuery::new(
+        EntityId::new("did:example:clinic1"),
+        AuthorityId::new("did:example:healthdept"),
+        Action::new("issue"),
+        Resource::new("HealthCredential"),
+    );
+
+    let retrieved = storage.read(query).await.unwrap();
+    assert_eq!(retrieved.entity_id().as_str(), "did:example:clinic1");
+    assert_eq!(
+        retrieved.authority_id().as_str(),
+        "did:example:healthdept"
+    );
+    assert_eq!(retrieved.action().as_str(), "issue");
+    assert_eq!(retrieved.resource().as_str(), "HealthCredential");
+    assert!(retrieved.is_authorized());
+    assert!(retrieved.is_recognized());
+
+    cleanup_test_data(&storage).await;
+}
+
+#[tokio::test]
+async fn test_redis_update_record() {
+    let Some(storage) = get_test_storage().await else {
+        return;
+    };
+    cleanup_test_data(&storage).await;
+
+    // Create initial record
+    let record = create_test_record(
+        "did:example:clinic1",
+        "did:example:healthdept",
+        "issue",
+        "HealthCredential",
+        true,
+        true,
+        "assertion",
+    );
+    storage.create(record).await.unwrap();
+
+    // Update the record
+    let updated_record = create_test_record(
+        "did:example:clinic1",
+        "did:example:healthdept",
+        "issue",
+        "HealthCredential",
+        false,
+        false,
+        "assertion",
+    );
+
+    let result = storage.update(updated_record).await;
+    assert!(result.is_ok());
+
+    // Verify the update
+    let query = TrustRecordQuery::new(
+        EntityId::new("did:example:clinic1"),
+        AuthorityId::new("did:example:healthdept"),
+        Action::new("issue"),
+        Resource::new("HealthCredential"),
+    );
+    let retrieved = storage.read(query).await.unwrap();
+    assert!(!retrieved.is_authorized());
+    assert!(!retrieved.is_recognized());
+
+    cleanup_test_data(&storage).await;
+}
+
+#[tokio::test]
+async fn test_redis_delete_record() {
+    let Some(storage) = get_test_storage().await else {
+        return;
+    };
+    cleanup_test_data(&storage).await;
+
+    // Create a record first
+    let record = create_test_record(
+        "did:example:clinic1",
+        "did:example:healthdept",
+        "issue",
+        "HealthCredential",
+        true,
+        true,
+        "assertion",
+    );
+    storage.create(record).await.unwrap();
+
+    // Delete the record
+    let query = TrustRecordQuery::new(
+        EntityId::new("did:example:clinic1"),
+        AuthorityId::new("did:example:healthdept"),
+        Action::new("issue"),
+        Resource::new("HealthCredential"),
+    );
+
+    let result = storage.delete(query.clone()).await;
+    assert!(result.is_ok());
+
+    // Verify deletion
+    let read_result = storage.read(query).await;
+    assert!(read_result.is_err());
+    assert!(matches!(
+        read_result,
+        Err(RepositoryError::RecordNotFound(_))
+    ));
+
+    cleanup_test_data(&storage).await;
+}
+
+#[tokio::test]
+async fn test_redis_list_records() {
     let Some(storage) = get_test_storage().await else {
         return;
     };
@@ -68,7 +230,6 @@ async fn test_redis_full_crud_workflow() {
         true,
         "assertion",
     );
-
     let record2 = create_test_record(
         "did:example:hospital1",
         "did:example:healthdept",
@@ -78,7 +239,6 @@ async fn test_redis_full_crud_workflow() {
         false,
         "recognition",
     );
-
     let record3 = create_test_record(
         "did:example:pharmacy1",
         "did:example:healthdept",
@@ -89,67 +249,25 @@ async fn test_redis_full_crud_workflow() {
         "assertion",
     );
 
-    // Test CREATE operations
-    storage.create(record1.clone()).await.unwrap();
-    storage.create(record2.clone()).await.unwrap();
-    storage.create(record3.clone()).await.unwrap();
+    storage.create(record1).await.unwrap();
+    storage.create(record2).await.unwrap();
+    storage.create(record3).await.unwrap();
 
-    // Test LIST operation
+    // Test list operation
     let list = storage.list().await.unwrap();
     assert_eq!(list.records().len(), 3);
-
-    // Test READ operation
-    let query1 = TrustRecordQuery::new(
-        EntityId::new("did:example:clinic1"),
-        AuthorityId::new("did:example:healthdept"),
-        Action::new("issue"),
-        Resource::new("HealthCredential"),
-    );
-
-    let retrieved = storage.read(query1.clone()).await.unwrap();
-    assert_eq!(retrieved.entity_id().as_str(), "did:example:clinic1");
-    assert!(retrieved.is_authorized());
-    assert!(retrieved.is_recognized());
-
-    // Test UPDATE operation
-    let updated_record = create_test_record(
-        "did:example:clinic1",
-        "did:example:healthdept",
-        "issue",
-        "HealthCredential",
-        false, // Changed
-        false, // Changed
-        "assertion",
-    );
-
-    storage.update(updated_record).await.unwrap();
-
-    let retrieved_after_update = storage.read(query1.clone()).await.unwrap();
-    assert!(!retrieved_after_update.is_authorized());
-    assert!(!retrieved_after_update.is_recognized());
-
-    // Test DELETE operation
-    storage.delete(query1.clone()).await.unwrap();
-
-    let result = storage.read(query1).await;
-    assert!(result.is_err());
-    assert!(matches!(result, Err(RepositoryError::RecordNotFound(_))));
-
-    // Verify list count after delete
-    let list_after_delete = storage.list().await.unwrap();
-    assert_eq!(list_after_delete.records().len(), 2);
 
     cleanup_test_data(&storage).await;
 }
 
 #[tokio::test]
-async fn test_redis_query_operations() {
+async fn test_redis_find_by_query_success() {
     let Some(storage) = get_test_storage().await else {
         return;
     };
     cleanup_test_data(&storage).await;
 
-    // Create test records
+    // Create test record
     let record = create_test_record(
         "did:example:issuer1",
         "did:example:authority1",
@@ -159,10 +277,9 @@ async fn test_redis_query_operations() {
         true,
         "assertion",
     );
-
     storage.create(record).await.unwrap();
 
-    // Test find_by_query (from TrustRecordRepository trait)
+    // Test find_by_query
     let query = TrustRecordQuery::new(
         EntityId::new("did:example:issuer1"),
         AuthorityId::new("did:example:authority1"),
@@ -170,7 +287,7 @@ async fn test_redis_query_operations() {
         Resource::new("DriverLicense"),
     );
 
-    let result = storage.find_by_query(query.clone()).await.unwrap();
+    let result = storage.find_by_query(query).await.unwrap();
     assert!(result.is_some());
 
     let record = result.unwrap();
@@ -179,22 +296,34 @@ async fn test_redis_query_operations() {
     assert_eq!(record.action().as_str(), "issue");
     assert_eq!(record.resource().as_str(), "DriverLicense");
 
+    cleanup_test_data(&storage).await;
+}
+
+#[tokio::test]
+async fn test_redis_find_by_query_not_found() {
+    let Some(storage) = get_test_storage().await else {
+        return;
+    };
+    cleanup_test_data(&storage).await;
+
     // Test query for non-existent record
-    let non_existent_query = TrustRecordQuery::new(
+    let query = TrustRecordQuery::new(
         EntityId::new("did:example:nonexistent"),
         AuthorityId::new("did:example:authority1"),
         Action::new("issue"),
         Resource::new("DriverLicense"),
     );
 
-    let result = storage.find_by_query(non_existent_query).await.unwrap();
+    let result = storage.find_by_query(query).await.unwrap();
     assert!(result.is_none());
 
     cleanup_test_data(&storage).await;
 }
 
+// Error handling tests - one per error scenario
+
 #[tokio::test]
-async fn test_redis_error_handling() {
+async fn test_redis_create_duplicate_record_error() {
     let Some(storage) = get_test_storage().await else {
         return;
     };
@@ -210,16 +339,27 @@ async fn test_redis_error_handling() {
         "assertion",
     );
 
-    // Test creating duplicate record
+    // Create record first time - should succeed
     storage.create(record.clone()).await.unwrap();
-    let duplicate_result = storage.create(record.clone()).await;
+
+    // Attempt to create duplicate - should fail
+    let duplicate_result = storage.create(record).await;
     assert!(duplicate_result.is_err());
     assert!(matches!(
         duplicate_result,
         Err(RepositoryError::RecordAlreadyExists(_))
     ));
 
-    // Test updating non-existent record
+    cleanup_test_data(&storage).await;
+}
+
+#[tokio::test]
+async fn test_redis_update_nonexistent_record_error() {
+    let Some(storage) = get_test_storage().await else {
+        return;
+    };
+    cleanup_test_data(&storage).await;
+
     let non_existent_record = create_test_record(
         "did:example:nonexistent",
         "did:example:authority",
@@ -237,7 +377,16 @@ async fn test_redis_error_handling() {
         Err(RepositoryError::RecordNotFound(_))
     ));
 
-    // Test deleting non-existent record
+    cleanup_test_data(&storage).await;
+}
+
+#[tokio::test]
+async fn test_redis_delete_nonexistent_record_error() {
+    let Some(storage) = get_test_storage().await else {
+        return;
+    };
+    cleanup_test_data(&storage).await;
+
     let delete_query = TrustRecordQuery::new(
         EntityId::new("did:example:nonexistent"),
         AuthorityId::new("did:example:authority"),
@@ -252,7 +401,16 @@ async fn test_redis_error_handling() {
         Err(RepositoryError::RecordNotFound(_))
     ));
 
-    // Test reading non-existent record
+    cleanup_test_data(&storage).await;
+}
+
+#[tokio::test]
+async fn test_redis_read_nonexistent_record_error() {
+    let Some(storage) = get_test_storage().await else {
+        return;
+    };
+    cleanup_test_data(&storage).await;
+
     let read_query = TrustRecordQuery::new(
         EntityId::new("did:example:nonexistent"),
         AuthorityId::new("did:example:authority"),
@@ -266,6 +424,106 @@ async fn test_redis_error_handling() {
         read_result,
         Err(RepositoryError::RecordNotFound(_))
     ));
+
+    cleanup_test_data(&storage).await;
+}
+
+// Comprehensive workflow test validating the complete CRUD flow
+
+#[tokio::test]
+async fn test_redis_complete_crud_workflow() {
+    let Some(storage) = get_test_storage().await else {
+        return;
+    };
+    cleanup_test_data(&storage).await;
+
+    // Step 1: Create multiple records
+    let record1 = create_test_record(
+        "did:example:clinic1",
+        "did:example:healthdept",
+        "issue",
+        "HealthCredential",
+        true,
+        true,
+        "assertion",
+    );
+    let record2 = create_test_record(
+        "did:example:hospital1",
+        "did:example:healthdept",
+        "verify",
+        "MedicalRecord",
+        true,
+        false,
+        "recognition",
+    );
+    let record3 = create_test_record(
+        "did:example:pharmacy1",
+        "did:example:healthdept",
+        "dispense",
+        "Prescription",
+        false,
+        true,
+        "assertion",
+    );
+
+    storage.create(record1.clone()).await.unwrap();
+    storage.create(record2.clone()).await.unwrap();
+    storage.create(record3.clone()).await.unwrap();
+
+    // Step 2: Verify all records exist via list
+    let list = storage.list().await.unwrap();
+    assert_eq!(list.records().len(), 3);
+
+    // Step 3: Read a specific record
+    let query1 = TrustRecordQuery::new(
+        EntityId::new("did:example:clinic1"),
+        AuthorityId::new("did:example:healthdept"),
+        Action::new("issue"),
+        Resource::new("HealthCredential"),
+    );
+    let retrieved = storage.read(query1.clone()).await.unwrap();
+    assert_eq!(retrieved.entity_id().as_str(), "did:example:clinic1");
+    assert!(retrieved.is_authorized());
+    assert!(retrieved.is_recognized());
+
+    // Step 4: Update a record
+    let updated_record = create_test_record(
+        "did:example:clinic1",
+        "did:example:healthdept",
+        "issue",
+        "HealthCredential",
+        false,
+        false,
+        "assertion",
+    );
+    storage.update(updated_record).await.unwrap();
+
+    // Step 5: Verify update took effect
+    let retrieved_after_update = storage.read(query1.clone()).await.unwrap();
+    assert!(!retrieved_after_update.is_authorized());
+    assert!(!retrieved_after_update.is_recognized());
+
+    // Step 6: Delete a record
+    storage.delete(query1.clone()).await.unwrap();
+
+    // Step 7: Verify deletion
+    let result = storage.read(query1).await;
+    assert!(result.is_err());
+    assert!(matches!(result, Err(RepositoryError::RecordNotFound(_))));
+
+    // Step 8: Verify list count decreased
+    let list_after_delete = storage.list().await.unwrap();
+    assert_eq!(list_after_delete.records().len(), 2);
+
+    // Step 9: Query remaining records
+    let query2 = TrustRecordQuery::new(
+        EntityId::new("did:example:hospital1"),
+        AuthorityId::new("did:example:healthdept"),
+        Action::new("verify"),
+        Resource::new("MedicalRecord"),
+    );
+    let found = storage.find_by_query(query2).await.unwrap();
+    assert!(found.is_some());
 
     cleanup_test_data(&storage).await;
 }
