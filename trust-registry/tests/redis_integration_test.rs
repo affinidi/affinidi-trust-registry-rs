@@ -113,10 +113,7 @@ async fn test_redis_read_record() {
 
     let retrieved = storage.read(query).await.unwrap();
     assert_eq!(retrieved.entity_id().as_str(), "did:example:clinic1");
-    assert_eq!(
-        retrieved.authority_id().as_str(),
-        "did:example:healthdept"
-    );
+    assert_eq!(retrieved.authority_id().as_str(), "did:example:healthdept");
     assert_eq!(retrieved.action().as_str(), "issue");
     assert_eq!(retrieved.resource().as_str(), "HealthCredential");
     assert!(retrieved.is_authorized());
