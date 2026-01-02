@@ -71,7 +71,7 @@ pub(crate) async fn start_one_did_listener(
     .unwrap();
 
     info!(
-        "[profile = {}] Listener started",
+        "[profile = {}] Listener built",
         &listener.profile.inner.alias
     );
 
@@ -82,7 +82,7 @@ pub(crate) async fn start_one_did_listener(
             error!("Start listener error: {:?}", e);
             e
         })
-        .unwrap()
+        .unwrap();
 }
 
 /// starts DIDComm listener for the configured DID profile
