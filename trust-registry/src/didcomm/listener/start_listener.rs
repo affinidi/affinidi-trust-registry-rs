@@ -1,4 +1,4 @@
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::didcomm::listener::*;
 
@@ -7,10 +7,13 @@ impl<H: MessageHandler> Listener<H> {
         self: Arc<Self>,
         config: Arc<DidcommConfig>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.clone()
+        let _ = self
+            .clone()
             .set_public_acls_mode(config.only_admin_operations)
-            .await?;
-
+            .await
+            .inspect_err(|e| {
+                warn!("Failed to change ACL mode to public. Error: {}", e);
+            });
         let cloned_self = self.clone();
         cloned_self.spawn_periodic_offline_sync().await;
 
