@@ -10,7 +10,7 @@ rust-version = "1.88.0"
 description = "Trust Registry"
 readme = "README.md"
 license = "Apache-2.0"
-keywords = ["ssi", "affinidi", "trqp", "trql", "trust", "trust-registry", "registry"]
+keywords = ["ssi", "affinidi", "trqp", "trql", "trust-registry"]
 repository = "https://github.com/affinidi/affinidi-trust-registry-rs"
 homepage = "https://affinidi.com/"
 
