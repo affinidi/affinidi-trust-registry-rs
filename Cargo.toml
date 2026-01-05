@@ -1,15 +1,18 @@
 [workspace]
-members = ["test-client", "trust-registry"]
+members = ["test-client", "trust-registry", "trql-client", "trqp-client"]
 resolver = "3"
 
 [workspace.package]
 version = '0.1.0'
 edition = "2024"
-publish = false
+publish = true
 rust-version = "1.88.0"
 description = "Trust Registry"
 readme = "README.md"
 license = "Apache-2.0"
+keywords = ["ssi", "affinidi", "trqp", "trql", "trust", "trust-registry", "registry"]
+repository = "https://github.com/affinidi/affinidi-tdk-rs"
+homepage = "https://affinidi.com/"
 
 [workspace.dependencies]
 
