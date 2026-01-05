@@ -11,7 +11,7 @@ description = "Trust Registry"
 readme = "README.md"
 license = "Apache-2.0"
 keywords = ["ssi", "affinidi", "trqp", "trql", "trust", "trust-registry", "registry"]
-repository = "https://github.com/affinidi/affinidi-tdk-rs"
+repository = "https://github.com/affinidi/affinidi-trust-registry-rs"
 homepage = "https://affinidi.com/"
 
 [workspace.dependencies]
