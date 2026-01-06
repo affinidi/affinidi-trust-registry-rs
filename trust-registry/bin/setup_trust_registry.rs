@@ -362,6 +362,10 @@ pub fn setup_did_web_tr(
     did_document
         .assertion_method
         .push(VerificationRelationship::Reference(v_key_id.clone()));
+    
+    did_document
+        .authentication
+        .push(VerificationRelationship::Reference(v_key_id.clone()));
 
     // Encryption Key
     property_set.insert(
