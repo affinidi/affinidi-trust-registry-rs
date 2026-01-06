@@ -107,7 +107,7 @@ struct Args {
     )]
     ddb_table_name: Option<String>,
 
-    /// Redis URL (required when storage_backend is redis)
+    /// DynamoDB table name (required when storage_backend is ddb)
     #[arg(
         long,
         short = 'u',
@@ -362,7 +362,7 @@ pub fn setup_did_web_tr(
     did_document
         .assertion_method
         .push(VerificationRelationship::Reference(v_key_id.clone()));
-    
+
     did_document
         .authentication
         .push(VerificationRelationship::Reference(v_key_id.clone()));
