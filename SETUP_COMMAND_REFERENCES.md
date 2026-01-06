@@ -20,9 +20,10 @@ This document provides a comprehensive reference for the `setup-trust-registry` 
   - [2. Setup with DIDComm Enabled](#2-setup-with-didcomm-enabled)
   - [3. Setup with Existing DID and Secrets](#3-setup-with-existing-did-and-secrets)
   - [4. Setup with DynamoDB Storage](#4-setup-with-dynamodb-storage)
-  - [5. Setup with Custom Admin DIDs](#5-setup-with-custom-admin-dids)
-  - [6. Setup with did:web Method](#6-setup-with-didweb-method)
-  - [7. Setup with Existing Profile](#7-setup-with-existing-profile)
+  - [5. Setup with Redis Storage](#5-setup-with-redis-storage)
+  - [6. Setup with Custom Admin DIDs](#6-setup-with-custom-admin-dids)
+  - [7. Setup with did:web Method](#7-setup-with-didweb-method)
+  - [8. Setup with Existing Profile](#8-setup-with-existing-profile)
 - [Environment Variables Configured](#environment-variables-configured)
 - [Test Environment Files](#test-environment-files)
 - [Additional Resources](#additional-resources)
@@ -42,19 +43,13 @@ cargo run --bin setup-trust-registry --features="dev-tools" -- [OPTIONS]
 
 ### DIDComm Mediator Configuration
 
-#### `--mediator-url`, `-u`
-
-Mediator URL to connect the Trust Registry.
-
-**Expected Value:** `https://mediator.example.com`
-
 #### `--mediator-did`, `-d`
 
 Mediator DID to connect the Trust Registry.
 
-**Expected Value:** `did:peer:2.Vz6Mk...`
+**Expected Value:** `did:web:mediator.goodcompany.com` or `did:peer:2.Vz6Mk...`
 
-**Note:** Both `--mediator-url` and `--mediator-did` must be provided together to enable DIDComm functionality.
+**Note:** When provided, this enables DIDComm functionality. The mediator service endpoint is resolved from the DID document.
 
 ### DID Method Configuration
 
@@ -95,7 +90,7 @@ Profile configuration location using URI schemes. This option serves dual purpos
 
 Storage backend for trust records.
 
-**Expected Values:** `csv` | `ddb`  
+**Expected Values:** `csv` | `ddb` | `redis`  
 **Default:** `csv`
 
 #### `--file-storage-path`, `-f`
@@ -113,6 +108,14 @@ DynamoDB table name for storing trust records.
 **Expected Value:** `trust-registry-records`  
 **Default:** `test`  
 **Required when:** `--storage-backend` is `ddb`
+
+#### `--redis-url`
+
+Redis connection URL for storing trust records.
+
+**Expected Value:** `redis://localhost:6379` or `redis://username:password@host:port/db`  
+**Default:** `redis://localhost:6379`  
+**Required when:** `--storage-backend` is `redis`
 
 ### Admin Configuration
 
@@ -152,6 +155,13 @@ Trust Registry audit log output format.
 **Expected Value:** `json` | `text`  
 **Default:** `json`
 
+#### `--only-admin-operations`, `-x`
+
+Enable only admin operations via DIDComm. When enabled, the Trust Registry will only accept admin operations and skip general DIDComm message handling.
+
+**Expected Value:** `true` | `false`  
+**Default:** `false`
+
 ## Common Usage Examples
 
 ### 1. Quick Setup (No DIDComm)
@@ -174,8 +184,7 @@ Set up Trust Registry with DIDComm mediator integration:
 
 ```bash
 cargo run --bin setup-trust-registry --features="dev-tools" -- \
-  --mediator-did=did:peer:2.Vz6Mk... \
-  --mediator-url=https://mediator.example.com
+  --mediator-did=did:web:mediator.goodcompany.com
 ```
 
 **The script does the following:**
@@ -193,8 +202,7 @@ Set up Trust Registry using an existing DID and its secrets instead of generatin
 cargo run --bin setup-trust-registry --features="dev-tools" -- \
   --tr-did=did:peer:2.Vz6Mk... \
   --tr-did-secret='[{"id":"did:peer:2.Vz6Mk...#key-1","privateKeyJwk":{"crv":"P-256","kty":"EC","x":"...","y":"..."},"type":"JsonWebKey2020"}]' \
-  --mediator-did=did:peer:2.Vz6Mk... \
-  --mediator-url=https://mediator.example.com \
+  --mediator-did=did:web:mediator.goodcompany.com \
   --admin-dids=did:peer:2.Admin...
 ```
 
@@ -215,18 +223,27 @@ cargo run --bin setup-trust-registry --features="dev-tools" -- \
   --ddb-table-name=trust-registry-prod
 ```
 
-### 5. Setup with Custom Admin DIDs
+### 5. Setup with Redis Storage
+
+Set up Trust Registry using Redis as the storage backend:
+
+```bash
+cargo run --bin setup-trust-registry --features="dev-tools" -- \
+  --storage-backend=redis \
+  --redis-url=redis://localhost:6379
+```
+
+### 6. Setup with Custom Admin DIDs
 
 Set up Trust Registry with specific admin DIDs:
 
 ```bash
 cargo run --bin setup-trust-registry --features="dev-tools" -- \
-  --mediator-did=did:peer:2.Vz6Mk... \
-  --mediator-url=https://mediator.example.com \
+  --mediator-did=did:web:mediator.goodcompany.com \
   --admin-dids=did:peer:2.Admin1...,did:peer:2.Admin2...
 ```
 
-### 6. Setup with did:web Method
+### 7. Setup with did:web Method
 
 Set up Trust Registry using did:web method:
 
@@ -234,19 +251,17 @@ Set up Trust Registry using did:web method:
 cargo run --bin setup-trust-registry --features="dev-tools" -- \
   --did-method=web \
   --didweb-url=https://example.com/.well-known/did.json \
-  --mediator-did=did:peer:2.Vz6Mk... \
-  --mediator-url=https://mediator.example.com
+  --mediator-did=did:web:mediator.goodcompany.com
 ```
 
-### 7. Setup with Existing Profile
+### 8. Setup with Existing Profile
 
 Load an existing profile configuration from a file:
 
 ```bash
 cargo run --bin setup-trust-registry --features="dev-tools" -- \
   --profile='file:///path/to/profile.json' \
-  --mediator-did=did:peer:2.Vz6Mk... \
-  --mediator-url=https://mediator.example.com
+  --mediator-did=did:web:mediator.goodcompany.com
 ```
 
 ## Environment Variables Configured
@@ -255,14 +270,16 @@ The setup command generates a `.env` file with the following variables:
 
 | Variable | Description |
 |----------|-------------|
-| `TR_STORAGE_BACKEND` | Storage backend type (csv or ddb). |
+| `TR_STORAGE_BACKEND` | Storage backend type (csv, ddb, redis). |
 | `FILE_STORAGE_PATH` | Path to CSV file (when using csv backend). |
 | `DDB_TABLE_NAME` | DynamoDB table name (when using ddb backend). |
+| `REDIS_URL`  | Redis connection URL when using Redis as the storage backend. Format: `redis://host:port` or `redis://username:password@host:port/db`. |
 | `CORS_ALLOWED_ORIGINS` | Allowed CORS origins. |
 | `AUDIT_LOG_FORMAT` | Audit log output format. |
 | `MEDIATOR_DID` | DIDComm mediator DID (when DIDComm enabled). |
 | `ADMIN_DIDS` | Authorized admin DIDs (when DIDComm enabled). |
 | `PROFILE_CONFIG` | Trust Registry profile configuration (when DIDComm enabled). |
+| `ONLY_ADMIN_OPERATIONS` | Enable only admin operations via DIDComm (when DIDComm enabled). |
 
 ## Test Environment Files
 

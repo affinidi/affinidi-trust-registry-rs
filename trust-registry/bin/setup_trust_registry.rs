@@ -19,6 +19,7 @@ use affinidi_tdk::{
     secrets_resolver::secrets::{KeyType, Secret, SecretMaterial},
 };
 
+use std::str::FromStr;
 use clap::Parser;
 use did_peer::{
     DIDPeer, DIDPeerCreateKeys, DIDPeerKeyType, DIDPeerKeys, DIDPeerService, PeerServiceEndPoint,
@@ -55,10 +56,6 @@ struct ProfileConfig {
 #[derive(Parser, Debug)]
 #[command(version, about = "Affinidi Trust Registry Setup Tool", long_about = None)]
 struct Args {
-    /// Mediator URL to connect the Trust Registry (e.g., https://mediator.goodcompany.com)
-    #[arg(long, short = 'u')]
-    mediator_url: Option<String>,
-
     /// Mediator DID to connect the Trust Registry (e.g., did:example:123456789abcdefghi)
     #[arg(long, short = 'd')]
     mediator_did: Option<String>,
@@ -90,7 +87,7 @@ struct Args {
     profile: Option<String>,
 
     /// Storage backend for trust records (csv or ddb)
-    #[arg(long, short = 's', value_parser = ["csv", "ddb"], default_value = "csv")]
+    #[arg(long, short = 's', value_parser = ["csv", "ddb", "redis"], default_value = "csv")]
     storage_backend: String,
 
     /// Path to CSV file (required when storage_backend is csv)
@@ -110,6 +107,15 @@ struct Args {
         default_value = "test"
     )]
     ddb_table_name: Option<String>,
+
+    /// DynamoDB table name (required when storage_backend is ddb)
+    #[arg(
+        long,
+        short = 't',
+        required_if_eq("storage_backend", "redis"),
+        default_value = "redis://localhost:6379"
+    )]
+    redis_url: Option<String>,
 
     /// Admin DIDs that can manage Trust Registry records (comma-separated)
     #[arg(long, short = 'a')]
@@ -260,7 +266,7 @@ fn create_keys() -> (Secret, Secret) {
     (verification_key, encryption_key)
 }
 
-pub fn create_did(service: Option<Vec<String>>, auth_service: bool) -> (String, Vec<Secret>) {
+pub fn create_did(mediator_did: String) -> (String, Vec<Secret>) {
     let (e_did_key, mut e_secp256k1_key) = DIDKey::generate(KeyType::Secp256k1).unwrap();
     let (v_did_key, mut v_p256) = DIDKey::generate(KeyType::P256).unwrap();
 
@@ -277,37 +283,14 @@ pub fn create_did(service: Option<Vec<String>>, auth_service: bool) -> (String, 
         },
     ];
 
-    let mut services = service.as_ref().map(|service| {
-        let endpoints = service.iter().map(|uri| PeerServiceEndPointLongMap {
-            uri: uri.to_string(),
-            accept: vec!["didcomm/v2".into()],
-            routing_keys: vec![],
-        });
-        vec![DIDPeerService {
-            id: None,
-            _type: "dm".into(),
-            service_end_point: PeerServiceEndPoint::Long(PeerServiceEndPointLong::Map(
-                OneOrMany::Many(endpoints.collect()),
-            )),
-        }]
-    });
-
-    if auth_service {
-        let service = service.as_ref().unwrap();
-
-        let auth_service = DIDPeerService {
-            id: Some("#auth".into()),
-            _type: "Authentication".into(),
-            service_end_point: PeerServiceEndPoint::Long(PeerServiceEndPointLong::URI(
-                [&service[0], "/authenticate"].concat(),
-            )),
-        };
-        services.as_mut().unwrap().push(auth_service);
-    }
-    let services = services.as_ref();
+    let services = Some(vec![DIDPeerService {
+        id: None,
+        _type: "dm".into(),
+        service_end_point: PeerServiceEndPoint::Long(PeerServiceEndPointLong::URI(mediator_did.to_string())),
+    }]);
 
     let (did_peer, _) =
-        DIDPeer::create_peer_did(&keys, services).expect("Failed to create did:peer");
+        DIDPeer::create_peer_did(&keys, services.as_ref()).expect("Failed to create did:peer");
     v_p256.id = [did_peer.as_str(), "#key-1"].concat();
     e_secp256k1_key.id = [did_peer.as_str(), "#key-2"].concat();
 
@@ -315,9 +298,9 @@ pub fn create_did(service: Option<Vec<String>>, auth_service: bool) -> (String, 
     (did_peer, secrets_json)
 }
 
-pub fn setup_did_peer_tr(mediator_url: String) -> (String, Vec<Secret>) {
+pub fn setup_did_peer_tr(mediator_did: String) -> (String, Vec<Secret>) {
     println!("Setting up did:peer for Trust Registry...");
-    let tr_did = create_did(Some(vec![mediator_url.clone()]), true);
+    let tr_did = create_did(mediator_did);
 
     println!("✓ Trust Registry DID created: {}", tr_did.0);
 
@@ -325,7 +308,7 @@ pub fn setup_did_peer_tr(mediator_url: String) -> (String, Vec<Secret>) {
 }
 
 pub fn setup_did_web_tr(
-    mediator_url: String,
+    mediator_did: String,
     web_url: String,
     did_method: String,
 ) -> Result<(String, Vec<Secret>), Box<dyn Error>> {
@@ -349,6 +332,18 @@ pub fn setup_did_web_tr(
     // Add the verification methods to the DID Document
     let mut property_set: HashMap<String, Value> = HashMap::new();
 
+    // Add JSON-LD contexts
+    let mut parameters_set = HashMap::new();
+    parameters_set.insert(
+        "@context".to_string(),
+        json!([
+            "https://www.w3.org/ns/did/v1".to_string(),
+            "https://w3id.org/security/multikey/v1".to_string(),
+        ]),
+    );
+
+    did_document.parameters_set = parameters_set;
+
     // Signing and Authentication Key
     property_set.insert(
         "publicKeyMultibase".to_string(),
@@ -365,10 +360,6 @@ pub fn setup_did_web_tr(
     });
     did_document
         .assertion_method
-        .push(VerificationRelationship::Reference(v_key_id.clone()));
-
-    did_document
-        .authentication
         .push(VerificationRelationship::Reference(v_key_id.clone()));
 
     // Encryption Key
@@ -390,7 +381,7 @@ pub fn setup_did_web_tr(
         .push(VerificationRelationship::Reference(e_key_id.clone()));
 
     // Add service endpoints to the DID Document
-    let endpoint = Endpoint::Map(json!([{"accept": ["didcomm/v2"], "uri": mediator_url}]));
+    let endpoint = Endpoint::Url(Url::from_str(&mediator_did.clone())?);
     did_document.service.push(Service {
         id: Some(Url::parse(
             &[tr_did.to_string(), "#service".to_string()].concat(),
@@ -398,18 +389,6 @@ pub fn setup_did_web_tr(
         type_: vec!["DIDCommMessaging".to_string()],
         property_set: HashMap::new(),
         service_endpoint: endpoint,
-    });
-
-    let mediator_auth_url = [mediator_url, "/authenticate".to_string()].concat();
-    let auth_endpoint =
-        Endpoint::Map(json!([{"accept": ["didcomm/v2"], "uri": mediator_auth_url}]));
-    did_document.service.push(Service {
-        id: Some(Url::parse(
-            &[tr_did.to_string(), "#auth".to_string()].concat(),
-        )?),
-        type_: vec!["Authentication".to_string()],
-        property_set: HashMap::new(),
-        service_endpoint: auth_endpoint,
     });
 
     if did_method == "webvh" {
@@ -517,14 +496,13 @@ pub fn setup_did_web_tr(
 }
 
 pub async fn setup_test_trust_registry(
-    mediator_url: String,
     mediator_did: String,
     in_pipeline: bool,
 ) -> std::io::Result<()> {
     println!("Generating test DIDs for Trust Registry...");
 
     let mut dids_and_secrets: Vec<(String, Vec<Secret>)> = vec![];
-    let test_tr_did = create_did(Some(vec![mediator_url.to_string()]), true);
+    let test_tr_did = create_did(mediator_did.clone());
     dids_and_secrets.push(test_tr_did.clone());
     let test_tr_profile_configs = json!({
         "did": test_tr_did.0,
@@ -532,7 +510,7 @@ pub async fn setup_test_trust_registry(
         "secrets": test_tr_did.1
     });
 
-    let test_client_did = create_did(Some(vec![mediator_url.to_string()]), true);
+    let test_client_did = create_did(mediator_did.clone());
     dids_and_secrets.push(test_client_did.clone());
 
     let client_secrets = serde_json::to_string(&serde_json::to_string(&test_client_did.1)?)?;
@@ -588,7 +566,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!();
 
     // DIDComm mediator configuration
-    let mediator_url = args.mediator_url.unwrap_or("".to_string());
     let mediator_did = args.mediator_did.unwrap_or("".to_string());
     let admin_dids = args.admin_dids.unwrap_or("".to_string());
     let only_admin_operations = args.only_admin_operations.unwrap_or(false);
@@ -607,19 +584,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut profile = args.profile.unwrap_or("".to_string());
 
     // Skips DIDComm related tasks if no mediator details are provided
-    let enable_didcomm = !mediator_url.is_empty() && !mediator_did.is_empty();
+    let enable_didcomm = !mediator_did.is_empty();
 
     // If the user has provided mediator details, proceed with DID setup
     if enable_didcomm {
         // Initialise profile configuration
         let mut profile_config: Option<ProfileConfig> = None;
 
-        // Validate mediator URL
-        let parsed_mediator_url = Url::parse(&mediator_url.clone())
-            .map_err(|e| format!("Invalid mediator URL '{}': {}", mediator_url.clone(), e))?;
-
         println!("Trust Registry DIDComm Configuration");
-        println!("Mediator URL: {}", parsed_mediator_url);
         println!("Mediator DID: {}", mediator_did);
         println!();
 
@@ -652,14 +624,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!();
 
             let (tr_did, tr_secrets) = match did_method.as_str() {
-                "peer" => setup_did_peer_tr(parsed_mediator_url.to_string()),
+                "peer" => setup_did_peer_tr(mediator_did.to_string()),
                 "web" | "webvh" => {
                     let web_url = args.didweb_url.ok_or(format!(
                         "--didweb-url is required when using did:{} method.",
                         did_method
                     ))?;
 
-                    setup_did_web_tr(parsed_mediator_url.to_string(), web_url, did_method.clone())?
+                    setup_did_web_tr(mediator_did.to_string(), web_url, did_method.clone())?
                 }
                 _ => {
                     return Err(format!("Unsupported DID method: {}.", did_method).into());
@@ -717,7 +689,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         // Configure test Trust Registry
-        setup_test_trust_registry(mediator_url.clone(), mediator_did.clone(), test_in_pipeline)
+        setup_test_trust_registry(mediator_did.clone(), test_in_pipeline)
             .await?;
     } else {
         println!("No Mediator configuration specified. Skipping Trust Registry DID configuration.");
@@ -758,6 +730,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("✓ DDB Table Name: {}", table_name);
         // Insert into the env file
         server_vars.insert("DDB_TABLE_NAME".to_string(), table_name.clone());
+    } else if args.storage_backend == "redis" {
+        let redis_url = args
+            .redis_url
+            .as_ref()
+            .ok_or("Error: --redis-url is required when using redis storage")?;
+        println!("✓ Redis URL: {}", redis_url);
+        // Insert into the env file
+        server_vars.insert("REDIS_URL".to_string(), redis_url.clone());
     }
     // Audit log format - default to json
     server_vars.insert(

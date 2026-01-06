@@ -16,6 +16,14 @@ A high-performance, Rust-based implementation of a Trust Registry, fully complia
   - [Run with DIDComm Enabled](#run-with-didcomm-enabled)
   - [Run with DIDComm Disabled](#run-with-didcomm-disabled)
 - [Run Trust Registry on Docker](#run-trust-registry-on-docker)
+- [Using Redis as Storage Backend](#using-redis-as-storage-backend)
+  - [Prerequisites](#prerequisites)
+  - [Setup Redis Storage](#setup-redis-storage)
+  - [Redis Storage Features](#redis-storage-features)
+  - [Production Considerations](#production-considerations)
+  - [Docker Compose with Redis](#docker-compose-with-redis)
+  - [Migrating from CSV/DynamoDB to Redis](#migrating-from-csvdynamodb-to-redis)
+  - [Troubleshooting](#troubleshooting)
 - [Test the API](#test-the-api)
   - [Recognition Query](#recognition-query)
   - [Authorization Query](#authorization-query)
@@ -137,10 +145,11 @@ Configure the environment to run Trust Registry. The setup command creates the `
 
 If you don't have a mediator yet, see [deployment options](https://docs.affinidi.com/products/affinidi-messaging/didcomm-mediator/deployment-options/).
 
-To enable DIDComm for managing and querying trust records, run the following command with your mediator's DID and URL:
+To enable DIDComm for managing and querying trust records, run the following command with your mediator's DID:
 
 ```bash
-cargo run --bin setup-trust-registry --features="dev-tools" -- --mediator-did=<MEDIATOR_DID> --mediator-url=<MEDIATOR_URL>
+cargo run --bin setup-trust-registry --features="dev-tools" -- \
+ --mediator-did=<MEDIATOR_DID>
 ```
 
 The command generates the following:
@@ -157,7 +166,6 @@ To enable DIDComm for admin operations only, set the `--only-admin-operations=tr
 ```bash
 cargo run --bin setup-trust-registry --features="dev-tools" -- \
  --mediator-did=<MEDIATOR_DID> \
- --mediator-url=<MEDIATOR_URL> \
  --only-admin-operations=true
 ```
 
@@ -237,20 +245,20 @@ Redis is a high-performance, in-memory data store that can be used as a storage 
    Set the following environment variables:
 
    ```bash
-   export TR_STORAGE_BACKEND=redis
-   export REDIS_URL="redis://localhost:6379"
+   TR_STORAGE_BACKEND=redis
+   REDIS_URL="redis://localhost:6379"
    ```
 
    For Redis with authentication:
 
    ```bash
-   export REDIS_URL="redis://username:password@localhost:6379"
+   REDIS_URL="redis://username:password@localhost:6379"
    ```
 
    For Redis with a specific database:
 
    ```bash
-   export REDIS_URL="redis://localhost:6379/0"
+   REDIS_URL="redis://localhost:6379/0"
    ```
 
 4. **Run Trust Registry**
