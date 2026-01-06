@@ -109,7 +109,7 @@ DynamoDB table name for storing trust records.
 **Default:** `test`  
 **Required when:** `--storage-backend` is `ddb`
 
-#### `--redis-url`
+#### `--redis-url`, `-u`
 
 Redis connection URL for storing trust records.
 

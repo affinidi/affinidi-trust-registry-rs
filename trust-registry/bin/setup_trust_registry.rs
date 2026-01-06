@@ -5,7 +5,6 @@ use affinidi_tdk::{
     common::{config::TDKConfig, profiles::TDKProfile},
     did_common::{
         Document,
-        one_or_many::OneOrMany,
         service::{Endpoint, Service},
         verification_method::{VerificationMethod, VerificationRelationship},
     },
@@ -19,16 +18,16 @@ use affinidi_tdk::{
     secrets_resolver::secrets::{KeyType, Secret, SecretMaterial},
 };
 
-use std::str::FromStr;
 use clap::Parser;
 use did_peer::{
     DIDPeer, DIDPeerCreateKeys, DIDPeerKeyType, DIDPeerKeys, DIDPeerService, PeerServiceEndPoint,
-    PeerServiceEndPointLong, PeerServiceEndPointLongMap,
+    PeerServiceEndPointLong,
 };
 use didwebvh_rs::{DIDWebVHState, parameters::Parameters, url::WebVHURL};
 use serde_json::Value;
 use serde_json::json;
 use sha256::digest;
+use std::str::FromStr;
 use url::Url;
 // use base64;
 use crossterm::{
@@ -111,7 +110,7 @@ struct Args {
     /// DynamoDB table name (required when storage_backend is ddb)
     #[arg(
         long,
-        short = 't',
+        short = 'u',
         required_if_eq("storage_backend", "redis"),
         default_value = "redis://localhost:6379"
     )]
@@ -286,7 +285,9 @@ pub fn create_did(mediator_did: String) -> (String, Vec<Secret>) {
     let services = Some(vec![DIDPeerService {
         id: None,
         _type: "dm".into(),
-        service_end_point: PeerServiceEndPoint::Long(PeerServiceEndPointLong::URI(mediator_did.to_string())),
+        service_end_point: PeerServiceEndPoint::Long(PeerServiceEndPointLong::URI(
+            mediator_did.to_string(),
+        )),
     }]);
 
     let (did_peer, _) =
@@ -689,8 +690,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         // Configure test Trust Registry
-        setup_test_trust_registry(mediator_did.clone(), test_in_pipeline)
-            .await?;
+        setup_test_trust_registry(mediator_did.clone(), test_in_pipeline).await?;
     } else {
         println!("No Mediator configuration specified. Skipping Trust Registry DID configuration.");
     }
