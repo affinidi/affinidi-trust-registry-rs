@@ -107,7 +107,7 @@ struct Args {
     )]
     ddb_table_name: Option<String>,
 
-    /// DynamoDB table name (required when storage_backend is ddb)
+    /// Redis URL (required when storage_backend is redis)
     #[arg(
         long,
         short = 'u',
