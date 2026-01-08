@@ -689,10 +689,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     server_vars.insert("PROFILE_CONFIG".to_string(), profile.clone());
     server_vars.insert("MEDIATOR_DID".to_string(), mediator_did.clone());
     server_vars.insert("ADMIN_DIDS".to_string(), admin_dids.clone());
-    server_vars.insert(
-        "ACL_MODE".to_string(),
-        acl_mode.to_string(),
-    );
+    server_vars.insert("ACL_MODE".to_string(), acl_mode.to_string());
 
     // Storage configuration
     println!();

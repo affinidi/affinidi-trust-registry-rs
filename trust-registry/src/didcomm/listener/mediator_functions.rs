@@ -12,13 +12,12 @@ pub const OFFLINE_SYNC_INTERVAL_SECS: u64 = 30;
 pub const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
 
 impl<H: MessageHandler> Listener<H> {
-
     /// Sets ACL mode of Trust Registry DID to public mode
     /// Anyone can send messages to TR DID
     pub(crate) async fn set_public_acl_mode(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        return self.set_acls_mode(AccessListModeType::ExplicitDeny).await
+        return self.set_acls_mode(AccessListModeType::ExplicitDeny).await;
     }
 
     /// Sets ACL mode of Trust Registry DID to private mode
@@ -26,7 +25,7 @@ impl<H: MessageHandler> Listener<H> {
     pub(crate) async fn set_private_acl_mode(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        return self.set_acls_mode(AccessListModeType::ExplicitAllow).await
+        return self.set_acls_mode(AccessListModeType::ExplicitAllow).await;
     }
 
     /// Sets ACLs mode for the mediator associated with this listener's profile (TR DID)

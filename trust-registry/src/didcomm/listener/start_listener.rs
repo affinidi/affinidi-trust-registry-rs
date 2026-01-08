@@ -14,7 +14,10 @@ impl<H: MessageHandler> Listener<H> {
             _ => self.set_public_acl_mode().await,
         }
         .inspect_err(|e| {
-            warn!("Failed to set ACL mode for Trust Registry DID. Error: {}", e);
+            warn!(
+                "Failed to set ACL mode for Trust Registry DID. Error: {}", 
+                e
+            );
         });
 
         let cloned_self = self.clone();
