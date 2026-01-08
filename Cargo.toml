@@ -1,5 +1,5 @@
 [workspace]
-members = ["test-client", "trust-registry", "trql-client", "trqp-client"]
+members = ["test-client", "trust-registry", "trql-client", "trqp"]
 resolver = "3"
 
 [workspace.package]
