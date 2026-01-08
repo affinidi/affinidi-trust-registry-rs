@@ -7,7 +7,6 @@ impl<H: MessageHandler> Listener<H> {
         self: Arc<Self>,
         config: Arc<DidcommConfig>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        
         let _ = match config.acl_mode.as_str() {
             "ExplicitAllow" => self.set_private_acl_mode().await,
             "ExplicitDeny" => self.set_public_acl_mode().await,
@@ -15,7 +14,7 @@ impl<H: MessageHandler> Listener<H> {
         }
         .inspect_err(|e| {
             warn!(
-                "Failed to set ACL mode for Trust Registry DID. Error: {}", 
+                "Failed to set ACL mode for Trust Registry DID. Error: {}",
                 e
             );
         });
