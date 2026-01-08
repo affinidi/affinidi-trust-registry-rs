@@ -87,8 +87,8 @@ impl Configs for DidcommConfig {
             return Ok(Default::default());
         }
         let acl_mode_raw = env_or("ACL_MODE", "ExplicitDeny");
-        let acl_mode = if acl_mode_raw == "ExplicitAllow".to_string() {
-              AccessListModeType::ExplicitAllow
+        let acl_mode = if acl_mode_raw == "ExplicitAllow" {
+            AccessListModeType::ExplicitAllow
         } else {
             AccessListModeType::ExplicitDeny
         };

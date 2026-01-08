@@ -8,7 +8,6 @@ impl<H: MessageHandler> Listener<H> {
         self: Arc<Self>,
         config: Arc<DidcommConfig>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-
         let _ = if config.acl_mode == AccessListModeType::ExplicitAllow {
             self.set_private_acl_mode().await
         } else {
