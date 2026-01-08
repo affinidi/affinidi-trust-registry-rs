@@ -12,9 +12,30 @@ pub const OFFLINE_SYNC_INTERVAL_SECS: u64 = 30;
 pub const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
 
 impl<H: MessageHandler> Listener<H> {
-    pub(crate) async fn set_public_acls_mode(
-        self: Arc<Self>,
-        is_only_admin: bool,
+
+    /// Sets ACL mode of Trust Registry DID to public mode
+    /// Anyone can send messages to TR DID
+    pub(crate) async fn set_public_acl_mode(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        return self.set_acls_mode(AccessListModeType::ExplicitDeny).await
+    }
+
+    /// Sets ACL mode of Trust Registry DID to private mode
+    /// Only DIDs in the allow list can send messages to TR DID
+    pub(crate) async fn set_private_acl_mode(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        return self.set_acls_mode(AccessListModeType::ExplicitAllow).await
+    }
+
+    /// Sets ACLs mode for the mediator associated with this listener's profile (TR DID)
+    /// to either public or private.
+    /// AccessListModeType::ExplicitDeny - public mode - anyone can send messages to TR DID
+    /// AccessListModeType::ExplicitAllow - private mode - only DIDs in the allow list can send messages to TR DID
+    pub(crate) async fn set_acls_mode(
+        &self,
+        acl_mode: AccessListModeType,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let protocols = Protocols::new();
 
@@ -27,13 +48,12 @@ impl<H: MessageHandler> Listener<H> {
             "[profile = {}] Failed to get account info",
             &self.profile.inner.alias
         ))?;
-        let mode = if is_only_admin {
-            AccessListModeType::ExplicitAllow
-        } else {
-            AccessListModeType::ExplicitDeny
-        };
+
         let mut acls = MediatorACLSet::from_u64(account_info.acls);
-        acls.set_access_list_mode(mode, true, false)?;
+
+        info!("ACL_MODE: Configured to {:?}", acl_mode);
+
+        acls.set_access_list_mode(acl_mode, true, false)?;
 
         protocols
             .mediator

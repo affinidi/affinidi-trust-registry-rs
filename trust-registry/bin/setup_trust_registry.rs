@@ -137,8 +137,8 @@ struct Args {
     audit_log_format: Option<String>,
 
     /// Trust Registry only admin operations. use didcomm
-    #[arg(long, short = 'x', default_value = "false")]
-    only_admin_operations: Option<bool>,
+    #[arg(long, short = 'x', default_value = "ExplicitDeny")]
+    acl_mode: Option<String>,
 }
 
 fn insert_env_vars(
@@ -573,7 +573,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // DIDComm mediator configuration
     let mediator_did = args.mediator_did.unwrap_or("".to_string());
     let admin_dids = args.admin_dids.unwrap_or("".to_string());
-    let only_admin_operations = args.only_admin_operations.unwrap_or(false);
+    let acl_mode = args.acl_mode.unwrap_or("ExplicitDeny".to_string());
 
     // Request to generate new Trust Registry DID
     let did_method = args.did_method.unwrap_or("".to_string());
@@ -690,8 +690,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     server_vars.insert("MEDIATOR_DID".to_string(), mediator_did.clone());
     server_vars.insert("ADMIN_DIDS".to_string(), admin_dids.clone());
     server_vars.insert(
-        "ONLY_ADMIN_OPERATIONS".to_string(),
-        only_admin_operations.to_string(),
+        "ACL_MODE".to_string(),
+        acl_mode.to_string(),
     );
 
     // Storage configuration

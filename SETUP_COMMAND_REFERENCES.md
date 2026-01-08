@@ -276,10 +276,10 @@ The setup command generates a `.env` file with the following variables:
 | `REDIS_URL`  | Redis connection URL when using Redis as the storage backend. Format: `redis://host:port` or `redis://username:password@host:port/db`. |
 | `CORS_ALLOWED_ORIGINS` | Allowed CORS origins. |
 | `AUDIT_LOG_FORMAT` | Audit log output format. |
-| `MEDIATOR_DID` | DIDComm mediator DID (when DIDComm enabled). |
-| `ADMIN_DIDS` | Authorized admin DIDs (when DIDComm enabled). |
-| `PROFILE_CONFIG` | Trust Registry profile configuration (when DIDComm enabled). |
-| `ONLY_ADMIN_OPERATIONS` | Enable only admin operations via DIDComm (when DIDComm enabled). |
+| `MEDIATOR_DID` | DIDComm mediator DID when DIDComm enabled. |
+| `ADMIN_DIDS` | Authorized admin DIDs when DIDComm enabled. |
+| `PROFILE_CONFIG` | Trust Registry profile configuration when DIDComm enabled. |
+| `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enable. ExplicitDeny - public mode, ExplicitAllow - private mode |
 
 ## Test Environment Files
 
