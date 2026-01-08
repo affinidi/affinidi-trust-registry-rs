@@ -279,7 +279,7 @@ The setup command generates a `.env` file with the following variables:
 | `MEDIATOR_DID` | DIDComm mediator DID when DIDComm enabled. |
 | `ADMIN_DIDS` | Authorized admin DIDs when DIDComm enabled. |
 | `PROFILE_CONFIG` | Trust Registry profile configuration when DIDComm enabled. |
-| `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enable. ExplicitDeny - public mode, ExplicitAllow - private mode |
+| `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enabled. ExplicitDeny - public mode, ExplicitAllow - private mode |
 
 ## Test Environment Files
 
