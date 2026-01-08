@@ -107,7 +107,7 @@ struct Args {
     )]
     ddb_table_name: Option<String>,
 
-    /// DynamoDB table name (required when storage_backend is ddb)
+    /// Redis URL (required when storage_backend is redis)
     #[arg(
         long,
         short = 'u',
@@ -676,21 +676,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 profile
             );
             println!();
-        }
-
-        if let Some(config) = &profile_config
-            && !only_admin_operations
-        {
-            println!("Configuring mediator ACLs for Trust Registry DID...");
-            // Configure ACLs in the mediator for the Trust Registry DID
-            set_acl(
-                &config.alias,
-                &config.did,
-                &mediator_did,
-                config.secrets.clone(),
-            )
-            .await;
-            println!("✓ Configured Trust Registry on mediator.");
         }
 
         // Configure test Trust Registry
