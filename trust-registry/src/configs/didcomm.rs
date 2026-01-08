@@ -1,4 +1,6 @@
-use affinidi_tdk::{messaging::protocols::mediator::acls::AccessListModeType, secrets_resolver::secrets::Secret};
+use affinidi_tdk::{
+    messaging::protocols::mediator::acls::AccessListModeType, secrets_resolver::secrets::Secret
+};
 use serde_derive::{Deserialize, Serialize};
 use std::fmt;
 use tracing::warn;
