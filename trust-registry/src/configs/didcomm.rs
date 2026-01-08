@@ -1,4 +1,4 @@
-use affinidi_tdk::secrets_resolver::secrets::Secret;
+use affinidi_tdk::{messaging::protocols::mediator::acls::AccessListModeType, secrets_resolver::secrets::Secret};
 use serde_derive::{Deserialize, Serialize};
 use std::fmt;
 use tracing::warn;
@@ -65,7 +65,7 @@ pub struct AdminConfig {
 #[derive(Debug, Clone, Default)]
 pub struct DidcommConfig {
     pub is_enabled: bool,
-    pub acl_mode: String,
+    pub acl_mode: AccessListModeType,
     pub profile_config: ProfileConfig,
     pub mediator_did: String,
     pub did_document: String,
@@ -86,7 +86,12 @@ impl Configs for DidcommConfig {
         if enable_didcomm != "true" {
             return Ok(Default::default());
         }
-        let acl_mode = env_or("ACL_MODE", "ExplicitDeny");
+        let acl_mode_raw = env_or("ACL_MODE", "ExplicitDeny");
+        let acl_mode = if acl_mode_raw == "ExplicitAllow".to_string() {
+              AccessListModeType::ExplicitAllow
+        } else {
+            AccessListModeType::ExplicitDeny
+        };
 
         let admin_dids_str = optional_env("ADMIN_DIDS").unwrap_or_else(|| {
             warn!("Missing environment variable: ADMIN_DIDS. The admin list is empty");

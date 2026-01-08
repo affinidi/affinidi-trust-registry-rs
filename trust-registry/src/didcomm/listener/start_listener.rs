@@ -1,16 +1,18 @@
 use tracing::{debug, error, warn};
 
 use crate::didcomm::listener::*;
+use affinidi_tdk::messaging::protocols::mediator::acls::AccessListModeType;
 
 impl<H: MessageHandler> Listener<H> {
     pub async fn start_listening(
         self: Arc<Self>,
         config: Arc<DidcommConfig>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = match config.acl_mode.as_str() {
-            "ExplicitAllow" => self.set_private_acl_mode().await,
-            "ExplicitDeny" => self.set_public_acl_mode().await,
-            _ => self.set_public_acl_mode().await,
+
+        let _ = if config.acl_mode == AccessListModeType::ExplicitAllow {
+            self.set_private_acl_mode().await
+        } else {
+            self.set_public_acl_mode().await
         }
         .inspect_err(|e| {
             warn!(
