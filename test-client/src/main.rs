@@ -86,8 +86,8 @@ async fn main() {
     let mediator_did = std::env::var("MEDIATOR_DID")
         .expect("MEDIATOR_DID environment variable is not set. Set it at runtime or in .env file.");
 
-    println!("\nTrust Registry DID: {}", trust_registry_did);
-    println!("\nMediator DID: {}", mediator_did);
+    println!("\nTrust Registry DID: {trust_registry_did}");
+    println!("\nMediator DID: {mediator_did}");
 
     // let mediator_did = mediator_did.clone();
     println!("\nLoading test user configurations...");
