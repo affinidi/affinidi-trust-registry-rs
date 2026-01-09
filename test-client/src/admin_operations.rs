@@ -28,6 +28,7 @@ pub struct CommonCrudInput {
     pub authority_id: String,
     pub action: String,
     pub resource: String,
+    pub record_type: String,
 }
 
 pub async fn create_record(
@@ -43,6 +44,7 @@ pub async fn create_record(
         "resource": input.resource,
         "recognized": recognized,
         "authorized": authorized,
+        "record_type": input.record_type,
     });
 
     if let Some(ctx) = context {
@@ -74,6 +76,7 @@ pub async fn update_record(
         "resource": input.resource,
         "recognized": recognized,
         "authorized": authorized,
+        "record_type": input.record_type,
     });
 
     if let Some(ctx) = context {

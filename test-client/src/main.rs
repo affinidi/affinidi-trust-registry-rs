@@ -65,14 +65,42 @@ async fn main() {
         }
     };
 
-    // TODO: provide dids via envs
-    let trust_registry_did = std::env::var("TRUST_REGISTRY_DID")
-        .unwrap_or("did:peer:2.Vz6Mkjm4p8h47Q9faL3oTrEYLyo8RAAndAyR35oUHBudWZhR3.EzQ3sherFvK5Fp7gfM9etgWwqiKMiaYGA5KbbDQGj4C7APDRHi".to_string());
-    let mediator_did = std::env::var("MEDIATOR_DID").unwrap_or(
-        "did:web:afddf5a2-bb92-4b9d-a467-9f4b0a57e51f.atlas.dev.affinidi.io".to_string(),
-    );
-    let mediator_did = mediator_did.clone();
+    // Get Trust Registry DID from PROFILE_CONFIG environment variable
+    let trust_registry_did = std::env::var("PROFILE_CONFIG")
+        .expect("PROFILE_CONFIG environment variable is not set. Run the Trust Registry first.")
+        .parse::<serde_json::Value>()
+        .expect("PROFILE_CONFIG is not a valid JSON string.")
+        .get("did")
+        .and_then(|v| v.as_str())
+        .expect("PROFILE_CONFIG does not contain a 'did' property.")
+        .to_string();
+
+    // Get Mediator DID from MEDIATOR_DID environment variable
+    let mediator_did = std::env::var("MEDIATOR_DID")
+        .expect("MEDIATOR_DID environment variable is not set.");
+
+    // Get Mediator DID from MEDIATOR_DID environment variable
+    let admin_dids_str = std::env::var("ADMIN_DIDS")
+        .expect("ADMIN_DIDS environment variable is not set.");
+
+    let admin_dids: Vec<String> = admin_dids_str
+            .split(',')
+            .map(|e| e.trim().to_string())
+            .collect();
+
+    println!("\nTrust Registry DID: {}", trust_registry_did);
+    println!("\nMediator DID: {}", mediator_did);
+
+    // let mediator_did = mediator_did.clone();
+    println!("\nLoading test user configurations...\n");
     for (did, did_config) in user_configs {
+        // Check if the current DID exists in the admin_dids list
+        if !admin_dids.contains(&did) {
+            eprintln!("\nError: DID '{}' is not authorised as an admin.", did);
+            eprintln!("Configure the ADMIN_DIDS environment variable to authorise {}.", did);
+            break;
+        }
+
         let mediator_did_clone = mediator_did.clone();
         let profile = TDKProfile::new(
             &did_config.alias,
@@ -90,6 +118,8 @@ async fn main() {
         )
         .await
         .unwrap();
+        println!("\nAdding profile: {}", &did_config.alias);
+        println!("Profile DID: {}", &did);
         tdk.add_profile(&profile).await;
 
         let atm = Arc::new(tdk.atm.clone().unwrap());
@@ -104,8 +134,9 @@ async fn main() {
             .await
             .unwrap();
 
-        if did_config.alias.eq("Alice") {
-            println!("\nStarting Admin Operations Demo for Alice...\n");
+        // Ensure we only run admin operations for the admin DID
+        if did_config.alias.eq("SampleTRAdmin") {
+            println!("\nStarting Admin Operations Demo for SampleTRAdmin...\n");
             set_public_acls_mode(Arc::clone(&atm), Arc::clone(&profile))
                 .await
                 .unwrap();
@@ -122,6 +153,7 @@ async fn main() {
                     authority_id: "did:example:authority456".to_string(),
                     action: "action_xyz".to_string(),
                     resource: "resource_abc".to_string(),
+                    record_type: "assertion".to_string(),
                 },
                 true,
                 true,
@@ -133,8 +165,8 @@ async fn main() {
             )
             .await
             {
-                Ok(_) => println!("Create record completed"),
-                Err(err) => println!("Create record failed: {err:#?}"),
+                Ok(_) => println!("Create record request sent - awaiting response..."),
+                Err(err) => println!("Create record request failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -149,11 +181,12 @@ async fn main() {
                 authority_id: "did:example:authority456".to_string(),
                 action: "action_xyz".to_string(),
                 resource: "resource_abc".to_string(),
+                record_type: "assertion".to_string(),
             })
             .await
             {
-                Ok(_) => println!("Read record completed"),
-                Err(err) => println!("Read record failed: {err:#?}"),
+                Ok(_) => println!("Read record request sent - awaiting response..."),
+                Err(err) => println!("Read record request failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -169,6 +202,7 @@ async fn main() {
                     authority_id: "did:example:authority456".to_string(),
                     action: "action_xyz".to_string(),
                     resource: "resource_abc".to_string(),
+                    record_type: "assertion".to_string(),
                 },
                 false,
                 true,
@@ -180,8 +214,8 @@ async fn main() {
             )
             .await
             {
-                Ok(_) => println!("Update record completed"),
-                Err(err) => println!("Update record failed: {err:#?}"),
+                Ok(_) => println!("Update record request sent - awaiting response..."),
+                Err(err) => println!("Update record request failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -195,8 +229,8 @@ async fn main() {
             )
             .await
             {
-                Ok(_) => println!("List records completed"),
-                Err(err) => println!("List records failed: {err:#?}"),
+                Ok(_) => println!("List records request sent - awaiting response..."),
+                Err(err) => println!("List records request failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -211,11 +245,12 @@ async fn main() {
                 authority_id: "did:example:authority456".to_string(),
                 action: "action_xyz".to_string(),
                 resource: "resource_abc".to_string(),
+                record_type: "assertion".to_string(),
             })
             .await
             {
-                Ok(_) => println!("Delete record completed"),
-                Err(err) => println!("Delete record failed: {err:#?}"),
+                Ok(_) => println!("Delete record request sent - awaiting response..."),
+                Err(err) => println!("Delete record request failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -230,18 +265,22 @@ async fn main() {
                 authority_id: "did:example:authority456".to_string(),
                 action: "action_xyz".to_string(),
                 resource: "resource_abc".to_string(),
+                record_type: "assertion".to_string(),
             })
             .await
             {
-                Ok(_) => println!("Read record (after delete) completed"),
-                Err(err) => println!("Read record (after delete) failed: {err:#?}"),
+                Ok(_) => println!("Read record (after delete) request sent - awaiting response..."),
+                Err(err) => println!("Read record (after delete) request failed: {err:#?}"),
             }
 
-            println!("\n{}", "=".repeat(60));
             println!("Admin Operations Demo completed!\n");
+            println!("\n{}", "=".repeat(60));
+        } else {
+            println!("\nUnable to find 'SampleTRAdmin' from the user_config.json file of the test-client.\n");
         }
 
-        if did_config.alias.eq("Alice") {
+        if did_config.alias.eq("SampleTRAdmin") {
+            println!("\nStart listening to responses from the Trust Registry...\n");
             user_listener(did_config, &atm_clone, protocols_clone, &profile).await;
         }
     }

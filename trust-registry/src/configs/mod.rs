@@ -17,14 +17,14 @@ pub trait Configs: Sized {
 }
 
 #[derive(Debug)]
-pub struct TrsutRegistryConfig {
+pub struct TrustRegistryConfig {
     pub server_config: ServerConfig,
     pub storage_config: StorageConfig,
     pub didcomm_config: DidcommConfig,
 }
 
 #[async_trait::async_trait]
-impl Configs for TrsutRegistryConfig {
+impl Configs for TrustRegistryConfig {
     async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
             server_config: ServerConfig::load().await?,

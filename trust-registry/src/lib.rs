@@ -14,7 +14,7 @@ pub struct SharedData<R>
 where
     R: TrustRecordRepository + ?Sized,
 {
-    pub config: Arc<configs::TrsutRegistryConfig>,
+    pub config: Arc<configs::TrustRegistryConfig>,
     pub service_start_timestamp: DateTime<Utc>,
     pub repository: Arc<R>,
 }

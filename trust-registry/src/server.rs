@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     SharedData,
-    configs::{Configs, DidcommConfig, TrsutRegistryConfig},
+    configs::{Configs, DidcommConfig, TrustRegistryConfig},
     didcomm::listener::start_didcomm_listener,
     http::application_routes,
 };
@@ -40,7 +40,7 @@ async fn start_didcomm_server(
 
 /// The main purpose is just to handle health check of container
 async fn start_http_server(
-    config: Arc<TrsutRegistryConfig>,
+    config: Arc<TrustRegistryConfig>,
     repository: Arc<dyn TrustRecordRepository>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listen_address = config.server_config.listen_address.clone();
@@ -99,7 +99,7 @@ pub async fn start() {
 
     setup_logging();
 
-    let config = match TrsutRegistryConfig::load().await {
+    let config = match TrustRegistryConfig::load().await {
         Ok(c) => Arc::new(c),
         Err(e) => {
             error!(

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 
 use crate::{
-    configs::{TrsutRegistryConfig, TrustStorageBackend},
+    configs::{TrustRegistryConfig, TrustStorageBackend},
     storage::{
         adapters::{
             csv_file_storage::FileStorage, ddb_storage::DynamoDbStorage,
@@ -14,11 +14,11 @@ use crate::{
 };
 
 pub struct TrustStorageRepoFactory {
-    config: Arc<TrsutRegistryConfig>,
+    config: Arc<TrustRegistryConfig>,
 }
 
 impl TrustStorageRepoFactory {
-    pub fn new(config: Arc<TrsutRegistryConfig>) -> Self {
+    pub fn new(config: Arc<TrustRegistryConfig>) -> Self {
         Self { config }
     }
     pub async fn create(
