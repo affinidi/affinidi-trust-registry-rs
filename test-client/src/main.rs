@@ -267,7 +267,9 @@ async fn main() {
             println!("Admin Operations Demo completed!\n");
             println!("\n{}", "=".repeat(60));
         } else {
-            println!("\nUnable to find 'SampleTRAdmin' from the user_config.json file of the test-client.\n");
+            println!(
+                "\nUnable to find 'SampleTRAdmin' from the user_config.json file of the test-client.\n"
+            );
         }
 
         if did_config.alias.eq("SampleTRAdmin") {
