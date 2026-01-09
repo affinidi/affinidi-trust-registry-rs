@@ -433,13 +433,7 @@ To query Trust Registry using DIDComm, refer to the [Trust Registry Authorizatio
 
 You can manage trust records stored in the Trust Registry using DIDComm by sending messages to the Trust Registry's DID. DIDComm provides a secure, interoperable way to exchange messages between an administrator and the Trust Registry, making it ideal for trust record operations such as creating, updating, or querying records.
 
-For reference, see the [test-client implementation](https://github.com/affinidi/affinidi-trust-registry-rs/tree/main/test-client), which demonstrates how to build DIDComm clients and send these messages.
-
-To run the sample client and interact with the Trust Registry:
-
-```bash
-MEDIATOR_DID="<TRUST_REGISTRY_MEDIATOR_DID>" TRUST_REGISTRY_DID="<TRUST_REGISTRY_DID>" cargo run --bin test-client
-```
+For a working reference, see the [test-client implementation](https://github.com/affinidi/affinidi-trust-registry-rs/tree/main/test-client), which demonstrates how to build a DIDComm client and send admin operation messages.
 
 See [Trust Registry Administration](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/DIDCOMM_PROTOCOLS.md#trust-registry-administration) section for more details.
 

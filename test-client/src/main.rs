@@ -65,42 +65,33 @@ async fn main() {
         }
     };
 
-    // Get Trust Registry DID from PROFILE_CONFIG environment variable
-    let trust_registry_did = std::env::var("PROFILE_CONFIG")
-        .expect("PROFILE_CONFIG environment variable is not set. Run the Trust Registry first.")
-        .parse::<serde_json::Value>()
-        .expect("PROFILE_CONFIG is not a valid JSON string.")
-        .get("did")
-        .and_then(|v| v.as_str())
-        .expect("PROFILE_CONFIG does not contain a 'did' property.")
-        .to_string();
+    // Get Trust Registry DID: runtime env var or fallback to PROFILE_CONFIG from .env
+    let trust_registry_did = std::env::var("TRUST_REGISTRY_DID")
+        .or_else(|_| {
+            std::env::var("PROFILE_CONFIG")
+                .and_then(|config| {
+                    config.parse::<serde_json::Value>()
+                        .map_err(|_| std::env::VarError::NotPresent)
+                        .and_then(|json| {
+                            json.get("did")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .ok_or(std::env::VarError::NotPresent)
+                        })
+                })
+        })
+        .expect("TRUST_REGISTRY_DID environment variable is not set, and PROFILE_CONFIG is either missing or does not contain a valid 'did' property.");
 
-    // Get Mediator DID from MEDIATOR_DID environment variable
+    // Get Mediator DID from environment variable (runtime or .env file)
     let mediator_did = std::env::var("MEDIATOR_DID")
-        .expect("MEDIATOR_DID environment variable is not set.");
-
-    // Get Mediator DID from MEDIATOR_DID environment variable
-    let admin_dids_str = std::env::var("ADMIN_DIDS")
-        .expect("ADMIN_DIDS environment variable is not set.");
-
-    let admin_dids: Vec<String> = admin_dids_str
-            .split(',')
-            .map(|e| e.trim().to_string())
-            .collect();
+        .expect("MEDIATOR_DID environment variable is not set. Set it at runtime or in .env file.");
 
     println!("\nTrust Registry DID: {}", trust_registry_did);
     println!("\nMediator DID: {}", mediator_did);
 
     // let mediator_did = mediator_did.clone();
-    println!("\nLoading test user configurations...\n");
+    println!("\nLoading test user configurations...");
     for (did, did_config) in user_configs {
-        // Check if the current DID exists in the admin_dids list
-        if !admin_dids.contains(&did) {
-            eprintln!("\nError: DID '{}' is not authorised as an admin.", did);
-            eprintln!("Configure the ADMIN_DIDS environment variable to authorise {}.", did);
-            break;
-        }
-
         let mediator_did_clone = mediator_did.clone();
         let profile = TDKProfile::new(
             &did_config.alias,
