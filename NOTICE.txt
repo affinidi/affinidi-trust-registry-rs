@@ -1,1 +1,10 @@
-This License does not grant permission to use the trade names, trademarks, service marks, or product names of the Licensor, except as required for reasonable and customary use in describing the origin of the Work and reproducing the content of the this notice when  they are further distributing this code.
+This project is licensed under the Apache License, Version 2.0.
+You may obtain a copy of the license at:
+http://www.apache.org/licenses/LICENSE-2.0
+This License does not grant permission to use the trade names, trademarks, service marks, or product names of the Licensor, except as required for reasonable and customary use in describing the origin of the Work and reproducing the content of this notice when further distributing this code.
+
+Additional License Notice for Data
+This project uses data from webpki-roots, which is licensed under the Community Data License Agreement – Permissive, Version 2.0 (CDLA-Permissive-2.0).
+The full license text is available at:
+https://cdla.dev/permissive-2-0/
+When redistributing this data, you must include the text of the CDLA-Permissive-2.0 license or provide a link to it.

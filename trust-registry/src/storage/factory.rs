@@ -3,19 +3,22 @@ use std::sync::Arc;
 use anyhow::anyhow;
 
 use crate::{
-    configs::{TrsutRegistryConfig, TrustStorageBackend},
+    configs::{TrustRegistryConfig, TrustStorageBackend},
     storage::{
-        adapters::{csv_file_storage::FileStorage, ddb_storage::DynamoDbStorage},
+        adapters::{
+            csv_file_storage::FileStorage, ddb_storage::DynamoDbStorage,
+            redis_storage::RedisStorage,
+        },
         repository::TrustRecordAdminRepository,
     },
 };
 
 pub struct TrustStorageRepoFactory {
-    config: Arc<TrsutRegistryConfig>,
+    config: Arc<TrustRegistryConfig>,
 }
 
 impl TrustStorageRepoFactory {
-    pub fn new(config: Arc<TrsutRegistryConfig>) -> Self {
+    pub fn new(config: Arc<TrustRegistryConfig>) -> Self {
         Self { config }
     }
     pub async fn create(
@@ -37,6 +40,13 @@ impl TrustStorageRepoFactory {
                         .await
                         .map_err(|e| anyhow!(e.to_string()))?;
                     Arc::new(ddb)
+                }
+                TrustStorageBackend::Redis => {
+                    let redis_config = self.config.storage_config.redis_storage_config.clone();
+                    let redis = RedisStorage::new(&redis_config.redis_url)
+                        .await
+                        .map_err(|e| anyhow!(e.to_string()))?;
+                    Arc::new(redis)
                 }
             };
 

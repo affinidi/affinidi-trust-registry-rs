@@ -2,11 +2,14 @@
 name = "trust-registry"
 version.workspace = true
 edition.workspace = true
-publish.workspace = true
 rust-version.workspace = true
 description.workspace = true
 readme.workspace = true
 license.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+repository.workspace = true
+publish = true
 
 [dependencies]
 axum.workspace = true
@@ -32,9 +35,14 @@ aws-sdk-ssm.workspace = true
 aws-sdk-secretsmanager.workspace = true
 serde_dynamo.workspace = true
 uuid.workspace = true
+redis.workspace = true
 
 did-peer = { version = "0.7.5", optional = true }
 affinidi-did-key = { version = "0.1.4", optional = true }
+didwebvh-rs = { version = "0.1", optional = true }
+url = "2.5"
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -51,6 +59,11 @@ name = "generate-secrets"
 path = "bin/generate_secrets.rs"
 required-features = ["dev-tools"]
 
+[[bin]]
+name = "setup-trust-registry"
+path = "bin/setup_trust_registry.rs"
+required-features = ["dev-tools"]
+
 [features]
 default = []
-dev-tools = ["did-peer", "affinidi-did-key"]
+dev-tools = ["did-peer", "affinidi-did-key", "didwebvh-rs"]

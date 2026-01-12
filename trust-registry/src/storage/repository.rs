@@ -70,12 +70,12 @@ pub enum RepositoryError {
 impl fmt::Display for RepositoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ConnectionFailed(msg) => write!(f, "Connection failed: {}", msg),
-            Self::QueryFailed(msg) => write!(f, "Query failed: {}", msg),
-            Self::SerializationFailed(msg) => write!(f, "Serialization failed: {}", msg),
-            Self::RecordNotFound(msg) => write!(f, "Record not found: {}", msg),
-            Self::RecordAlreadyExists(msg) => write!(f, "Record already exists: {}", msg),
-            Self::ValidationError(msg) => write!(f, "Validation error: {}", msg),
+            Self::ConnectionFailed(msg) => write!(f, "Connection failed: {msg}"),
+            Self::QueryFailed(msg) => write!(f, "Query failed: {msg}"),
+            Self::SerializationFailed(msg) => write!(f, "Serialization failed: {msg}"),
+            Self::RecordNotFound(msg) => write!(f, "Record not found: {msg}"),
+            Self::RecordAlreadyExists(msg) => write!(f, "Record already exists: {msg}"),
+            Self::ValidationError(msg) => write!(f, "Validation error: {msg}"),
         }
     }
 }

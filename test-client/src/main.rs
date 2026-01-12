@@ -18,7 +18,9 @@ use serde_json::json;
 use sha256::digest;
 
 use crate::{
-    admin_operations::{create_record, delete_record, list_records, read_record, update_record},
+    admin_operations::{
+        CommonCrudInput, create_record, delete_record, list_records, read_record, update_record,
+    },
     receivers::users_listener::user_listener,
     service_configs::load_user_config,
 };
@@ -58,20 +60,39 @@ async fn main() {
     let user_configs = match load_user_config() {
         Ok(uc) => uc,
         Err(err) => {
-            println!("Failed to get user config: {:#?}", err);
+            println!("Failed to get user config: {err:#?}");
             return;
         }
     };
 
-    // TODO: provide dids via envs
+    // Get Trust Registry DID: runtime env var or fallback to PROFILE_CONFIG from .env
     let trust_registry_did = std::env::var("TRUST_REGISTRY_DID")
-        .unwrap_or("did:peer:2.Vz6Mkjm4p8h47Q9faL3oTrEYLyo8RAAndAyR35oUHBudWZhR3.EzQ3sherFvK5Fp7gfM9etgWwqiKMiaYGA5KbbDQGj4C7APDRHi".to_string());
-    let mediator_did = std::env::var("MEDIATOR_DID").unwrap_or(
-        "did:web:afddf5a2-bb92-4b9d-a467-9f4b0a57e51f.atlas.dev.affinidi.io".to_string(),
-    );
-    let mediator_did = Arc::new(mediator_did);
+        .or_else(|_| {
+            std::env::var("PROFILE_CONFIG")
+                .and_then(|config| {
+                    config.parse::<serde_json::Value>()
+                        .map_err(|_| std::env::VarError::NotPresent)
+                        .and_then(|json| {
+                            json.get("did")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .ok_or(std::env::VarError::NotPresent)
+                        })
+                })
+        })
+        .expect("TRUST_REGISTRY_DID environment variable is not set, and PROFILE_CONFIG is either missing or does not contain a valid 'did' property.");
+
+    // Get Mediator DID from environment variable (runtime or .env file)
+    let mediator_did = std::env::var("MEDIATOR_DID")
+        .expect("MEDIATOR_DID environment variable is not set. Set it at runtime or in .env file.");
+
+    println!("\nTrust Registry DID: {trust_registry_did}");
+    println!("\nMediator DID: {mediator_did}");
+
+    // let mediator_did = mediator_did.clone();
+    println!("\nLoading test user configurations...");
     for (did, did_config) in user_configs {
-        let mediator_did_clone = Arc::clone(&mediator_did);
+        let mediator_did_clone = mediator_did.clone();
         let profile = TDKProfile::new(
             &did_config.alias,
             &did,
@@ -88,6 +109,8 @@ async fn main() {
         )
         .await
         .unwrap();
+        println!("\nAdding profile: {}", &did_config.alias);
+        println!("Profile DID: {}", &did);
         tdk.add_profile(&profile).await;
 
         let atm = Arc::new(tdk.atm.clone().unwrap());
@@ -102,23 +125,27 @@ async fn main() {
             .await
             .unwrap();
 
-        if did_config.alias.eq("Alice") {
-            println!("\nStarting Admin Operations Demo for Alice...\n");
+        // Ensure we only run admin operations for the admin DID
+        if did_config.alias.eq("SampleTRAdmin") {
+            println!("\nStarting Admin Operations Demo for SampleTRAdmin...\n");
             set_public_acls_mode(Arc::clone(&atm), Arc::clone(&profile))
                 .await
                 .unwrap();
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
             match create_record(
-                &atm,
-                profile.clone(),
-                &trust_registry_did,
-                &protocols,
-                &mediator_did,
-                "did:example:entity123",
-                "did:example:authority456",
-                "action_xyz",
-                "resource_abc",
+                CommonCrudInput {
+                    atm: Arc::clone(&atm),
+                    profile: Arc::clone(&profile),
+                    trust_registry_did: trust_registry_did.clone(),
+                    protocols: Arc::clone(&protocols),
+                    mediator_did: mediator_did.clone(),
+                    entity_id: "did:example:entity123".to_string(),
+                    authority_id: "did:example:authority456".to_string(),
+                    action: "action_xyz".to_string(),
+                    resource: "resource_abc".to_string(),
+                    record_type: "assertion".to_string(),
+                },
                 true,
                 true,
                 Some(json!({
@@ -129,41 +156,45 @@ async fn main() {
             )
             .await
             {
-                Ok(_) => println!("Create record completed"),
-                Err(err) => println!("Create record failed: {:#?}", err),
+                Ok(_) => println!("Create record request sent - awaiting response..."),
+                Err(err) => println!("Create record request failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-            match read_record(
-                &atm,
-                profile.clone(),
-                &trust_registry_did,
-                &protocols,
-                &mediator_did,
-                "did:example:entity123",
-                "did:example:authority456",
-                "action_xyz",
-                "resource_abc",
-            )
+            match read_record(CommonCrudInput {
+                atm: Arc::clone(&atm),
+                profile: Arc::clone(&profile),
+                trust_registry_did: trust_registry_did.clone(),
+                protocols: Arc::clone(&protocols),
+                mediator_did: mediator_did.clone(),
+                entity_id: "did:example:entity123".to_string(),
+                authority_id: "did:example:authority456".to_string(),
+                action: "action_xyz".to_string(),
+                resource: "resource_abc".to_string(),
+                record_type: "assertion".to_string(),
+            })
             .await
             {
-                Ok(_) => println!("Read record completed"),
-                Err(err) => println!("Read record failed: {:#?}", err),
+                Ok(_) => println!("Read record request sent - awaiting response..."),
+                Err(err) => println!("Read record request failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
             match update_record(
-                &atm,
-                profile.clone(),
-                &trust_registry_did,
-                &protocols,
-                &mediator_did,
-                "did:example:entity123",
-                "did:example:authority456",
-                "action_xyz",
-                "resource_abc",
+                CommonCrudInput {
+                    atm: Arc::clone(&atm),
+                    profile: Arc::clone(&profile),
+                    trust_registry_did: trust_registry_did.clone(),
+                    protocols: Arc::clone(&protocols),
+                    mediator_did: mediator_did.clone(),
+                    entity_id: "did:example:entity123".to_string(),
+                    authority_id: "did:example:authority456".to_string(),
+                    action: "action_xyz".to_string(),
+                    resource: "resource_abc".to_string(),
+                    record_type: "assertion".to_string(),
+                },
                 false,
                 true,
                 Some(json!({
@@ -174,8 +205,8 @@ async fn main() {
             )
             .await
             {
-                Ok(_) => println!("Update record completed"),
-                Err(err) => println!("Update record failed: {:#?}", err),
+                Ok(_) => println!("Update record request sent - awaiting response..."),
+                Err(err) => println!("Update record request failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -189,53 +220,60 @@ async fn main() {
             )
             .await
             {
-                Ok(_) => println!("List records completed"),
-                Err(err) => println!("List records failed: {:#?}", err),
+                Ok(_) => println!("List records request sent - awaiting response..."),
+                Err(err) => println!("List records request failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-            match delete_record(
-                &atm,
-                profile.clone(),
-                &trust_registry_did,
-                &protocols,
-                &mediator_did,
-                "did:example:entity123",
-                "did:example:authority456",
-                "action_xyz",
-                "resource_abc",
-            )
+            match delete_record(CommonCrudInput {
+                atm: Arc::clone(&atm),
+                profile: Arc::clone(&profile),
+                trust_registry_did: trust_registry_did.clone(),
+                protocols: Arc::clone(&protocols),
+                mediator_did: mediator_did.clone(),
+                entity_id: "did:example:entity123".to_string(),
+                authority_id: "did:example:authority456".to_string(),
+                action: "action_xyz".to_string(),
+                resource: "resource_abc".to_string(),
+                record_type: "assertion".to_string(),
+            })
             .await
             {
-                Ok(_) => println!("Delete record completed"),
-                Err(err) => println!("Delete record failed: {:#?}", err),
+                Ok(_) => println!("Delete record request sent - awaiting response..."),
+                Err(err) => println!("Delete record request failed: {err:#?}"),
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-            match read_record(
-                &atm,
-                profile.clone(),
-                &trust_registry_did,
-                &protocols,
-                &mediator_did,
-                "did:example:entity123",
-                "did:example:authority456",
-                "action_xyz",
-                "resource_abc",
-            )
+            match read_record(CommonCrudInput {
+                atm: Arc::clone(&atm),
+                profile: Arc::clone(&profile),
+                trust_registry_did: trust_registry_did.clone(),
+                protocols: Arc::clone(&protocols),
+                mediator_did: mediator_did.clone(),
+                entity_id: "did:example:entity123".to_string(),
+                authority_id: "did:example:authority456".to_string(),
+                action: "action_xyz".to_string(),
+                resource: "resource_abc".to_string(),
+                record_type: "assertion".to_string(),
+            })
             .await
             {
-                Ok(_) => println!("Read record (after delete) completed"),
-                Err(err) => println!("Read record (after delete) failed: {:#?}", err),
+                Ok(_) => println!("Read record (after delete) request sent - awaiting response..."),
+                Err(err) => println!("Read record (after delete) request failed: {err:#?}"),
             }
 
-            println!("\n{}", "=".repeat(60));
             println!("Admin Operations Demo completed!\n");
+            println!("\n{}", "=".repeat(60));
+        } else {
+            println!(
+                "\nUnable to find 'SampleTRAdmin' from the user_config.json file of the test-client.\n"
+            );
         }
 
-        if did_config.alias.eq("Alice") {
+        if did_config.alias.eq("SampleTRAdmin") {
+            println!("\nStart listening to responses from the Trust Registry...\n");
             user_listener(did_config, &atm_clone, protocols_clone, &profile).await;
         }
     }

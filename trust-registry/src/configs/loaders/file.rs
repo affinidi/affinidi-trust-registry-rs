@@ -1,7 +1,7 @@
 use std::fs;
 
 pub fn load(path: &str) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|e| format!("Failed to read file '{}': {}", path, e))
+    fs::read_to_string(path).map_err(|e| format!("Failed to read file '{path}': {e}"))
 }
 
 #[cfg(test)]

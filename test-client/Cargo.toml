@@ -2,11 +2,11 @@
 name = "test-client"
 version.workspace = true
 edition.workspace = true
-publish.workspace = true
 rust-version.workspace = true
 description.workspace = true
 readme.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 affinidi-tdk.workspace = true

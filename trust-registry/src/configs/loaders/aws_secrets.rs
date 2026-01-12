@@ -10,10 +10,10 @@ pub async fn load(secret_name: &str) -> Result<String, String> {
         .secret_id(secret_name)
         .send()
         .await
-        .map_err(|e| format!("Failed to get secret '{}': {}", secret_name, e))?;
+        .map_err(|e| format!("Failed to get secret '{secret_name}': {e}"))?;
 
     result
         .secret_string()
         .map(|s| s.to_string())
-        .ok_or_else(|| format!("Secret '{}' has no string value", secret_name))
+        .ok_or_else(|| format!("Secret '{secret_name}' has no string value"))
 }

@@ -8,6 +8,7 @@ const DEFAULT_REGION: &str = "ap-southeast-1";
 pub enum TrustStorageBackend {
     Csv,
     DynamoDb,
+    Redis,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -26,10 +27,17 @@ pub struct DynamoDbStorageConfig {
     pub endpoint_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RedisStorageConfig {
+    pub is_enabled: bool,
+    pub redis_url: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
     pub ddb_storage_config: DynamoDbStorageConfig,
     pub file_storage_config: FileStorageConfig,
+    pub redis_storage_config: RedisStorageConfig,
     pub storage_backend: TrustStorageBackend,
 }
 
@@ -37,6 +45,7 @@ fn load_storage_backend() -> TrustStorageBackend {
     let storage_backend_str = env_or("TR_STORAGE_BACKEND", "csv").to_lowercase();
     match storage_backend_str.as_str() {
         "dynamodb" | "ddb" => TrustStorageBackend::DynamoDb,
+        "redis" => TrustStorageBackend::Redis,
         _ => TrustStorageBackend::Csv,
     }
 }
@@ -79,12 +88,27 @@ impl Configs for DynamoDbStorageConfig {
 }
 
 #[async_trait::async_trait]
+impl Configs for RedisStorageConfig {
+    async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        if load_storage_backend() == TrustStorageBackend::Redis {
+            Ok(RedisStorageConfig {
+                is_enabled: true,
+                redis_url: required_env("REDIS_URL")?,
+            })
+        } else {
+            Ok(Default::default())
+        }
+    }
+}
+
+#[async_trait::async_trait]
 impl Configs for StorageConfig {
     async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let storage_backend = load_storage_backend();
         Ok(StorageConfig {
             ddb_storage_config: DynamoDbStorageConfig::load().await?,
             file_storage_config: FileStorageConfig::load().await?,
+            redis_storage_config: RedisStorageConfig::load().await?,
             storage_backend,
         })
     }

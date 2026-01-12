@@ -1,3 +1,6 @@
 [target.'cfg(coverage)']
 # Configuration for coverage builds
 rustflags = ["-C", "instrument-coverage"]
+
+[build]
+rustflags = ["--cfg", "tracing_unstable"]

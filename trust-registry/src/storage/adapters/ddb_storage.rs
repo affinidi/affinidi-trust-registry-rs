@@ -110,8 +110,7 @@ impl TrustRecordRepository for DynamoDbStorage {
             .await
             .map_err(|err| {
                 RepositoryError::ConnectionFailed(format!(
-                    "Failed to fetch item from DynamoDB: {}",
-                    err
+                    "Failed to fetch item from DynamoDB: {err}",
                 ))
             })?;
 
@@ -168,7 +167,7 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
                         record.resource()
                     ))
                 } else {
-                    RepositoryError::QueryFailed(format!("Failed to create record: {}", err))
+                    RepositoryError::QueryFailed(format!("Failed to create record: {err}"))
                 }
             })?;
 
@@ -216,7 +215,7 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
                         record.resource()
                     ))
                 } else {
-                    RepositoryError::QueryFailed(format!("Failed to update record: {}", err))
+                    RepositoryError::QueryFailed(format!("Failed to update record: {err}"))
                 }
             })?;
 
@@ -248,7 +247,7 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
                         query.entity_id, query.authority_id, query.action, query.resource
                     ))
                 } else {
-                    RepositoryError::QueryFailed(format!("Failed to delete record: {}", err))
+                    RepositoryError::QueryFailed(format!("Failed to delete record: {err}"))
                 }
             })?;
 
@@ -264,9 +263,7 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             .table_name(&self.table_name)
             .send()
             .await
-            .map_err(|err| {
-                RepositoryError::QueryFailed(format!("Failed to scan table: {}", err))
-            })?;
+            .map_err(|err| RepositoryError::QueryFailed(format!("Failed to scan table: {err}")))?;
 
         let items = response.items.unwrap_or_default();
         let mut records = Vec::with_capacity(items.len());
@@ -300,8 +297,7 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             .await
             .map_err(|err| {
                 RepositoryError::ConnectionFailed(format!(
-                    "Failed to fetch item from DynamoDB: {}",
-                    err
+                    "Failed to fetch item from DynamoDB: {err}",
                 ))
             })?;
 

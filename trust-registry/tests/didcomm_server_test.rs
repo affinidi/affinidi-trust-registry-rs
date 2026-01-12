@@ -14,7 +14,7 @@ async fn test_start_server() {
         }
     }
     unsafe {
-        std::env::set_var("LISTEN_ADDRESS", "0.0.0.0:3232");
+        std::env::set_var("LISTEN_ADDRESS", "0.0.0.0:3234");
     }
     let result = timeout(Duration::from_secs(10), trust_registry::server::start()).await;
 

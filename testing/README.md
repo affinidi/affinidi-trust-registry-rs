@@ -18,6 +18,12 @@ TR_STORAGE_BACKEND=csv
 TR_STORAGE_BACKEND=ddb
 ```
 
+**Redis Storage:**
+
+```bash
+TR_STORAGE_BACKEND=redis
+```
+
 ## Option 1: Run Tests Using Testing Script
 
 If you have not setup your environment, please refer to [Setup Environment](../README.md#set-up-environment)

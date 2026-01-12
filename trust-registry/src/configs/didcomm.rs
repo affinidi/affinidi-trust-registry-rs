@@ -1,4 +1,6 @@
-use affinidi_tdk::secrets_resolver::secrets::Secret;
+use affinidi_tdk::{
+    messaging::protocols::mediator::acls::AccessListModeType, secrets_resolver::secrets::Secret,
+};
 use serde_derive::{Deserialize, Serialize};
 use std::fmt;
 use tracing::warn;
@@ -34,7 +36,7 @@ impl std::str::FromStr for AuditLogFormat {
         match s.to_lowercase().as_str() {
             "text" => Ok(Self::Text),
             "json" => Ok(Self::Json),
-            _ => Err(format!("Invalid audit log format: {}", s)),
+            _ => Err(format!("Invalid audit log format: {s}")),
         }
     }
 }
@@ -60,6 +62,7 @@ pub struct AdminConfig {
 #[derive(Debug, Clone, Default)]
 pub struct DidcommConfig {
     pub is_enabled: bool,
+    pub acl_mode: AccessListModeType,
     pub profile_config: ProfileConfig,
     pub mediator_did: String,
     pub did_document: String,
@@ -80,6 +83,12 @@ impl Configs for DidcommConfig {
         if enable_didcomm != "true" {
             return Ok(Default::default());
         }
+        let acl_mode_raw = env_or("ACL_MODE", "ExplicitDeny");
+        let acl_mode = if acl_mode_raw == "ExplicitAllow" {
+            AccessListModeType::ExplicitAllow
+        } else {
+            AccessListModeType::ExplicitDeny
+        };
 
         let admin_dids_str = optional_env("ADMIN_DIDS").unwrap_or_else(|| {
             warn!("Missing environment variable: ADMIN_DIDS. The admin list is empty");
@@ -113,6 +122,7 @@ impl Configs for DidcommConfig {
 
         Ok(DidcommConfig {
             is_enabled: true,
+            acl_mode,
             mediator_did,
             profile_config,
             did_document,

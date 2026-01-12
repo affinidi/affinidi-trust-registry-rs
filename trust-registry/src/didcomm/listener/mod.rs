@@ -71,18 +71,18 @@ pub(crate) async fn start_one_did_listener(
     .unwrap();
 
     info!(
-        "[profile = {}] Listener started",
+        "[profile = {}] Listener built",
         &listener.profile.inner.alias
     );
 
     Arc::new(listener)
-        .start_listening()
+        .start_listening(config)
         .await
         .map_err(|e| {
             error!("Start listener error: {:?}", e);
             e
         })
-        .unwrap()
+        .unwrap();
 }
 
 /// starts DIDComm listener for the configured DID profile
