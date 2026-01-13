@@ -282,11 +282,11 @@ mod tests {
 
     async fn cleanup_test_data(storage: &RedisStorage) {
         let mut conn = storage.connection.write().await;
-        
+
         // Only delete keys that match the test pattern
         let test_key_pattern = format!("{}*", TEST_DID_PREFIX);
         let keys: Result<Vec<String>, _> = conn.keys(&test_key_pattern).await;
-        
+
         if let Ok(keys) = keys {
             for key in keys {
                 let _: Result<(), _> = conn.del(&key).await;

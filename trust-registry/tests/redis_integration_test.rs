@@ -1,9 +1,9 @@
+use serial_test::serial;
 use std::str::FromStr;
 use trust_registry::{
     domain::*,
     storage::{adapters::redis_storage::RedisStorage, repository::*},
 };
-use serial_test::serial;
 
 async fn get_test_storage() -> Option<RedisStorage> {
     // Use a test Redis instance, skip if not available
