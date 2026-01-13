@@ -243,7 +243,11 @@ impl TrustRecordAdminRepository for RedisStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::str::FromStr;
+
+    // Constant pattern for test DIDs to isolate test data
+    const TEST_DID_PREFIX: &str = "did:example:";
 
     fn create_test_record(
         entity: &str,
@@ -278,10 +282,20 @@ mod tests {
 
     async fn cleanup_test_data(storage: &RedisStorage) {
         let mut conn = storage.connection.write().await;
-        let _: Result<(), _> = redis::cmd("FLUSHDB").query_async(&mut *conn).await;
+        
+        // Only delete keys that match the test pattern
+        let test_key_pattern = format!("{}*", TEST_DID_PREFIX);
+        let keys: Result<Vec<String>, _> = conn.keys(&test_key_pattern).await;
+        
+        if let Ok(keys) = keys {
+            for key in keys {
+                let _: Result<(), _> = conn.del(&key).await;
+            }
+        }
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_create_and_read_record() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -316,6 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_create_duplicate_fails() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -344,6 +359,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_update_record() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -389,6 +405,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_delete_record() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -424,6 +441,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_list_records() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -460,6 +478,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_find_by_query() {
         let Some(storage) = get_test_storage().await else {
             return;

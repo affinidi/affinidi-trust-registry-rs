@@ -3,6 +3,7 @@ use trust_registry::{
     domain::*,
     storage::{adapters::redis_storage::RedisStorage, repository::*},
 };
+use serial_test::serial;
 
 async fn get_test_storage() -> Option<RedisStorage> {
     // Use a test Redis instance, skip if not available
@@ -52,6 +53,7 @@ fn create_test_record(
 }
 
 #[tokio::test]
+#[serial]
 async fn test_redis_create_record() {
     let Some(storage) = get_test_storage().await else {
         return;
@@ -85,6 +87,7 @@ async fn test_redis_create_record() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_redis_read_record() {
     let Some(storage) = get_test_storage().await else {
         return;
@@ -123,6 +126,7 @@ async fn test_redis_read_record() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_redis_update_record() {
     let Some(storage) = get_test_storage().await else {
         return;
@@ -170,6 +174,7 @@ async fn test_redis_update_record() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_redis_delete_record() {
     let Some(storage) = get_test_storage().await else {
         return;
@@ -211,6 +216,7 @@ async fn test_redis_delete_record() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_redis_list_records() {
     let Some(storage) = get_test_storage().await else {
         return;
@@ -258,6 +264,7 @@ async fn test_redis_list_records() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_redis_find_by_query_success() {
     let Some(storage) = get_test_storage().await else {
         return;
@@ -297,6 +304,7 @@ async fn test_redis_find_by_query_success() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_redis_find_by_query_not_found() {
     let Some(storage) = get_test_storage().await else {
         return;
@@ -320,6 +328,7 @@ async fn test_redis_find_by_query_not_found() {
 // Error handling tests - one per error scenario
 
 #[tokio::test]
+#[serial]
 async fn test_redis_create_duplicate_record_error() {
     let Some(storage) = get_test_storage().await else {
         return;
@@ -351,6 +360,7 @@ async fn test_redis_create_duplicate_record_error() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_redis_update_nonexistent_record_error() {
     let Some(storage) = get_test_storage().await else {
         return;
@@ -378,6 +388,7 @@ async fn test_redis_update_nonexistent_record_error() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_redis_delete_nonexistent_record_error() {
     let Some(storage) = get_test_storage().await else {
         return;
@@ -402,6 +413,7 @@ async fn test_redis_delete_nonexistent_record_error() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_redis_read_nonexistent_record_error() {
     let Some(storage) = get_test_storage().await else {
         return;
@@ -428,6 +440,7 @@ async fn test_redis_read_nonexistent_record_error() {
 // Comprehensive workflow test validating the complete CRUD flow
 
 #[tokio::test]
+#[serial]
 async fn test_redis_complete_crud_workflow() {
     let Some(storage) = get_test_storage().await else {
         return;
@@ -526,6 +539,7 @@ async fn test_redis_complete_crud_workflow() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_redis_context_serialization() {
     let Some(storage) = get_test_storage().await else {
         return;
