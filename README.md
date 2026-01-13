@@ -14,6 +14,7 @@ A high-performance, Rust-based implementation of a Trust Registry, fully complia
 - [Requirements](#requirements)
 - [Set up Trust Registry](#set-up-trust-registry)
   - [Run with DIDComm Enabled](#run-with-didcomm-enabled)
+  - [Run with DIDComm Enabled In Private Mode](#run-with-didcomm-enabled-in-private-mode)
   - [Run with DIDComm Disabled](#run-with-didcomm-disabled)
 - [Run Trust Registry on Docker](#run-trust-registry-on-docker)
 - [Using Redis as Storage Backend](#using-redis-as-storage-backend)
@@ -159,17 +160,27 @@ The command generates the following:
 - Configures the appropriate DIDComm mediator ACLs for the Trust Registry and test user DIDs.
 - Populates the environment variables with default values, such as Storage Backend (`csv`) and audit log format (`json`).
 
-#### Run with DIDComm Enabled for Admin Operations Only
+### Run with DIDComm Enabled In Private Mode
 
-To enable DIDComm for admin operations only, set the `--only-admin-operations=true` option:
+By default, the Trust Registry runs in **public mode** (`ACL_MODE=ExplicitDeny`), which accepts messages from any DID. To enable **private mode** where only pre-authorized DIDs can send messages to the Trust Registry, use the `--acl-mode=ExplicitAllow` option:
 
 ```bash
 cargo run --bin setup-trust-registry --features="dev-tools" -- \
  --mediator-did=<MEDIATOR_DID> \
- --only-admin-operations=true
+ --acl-mode=ExplicitAllow
 ```
 
-This option ensures that the Trust Registry (TR) starts with **Explicit Allow** mode. In this mode, it only allows the admin DIDs specified in the environment file to send messages to perform administrative operations, such as creating, updating, and deleting trust records. **Querying using TRQP is not accepted in this configuration**.
+**With this setup command:**
+
+- Sets the Trust Registry ACL mode to `ExplicitAllow` (private mode).
+- Only DIDs in the mediator's allow list for the Trust Registry can send messages (configured via the mediator ACLs during setup).
+- Denies all other DIDs, enhancing security for sensitive deployments.
+
+**Use cases for private mode:**
+
+- Production environments that require strict access control.
+- Scenarios where only specific administrators should manage trust records.
+- Compliance requirements that demand explicit authorisation.
 
 After successful setup, it displays the command to run the Trust Registry.
 

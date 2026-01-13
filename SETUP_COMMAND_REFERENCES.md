@@ -155,12 +155,17 @@ Trust Registry audit log output format.
 **Expected Value:** `json` | `text`  
 **Default:** `json`
 
-#### `--only-admin-operations`, `-x`
+#### `--acl-mode`, `-x`
 
-Enable only admin operations via DIDComm. When enabled, the Trust Registry will only accept admin operations and skip general DIDComm message handling.
+ACL (Access Control List) mode for the Trust Registry when DIDComm is enabled. This controls how the Trust Registry handles incoming connections and messages.
 
-**Expected Value:** `true` | `false`  
-**Default:** `false`
+**Expected Values:**
+- `ExplicitDeny` - Public mode: Allows connections from all DIDs unless explicitly denied. The Trust Registry accepts messages from any DID.
+- `ExplicitAllow` - Private mode: Only allows connections from explicitly approved DIDs. The Trust Registry only accepts messages from pre-authorized DIDs.
+
+**Default:** `ExplicitDeny`
+
+**Note:** This setting is only relevant when `--mediator-did` is specified (DIDComm enabled).
 
 ## Common Usage Examples
 
