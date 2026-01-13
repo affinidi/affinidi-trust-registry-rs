@@ -25,8 +25,8 @@ echo "Using TR_STORAGE_BACKEND=$TR_STORAGE_BACKEND"
 # echo "Using PROFILE_CONFIG=$PROFILE_CONFIG"
 
 if [ ! -f .env.test ]; then
-    echo ".env.test not found. Please run the following command to generate credentials:"
-    echo "  cargo run --bin generate-secrets --features dev-tools -p trust-registry"
+    echo ".env.test not found. Please run the following command to set up the Trust Registry:"
+    echo "  cargo run --bin setup-trust-registry --features dev-tools"
     exit 1
 fi
 source .env.test
