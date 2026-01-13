@@ -8,11 +8,12 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{error, info};
 
@@ -62,11 +63,11 @@ impl FileStorage {
             })?;
 
         {
-            let mut guard = records.write().unwrap();
+            let mut guard = records.write().await;
             *guard = initial_records;
         }
         {
-            let mut guard = last_modified.write().unwrap();
+            let mut guard = last_modified.write().await;
             *guard = Some(modified);
         }
 
@@ -94,16 +95,16 @@ impl FileStorage {
 
                 info!(path = %file_path.display(), "Syncing trust records from file");
 
-                let previous = { *last_modified.read().unwrap() };
+                let previous = { *last_modified.read().await };
 
                 match Self::load_if_modified(&file_path, previous).await {
                     Ok(Some((new_records, modified))) => {
                         {
-                            let mut guard = records.write().unwrap();
+                            let mut guard = records.write().await;
                             *guard = new_records;
                         }
                         {
-                            let mut guard = last_modified.write().unwrap();
+                            let mut guard = last_modified.write().await;
                             *guard = Some(modified);
                         }
                     }
@@ -182,7 +183,7 @@ impl FileStorage {
 
     async fn write_to_file(&self) -> Result<(), RepositoryError> {
         let records_clone = {
-            let records = self.records.read().unwrap();
+            let records = self.records.read().await;
             records.values().cloned().collect::<Vec<_>>()
         };
 
@@ -213,7 +214,7 @@ impl FileStorage {
             RepositoryError::QueryFailed(format!("Failed to get modified time: {e}"))
         })?;
 
-        let mut guard = self.last_modified.write().unwrap();
+        let mut guard = self.last_modified.write().await;
         *guard = Some(modified);
 
         Ok(())
@@ -228,7 +229,7 @@ impl TrustRecordRepository for FileStorage {
     ) -> Result<Option<TrustRecord>, RepositoryError> {
         let records = Arc::clone(&self.records);
 
-        let guard = records.read().unwrap();
+        let guard = records.read().await;
         let result = guard
             .values()
             .find(|&record| FileStorage::matches_query(record, &query))
@@ -243,14 +244,10 @@ impl TrustRecordAdminRepository for FileStorage {
     async fn create(&self, record: TrustRecord) -> Result<(), RepositoryError> {
         let key = RecordKey::from_record(&record);
         {
-            let mut records = self.records.write().unwrap();
+            let mut records = self.records.write().await;
             if records.contains_key(&key) {
                 return Err(RepositoryError::RecordAlreadyExists(format!(
-                    "Record already exists: {}|{}|{}|{}",
-                    record.entity_id(),
-                    record.authority_id(),
-                    record.action(),
-                    record.resource(),
+                    "Record already exists: {record}"
                 )));
             }
             records.insert(key, record);
@@ -261,14 +258,10 @@ impl TrustRecordAdminRepository for FileStorage {
     async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError> {
         let key = RecordKey::from_record(&record);
         {
-            let mut records = self.records.write().unwrap();
+            let mut records = self.records.write().await;
             if !records.contains_key(&key) {
                 return Err(RepositoryError::RecordNotFound(format!(
-                    "Record not found: {}|{}|{}|{}",
-                    record.entity_id(),
-                    record.authority_id(),
-                    record.action(),
-                    record.resource()
+                    "Record not found: {record}"
                 )));
             }
             records.insert(key, record);
@@ -284,7 +277,7 @@ impl TrustRecordAdminRepository for FileStorage {
             resource: query.resource.clone(),
         };
         {
-            let mut records = self.records.write().unwrap();
+            let mut records = self.records.write().await;
             if records.remove(&key).is_none() {
                 return Err(RepositoryError::RecordNotFound(format!(
                     "Record not found: {}|{}|{}|{}",
@@ -296,13 +289,13 @@ impl TrustRecordAdminRepository for FileStorage {
     }
 
     async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
-        let records = self.records.read().unwrap();
+        let records = self.records.read().await;
         let records_vec: Vec<TrustRecord> = records.values().cloned().collect();
         Ok(TrustRecordList::new(records_vec))
     }
 
     async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
-        let records = self.records.read().unwrap();
+        let records = self.records.read().await;
         let result = records
             .values()
             .find(|&record| FileStorage::matches_query(record, &query))

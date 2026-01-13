@@ -7,7 +7,7 @@ use affinidi_tdk::{
 use serde_json::Value;
 use tracing::{error, info};
 
-use crate::didcomm::new_message_id;
+use crate::didcomm::{error::DIDCommError, new_message_id};
 
 use super::problem_report::ProblemReport;
 
@@ -58,7 +58,7 @@ pub async fn send_response(
     recipient: &str,
     thid: Option<String>,
     pthid: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), DIDCommError> {
     let response_message = build_response(
         message_type,
         profile.inner.did.clone(),
@@ -86,7 +86,10 @@ pub async fn send_response(
             false,
             &packed_msg.0,
             Some(&message_id),
-            &profile.to_tdk_profile().mediator.unwrap(),
+            &profile
+                .to_tdk_profile()
+                .mediator
+                .ok_or(DIDCommError::MissingMediator)?,
             recipient,
             None,
             None,

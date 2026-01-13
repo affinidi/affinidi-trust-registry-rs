@@ -182,6 +182,16 @@ pub struct TrustRecord {
     record_type: RecordType,
 }
 
+impl fmt::Display for TrustRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}|{}|{}|{}",
+            self.entity_id, self.authority_id, self.action, self.resource
+        )
+    }
+}
+
 impl TrustRecord {
     #[allow(clippy::too_many_arguments)]
     pub fn new(

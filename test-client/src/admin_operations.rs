@@ -195,7 +195,11 @@ async fn send_admin_message(
             false,
             &packed_msg.0,
             Some(&message_id),
-            &profile.to_tdk_profile().mediator.unwrap(),
+            profile
+                .to_tdk_profile()
+                .mediator
+                .as_ref()
+                .ok_or(anyhow::anyhow!("Missing mediator"))?,
             trust_registry_did,
             None,
             None,

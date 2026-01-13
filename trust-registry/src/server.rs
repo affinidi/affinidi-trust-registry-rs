@@ -33,7 +33,7 @@ async fn start_didcomm_server(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    start_didcomm_listener(config, repository).await?;
+    let _ = start_didcomm_listener(config, repository).await?;
 
     Ok(())
 }

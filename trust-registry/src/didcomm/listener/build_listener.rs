@@ -7,6 +7,7 @@ use affinidi_tdk::{
 };
 use tokio::time::timeout;
 
+use crate::didcomm::error::DIDCommError;
 use crate::{
     configs::ProfileConfig,
     didcomm::listener::{Listener, MessageHandler},
@@ -17,7 +18,7 @@ impl<H: MessageHandler> Listener<H> {
         profile_config: ProfileConfig,
         mediator_did: &str,
         handler: H,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, DIDCommError> {
         let alias = &profile_config.alias;
         let did = &profile_config.did;
         let secrets = profile_config.secrets;
@@ -33,7 +34,7 @@ impl<H: MessageHandler> Listener<H> {
 
         tdk.add_profile(&listener_profile_tdk).await;
 
-        let atm = tdk.atm.clone().ok_or("Value is missing")?;
+        let atm = tdk.atm.clone().ok_or(DIDCommError::MissingATM)?;
 
         let listener_profile = timeout(
             Duration::from_secs(10),

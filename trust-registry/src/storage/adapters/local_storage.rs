@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use crate::domain::*;
@@ -10,6 +12,16 @@ struct RecordKey {
     authority_id: AuthorityId,
     action: Action,
     resource: Resource,
+}
+
+impl fmt::Display for RecordKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}|{}|{}|{}",
+            self.entity_id, self.authority_id, self.action, self.resource
+        )
+    }
 }
 
 impl RecordKey {
@@ -35,27 +47,41 @@ impl LocalStorage {
         }
     }
 
-    pub async fn save(&self, record: TrustRecord) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn save(&self, record: TrustRecord) -> Result<(), RepositoryError> {
         let key = RecordKey::from_record(&record);
-        let mut records = self.records.write().unwrap();
-        if records.contains_key(&key) {
-            return Err(anyhow::anyhow!("Record with the same keys already exists").into());
+        let mut records = self
+            .records
+            .write()
+            .map_err(|_| RepositoryError::LockPoisoned)?;
+
+        match records.entry(key.clone()) {
+            Entry::Occupied(e) => Err(RepositoryError::RecordAlreadyExists(e.key().to_string())),
+            Entry::Vacant(_) => {
+                records.insert(key, record);
+                Ok(())
+            }
         }
-        records.insert(key, record);
-        Ok(())
     }
 
-    pub fn with_records(records: Vec<TrustRecord>) -> Self {
+    pub fn with_records(records: Vec<TrustRecord>) -> Result<Self, RepositoryError> {
         let storage = Self::new();
         for record in records {
             let key = RecordKey::from_record(&record);
-            storage.records.write().unwrap().insert(key, record);
+            storage
+                .records
+                .write()
+                .map_err(|_| RepositoryError::LockPoisoned)?
+                .insert(key, record);
         }
-        storage
+        Ok(storage)
     }
 
-    pub fn clear(&self) {
-        self.records.write().unwrap().clear();
+    pub fn clear(&self) -> Result<(), RepositoryError> {
+        self.records
+            .write()
+            .map_err(|_| RepositoryError::LockPoisoned)?
+            .clear();
+        Ok(())
     }
 
     fn matches_query(record: &TrustRecord, query: &TrustRecordQuery) -> bool {
@@ -78,7 +104,10 @@ impl TrustRecordRepository for LocalStorage {
         &self,
         query: TrustRecordQuery,
     ) -> Result<Option<TrustRecord>, RepositoryError> {
-        let records = self.records.read().unwrap();
+        let records = self
+            .records
+            .read()
+            .map_err(|_| RepositoryError::LockPoisoned)?;
         let result = records
             .values()
             .find(|&record| Self::matches_query(record, &query))
@@ -91,7 +120,10 @@ impl TrustRecordRepository for LocalStorage {
 impl TrustRecordAdminRepository for LocalStorage {
     async fn create(&self, record: TrustRecord) -> Result<(), RepositoryError> {
         let key = RecordKey::from_record(&record);
-        let mut records = self.records.write().unwrap();
+        let mut records = self
+            .records
+            .write()
+            .map_err(|_| RepositoryError::LockPoisoned)?;
         if records.contains_key(&key) {
             return Err(RepositoryError::RecordAlreadyExists(format!(
                 "Record already exists: {}|{}|{}|{}",
@@ -107,7 +139,10 @@ impl TrustRecordAdminRepository for LocalStorage {
 
     async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError> {
         let key = RecordKey::from_record(&record);
-        let mut records = self.records.write().unwrap();
+        let mut records = self
+            .records
+            .write()
+            .map_err(|_| RepositoryError::LockPoisoned)?;
         if !records.contains_key(&key) {
             return Err(RepositoryError::RecordNotFound(format!(
                 "Record not found: {}|{}|{}|{}",
@@ -128,7 +163,10 @@ impl TrustRecordAdminRepository for LocalStorage {
             action: query.action.clone(),
             resource: query.resource.clone(),
         };
-        let mut records = self.records.write().unwrap();
+        let mut records = self
+            .records
+            .write()
+            .map_err(|_| RepositoryError::LockPoisoned)?;
         if records.remove(&key).is_none() {
             return Err(RepositoryError::RecordNotFound(format!(
                 "Record not found: {}|{}|{}|{}",
@@ -139,13 +177,19 @@ impl TrustRecordAdminRepository for LocalStorage {
     }
 
     async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
-        let records = self.records.read().unwrap();
+        let records = self
+            .records
+            .read()
+            .map_err(|_| RepositoryError::LockPoisoned)?;
         let records_vec: Vec<TrustRecord> = records.values().cloned().collect();
         Ok(TrustRecordList::new(records_vec))
     }
 
     async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
-        let records = self.records.read().unwrap();
+        let records = self
+            .records
+            .read()
+            .map_err(|_| RepositoryError::LockPoisoned)?;
         let result = records
             .values()
             .find(|&record| Self::matches_query(record, &query))
@@ -208,7 +252,8 @@ mod tests {
                 false,
                 "recognition",
             ),
-        ]);
+        ])
+        .unwrap();
 
         let query = TrustRecordQuery::new(
             EntityId::new("entity-1"),

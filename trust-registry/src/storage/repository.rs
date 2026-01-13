@@ -1,6 +1,5 @@
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::domain::*;
 
@@ -57,30 +56,23 @@ impl TrustRecordQuery {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RepositoryError {
+    #[error("Connection failed: {0}")]
     ConnectionFailed(String),
+    #[error("Query failed: {0}")]
     QueryFailed(String),
+    #[error("Serialization failed: {0}")]
     SerializationFailed(String),
+    #[error("Record not found: {0}")]
     RecordNotFound(String),
+    #[error("Record already exists: {0}")]
     RecordAlreadyExists(String),
+    #[error("Validation error: {0}")]
     ValidationError(String),
+    #[error("Lock poisoned")]
+    LockPoisoned,
 }
-
-impl fmt::Display for RepositoryError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ConnectionFailed(msg) => write!(f, "Connection failed: {msg}"),
-            Self::QueryFailed(msg) => write!(f, "Query failed: {msg}"),
-            Self::SerializationFailed(msg) => write!(f, "Serialization failed: {msg}"),
-            Self::RecordNotFound(msg) => write!(f, "Record not found: {msg}"),
-            Self::RecordAlreadyExists(msg) => write!(f, "Record already exists: {msg}"),
-            Self::ValidationError(msg) => write!(f, "Validation error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for RepositoryError {}
 
 /// Read-only repository trait for querying trust records
 #[async_trait::async_trait]

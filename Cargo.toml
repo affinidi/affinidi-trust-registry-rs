@@ -33,6 +33,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 ] }
 tempfile = "3.23"
 serde = "1.0.228"
+thiserror = "2.0"
 serde_derive = { version = "1.0" }
 serde_json = { version = "1.0" }
 sha256 = "1.6"
@@ -52,3 +53,7 @@ redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 reqwest = { version = "0.12", features = ["json"] }
 serial_test = "3.2.0"
 tower = { version = "0.5", features = ["util"] }
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

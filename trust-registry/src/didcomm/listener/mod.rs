@@ -1,7 +1,7 @@
+use crate::didcomm::error::DIDCommError;
 use crate::storage::repository::TrustRecordAdminRepository;
 use std::sync::Arc;
 use tokio::task::JoinError;
-use tracing::error;
 
 use affinidi_tdk::didcomm::{Message, UnpackMetadata};
 use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
@@ -57,39 +57,28 @@ pub(crate) async fn start_one_did_listener(
     profile_config: ProfileConfig,
     config: Arc<DidcommConfig>,
     repository: Arc<dyn TrustRecordAdminRepository>,
-) {
+) -> Result<(), DIDCommError> {
     let listener = Listener::build_listener(
         profile_config,
         &config.mediator_did,
         BaseHandler::build_from_arc(repository, config.clone()),
     )
-    .await
-    .map_err(|e| {
-        error!("Build listener error: {:?}", e);
-        e
-    })
-    .unwrap();
+    .await?;
 
     info!(
         "[profile = {}] Listener built",
         &listener.profile.inner.alias
     );
 
-    Arc::new(listener)
-        .start_listening(config)
-        .await
-        .map_err(|e| {
-            error!("Start listener error: {:?}", e);
-            e
-        })
-        .unwrap();
+    Arc::new(listener).start_listening(config).await?;
+    Ok(())
 }
 
 /// starts DIDComm listener for the configured DID profile
 pub(crate) async fn start_didcomm_listener(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
-) -> Result<(), JoinError> {
+) -> Result<Result<(), DIDCommError>, JoinError> {
     let profile_config = config.profile_config.clone();
     let config = Arc::new(config);
 

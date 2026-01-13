@@ -13,3 +13,6 @@ repository.workspace = true
 publish = true
 
 [dependencies]
+
+[lints]
+workspace = true

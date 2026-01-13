@@ -11,6 +11,7 @@ use tracing::error;
 use uuid::Uuid;
 
 pub mod did_document;
+pub mod error;
 pub mod handlers;
 pub mod listener;
 pub mod problem_report;

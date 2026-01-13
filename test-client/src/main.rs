@@ -1,3 +1,4 @@
+use anyhow::Result;
 use std::sync::Arc;
 
 use affinidi_tdk::{
@@ -31,15 +32,12 @@ pub mod receivers;
 pub mod sender;
 pub mod service_configs;
 
-async fn set_public_acls_mode(
-    atm: Arc<ATM>,
-    profile: Arc<ATMProfile>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn set_public_acls_mode(atm: Arc<ATM>, profile: Arc<ATMProfile>) -> Result<()> {
     let protocols = Protocols::new();
 
     let account_get_result = protocols.mediator.account_get(&atm, &profile, None).await;
 
-    let account_info = account_get_result?.ok_or(format!(
+    let account_info = account_get_result?.ok_or(anyhow::anyhow!(
         "[profile = {}] Failed to get account info",
         &profile.inner.alias
     ))?;
@@ -54,18 +52,19 @@ async fn set_public_acls_mode(
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     dotenv().ok();
     let protocols = Arc::new(Protocols::new());
     let user_configs = match load_user_config() {
         Ok(uc) => uc,
         Err(err) => {
             println!("Failed to get user config: {err:#?}");
-            return;
+            return Ok(());
         }
     };
 
     // Get Trust Registry DID: runtime env var or fallback to PROFILE_CONFIG from .env
+    #[allow(clippy::expect_used)]
     let trust_registry_did = std::env::var("TRUST_REGISTRY_DID")
         .or_else(|_| {
             std::env::var("PROFILE_CONFIG")
@@ -83,6 +82,7 @@ async fn main() {
         .expect("TRUST_REGISTRY_DID environment variable is not set, and PROFILE_CONFIG is either missing or does not contain a valid 'did' property.");
 
     // Get Mediator DID from environment variable (runtime or .env file)
+    #[allow(clippy::expect_used)]
     let mediator_did = std::env::var("MEDIATOR_DID")
         .expect("MEDIATOR_DID environment variable is not set. Set it at runtime or in .env file.");
 
@@ -101,36 +101,30 @@ async fn main() {
         );
 
         let tdk = TDK::new(
-            TDKConfig::builder()
-                .with_load_environment(false)
-                .build()
-                .unwrap(),
+            TDKConfig::builder().with_load_environment(false).build()?,
             None,
         )
-        .await
-        .unwrap();
+        .await?;
         println!("\nAdding profile: {}", &did_config.alias);
         println!("Profile DID: {}", &did);
         tdk.add_profile(&profile).await;
 
-        let atm = Arc::new(tdk.atm.clone().unwrap());
+        let atm = Arc::new(
+            tdk.atm
+                .clone()
+                .ok_or(anyhow::anyhow!("Failed to initialize ATM client"))?,
+        );
         let atm_clone = Arc::clone(&atm);
         let protocols_clone = Arc::clone(&protocols);
 
         let profile = atm
-            .profile_add(
-                &ATMProfile::from_tdk_profile(&atm, &profile).await.unwrap(),
-                true,
-            )
-            .await
-            .unwrap();
+            .profile_add(&ATMProfile::from_tdk_profile(&atm, &profile).await?, true)
+            .await?;
 
         // Ensure we only run admin operations for the admin DID
         if did_config.alias.eq("SampleTRAdmin") {
             println!("\nStarting Admin Operations Demo for SampleTRAdmin...\n");
-            set_public_acls_mode(Arc::clone(&atm), Arc::clone(&profile))
-                .await
-                .unwrap();
+            set_public_acls_mode(Arc::clone(&atm), Arc::clone(&profile)).await?;
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
             match create_record(
@@ -277,4 +271,5 @@ async fn main() {
             user_listener(did_config, &atm_clone, protocols_clone, &profile).await;
         }
     }
+    Ok(())
 }

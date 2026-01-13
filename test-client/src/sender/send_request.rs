@@ -20,7 +20,8 @@ pub async fn send_request(
         &body.to_string(),
         message_type,
         None,
-    );
+    )
+    .map_err(|e| ATMError::MsgSendError(e.to_string()))?;
 
     let packed_msg = atm
         .pack_encrypted(

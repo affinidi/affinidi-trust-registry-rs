@@ -4,6 +4,8 @@ use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
 use serde_json::json;
 use tracing::{error, info};
 
+use crate::didcomm::error::DIDCommError;
+
 use super::transport;
 
 pub mod codes {
@@ -117,7 +119,10 @@ pub async fn send_problem_report(
             false,
             &packed_msg.0,
             Some(&message_id),
-            &profile.to_tdk_profile().mediator.unwrap(),
+            &profile
+                .to_tdk_profile()
+                .mediator
+                .ok_or(DIDCommError::MissingMediator)?,
             recipient,
             None,
             None,

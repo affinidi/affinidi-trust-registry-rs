@@ -1,4 +1,5 @@
 use affinidi_tdk::didcomm::Message;
+use anyhow::Result;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -9,13 +10,10 @@ pub fn build_message(
     body: &str,
     message_type: String,
     msg_id: Option<String>,
-) -> Message {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+) -> Result<Message> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let id = msg_id.unwrap_or(Uuid::new_v4().into());
-    let m = Message::build(id, message_type, serde_json::from_str(body).unwrap())
+    let m = Message::build(id, message_type, serde_json::from_str(body)?)
         .to(service_did)
         .from(issuer_profile_did)
         .created_time(now)
@@ -25,5 +23,5 @@ pub fn build_message(
     println!("---  MESSAGE: '{}' ---", &m.type_);
     println!("{:?}", serde_json::to_string(&m));
     println!("------");
-    m
+    Ok(m)
 }

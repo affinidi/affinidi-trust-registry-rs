@@ -5548,6 +5548,7 @@ name = "test-client"
 version = "0.1.0"
 dependencies = [
  "affinidi-tdk",
+ "anyhow",
  "async-trait",
  "axum",
  "axum-server",
@@ -5990,6 +5991,7 @@ dependencies = [
  "serial_test",
  "sha256",
  "tempfile",
+ "thiserror 2.0.17",
  "tokio",
  "tower 0.5.2",
  "tower-http",

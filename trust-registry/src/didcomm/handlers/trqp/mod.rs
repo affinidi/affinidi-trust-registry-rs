@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::storage::repository::{TrustRecordQuery, TrustRecordRepository};
+use crate::{
+    didcomm::error::DIDCommError,
+    storage::repository::{TrustRecordQuery, TrustRecordRepository},
+};
 use affinidi_tdk::didcomm::{Message, UnpackMetadata};
 use async_trait::async_trait;
 use serde_json::json;
@@ -69,7 +72,11 @@ impl<R: ?Sized + TrustRecordRepository + 'static> ProtocolHandler for TRQPMessag
                 false,
                 &packed_msg.0,
                 Some(&message_id),
-                &ctx.profile.to_tdk_profile().mediator.unwrap(),
+                ctx.profile
+                    .to_tdk_profile()
+                    .mediator
+                    .as_ref()
+                    .ok_or(DIDCommError::MissingMediator)?,
                 &ctx.sender_did,
                 None,
                 None,
