@@ -37,7 +37,7 @@ serde_derive = { version = "1.0" }
 serde_json = { version = "1.0" }
 sha256 = "1.6"
 once_cell = "1.21"
-axum-server = { version = "0.7", default-features = true }
+axum-server = { version = "0.8", default-features = true }
 tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
 uuid = { version = "1.19", features = ["v4"] }
 aws-types = { version = "1.3" }
@@ -46,9 +46,9 @@ aws-sdk-dynamodb = { version = "1.100" }
 aws-sdk-ssm = { version = "1.100" }
 aws-sdk-secretsmanager = { version = "1.95" }
 serde_dynamo = { version = "4.3", features = ["aws-sdk-dynamodb+1"] }
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "1.0.2", features = ["tokio-comp", "connection-manager"] }
 
 # Test dependencies
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 serial_test = "3.2.0"
 tower = { version = "0.5", features = ["util"] }
