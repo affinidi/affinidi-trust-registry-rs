@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
+use tokio_util::sync::CancellationToken;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -42,6 +43,7 @@ pub struct FileStorage {
     update_interval: Duration,
     records: Arc<RwLock<HashMap<RecordKey, TrustRecord>>>,
     last_modified: Arc<RwLock<Option<SystemTime>>>,
+    shutdown: CancellationToken,
 }
 
 impl FileStorage {
@@ -76,6 +78,7 @@ impl FileStorage {
             update_interval,
             records: Arc::clone(&records),
             last_modified: Arc::clone(&last_modified),
+            shutdown: CancellationToken::new(),
         };
 
         storage.spawn_sync_task();
@@ -88,33 +91,40 @@ impl FileStorage {
         let update_interval = self.update_interval;
         let records = Arc::clone(&self.records);
         let last_modified = Arc::clone(&self.last_modified);
+        let shutdown = self.shutdown.clone();
 
         tokio::spawn(async move {
             loop {
-                sleep(update_interval).await;
-
-                info!(path = %file_path.display(), "Syncing trust records from file");
-
-                let previous = { *last_modified.read().await };
-
-                match Self::load_if_modified(&file_path, previous).await {
-                    Ok(Some((new_records, modified))) => {
-                        {
-                            let mut guard = records.write().await;
-                            *guard = new_records;
-                        }
-                        {
-                            let mut guard = last_modified.write().await;
-                            *guard = Some(modified);
-                        }
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        info!(path = %file_path.display(), "CSV sync task shutting down");
+                        break;
                     }
-                    Ok(None) => {}
-                    Err(err) => {
-                        error!(
-                            error = %err,
-                            path = %file_path.display(),
-                            "Failed to sync trust records from file"
-                        );
+                    _ = sleep(update_interval) => {
+                        info!(path = %file_path.display(), "Syncing trust records from file");
+
+                        let previous = { *last_modified.read().await };
+
+                        match Self::load_if_modified(&file_path, previous).await {
+                            Ok(Some((new_records, modified))) => {
+                                {
+                                    let mut guard = records.write().await;
+                                    *guard = new_records;
+                                }
+                                {
+                                    let mut guard = last_modified.write().await;
+                                    *guard = Some(modified);
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                error!(
+                                    error = %err,
+                                    path = %file_path.display(),
+                                    "Failed to sync trust records from file"
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -307,6 +317,12 @@ impl TrustRecordAdminRepository for FileStorage {
                 query.entity_id, query.authority_id, query.action, query.resource
             ))
         })
+    }
+}
+
+impl Drop for FileStorage {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
     }
 }
 

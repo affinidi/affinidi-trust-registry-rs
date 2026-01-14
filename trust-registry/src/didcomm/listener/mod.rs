@@ -2,6 +2,7 @@ use crate::didcomm::error::DIDCommError;
 use crate::storage::repository::TrustRecordAdminRepository;
 use std::sync::Arc;
 use tokio::task::JoinError;
+use tokio_util::sync::CancellationToken;
 
 use affinidi_tdk::didcomm::{Message, UnpackMetadata};
 use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
@@ -41,14 +42,21 @@ pub struct Listener<H: MessageHandler> {
     pub atm: Arc<ATM>,
     pub profile: Arc<ATMProfile>,
     pub handler: Arc<H>,
+    pub(crate) shutdown: CancellationToken,
 }
 
 impl<H: MessageHandler> Listener<H> {
-    pub fn new(atm: Arc<ATM>, profile: Arc<ATMProfile>, handler: Arc<H>) -> Self {
+    pub fn new(
+        atm: Arc<ATM>,
+        profile: Arc<ATMProfile>,
+        handler: Arc<H>,
+        shutdown: CancellationToken,
+    ) -> Self {
         Self {
             atm,
             profile,
             handler,
+            shutdown,
         }
     }
 }
@@ -57,11 +65,13 @@ pub(crate) async fn start_one_did_listener(
     profile_config: ProfileConfig,
     config: Arc<DidcommConfig>,
     repository: Arc<dyn TrustRecordAdminRepository>,
+    shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
     let listener = Listener::build_listener(
         profile_config,
         &config.mediator_did,
         BaseHandler::build_from_arc(repository, config.clone()),
+        shutdown,
     )
     .await?;
 
@@ -78,11 +88,17 @@ pub(crate) async fn start_one_did_listener(
 pub(crate) async fn start_didcomm_listener(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
+    shutdown: CancellationToken,
 ) -> Result<Result<(), DIDCommError>, JoinError> {
     let profile_config = config.profile_config.clone();
     let config = Arc::new(config);
 
-    let handle = tokio::spawn(start_one_did_listener(profile_config, config, repository));
+    let handle = tokio::spawn(start_one_did_listener(
+        profile_config,
+        config,
+        repository,
+        shutdown,
+    ));
 
     handle.await
 }

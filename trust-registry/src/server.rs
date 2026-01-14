@@ -7,6 +7,7 @@ use crate::storage::{
 use axum::{Json, Router, routing::get};
 use dotenvy::dotenv;
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -32,8 +33,9 @@ fn setup_logging() {
 async fn start_didcomm_server(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
+    shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _ = start_didcomm_listener(config, repository).await?;
+    let _ = start_didcomm_listener(config, repository, shutdown).await?;
 
     Ok(())
 }
@@ -120,6 +122,9 @@ pub async fn start() {
         }
     };
 
+    // Shutdown token for graceful termination of background tasks
+    let shutdown = CancellationToken::new();
+
     // tasks section
     let http_task = tokio::spawn(start_http_server(config.clone(), repository.clone()));
 
@@ -127,14 +132,17 @@ pub async fn start() {
         let didcomm_task = tokio::spawn(start_didcomm_server(
             config.didcomm_config.clone(),
             repository,
+            shutdown.clone(),
         ));
 
         tokio::select! {
             result = didcomm_task => {
                 error!("didcomm_task failed: {:?}", result);
+                shutdown.cancel();
             }
             result = http_task => {
                 error!("http_task failed: {:?}", result);
+                shutdown.cancel();
             }
         }
     } else {
@@ -143,6 +151,7 @@ pub async fn start() {
         if let Err(e) = http_task.await {
             error!("http_task failed: {:?}", e);
         }
+        shutdown.cancel();
     }
 
     std::process::exit(1);

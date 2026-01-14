@@ -186,17 +186,25 @@ impl<H: MessageHandler> Listener<H> {
     }
 
     pub(crate) async fn spawn_periodic_offline_sync(self: Arc<Self>) {
+        let shutdown = self.shutdown.clone();
+        let profile_alias = self.profile.inner.alias.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(OFFLINE_SYNC_INTERVAL_SECS))
-                    .await;
-                let offline_messages_result = self.sync_and_process_offline_messages().await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        info!("[profile = {}] Offline sync task shutting down", profile_alias);
+                        break;
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(OFFLINE_SYNC_INTERVAL_SECS)) => {
+                        let offline_messages_result = self.sync_and_process_offline_messages().await;
 
-                if let Err(e) = offline_messages_result {
-                    error!(
-                        "[profile = {}] Error returned from offline_messages_result function. {}",
-                        &self.profile.inner.alias, e
-                    );
+                        if let Err(e) = offline_messages_result {
+                            error!(
+                                "[profile = {}] Error returned from offline_messages_result function. {}",
+                                &self.profile.inner.alias, e
+                            );
+                        }
+                    }
                 }
             }
         });

@@ -6,6 +6,7 @@ use affinidi_tdk::{
     common::{config::TDKConfig, profiles::TDKProfile},
 };
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 use crate::didcomm::error::DIDCommError;
 use crate::{
@@ -18,6 +19,7 @@ impl<H: MessageHandler> Listener<H> {
         profile_config: ProfileConfig,
         mediator_did: &str,
         handler: H,
+        shutdown: CancellationToken,
     ) -> Result<Self, DIDCommError> {
         let alias = &profile_config.alias;
         let did = &profile_config.did;
@@ -49,6 +51,7 @@ impl<H: MessageHandler> Listener<H> {
             Arc::new(atm),
             listener_profile,
             Arc::new(handler),
+            shutdown,
         ))
     }
 }
