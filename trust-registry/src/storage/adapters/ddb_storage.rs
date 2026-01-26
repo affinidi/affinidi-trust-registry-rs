@@ -257,15 +257,19 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
     async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
         debug!("Listing all trust records from DynamoDB");
 
-        let response = self
+        // DynamoDB scan returns max 1MB per request. We use the paginator
+        // to automatically handle pagination via exclusive_start_key/last_evaluated_key.
+        let items: Vec<_> = self
             .client
             .scan()
             .table_name(&self.table_name)
+            .into_paginator()
+            .items()
             .send()
+            .try_collect()
             .await
             .map_err(|err| RepositoryError::QueryFailed(format!("Failed to scan table: {err}")))?;
 
-        let items = response.items.unwrap_or_default();
         let mut records = Vec::with_capacity(items.len());
 
         for item in items {
