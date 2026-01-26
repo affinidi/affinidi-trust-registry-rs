@@ -6,6 +6,7 @@ use crate::{
 };
 use affinidi_tdk::didcomm::{Message, UnpackMetadata};
 use async_trait::async_trait;
+use chrono::{SecondsFormat, Utc};
 use serde_json::json;
 use tracing::{debug, error, info};
 use uuid::Uuid;
@@ -40,12 +41,50 @@ impl<R: ?Sized + TrustRecordRepository + 'static> ProtocolHandler for TRQPMessag
         message: Message,
         _meta: UnpackMetadata,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let requested_at = Utc::now();
+        let is_authorization = message.type_ == QUERY_AUTHORIZATION_MESSAGE_TYPE;
+
         let output_message_type: String = format!("{}/response", message.type_);
         let query: TrustRecordQuery = serde_json::from_value(message.body)?;
         let record = self.repository.find_by_query(query).await?;
+
+        let evaluated_at = Utc::now();
+
         let mut output_body = json!({});
         if let Some(tr) = record {
-            output_body = serde_json::to_value(tr)?;
+            // Apply the same field filtering as HTTP handler
+            let tr = if is_authorization {
+                tr.none_recognized()
+            } else {
+                tr.none_authorized()
+            };
+
+            // Build message like HTTP handler does
+            let message_text = if is_authorization {
+                format!(
+                    "{} authorized to {}+{} by {}",
+                    tr.entity_id(),
+                    tr.action(),
+                    tr.resource(),
+                    tr.authority_id()
+                )
+            } else {
+                format!("{} recognized by {}", tr.entity_id(), tr.authority_id())
+            };
+
+            output_body = serde_json::to_value(&tr)?;
+            // Add the missing response fields
+            if let Some(obj) = output_body.as_object_mut() {
+                obj.insert(
+                    "time_requested".to_string(),
+                    json!(requested_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+                );
+                obj.insert(
+                    "time_evaluated".to_string(),
+                    json!(evaluated_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+                );
+                obj.insert("message".to_string(), json!(message_text));
+            }
         }
 
         let message_id = Uuid::new_v4().to_string();
