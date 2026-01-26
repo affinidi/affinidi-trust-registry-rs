@@ -188,28 +188,42 @@ impl TrustRecordAdminRepository for RedisStorage {
         debug!("Listing all records");
 
         let mut conn = self.connection.write().await;
-
-        let keys: Vec<String> = conn
-            .keys("*|*|*|*")
-            .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis KEYS failed: {e}")))?;
-
         let mut records = Vec::new();
 
-        for key in keys {
-            let data: Option<String> = conn
-                .get(&key)
+        // Use SCAN instead of KEYS to avoid blocking Redis
+        // SCAN is O(1) per call and iterates incrementally
+        let mut cursor: u64 = 0;
+        loop {
+            let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("*|*|*|*")
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut *conn)
                 .await
-                .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {e}")))?;
+                .map_err(|e| RepositoryError::QueryFailed(format!("Redis SCAN failed: {e}")))?;
 
-            if let Some(data) = data {
-                match Self::deserialize_record(&data) {
-                    Ok(record) => records.push(record),
-                    Err(e) => {
-                        error!("Failed to deserialize record for key {}: {}", key, e);
+            for key in keys {
+                let data: Option<String> = conn
+                    .get(&key)
+                    .await
+                    .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {e}")))?;
+
+                if let Some(data) = data {
+                    match Self::deserialize_record(&data) {
+                        Ok(record) => records.push(record),
+                        Err(e) => {
+                            error!("Failed to deserialize record for key {}: {}", key, e);
+                        }
                     }
                 }
             }
+
+            if new_cursor == 0 {
+                break;
+            }
+            cursor = new_cursor;
         }
 
         info!("Listed {} records", records.len());
@@ -284,12 +298,29 @@ mod tests {
         let mut conn = storage.connection.write().await;
 
         // Only delete keys that match the test pattern
+        // Use SCAN instead of KEYS to avoid blocking Redis
         let test_key_pattern = format!("{}*", TEST_DID_PREFIX);
-        let keys: Result<Vec<String>, _> = conn.keys(&test_key_pattern).await;
+        let mut cursor: u64 = 0;
+        loop {
+            let result: Result<(u64, Vec<String>), _> = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&test_key_pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut *conn)
+                .await;
 
-        if let Ok(keys) = keys {
-            for key in keys {
-                let _: Result<(), _> = conn.del(&key).await;
+            if let Ok((new_cursor, keys)) = result {
+                for key in keys {
+                    let _: Result<(), _> = conn.del(&key).await;
+                }
+                if new_cursor == 0 {
+                    break;
+                }
+                cursor = new_cursor;
+            } else {
+                break;
             }
         }
     }
