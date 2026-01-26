@@ -538,7 +538,27 @@ async fn test_trqp_handler() {
     assert_eq!(response_body["action"], expected_action);
     assert_eq!(response_body["resource"], expected_resource);
     assert_eq!(response_body["recognized"].as_bool(), Some(true));
-    assert_eq!(response_body["authorized"].as_bool(), Some(true));
+    // Per TRQP spec, recognition queries should not include the 'authorized' field
+    assert_eq!(response_body["authorized"].as_bool(), None);
+
+    // Verify response metadata fields (FTL-25196)
+    assert!(
+        response_body["time_requested"].as_str().is_some(),
+        "time_requested should be present"
+    );
+    assert!(
+        response_body["time_evaluated"].as_str().is_some(),
+        "time_evaluated should be present"
+    );
+    assert!(
+        response_body["message"].as_str().is_some(),
+        "message should be present"
+    );
+    let message = response_body["message"].as_str().unwrap();
+    assert!(
+        message.contains(&expected_entity_id) && message.contains(&expected_authority_id),
+        "message should contain entity_id and authority_id"
+    );
 }
 
 async fn send_message(
