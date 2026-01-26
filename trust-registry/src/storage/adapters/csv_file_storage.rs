@@ -1,4 +1,4 @@
-use crate::domain::*;
+use crate::domain::{key::TrustRecordKey, *};
 use crate::storage::repository::*;
 use anyhow::anyhow;
 use base64::Engine as _;
@@ -18,30 +18,11 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{error, info};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RecordKey {
-    entity_id: EntityId,
-    authority_id: AuthorityId,
-    action: Action,
-    resource: Resource,
-}
-
-impl RecordKey {
-    fn from_record(record: &TrustRecord) -> Self {
-        Self {
-            entity_id: record.entity_id().clone(),
-            authority_id: record.authority_id().clone(),
-            action: record.action().clone(),
-            resource: record.resource().clone(),
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct FileStorage {
     file_path: PathBuf,
     update_interval: Duration,
-    records: Arc<RwLock<HashMap<RecordKey, TrustRecord>>>,
+    records: Arc<RwLock<HashMap<TrustRecordKey, TrustRecord>>>,
     last_modified: Arc<RwLock<Option<SystemTime>>>,
     shutdown: CancellationToken,
 }
@@ -135,7 +116,7 @@ impl FileStorage {
         path: &Path,
         last_seen: Option<SystemTime>,
     ) -> Result<
-        Option<(HashMap<RecordKey, TrustRecord>, SystemTime)>,
+        Option<(HashMap<TrustRecordKey, TrustRecord>, SystemTime)>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
         let metadata = tokio::fs::metadata(path)
@@ -166,7 +147,8 @@ impl FileStorage {
 
     fn parse_csv(
         contents: &str,
-    ) -> Result<HashMap<RecordKey, TrustRecord>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<HashMap<TrustRecordKey, TrustRecord>, Box<dyn std::error::Error + Send + Sync>>
+    {
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(true)
             .trim(csv::Trim::All)
@@ -177,7 +159,7 @@ impl FileStorage {
         for result in reader.deserialize::<TrustRecordCsvRow>() {
             let row = result?;
             let record = row.into_record()?;
-            let key = RecordKey::from_record(&record);
+            let key = TrustRecordKey::from_record(&record);
             records.insert(key, record);
         }
 
@@ -252,7 +234,7 @@ impl TrustRecordRepository for FileStorage {
 #[async_trait::async_trait]
 impl TrustRecordAdminRepository for FileStorage {
     async fn create(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-        let key = RecordKey::from_record(&record);
+        let key = TrustRecordKey::from_record(&record);
         {
             let mut records = self.records.write().await;
             if records.contains_key(&key) {
@@ -266,7 +248,7 @@ impl TrustRecordAdminRepository for FileStorage {
     }
 
     async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-        let key = RecordKey::from_record(&record);
+        let key = TrustRecordKey::from_record(&record);
         {
             let mut records = self.records.write().await;
             if !records.contains_key(&key) {
@@ -280,18 +262,12 @@ impl TrustRecordAdminRepository for FileStorage {
     }
 
     async fn delete(&self, query: TrustRecordQuery) -> Result<(), RepositoryError> {
-        let key = RecordKey {
-            entity_id: query.entity_id.clone(),
-            authority_id: query.authority_id.clone(),
-            action: query.action.clone(),
-            resource: query.resource.clone(),
-        };
+        let key = TrustRecordKey::from_query(&query);
         {
             let mut records = self.records.write().await;
             if records.remove(&key).is_none() {
                 return Err(RepositoryError::RecordNotFound(format!(
-                    "Record not found: {}|{}|{}|{}",
-                    query.entity_id, query.authority_id, query.action, query.resource
+                    "Record not found: {key}",
                 )));
             }
         }

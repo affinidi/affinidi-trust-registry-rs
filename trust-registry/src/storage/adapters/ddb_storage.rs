@@ -8,7 +8,7 @@ use tracing::debug;
 
 use crate::{
     configs::DynamoDbStorageConfig,
-    domain::TrustRecord,
+    domain::{TrustRecord, key::TrustRecordKey},
     storage::repository::{
         RepositoryError, TrustRecordAdminRepository, TrustRecordList, TrustRecordQuery,
         TrustRecordRepository,
@@ -58,10 +58,7 @@ impl DynamoDbStorage {
     }
 
     fn build_key(&self, query: &TrustRecordQuery) -> HashMap<String, AttributeValue> {
-        let key_value = format!(
-            "{}|{}|{}|{}",
-            query.entity_id, query.authority_id, query.action, query.resource
-        );
+        let key_value = TrustRecordKey::from_query(query).to_string();
         let mut key = HashMap::with_capacity(2);
         key.insert(PK_ATTR.to_string(), AttributeValue::S(key_value.clone()));
         key.insert(SK_ATTR.to_string(), AttributeValue::S(key_value));
@@ -139,13 +136,7 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))?;
 
         // Add PK and SK for DynamoDB
-        let key_value = format!(
-            "{}|{}|{}|{}",
-            record.entity_id(),
-            record.authority_id(),
-            record.action(),
-            record.resource()
-        );
+        let key_value = TrustRecordKey::from_record(&record).to_string();
         item.insert(PK_ATTR.to_string(), AttributeValue::S(key_value.clone()));
         item.insert(SK_ATTR.to_string(), AttributeValue::S(key_value));
 
@@ -187,13 +178,7 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))?;
 
         // Add PK and SK
-        let key_value = format!(
-            "{}|{}|{}|{}",
-            record.entity_id(),
-            record.authority_id(),
-            record.action(),
-            record.resource()
-        );
+        let key_value = TrustRecordKey::from_record(&record).to_string();
         item.insert(PK_ATTR.to_string(), AttributeValue::S(key_value.clone()));
         item.insert(SK_ATTR.to_string(), AttributeValue::S(key_value));
 

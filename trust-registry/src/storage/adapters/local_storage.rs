@@ -1,43 +1,14 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::fmt;
 use std::sync::{Arc, RwLock};
 
+use crate::domain::key::TrustRecordKey;
 use crate::domain::*;
 use crate::storage::repository::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RecordKey {
-    entity_id: EntityId,
-    authority_id: AuthorityId,
-    action: Action,
-    resource: Resource,
-}
-
-impl fmt::Display for RecordKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}|{}|{}|{}",
-            self.entity_id, self.authority_id, self.action, self.resource
-        )
-    }
-}
-
-impl RecordKey {
-    fn from_record(record: &TrustRecord) -> Self {
-        Self {
-            entity_id: record.entity_id().clone(),
-            authority_id: record.authority_id().clone(),
-            action: record.action().clone(),
-            resource: record.resource().clone(),
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct LocalStorage {
-    records: Arc<RwLock<HashMap<RecordKey, TrustRecord>>>,
+    records: Arc<RwLock<HashMap<TrustRecordKey, TrustRecord>>>,
 }
 
 impl LocalStorage {
@@ -48,7 +19,7 @@ impl LocalStorage {
     }
 
     pub async fn save(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-        let key = RecordKey::from_record(&record);
+        let key = TrustRecordKey::from_record(&record);
         let mut records = self
             .records
             .write()
@@ -66,7 +37,7 @@ impl LocalStorage {
     pub fn with_records(records: Vec<TrustRecord>) -> Result<Self, RepositoryError> {
         let storage = Self::new();
         for record in records {
-            let key = RecordKey::from_record(&record);
+            let key = TrustRecordKey::from_record(&record);
             storage
                 .records
                 .write()
@@ -119,7 +90,7 @@ impl TrustRecordRepository for LocalStorage {
 #[async_trait::async_trait]
 impl TrustRecordAdminRepository for LocalStorage {
     async fn create(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-        let key = RecordKey::from_record(&record);
+        let key = TrustRecordKey::from_record(&record);
         let mut records = self
             .records
             .write()
@@ -138,7 +109,7 @@ impl TrustRecordAdminRepository for LocalStorage {
     }
 
     async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-        let key = RecordKey::from_record(&record);
+        let key = TrustRecordKey::from_record(&record);
         let mut records = self
             .records
             .write()
@@ -157,12 +128,7 @@ impl TrustRecordAdminRepository for LocalStorage {
     }
 
     async fn delete(&self, query: TrustRecordQuery) -> Result<(), RepositoryError> {
-        let key = RecordKey {
-            entity_id: query.entity_id.clone(),
-            authority_id: query.authority_id.clone(),
-            action: query.action.clone(),
-            resource: query.resource.clone(),
-        };
+        let key = TrustRecordKey::from_query(&query);
         let mut records = self
             .records
             .write()

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fmt;
 
+pub mod key;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct EntityId(String);
 

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
+use crate::domain::key::TrustRecordKey;
 use crate::domain::*;
 use crate::storage::repository::*;
 
@@ -25,39 +26,6 @@ impl RedisStorage {
         })
     }
 
-    fn generate_key(
-        entity_id: &EntityId,
-        authority_id: &AuthorityId,
-        action: &Action,
-        resource: &Resource,
-    ) -> String {
-        format!(
-            "{}|{}|{}|{}",
-            entity_id.as_str(),
-            authority_id.as_str(),
-            action.as_str(),
-            resource.as_str()
-        )
-    }
-
-    fn key_from_record(record: &TrustRecord) -> String {
-        Self::generate_key(
-            record.entity_id(),
-            record.authority_id(),
-            record.action(),
-            record.resource(),
-        )
-    }
-
-    fn key_from_query(query: &TrustRecordQuery) -> String {
-        Self::generate_key(
-            &query.entity_id,
-            &query.authority_id,
-            &query.action,
-            &query.resource,
-        )
-    }
-
     fn serialize_record(record: &TrustRecord) -> Result<String, RepositoryError> {
         serde_json::to_string(record).map_err(|e| {
             RepositoryError::SerializationFailed(format!("Failed to serialize record: {e}"))
@@ -77,7 +45,7 @@ impl TrustRecordRepository for RedisStorage {
         &self,
         query: TrustRecordQuery,
     ) -> Result<Option<TrustRecord>, RepositoryError> {
-        let key = Self::key_from_query(&query);
+        let key = TrustRecordKey::from_query(&query).to_string();
         debug!("Finding record by key: {}", key);
 
         let mut conn = self.connection.write().await;
@@ -99,7 +67,7 @@ impl TrustRecordRepository for RedisStorage {
 #[async_trait::async_trait]
 impl TrustRecordAdminRepository for RedisStorage {
     async fn create(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-        let key = Self::key_from_record(&record);
+        let key = TrustRecordKey::from_record(&record).to_string();
         debug!("Creating record with key: {}", key);
 
         let mut conn = self.connection.write().await;
@@ -131,7 +99,7 @@ impl TrustRecordAdminRepository for RedisStorage {
     }
 
     async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-        let key = Self::key_from_record(&record);
+        let key = TrustRecordKey::from_record(&record).to_string();
         debug!("Updating record with key: {}", key);
 
         let mut conn = self.connection.write().await;
@@ -163,7 +131,7 @@ impl TrustRecordAdminRepository for RedisStorage {
     }
 
     async fn delete(&self, query: TrustRecordQuery) -> Result<(), RepositoryError> {
-        let key = Self::key_from_query(&query);
+        let key = TrustRecordKey::from_query(&query).to_string();
         debug!("Deleting record with key: {}", key);
 
         let mut conn = self.connection.write().await;
@@ -217,7 +185,7 @@ impl TrustRecordAdminRepository for RedisStorage {
     }
 
     async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
-        let key = Self::key_from_query(&query);
+        let key = TrustRecordKey::from_query(&query).to_string();
         debug!("Reading record with key: {}", key);
 
         let mut conn = self.connection.write().await;
