@@ -76,9 +76,9 @@ async fn check_did_document_availability(
 
         if parts.len() > 1 {
             let path = parts[1..].join("/");
-            format!("https://{}/{}/.well-known/did.json", domain, path)
+            format!("https://{domain}/{path}/.well-known/did.json")
         } else {
-            format!("https://{}/.well-known/did.json", domain)
+            format!("https://{domain}/.well-known/did.json")
         }
     } else {
         // Skip for other DID methods
