@@ -17,4 +17,7 @@ pub enum DIDCommError {
 
     #[error("Missing ATM instance")]
     MissingATM,
+
+    #[error("Trust Registry DID document is unreachable at /.well-known/did.json")]
+    UnreachableDidDocument,
 }

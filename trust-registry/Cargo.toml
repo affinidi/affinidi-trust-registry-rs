@@ -38,6 +38,7 @@ serde_dynamo.workspace = true
 uuid.workspace = true
 redis.workspace = true
 thiserror.workspace = true
+reqwest.workspace = true
 
 did-peer = { version = "0.7.5", optional = true }
 affinidi-did-key = { version = "0.1.4", optional = true }
@@ -48,7 +49,6 @@ crossterm = "0.29"
 
 [dev-dependencies]
 tempfile.workspace = true
-reqwest.workspace = true
 serial_test.workspace = true
 tower.workspace = true
 
