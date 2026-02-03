@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio::task::JoinError;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+use urlencoding::decode;
 
 use affinidi_tdk::didcomm::{Message, UnpackMetadata};
 use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
@@ -63,20 +64,22 @@ impl<H: MessageHandler> Listener<H> {
     }
 }
 
-/// Checks if /.well-known/did.json is reachable
+/// Checks if /.well-known/did.json is reachable with exponential retry
 async fn check_did_document_availability(
     profile_did: &str,
     max_attempts: u32,
-    retry_delay: Duration,
+    initial_delay_secs: u64,
+    max_delay_secs: u64,
 ) -> Result<(), DIDCommError> {
     // Extract the base URL from did:web
     let did_document_url = if let Some(did_path) = profile_did.strip_prefix("did:web:") {
         let parts: Vec<&str> = did_path.split(':').collect();
-        let domain = parts[0];
+        // URL decode domain in case it contians port e.g. did:web:localhost%3A3232
+        let domain = decode(parts[0]).map_err(|_| DIDCommError::InvalidDid)?; 
 
         if parts.len() > 1 {
             let path = parts[1..].join("/");
-            format!("https://{domain}/{path}/.well-known/did.json")
+            format!("https://{domain}/{path}/did.json")
         } else {
             format!("https://{domain}/.well-known/did.json")
         }
@@ -94,7 +97,12 @@ async fn check_did_document_availability(
         did_document_url
     );
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(DIDCommError::HttpRequest)?;
+
+    let mut current_delay_secs = initial_delay_secs;
 
     for attempt in 1..=max_attempts {
         match client.get(&did_document_url).send().await {
@@ -120,8 +128,11 @@ async fn check_did_document_availability(
         }
 
         if attempt < max_attempts {
-            info!("Retrying in {:?}...", retry_delay);
-            sleep(retry_delay).await;
+            let delay = Duration::from_secs(current_delay_secs);
+            info!("Retrying in {:?}...", delay);
+            sleep(delay).await;
+            // Exponential backoff, cap at max_delay_secs
+            current_delay_secs = (current_delay_secs * 2).min(max_delay_secs);
         }
     }
 
@@ -135,7 +146,13 @@ pub(crate) async fn start_one_did_listener(
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
     // Check if DID document is available before building listener
-    check_did_document_availability(&profile_config.did, 20, Duration::from_secs(3)).await?;
+    check_did_document_availability(
+        &profile_config.did,
+        config.retry_config.max_attempts,
+        config.retry_config.initial_delay_secs,
+        config.retry_config.max_delay_secs,
+    )
+    .await?;
 
     let listener = Listener::build_listener(
         profile_config,

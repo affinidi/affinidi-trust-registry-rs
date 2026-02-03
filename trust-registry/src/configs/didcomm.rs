@@ -59,6 +59,23 @@ pub struct AdminConfig {
     pub audit_config: AuditConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct DidDocumentRetryConfig {
+    pub max_attempts: u32,
+    pub initial_delay_secs: u64,
+    pub max_delay_secs: u64,
+}
+
+impl Default for DidDocumentRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 10,
+            initial_delay_secs: 2,
+            max_delay_secs: 30,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DidcommConfig {
     pub is_enabled: bool,
@@ -67,6 +84,7 @@ pub struct DidcommConfig {
     pub mediator_did: String,
     pub did_document: String,
     pub admin_config: AdminConfig,
+    pub retry_config: DidDocumentRetryConfig,
 }
 
 pub fn parse_profile_from_secrets_str(
@@ -120,6 +138,18 @@ impl Configs for DidcommConfig {
             build_did_document(&profile_config, &mediator_did)
         };
 
+        let retry_config = DidDocumentRetryConfig {
+            max_attempts: env_or("DID_CHECK_MAX_ATTEMPTS", "10")
+                .parse()
+                .unwrap_or(10),
+            initial_delay_secs: env_or("DID_CHECK_INITIAL_DELAY_SECS", "2")
+                .parse()
+                .unwrap_or(2),
+            max_delay_secs: env_or("DID_CHECK_MAX_DELAY_SECS", "20")
+                .parse()
+                .unwrap_or(20),
+        };
+
         Ok(DidcommConfig {
             is_enabled: true,
             acl_mode,
@@ -127,6 +157,7 @@ impl Configs for DidcommConfig {
             profile_config,
             did_document,
             admin_config,
+            retry_config,
         })
     }
 }
