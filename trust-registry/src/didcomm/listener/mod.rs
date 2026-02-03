@@ -75,7 +75,7 @@ async fn check_did_document_availability(
     let did_document_url = if let Some(did_path) = profile_did.strip_prefix("did:web:") {
         let parts: Vec<&str> = did_path.split(':').collect();
         // URL decode domain in case it contians port e.g. did:web:localhost%3A3232
-        let domain = decode(parts[0]).map_err(|_| DIDCommError::InvalidDid)?; 
+        let domain = decode(parts[0]).map_err(|_| DIDCommError::InvalidDid)?;
 
         if parts.len() > 1 {
             let path = parts[1..].join("/");

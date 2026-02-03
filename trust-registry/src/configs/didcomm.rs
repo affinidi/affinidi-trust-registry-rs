@@ -139,9 +139,7 @@ impl Configs for DidcommConfig {
         };
 
         let retry_config = DidDocumentRetryConfig {
-            max_attempts: env_or("DID_CHECK_MAX_ATTEMPTS", "10")
-                .parse()
-                .unwrap_or(10),
+            max_attempts: env_or("DID_CHECK_MAX_ATTEMPTS", "10").parse().unwrap_or(10),
             initial_delay_secs: env_or("DID_CHECK_INITIAL_DELAY_SECS", "2")
                 .parse()
                 .unwrap_or(2),
