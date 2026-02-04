@@ -1,5 +1,7 @@
 use crate::{domain::*, storage::repository::TrustRecordQuery};
 
+pub const TR_PREFIX: &str = "TR#";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrustRecordKey {
     entity_id: EntityId,
@@ -12,8 +14,8 @@ impl fmt::Display for TrustRecordKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}|{}|{}|{}",
-            self.entity_id, self.authority_id, self.action, self.resource
+            "{}{}|{}|{}|{}",
+            TR_PREFIX, self.entity_id, self.authority_id, self.action, self.resource
         )
     }
 }
