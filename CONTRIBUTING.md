@@ -2,7 +2,7 @@
 
 When contributing to this repository, please first discuss the change you wish to make by creating a new [GitHub issue](https://github.com/affinidi/affinidi-trust-registry-rs/issues/new).
 
-## Developement Requirements
+## Development Requirements
 
 ### Installation
 
