@@ -409,7 +409,7 @@ mod tests {
         write!(
             file,
             "{}",
-            sample_csv(&[("e1", "a1", "ac1", "r1", "assertion")])
+            sample_csv(&[("e1", "a1", "ac1", "r1", "authorization")])
         )
         .unwrap();
 
