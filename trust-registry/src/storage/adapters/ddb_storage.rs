@@ -59,7 +59,10 @@ impl DynamoDbStorage {
     fn build_key(query: &TrustRecordQuery) -> HashMap<String, AttributeValue> {
         let record_key = TrustRecordKey::from_query(query);
         let mut key = HashMap::with_capacity(2);
-        key.insert(PK_ATTR.to_string(), AttributeValue::S(TrustRecordKey::pk().to_string()));
+        key.insert(
+            PK_ATTR.to_string(),
+            AttributeValue::S(TrustRecordKey::pk().to_string()),
+        );
         key.insert(SK_ATTR.to_string(), AttributeValue::S(record_key.sk()));
         key
     }
@@ -67,7 +70,10 @@ impl DynamoDbStorage {
     fn build_key_from_record(record: &TrustRecord) -> HashMap<String, AttributeValue> {
         let record_key = TrustRecordKey::from_record(record);
         let mut key = HashMap::with_capacity(2);
-        key.insert(PK_ATTR.to_string(), AttributeValue::S(TrustRecordKey::pk().to_string()));
+        key.insert(
+            PK_ATTR.to_string(),
+            AttributeValue::S(TrustRecordKey::pk().to_string()),
+        );
         key.insert(SK_ATTR.to_string(), AttributeValue::S(record_key.sk()));
         key
     }
@@ -249,7 +255,10 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             .table_name(&self.table_name)
             .key_condition_expression("PK = :pk AND begins_with(SK, :sk_prefix)")
             .expression_attribute_values(":pk", AttributeValue::S(TrustRecordKey::pk().to_string()))
-            .expression_attribute_values(":sk_prefix", AttributeValue::S(crate::domain::key::TR_SK_PREFIX.to_string()))
+            .expression_attribute_values(
+                ":sk_prefix",
+                AttributeValue::S(crate::domain::key::TR_SK_PREFIX.to_string()),
+            )
             .into_paginator()
             .items()
             .send()

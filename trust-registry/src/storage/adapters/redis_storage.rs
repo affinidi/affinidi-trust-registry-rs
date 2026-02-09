@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
-use crate::domain::key::{TrustRecordKey, TR_SK_PREFIX};
+use crate::domain::key::{TR_SK_PREFIX, TrustRecordKey};
 use crate::domain::*;
 use crate::storage::repository::*;
 
