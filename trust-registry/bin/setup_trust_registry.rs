@@ -3,7 +3,8 @@ use affinidi_tdk::{
     TDK,
     common::{config::TDKConfig, profiles::TDKProfile},
     did_common::{
-        DID as DIDCommon, Document, PeerCreateKey, PeerKeyPurpose, PeerService, PeerServiceEndpoint,
+        DID as DIDCommon, Document, PeerCreateKey, PeerKeyPurpose, PeerService,
+        PeerServiceEndpoint,
         service::{Endpoint, Service},
         verification_method::{VerificationMethod, VerificationRelationship},
     },
@@ -261,8 +262,7 @@ fn create_keys() -> (Secret, Secret) {
 }
 
 pub fn create_did(mediator_did: String) -> (String, Vec<Secret>) {
-    let mut v_p256_key =
-        Secret::generate_p256(None, None).expect("Couldn't create P256 secret");
+    let mut v_p256_key = Secret::generate_p256(None, None).expect("Couldn't create P256 secret");
     let mut e_secp256k1_key =
         Secret::generate_secp256k1(None, None).expect("Couldn't create Secp256k1 secret");
 

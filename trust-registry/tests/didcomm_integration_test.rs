@@ -4,12 +4,15 @@ use affinidi_tdk::{
         ATM,
         messages::{DeleteMessageRequest, FetchDeletePolicy, fetch::FetchOptions},
         profiles::ATMProfile,
-        protocols::{Protocols, mediator::acls::{AccessListModeType, MediatorACLSet}},
+        protocols::{
+            Protocols,
+            mediator::acls::{AccessListModeType, MediatorACLSet},
+        },
     },
     secrets_resolver::secrets::Secret,
 };
-use serial_test::serial;
 use serde_json::{Value, json};
+use serial_test::serial;
 use sha256::digest;
 use std::{env, sync::Arc, time::Duration, vec};
 use tokio::sync::OnceCell;
@@ -282,8 +285,11 @@ async fn setup_test_environment(
             .unwrap();
 
     println!("mediator did: {}", mediator_did);
-    let ping_result = protocols.trust_ping.send_ping(&atm, &profile, mediator_did, true, true, true)
-    .await.unwrap();
+    let ping_result = protocols
+        .trust_ping
+        .send_ping(&atm, &profile, mediator_did, true, true, true)
+        .await
+        .unwrap();
 
     println!("ping_result: {:?}", ping_result.response);
 
@@ -296,10 +302,12 @@ async fn setup_test_environment(
         .await
         .unwrap();
 
-    let account_info = account_get_result.ok_or(format!(
-        "[profile = {}] Failed to get account info",
-        &profile.inner.alias
-    )).unwrap();
+    let account_info = account_get_result
+        .ok_or(format!(
+            "[profile = {}] Failed to get account info",
+            &profile.inner.alias
+        ))
+        .unwrap();
 
     let mut acls = MediatorACLSet::from_u64(account_info.acls);
 
@@ -309,16 +317,9 @@ async fn setup_test_environment(
 
     protocols
         .mediator
-        .acls_set(
-            &atm,
-            &profile,
-            &digest(&profile.inner.did),
-            &acls,
-        )
+        .acls_set(&atm, &profile, &digest(&profile.inner.did), &acls)
         .await
         .unwrap();
-
-
 
     clear_messages(&atm, &profile).await;
     let create_messages = get_create_record_messages();

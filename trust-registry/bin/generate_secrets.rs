@@ -139,8 +139,7 @@ pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Se
 }
 
 pub fn create_did(service: Option<Vec<String>>, auth_service: bool) -> (String, Vec<Secret>) {
-    let mut v_p256_key =
-        Secret::generate_p256(None, None).expect("Couldn't create P256 secret");
+    let mut v_p256_key = Secret::generate_p256(None, None).expect("Couldn't create P256 secret");
     let mut e_secp256k1_key =
         Secret::generate_secp256k1(None, None).expect("Couldn't create Secp256k1 secret");
 
@@ -222,10 +221,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let test_client_did = create_did(Some(vec![mediator_url.to_string()]), true);
     dids_and_secrets.push(test_client_did.clone());
 
-    if !in_pipeline {
-        for ds in dids_and_secrets {
-            set_acl(&ds.0, &ds.0, &mediator_did, ds.1.clone()).await;
-        }
+    for ds in dids_and_secrets {
+        set_acl(&ds.0, &ds.0, &mediator_did, ds.1.clone()).await;
     }
     let client_secrets = serde_json::to_string(&serde_json::to_string(&test_client_did.1)?)?;
     let test_profile_configs_stringified = serde_json::to_string(&test_tr_profile_configs)?;
