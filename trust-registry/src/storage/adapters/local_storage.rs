@@ -207,7 +207,7 @@ mod tests {
                 "resource-1",
                 true,
                 true,
-                "assertion",
+                "authorization",
             ),
             create_test_record(
                 "entity-2",

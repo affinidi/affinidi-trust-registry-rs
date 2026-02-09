@@ -40,8 +40,6 @@ redis.workspace = true
 thiserror.workspace = true
 reqwest.workspace = true
 
-did-peer = { version = "0.7.5", optional = true }
-affinidi-did-key = { version = "0.1.4", optional = true }
 didwebvh-rs = { version = "0.1", optional = true }
 url = "2.5"
 clap = { version = "4.5", features = ["derive"] }
@@ -69,7 +67,7 @@ required-features = ["dev-tools"]
 
 [features]
 default = []
-dev-tools = ["did-peer", "affinidi-did-key", "didwebvh-rs"]
+dev-tools = ["didwebvh-rs"]
 
 [lints]
 workspace = true

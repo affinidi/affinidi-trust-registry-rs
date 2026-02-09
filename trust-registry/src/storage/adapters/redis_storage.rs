@@ -308,7 +308,7 @@ mod tests {
             "VerifiableCredential",
             true,
             true,
-            "assertion",
+            "authorization",
         );
 
         storage.create(record.clone()).await.unwrap();
@@ -343,7 +343,7 @@ mod tests {
             "VerifiableCredential",
             true,
             true,
-            "assertion",
+            "authorization",
         );
 
         storage.create(record.clone()).await.unwrap();
@@ -372,7 +372,7 @@ mod tests {
             "VerifiableCredential",
             true,
             true,
-            "assertion",
+            "authorization",
         );
 
         storage.create(record.clone()).await.unwrap();
@@ -384,7 +384,7 @@ mod tests {
             "VerifiableCredential",
             false,
             false,
-            "assertion",
+            "authorization",
         );
 
         storage.update(record).await.unwrap();
@@ -418,7 +418,7 @@ mod tests {
             "VerifiableCredential",
             true,
             true,
-            "assertion",
+            "authorization",
         );
 
         storage.create(record).await.unwrap();
@@ -454,7 +454,7 @@ mod tests {
             "VerifiableCredential",
             true,
             true,
-            "assertion",
+            "authorization",
         );
 
         let record2 = create_test_record(
@@ -491,7 +491,7 @@ mod tests {
             "VerifiableCredential",
             true,
             true,
-            "assertion",
+            "authorization",
         );
 
         storage.create(record).await.unwrap();

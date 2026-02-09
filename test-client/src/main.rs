@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
                     authority_id: "did:example:authority456".to_string(),
                     action: "action_xyz".to_string(),
                     resource: "resource_abc".to_string(),
-                    record_type: "assertion".to_string(),
+                    record_type: "authorization".to_string(),
                 },
                 true,
                 true,
@@ -166,7 +166,7 @@ async fn main() -> Result<()> {
                 authority_id: "did:example:authority456".to_string(),
                 action: "action_xyz".to_string(),
                 resource: "resource_abc".to_string(),
-                record_type: "assertion".to_string(),
+                record_type: "authorization".to_string(),
             })
             .await
             {
@@ -187,7 +187,7 @@ async fn main() -> Result<()> {
                     authority_id: "did:example:authority456".to_string(),
                     action: "action_xyz".to_string(),
                     resource: "resource_abc".to_string(),
-                    record_type: "assertion".to_string(),
+                    record_type: "authorization".to_string(),
                 },
                 false,
                 true,
@@ -230,7 +230,7 @@ async fn main() -> Result<()> {
                 authority_id: "did:example:authority456".to_string(),
                 action: "action_xyz".to_string(),
                 resource: "resource_abc".to_string(),
-                record_type: "assertion".to_string(),
+                record_type: "authorization".to_string(),
             })
             .await
             {
@@ -250,7 +250,7 @@ async fn main() -> Result<()> {
                 authority_id: "did:example:authority456".to_string(),
                 action: "action_xyz".to_string(),
                 resource: "resource_abc".to_string(),
-                record_type: "assertion".to_string(),
+                record_type: "authorization".to_string(),
             })
             .await
             {

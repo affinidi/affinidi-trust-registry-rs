@@ -1,5 +1,4 @@
 #![cfg(feature = "dev-tools")]
-use affinidi_did_key::DIDKey;
 use affinidi_tdk::{
     TDK,
     common::{config::TDKConfig, profiles::TDKProfile},
@@ -8,6 +7,7 @@ use affinidi_tdk::{
         service::{Endpoint, Service},
         verification_method::{VerificationMethod, VerificationRelationship},
     },
+    dids::{DID, KeyType, PeerKeyRole},
     messaging::{
         profiles::ATMProfile,
         protocols::{
@@ -15,14 +15,10 @@ use affinidi_tdk::{
             mediator::acls::{AccessListModeType, MediatorACLSet},
         },
     },
-    secrets_resolver::secrets::{KeyType, Secret, SecretMaterial},
+    secrets_resolver::secrets::{Secret, SecretMaterial},
 };
 
 use clap::Parser;
-use did_peer::{
-    DIDPeer, DIDPeerCreateKeys, DIDPeerKeyType, DIDPeerKeys, DIDPeerService, PeerServiceEndPoint,
-    PeerServiceEndPointLong,
-};
 use didwebvh_rs::{DIDWebVHState, parameters::Parameters, url::WebVHURL};
 use serde_json::Value;
 use serde_json::json;
@@ -266,37 +262,15 @@ fn create_keys() -> (Secret, Secret) {
 }
 
 pub fn create_did(mediator_did: String) -> (String, Vec<Secret>) {
-    let (e_did_key, mut e_secp256k1_key) = DIDKey::generate(KeyType::Secp256k1).unwrap();
-    let (v_did_key, mut v_p256) = DIDKey::generate(KeyType::P256).unwrap();
-
     let keys = vec![
-        DIDPeerCreateKeys {
-            purpose: DIDPeerKeys::Verification,
-            type_: Some(DIDPeerKeyType::P256),
-            public_key_multibase: Some(v_did_key[8..].to_string()),
-        },
-        DIDPeerCreateKeys {
-            purpose: DIDPeerKeys::Encryption,
-            type_: Some(DIDPeerKeyType::Secp256k1),
-            public_key_multibase: Some(e_did_key[8..].to_string()),
-        },
+        (PeerKeyRole::Verification, KeyType::P256),
+        (PeerKeyRole::Encryption, KeyType::Secp256k1),
     ];
 
-    let services = Some(vec![DIDPeerService {
-        id: None,
-        _type: "dm".into(),
-        service_end_point: PeerServiceEndPoint::Long(PeerServiceEndPointLong::URI(
-            mediator_did.to_string(),
-        )),
-    }]);
+    let (did_peer, secrets) =
+        DID::generate_did_peer(keys, Some(mediator_did)).expect("Failed to create did:peer");
 
-    let (did_peer, _) =
-        DIDPeer::create_peer_did(&keys, services.as_ref()).expect("Failed to create did:peer");
-    v_p256.id = [did_peer.as_str(), "#key-1"].concat();
-    e_secp256k1_key.id = [did_peer.as_str(), "#key-2"].concat();
-
-    let secrets_json = vec![v_p256, e_secp256k1_key];
-    (did_peer, secrets_json)
+    (did_peer, secrets)
 }
 
 pub fn setup_did_peer_tr(mediator_did: String) -> (String, Vec<Secret>) {

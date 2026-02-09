@@ -1,8 +1,8 @@
 use crate::configs::ProfileConfig;
 
-pub fn build_public_jwk(jwk: &affinidi_tdk::secrets_resolver::jwk::JWK) -> serde_json::Value {
+pub fn build_public_jwk(jwk: &affinidi_tdk::affinidi_crypto::JWK) -> serde_json::Value {
     match &jwk.params {
-        affinidi_tdk::secrets_resolver::jwk::Params::EC(params) => {
+        affinidi_tdk::affinidi_crypto::Params::EC(params) => {
             let mut jwk_obj = serde_json::json!({
                 "kty": "EC",
                 "crv": params.curve,
@@ -14,7 +14,7 @@ pub fn build_public_jwk(jwk: &affinidi_tdk::secrets_resolver::jwk::JWK) -> serde
             }
             jwk_obj
         }
-        affinidi_tdk::secrets_resolver::jwk::Params::OKP(params) => {
+        affinidi_tdk::affinidi_crypto::Params::OKP(params) => {
             let mut jwk_obj = serde_json::json!({
                 "kty": "OKP",
                 "crv": params.curve,
@@ -84,7 +84,7 @@ pub fn build_did_document(profile_config: &ProfileConfig, mediator_did: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use affinidi_tdk::secrets_resolver::{jwk::JWK, secrets::Secret};
+    use affinidi_tdk::{affinidi_crypto::JWK, secrets_resolver::secrets::Secret};
     use serde_json::json;
 
     #[test]
