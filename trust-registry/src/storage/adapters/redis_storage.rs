@@ -3,12 +3,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
-use crate::domain::key::TrustRecordKey;
+use crate::domain::key::{TrustRecordKey, TR_SK_PREFIX};
 use crate::domain::*;
 use crate::storage::repository::*;
 
 /// Redis storage adapter for Trust Registry
-/// Keys are formatted as: entity_id|authority_id|action|resource
+/// Keys are formatted as: TR#{authority}#{action}#{resource}#{entity}
 /// Values are JSON-serialized TrustRecord objects
 #[derive(Clone)]
 pub struct RedisStorage {
@@ -79,11 +79,11 @@ impl TrustRecordAdminRepository for RedisStorage {
 
         if exists {
             return Err(RepositoryError::RecordAlreadyExists(format!(
-                "Record already exists: {}|{}|{}|{}",
-                record.entity_id(),
+                "Record already exists: {}#{}#{}#{}",
                 record.authority_id(),
                 record.action(),
-                record.resource()
+                record.resource(),
+                record.entity_id()
             )));
         }
 
@@ -111,11 +111,11 @@ impl TrustRecordAdminRepository for RedisStorage {
 
         if !exists {
             return Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}|{}",
-                record.entity_id(),
+                "Record not found: {}#{}#{}#{}",
                 record.authority_id(),
                 record.action(),
-                record.resource()
+                record.resource(),
+                record.entity_id()
             )));
         }
 
@@ -143,8 +143,8 @@ impl TrustRecordAdminRepository for RedisStorage {
 
         if deleted == 0 {
             return Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}|{}",
-                query.entity_id, query.authority_id, query.action, query.resource
+                "Record not found: {}#{}#{}#{}",
+                query.authority_id, query.action, query.resource, query.entity_id
             )));
         }
 
@@ -162,10 +162,11 @@ impl TrustRecordAdminRepository for RedisStorage {
         // SCAN is O(1) per call and iterates incrementally
         let mut cursor: u64 = 0;
         loop {
+            let pattern = format!("{}*", TR_SK_PREFIX);
             let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
                 .arg(cursor)
                 .arg("MATCH")
-                .arg("*|*|*|*")
+                .arg(&pattern)
                 .arg("COUNT")
                 .arg(100)
                 .query_async(&mut *conn)
@@ -215,8 +216,8 @@ impl TrustRecordAdminRepository for RedisStorage {
                 Ok(record)
             }
             None => Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}|{}",
-                query.entity_id, query.authority_id, query.action, query.resource
+                "Record not found: {}#{}#{}#{}",
+                query.authority_id, query.action, query.resource, query.entity_id
             ))),
         }
     }
