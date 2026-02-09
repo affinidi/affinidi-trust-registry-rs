@@ -3,11 +3,10 @@ use affinidi_tdk::{
     TDK,
     common::{config::TDKConfig, profiles::TDKProfile},
     did_common::{
-        Document,
+        DID as DIDCommon, Document, PeerCreateKey, PeerKeyPurpose, PeerService, PeerServiceEndpoint,
         service::{Endpoint, Service},
         verification_method::{VerificationMethod, VerificationRelationship},
     },
-    dids::{DID, KeyType, PeerKeyRole},
     messaging::{
         profiles::ATMProfile,
         protocols::{
@@ -262,15 +261,37 @@ fn create_keys() -> (Secret, Secret) {
 }
 
 pub fn create_did(mediator_did: String) -> (String, Vec<Secret>) {
+    let mut v_p256_key =
+        Secret::generate_p256(None, None).expect("Couldn't create P256 secret");
+    let mut e_secp256k1_key =
+        Secret::generate_secp256k1(None, None).expect("Couldn't create Secp256k1 secret");
+
+    let v_multibase = v_p256_key
+        .get_public_keymultibase()
+        .expect("Couldn't get verification key multibase");
+    let e_multibase = e_secp256k1_key
+        .get_public_keymultibase()
+        .expect("Couldn't get encryption key multibase");
+
     let keys = vec![
-        (PeerKeyRole::Verification, KeyType::P256),
-        (PeerKeyRole::Encryption, KeyType::Secp256k1),
+        PeerCreateKey::from_multibase(PeerKeyPurpose::Verification, v_multibase),
+        PeerCreateKey::from_multibase(PeerKeyPurpose::Encryption, e_multibase),
     ];
 
-    let (did_peer, secrets) =
-        DID::generate_did_peer(keys, Some(mediator_did)).expect("Failed to create did:peer");
+    let services = Some(vec![PeerService {
+        id: None,
+        type_: "dm".into(),
+        endpoint: PeerServiceEndpoint::Uri(mediator_did.to_string()),
+    }]);
 
-    (did_peer, secrets)
+    let (did_peer, _) =
+        DIDCommon::generate_peer(&keys, services.as_deref()).expect("Failed to create did:peer");
+    let did_peer_str = did_peer.to_string();
+
+    v_p256_key.id = [did_peer_str.as_str(), "#key-1"].concat();
+    e_secp256k1_key.id = [did_peer_str.as_str(), "#key-2"].concat();
+
+    (did_peer_str, vec![v_p256_key, e_secp256k1_key])
 }
 
 pub fn setup_did_peer_tr(mediator_did: String) -> (String, Vec<Secret>) {
