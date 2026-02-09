@@ -143,11 +143,21 @@ impl TrustRecordIds {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RecordType {
     Authorization,
     Recognition,
+}
+
+impl<'de> Deserialize<'de> for RecordType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<RecordType>().map_err(serde::de::Error::custom)
+    }
 }
 
 impl std::str::FromStr for RecordType {

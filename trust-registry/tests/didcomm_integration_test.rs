@@ -4,11 +4,13 @@ use affinidi_tdk::{
         ATM,
         messages::{DeleteMessageRequest, FetchDeletePolicy, fetch::FetchOptions},
         profiles::ATMProfile,
-        protocols::Protocols,
+        protocols::{Protocols, mediator::acls::{AccessListModeType, MediatorACLSet}},
     },
     secrets_resolver::secrets::Secret,
 };
+use serial_test::serial;
 use serde_json::{Value, json};
+use sha256::digest;
 use std::{env, sync::Arc, time::Duration, vec};
 use tokio::sync::OnceCell;
 use trust_registry::didcomm::{
@@ -275,11 +277,48 @@ async fn setup_test_environment(
     let protocols = Arc::new(Protocols::new());
     let secrets: Vec<Secret> = serde_json::from_str(secrets).unwrap();
     let (atm, profile) =
-        prepare_atm_and_profile("test-client", client_did, mediator_did, secrets, false)
+        prepare_atm_and_profile("test-client", client_did, mediator_did, secrets, true)
             .await
             .unwrap();
 
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    println!("mediator did: {}", mediator_did);
+    let ping_result = protocols.trust_ping.send_ping(&atm, &profile, mediator_did, true, true, true)
+    .await.unwrap();
+
+    println!("ping_result: {:?}", ping_result.response);
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let acl_mode = AccessListModeType::ExplicitDeny;
+
+    let account_get_result = protocols
+        .mediator
+        .account_get(&atm, &profile, None)
+        .await
+        .unwrap();
+
+    let account_info = account_get_result.ok_or(format!(
+        "[profile = {}] Failed to get account info",
+        &profile.inner.alias
+    )).unwrap();
+
+    let mut acls = MediatorACLSet::from_u64(account_info.acls);
+
+    println!("ACL_MODE: Configured to {:?}", acl_mode);
+
+    acls.set_access_list_mode(acl_mode, true, false).unwrap();
+
+    protocols
+        .mediator
+        .acls_set(
+            &atm,
+            &profile,
+            &digest(&profile.inner.did),
+            &acls,
+        )
+        .await
+        .unwrap();
+
+
 
     clear_messages(&atm, &profile).await;
     let create_messages = get_create_record_messages();
@@ -297,6 +336,7 @@ async fn setup_test_environment(
 }
 
 #[tokio::test]
+#[serial]
 async fn test_admin_read() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -344,6 +384,7 @@ async fn test_admin_read() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_admin_update() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -391,6 +432,7 @@ async fn test_admin_update() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_admin_list() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -450,6 +492,7 @@ async fn test_admin_list() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_admin_delete() {
     let (atm_test_context, config) = get_test_context().await;
 
@@ -495,6 +538,7 @@ async fn test_admin_delete() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_trqp_handler() {
     let (atm_test_context, config) = get_test_context().await;
 
