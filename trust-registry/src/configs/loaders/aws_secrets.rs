@@ -2,7 +2,7 @@ use aws_config::{self, BehaviorVersion};
 use aws_sdk_secretsmanager;
 
 pub async fn load(secret_name: &str) -> Result<String, String> {
-    let config = aws_config::load_defaults(BehaviorVersion::v2025_08_07()).await;
+    let config = aws_config::load_defaults(BehaviorVersion::v2026_01_12()).await;
     let client = aws_sdk_secretsmanager::Client::new(&config);
 
     let result = client
