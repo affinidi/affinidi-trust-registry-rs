@@ -35,7 +35,6 @@ A high-performance, Rust-based implementation of a Trust Registry, fully complia
 - [Support \& feedback](#support--feedback)
   - [Reporting technical issues](#reporting-technical-issues)
 - [Contributing](#contributing)
-- [Changelog](#changelog)
 
 ## Quickstart
 
@@ -556,7 +555,3 @@ If you have a technical issue with the project's codebase, you can also create a
 Want to contribute?
 
 Head over to our [CONTRIBUTING](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/CONTRIBUTING.md) guidelines.
-
-
-## Changelog
-See [CHANGELOG](./CHANGELOG.md) for release notes.
