@@ -97,11 +97,11 @@ impl TrustRecordAdminRepository for LocalStorage {
             .map_err(|_| RepositoryError::LockPoisoned)?;
         if records.contains_key(&key) {
             return Err(RepositoryError::RecordAlreadyExists(format!(
-                "Record already exists: {}|{}|{}|{}",
-                record.entity_id(),
+                "Record already exists: {}#{}#{}#{}",
                 record.authority_id(),
                 record.action(),
-                record.resource()
+                record.resource(),
+                record.entity_id()
             )));
         }
         records.insert(key, record);
@@ -116,11 +116,11 @@ impl TrustRecordAdminRepository for LocalStorage {
             .map_err(|_| RepositoryError::LockPoisoned)?;
         if !records.contains_key(&key) {
             return Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}|{}",
-                record.entity_id(),
+                "Record not found: {}#{}#{}#{}",
                 record.authority_id(),
                 record.action(),
-                record.resource()
+                record.resource(),
+                record.entity_id()
             )));
         }
         records.insert(key, record);
@@ -135,8 +135,8 @@ impl TrustRecordAdminRepository for LocalStorage {
             .map_err(|_| RepositoryError::LockPoisoned)?;
         if records.remove(&key).is_none() {
             return Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}|{}",
-                query.entity_id, query.authority_id, query.action, query.resource
+                "Record not found: {}#{}#{}#{}",
+                query.authority_id, query.action, query.resource, query.entity_id
             )));
         }
         Ok(())
@@ -163,8 +163,8 @@ impl TrustRecordAdminRepository for LocalStorage {
 
         result.ok_or_else(|| {
             RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}|{}",
-                query.entity_id, query.authority_id, query.action, query.resource
+                "Record not found: {}#{}#{}#{}",
+                query.authority_id, query.action, query.resource, query.entity_id
             ))
         })
     }

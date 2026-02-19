@@ -45,7 +45,6 @@ impl DynamoDbStorage {
 
         let shared_config = loader.load().await;
         let client = Client::new(&shared_config);
-        // TODO: describe table to check connection to fail fast?
 
         Ok(Self::with_client(client, config.table_name))
     }
@@ -57,11 +56,25 @@ impl DynamoDbStorage {
         }
     }
 
-    fn build_key(&self, query: &TrustRecordQuery) -> HashMap<String, AttributeValue> {
-        let key_value = TrustRecordKey::from_query(query).to_string();
+    fn build_key(query: &TrustRecordQuery) -> HashMap<String, AttributeValue> {
+        let record_key = TrustRecordKey::from_query(query);
         let mut key = HashMap::with_capacity(2);
-        key.insert(PK_ATTR.to_string(), AttributeValue::S(key_value.clone()));
-        key.insert(SK_ATTR.to_string(), AttributeValue::S(key_value));
+        key.insert(
+            PK_ATTR.to_string(),
+            AttributeValue::S(TrustRecordKey::pk().to_string()),
+        );
+        key.insert(SK_ATTR.to_string(), AttributeValue::S(record_key.sk()));
+        key
+    }
+
+    fn build_key_from_record(record: &TrustRecord) -> HashMap<String, AttributeValue> {
+        let record_key = TrustRecordKey::from_record(record);
+        let mut key = HashMap::with_capacity(2);
+        key.insert(
+            PK_ATTR.to_string(),
+            AttributeValue::S(TrustRecordKey::pk().to_string()),
+        );
+        key.insert(SK_ATTR.to_string(), AttributeValue::S(record_key.sk()));
         key
     }
 
@@ -96,7 +109,7 @@ impl TrustRecordRepository for DynamoDbStorage {
             "Querying trust record in DynamoDB"
         );
 
-        let key = self.build_key(&query);
+        let key = Self::build_key(&query);
 
         let response = self
             .client
@@ -135,27 +148,24 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
         let mut item: HashMap<String, AttributeValue> = serde_dynamo::to_item(&record)
             .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))?;
 
-        // Add PK and SK for DynamoDB
-        let key_value = TrustRecordKey::from_record(&record).to_string();
-        item.insert(PK_ATTR.to_string(), AttributeValue::S(key_value.clone()));
-        item.insert(SK_ATTR.to_string(), AttributeValue::S(key_value));
+        let key = Self::build_key_from_record(&record);
+        item.extend(key);
 
-        // Use condition expression to prevent overwriting existing records
         self.client
             .put_item()
             .table_name(&self.table_name)
             .set_item(Some(item))
-            .condition_expression("attribute_not_exists(PK)")
+            .condition_expression("attribute_not_exists(SK)")
             .send()
             .await
             .map_err(|err| {
                 if err.to_string().contains("ConditionalCheckFailed") {
                     RepositoryError::RecordAlreadyExists(format!(
-                        "Record already exists: {}|{}|{}|{}",
-                        record.entity_id(),
+                        "Record already exists: {}#{}#{}#{}",
                         record.authority_id(),
                         record.action(),
-                        record.resource()
+                        record.resource(),
+                        record.entity_id()
                     ))
                 } else {
                     RepositoryError::QueryFailed(format!("Failed to create record: {err}"))
@@ -177,27 +187,24 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
         let mut item: HashMap<String, AttributeValue> = serde_dynamo::to_item(&record)
             .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))?;
 
-        // Add PK and SK
-        let key_value = TrustRecordKey::from_record(&record).to_string();
-        item.insert(PK_ATTR.to_string(), AttributeValue::S(key_value.clone()));
-        item.insert(SK_ATTR.to_string(), AttributeValue::S(key_value));
+        let key = Self::build_key_from_record(&record);
+        item.extend(key);
 
-        // Use condition expression to ensure record exists before updating
         self.client
             .put_item()
             .table_name(&self.table_name)
             .set_item(Some(item))
-            .condition_expression("attribute_exists(PK)")
+            .condition_expression("attribute_exists(SK)")
             .send()
             .await
             .map_err(|err| {
                 if err.to_string().contains("ConditionalCheckFailed") {
                     RepositoryError::RecordNotFound(format!(
-                        "Record not found: {}|{}|{}|{}",
-                        record.entity_id(),
+                        "Record not found: {}#{}#{}#{}",
                         record.authority_id(),
                         record.action(),
-                        record.resource()
+                        record.resource(),
+                        record.entity_id()
                     ))
                 } else {
                     RepositoryError::QueryFailed(format!("Failed to update record: {err}"))
@@ -216,20 +223,20 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             "Deleting trust record from DynamoDB"
         );
 
-        let key = self.build_key(&query);
+        let key = Self::build_key(&query);
 
         self.client
             .delete_item()
             .table_name(&self.table_name)
             .set_key(Some(key))
-            .condition_expression("attribute_exists(PK)")
+            .condition_expression("attribute_exists(SK)")
             .send()
             .await
             .map_err(|err| {
                 if err.to_string().contains("ConditionalCheckFailed") {
                     RepositoryError::RecordNotFound(format!(
-                        "Record not found: {}|{}|{}|{}",
-                        query.entity_id, query.authority_id, query.action, query.resource
+                        "Record not found: {}#{}#{}#{}",
+                        query.authority_id, query.action, query.resource, query.entity_id
                     ))
                 } else {
                     RepositoryError::QueryFailed(format!("Failed to delete record: {err}"))
@@ -242,18 +249,22 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
     async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
         debug!("Listing all trust records from DynamoDB");
 
-        // DynamoDB scan returns max 1MB per request. We use the paginator
-        // to automatically handle pagination via exclusive_start_key/last_evaluated_key.
         let items: Vec<_> = self
             .client
-            .scan()
+            .query()
             .table_name(&self.table_name)
+            .key_condition_expression("PK = :pk AND begins_with(SK, :sk_prefix)")
+            .expression_attribute_values(":pk", AttributeValue::S(TrustRecordKey::pk().to_string()))
+            .expression_attribute_values(
+                ":sk_prefix",
+                AttributeValue::S(crate::domain::key::TR_SK_PREFIX.to_string()),
+            )
             .into_paginator()
             .items()
             .send()
             .try_collect()
             .await
-            .map_err(|err| RepositoryError::QueryFailed(format!("Failed to scan table: {err}")))?;
+            .map_err(|err| RepositoryError::QueryFailed(format!("Failed to query table: {err}")))?;
 
         let mut records = Vec::with_capacity(items.len());
 
@@ -275,7 +286,7 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             "Reading trust record from DynamoDB"
         );
 
-        let key = self.build_key(&query);
+        let key = Self::build_key(&query);
 
         let response = self
             .client
@@ -297,8 +308,8 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
         }
 
         Err(RepositoryError::RecordNotFound(format!(
-            "Record not found: {}|{}|{}|{}",
-            query.entity_id, query.authority_id, query.action, query.resource
+            "Record not found: {}#{}#{}#{}",
+            query.authority_id, query.action, query.resource, query.entity_id
         )))
     }
 }

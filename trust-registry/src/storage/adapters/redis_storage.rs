@@ -3,12 +3,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
-use crate::domain::key::TrustRecordKey;
+use crate::domain::key::{TR_SK_PREFIX, TrustRecordKey};
 use crate::domain::*;
 use crate::storage::repository::*;
 
 /// Redis storage adapter for Trust Registry
-/// Keys are formatted as: entity_id|authority_id|action|resource
+/// Keys are formatted as: TR#{authority}#{action}#{resource}#{entity}
 /// Values are JSON-serialized TrustRecord objects
 #[derive(Clone)]
 pub struct RedisStorage {
@@ -79,11 +79,11 @@ impl TrustRecordAdminRepository for RedisStorage {
 
         if exists {
             return Err(RepositoryError::RecordAlreadyExists(format!(
-                "Record already exists: {}|{}|{}|{}",
-                record.entity_id(),
+                "Record already exists: {}#{}#{}#{}",
                 record.authority_id(),
                 record.action(),
-                record.resource()
+                record.resource(),
+                record.entity_id()
             )));
         }
 
@@ -111,11 +111,11 @@ impl TrustRecordAdminRepository for RedisStorage {
 
         if !exists {
             return Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}|{}",
-                record.entity_id(),
+                "Record not found: {}#{}#{}#{}",
                 record.authority_id(),
                 record.action(),
-                record.resource()
+                record.resource(),
+                record.entity_id()
             )));
         }
 
@@ -143,8 +143,8 @@ impl TrustRecordAdminRepository for RedisStorage {
 
         if deleted == 0 {
             return Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}|{}",
-                query.entity_id, query.authority_id, query.action, query.resource
+                "Record not found: {}#{}#{}#{}",
+                query.authority_id, query.action, query.resource, query.entity_id
             )));
         }
 
@@ -162,10 +162,11 @@ impl TrustRecordAdminRepository for RedisStorage {
         // SCAN is O(1) per call and iterates incrementally
         let mut cursor: u64 = 0;
         loop {
+            let pattern = format!("{}*", TR_SK_PREFIX);
             let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
                 .arg(cursor)
                 .arg("MATCH")
-                .arg("*|*|*|*")
+                .arg(&pattern)
                 .arg("COUNT")
                 .arg(100)
                 .query_async(&mut *conn)
@@ -215,8 +216,8 @@ impl TrustRecordAdminRepository for RedisStorage {
                 Ok(record)
             }
             None => Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}|{}|{}|{}",
-                query.entity_id, query.authority_id, query.action, query.resource
+                "Record not found: {}#{}#{}#{}",
+                query.authority_id, query.action, query.resource, query.entity_id
             ))),
         }
     }
@@ -227,9 +228,6 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::str::FromStr;
-
-    // Constant pattern for test DIDs to isolate test data
-    const TEST_DID_PREFIX: &str = "did:example:";
 
     fn create_test_record(
         entity: &str,
@@ -262,34 +260,11 @@ mod tests {
         }
     }
 
-    async fn cleanup_test_data(storage: &RedisStorage) {
+    async fn cleanup_test_data(storage: &RedisStorage, records: &[TrustRecord]) {
         let mut conn = storage.connection.write().await;
-
-        // Only delete keys that match the test pattern
-        // Use SCAN instead of KEYS to avoid blocking Redis
-        let test_key_pattern = format!("{}*", TEST_DID_PREFIX);
-        let mut cursor: u64 = 0;
-        loop {
-            let result: Result<(u64, Vec<String>), _> = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&test_key_pattern)
-                .arg("COUNT")
-                .arg(100)
-                .query_async(&mut *conn)
-                .await;
-
-            if let Ok((new_cursor, keys)) = result {
-                for key in keys {
-                    let _: Result<(), _> = conn.del(&key).await;
-                }
-                if new_cursor == 0 {
-                    break;
-                }
-                cursor = new_cursor;
-            } else {
-                break;
-            }
+        for record in records {
+            let key = TrustRecordKey::from_record(record).to_string();
+            let _: Result<(), _> = conn.del(&key).await;
         }
     }
 
@@ -299,7 +274,6 @@ mod tests {
         let Some(storage) = get_test_storage().await else {
             return;
         };
-        cleanup_test_data(&storage).await;
 
         let record = create_test_record(
             "did:example:entity1",
@@ -310,6 +284,7 @@ mod tests {
             true,
             "authorization",
         );
+        cleanup_test_data(&storage, &[record.clone()]).await;
 
         storage.create(record.clone()).await.unwrap();
 
@@ -325,7 +300,7 @@ mod tests {
         assert!(retrieved.is_authorized());
         assert!(retrieved.is_recognized());
 
-        cleanup_test_data(&storage).await;
+        cleanup_test_data(&storage, &[record]).await;
     }
 
     #[tokio::test]
@@ -334,7 +309,6 @@ mod tests {
         let Some(storage) = get_test_storage().await else {
             return;
         };
-        cleanup_test_data(&storage).await;
 
         let record = create_test_record(
             "did:example:entity1",
@@ -345,16 +319,17 @@ mod tests {
             true,
             "authorization",
         );
+        cleanup_test_data(&storage, &[record.clone()]).await;
 
         storage.create(record.clone()).await.unwrap();
-        let result = storage.create(record).await;
+        let result = storage.create(record.clone()).await;
         assert!(result.is_err());
         assert!(matches!(
             result,
             Err(RepositoryError::RecordAlreadyExists(_))
         ));
 
-        cleanup_test_data(&storage).await;
+        cleanup_test_data(&storage, &[record]).await;
     }
 
     #[tokio::test]
@@ -363,9 +338,8 @@ mod tests {
         let Some(storage) = get_test_storage().await else {
             return;
         };
-        cleanup_test_data(&storage).await;
 
-        let mut record = create_test_record(
+        let record = create_test_record(
             "did:example:entity1",
             "did:example:authority1",
             "issue",
@@ -374,10 +348,11 @@ mod tests {
             true,
             "authorization",
         );
+        cleanup_test_data(&storage, &[record.clone()]).await;
 
         storage.create(record.clone()).await.unwrap();
 
-        record = create_test_record(
+        let updated_record = create_test_record(
             "did:example:entity1",
             "did:example:authority1",
             "issue",
@@ -387,7 +362,7 @@ mod tests {
             "authorization",
         );
 
-        storage.update(record).await.unwrap();
+        storage.update(updated_record).await.unwrap();
 
         let query = TrustRecordQuery::new(
             EntityId::new("did:example:entity1"),
@@ -400,7 +375,7 @@ mod tests {
         assert!(!retrieved.is_authorized());
         assert!(!retrieved.is_recognized());
 
-        cleanup_test_data(&storage).await;
+        cleanup_test_data(&storage, &[record]).await;
     }
 
     #[tokio::test]
@@ -409,7 +384,6 @@ mod tests {
         let Some(storage) = get_test_storage().await else {
             return;
         };
-        cleanup_test_data(&storage).await;
 
         let record = create_test_record(
             "did:example:entity1",
@@ -420,8 +394,9 @@ mod tests {
             true,
             "authorization",
         );
+        cleanup_test_data(&storage, &[record.clone()]).await;
 
-        storage.create(record).await.unwrap();
+        storage.create(record.clone()).await.unwrap();
 
         let query = TrustRecordQuery::new(
             EntityId::new("did:example:entity1"),
@@ -435,8 +410,6 @@ mod tests {
         let result = storage.read(query).await;
         assert!(result.is_err());
         assert!(matches!(result, Err(RepositoryError::RecordNotFound(_))));
-
-        cleanup_test_data(&storage).await;
     }
 
     #[tokio::test]
@@ -445,7 +418,6 @@ mod tests {
         let Some(storage) = get_test_storage().await else {
             return;
         };
-        cleanup_test_data(&storage).await;
 
         let record1 = create_test_record(
             "did:example:entity1",
@@ -466,14 +438,15 @@ mod tests {
             false,
             "recognition",
         );
+        cleanup_test_data(&storage, &[record1.clone(), record2.clone()]).await;
 
-        storage.create(record1).await.unwrap();
-        storage.create(record2).await.unwrap();
+        storage.create(record1.clone()).await.unwrap();
+        storage.create(record2.clone()).await.unwrap();
 
         let list = storage.list().await.unwrap();
         assert_eq!(list.records().len(), 2);
 
-        cleanup_test_data(&storage).await;
+        cleanup_test_data(&storage, &[record1, record2]).await;
     }
 
     #[tokio::test]
@@ -482,7 +455,6 @@ mod tests {
         let Some(storage) = get_test_storage().await else {
             return;
         };
-        cleanup_test_data(&storage).await;
 
         let record = create_test_record(
             "did:example:entity1",
@@ -493,8 +465,9 @@ mod tests {
             true,
             "authorization",
         );
+        cleanup_test_data(&storage, &[record.clone()]).await;
 
-        storage.create(record).await.unwrap();
+        storage.create(record.clone()).await.unwrap();
 
         let query = TrustRecordQuery::new(
             EntityId::new("did:example:entity1"),
@@ -507,6 +480,6 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap().entity_id().as_str(), "did:example:entity1");
 
-        cleanup_test_data(&storage).await;
+        cleanup_test_data(&storage, &[record]).await;
     }
 }

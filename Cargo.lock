@@ -5543,7 +5543,7 @@ dependencies = [
 
 [[package]]
 name = "test-client"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "affinidi-tdk",
  "anyhow",
@@ -5952,15 +5952,15 @@ dependencies = [
 
 [[package]]
 name = "trql-client"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "trqp"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "trust-registry"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "affinidi-tdk",
  "anyhow",

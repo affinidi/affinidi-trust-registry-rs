@@ -67,7 +67,7 @@ async fn test_redis_create_record() {
         "HealthCredential",
         true,
         true,
-        "assertion",
+        "authorization",
     );
 
     let result = storage.create(record.clone()).await;
@@ -102,7 +102,7 @@ async fn test_redis_read_record() {
         "HealthCredential",
         true,
         true,
-        "assertion",
+        "authorization",
     );
     storage.create(record).await.unwrap();
 
@@ -141,7 +141,7 @@ async fn test_redis_update_record() {
         "HealthCredential",
         true,
         true,
-        "assertion",
+        "authorization",
     );
     storage.create(record).await.unwrap();
 
@@ -153,7 +153,7 @@ async fn test_redis_update_record() {
         "HealthCredential",
         false,
         false,
-        "assertion",
+        "authorization",
     );
 
     let result = storage.update(updated_record).await;
@@ -189,7 +189,7 @@ async fn test_redis_delete_record() {
         "HealthCredential",
         true,
         true,
-        "assertion",
+        "authorization",
     );
     storage.create(record).await.unwrap();
 
@@ -231,7 +231,7 @@ async fn test_redis_list_records() {
         "HealthCredential",
         true,
         true,
-        "assertion",
+        "authorization",
     );
     let record2 = create_test_record(
         "did:example:hospital1",
@@ -249,7 +249,7 @@ async fn test_redis_list_records() {
         "Prescription",
         false,
         true,
-        "assertion",
+        "authorization",
     );
 
     storage.create(record1).await.unwrap();
@@ -279,7 +279,7 @@ async fn test_redis_find_by_query_success() {
         "DriverLicense",
         true,
         true,
-        "assertion",
+        "authorization",
     );
     storage.create(record).await.unwrap();
 
@@ -342,7 +342,7 @@ async fn test_redis_create_duplicate_record_error() {
         "resource",
         true,
         true,
-        "assertion",
+        "authorization",
     );
 
     // Create record first time - should succeed
@@ -374,7 +374,7 @@ async fn test_redis_update_nonexistent_record_error() {
         "resource",
         true,
         true,
-        "assertion",
+        "authorization",
     );
 
     let update_result = storage.update(non_existent_record).await;
@@ -455,7 +455,7 @@ async fn test_redis_complete_crud_workflow() {
         "HealthCredential",
         true,
         true,
-        "assertion",
+        "authorization",
     );
     let record2 = create_test_record(
         "did:example:hospital1",
@@ -473,7 +473,7 @@ async fn test_redis_complete_crud_workflow() {
         "Prescription",
         false,
         true,
-        "assertion",
+        "authorization",
     );
 
     storage.create(record1.clone()).await.unwrap();
@@ -504,7 +504,7 @@ async fn test_redis_complete_crud_workflow() {
         "HealthCredential",
         false,
         false,
-        "assertion",
+        "authorization",
     );
     storage.update(updated_record).await.unwrap();
 
@@ -564,7 +564,7 @@ async fn test_redis_context_serialization() {
         "HealthCredential",
         true,
         true,
-        "assertion",
+        "authorization",
     );
 
     record = record.merge_contexts(Context::new(context.clone()));
