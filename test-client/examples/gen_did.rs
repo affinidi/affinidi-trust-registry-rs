@@ -1,5 +1,7 @@
 use affinidi_tdk::{
-    did_common::{DID as DIDCommon, PeerCreateKey, PeerKeyPurpose, PeerService, PeerServiceEndpoint},
+    did_common::{
+        DID as DIDCommon, PeerCreateKey, PeerKeyPurpose, PeerService, PeerServiceEndpoint,
+    },
     secrets_resolver::secrets::Secret,
 };
 use serde_json::json;

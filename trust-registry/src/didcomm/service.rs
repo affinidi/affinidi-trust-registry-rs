@@ -56,7 +56,7 @@ async fn admin_handler(
                     .actor(&sender_did)
                     .resource(AuditResource::empty())
                     .thread_id(Some(ctx.thread_id.clone()))
-                    .build_unauthorized(&format!(
+                    .build_unauthorized(format!(
                         "Unauthorized: DID {sender_did} is not in admin list"
                     )),
             )

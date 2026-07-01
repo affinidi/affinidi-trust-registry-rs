@@ -7,9 +7,6 @@ use affinidi_tdk::{
     },
     secrets_resolver::secrets::Secret,
 };
-use trust_tasks_rs::specs::messaging::acl::set::v0_1::{
-    MediatorAcl, MediatorAclAccessListMode,
-};
 use serde_json::{Value, json};
 use serial_test::serial;
 use sha256::digest;
@@ -28,6 +25,7 @@ use trust_registry::didcomm::{
     },
     prepare_atm_and_profile,
 };
+use trust_tasks_rs::specs::messaging::acl::set::v0_1::{MediatorAcl, MediatorAclAccessListMode};
 use uuid::Uuid;
 
 static TEST_CONTEXT: OnceCell<Arc<TestConfig>> = OnceCell::const_new();
@@ -84,10 +82,7 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
     .await;
 
     (
-        AtmTestContext {
-            atm,
-            profile,
-        },
+        AtmTestContext { atm, profile },
         TEST_CONTEXT
             .get_or_init(|| async {
                 Arc::new(TestConfig {
@@ -301,13 +296,7 @@ async fn setup_test_environment(
 
     clear_messages(&atm, &profile).await;
     let create_messages = get_create_record_messages();
-    create_records(
-        &atm,
-        &profile,
-        trust_registry_did,
-        create_messages,
-    )
-    .await;
+    create_records(&atm, &profile, trust_registry_did, create_messages).await;
 
     (atm, profile)
 }
