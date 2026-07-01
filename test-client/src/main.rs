@@ -187,7 +187,7 @@ async fn main() -> Result<()> {
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-            match list_records(&atm, profile.clone(), &trust_registry_did, &mediator_did).await {
+            match list_records(&atm, profile.clone(), &trust_registry_did).await {
                 Ok(_) => println!("List records request sent - awaiting response..."),
                 Err(err) => println!("List records request failed: {err:#?}"),
             }

@@ -54,7 +54,6 @@ pub async fn create_record(
         &input.atm,
         input.profile,
         &input.trust_registry_did,
-        &input.mediator_did,
         &body,
         CREATE_RECORD_MESSAGE_TYPE,
     )
@@ -85,7 +84,6 @@ pub async fn update_record(
         &input.atm,
         input.profile,
         &input.trust_registry_did,
-        &input.mediator_did,
         &body,
         UPDATE_RECORD_MESSAGE_TYPE,
     )
@@ -104,7 +102,6 @@ pub async fn delete_record(input: CommonCrudInput) -> Result<(), Box<dyn std::er
         &input.atm,
         input.profile,
         &input.trust_registry_did,
-        &input.mediator_did,
         &body,
         DELETE_RECORD_MESSAGE_TYPE,
     )
@@ -123,7 +120,6 @@ pub async fn read_record(input: CommonCrudInput) -> Result<(), Box<dyn std::erro
         &input.atm,
         input.profile,
         &input.trust_registry_did,
-        &input.mediator_did,
         &body,
         READ_RECORD_MESSAGE_TYPE,
     )
@@ -134,7 +130,6 @@ pub async fn list_records(
     atm: &Arc<ATM>,
     profile: Arc<ATMProfile>,
     trust_registry_did: &str,
-    mediator_did: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let body = json!({});
 
@@ -142,7 +137,6 @@ pub async fn list_records(
         atm,
         profile,
         trust_registry_did,
-        mediator_did,
         &body,
         LIST_RECORDS_MESSAGE_TYPE,
     )
@@ -154,7 +148,6 @@ async fn send_admin_message(
     atm: &Arc<ATM>,
     profile: Arc<ATMProfile>,
     trust_registry_did: &str,
-    _mediator_did: &str,
     body: &Value,
     message_type: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
