@@ -148,7 +148,6 @@ async fn trqp_handler(
     message: Message,
     Extension(repo): Extension<Repo>,
 ) -> Result<Option<DIDCommResponse>, DIDCommServiceError> {
-    use crate::storage::repository::TrustRecordQuery;
     use chrono::{SecondsFormat, Utc};
 
     let requested_at = Utc::now();
