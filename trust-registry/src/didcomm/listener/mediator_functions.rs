@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use affinidi_tdk::didcomm::{Message, UnpackMetadata};
+use affinidi_tdk::didcomm::Message;
+use affinidi_tdk::messaging::messages::compat::UnpackMetadata;
 use affinidi_tdk::messaging::protocols::Protocols;
 use affinidi_tdk::messaging::protocols::mediator::acls::{AccessListModeType, MediatorACLSet};
 use sha256::digest;

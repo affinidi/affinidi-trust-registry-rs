@@ -25,6 +25,7 @@ pub fn build_public_jwk(jwk: &affinidi_tdk::affinidi_crypto::JWK) -> serde_json:
             }
             jwk_obj
         }
+        _ => serde_json::json!({}),
     }
 }
 

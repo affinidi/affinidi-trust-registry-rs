@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use affinidi_tdk::{
     didcomm::Message,
-    messaging::{ATM, profiles::ATMProfile, protocols::Protocols},
+    messaging::{ATM, profiles::ATMProfile},
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -22,7 +22,6 @@ pub struct CommonCrudInput {
     pub atm: Arc<ATM>,
     pub profile: Arc<ATMProfile>,
     pub trust_registry_did: String,
-    pub protocols: Arc<Protocols>,
     pub mediator_did: String,
     pub entity_id: String,
     pub authority_id: String,
@@ -55,7 +54,6 @@ pub async fn create_record(
         &input.atm,
         input.profile,
         &input.trust_registry_did,
-        &input.protocols,
         &input.mediator_did,
         &body,
         CREATE_RECORD_MESSAGE_TYPE,
@@ -87,7 +85,6 @@ pub async fn update_record(
         &input.atm,
         input.profile,
         &input.trust_registry_did,
-        &input.protocols,
         &input.mediator_did,
         &body,
         UPDATE_RECORD_MESSAGE_TYPE,
@@ -107,7 +104,6 @@ pub async fn delete_record(input: CommonCrudInput) -> Result<(), Box<dyn std::er
         &input.atm,
         input.profile,
         &input.trust_registry_did,
-        &input.protocols,
         &input.mediator_did,
         &body,
         DELETE_RECORD_MESSAGE_TYPE,
@@ -127,7 +123,6 @@ pub async fn read_record(input: CommonCrudInput) -> Result<(), Box<dyn std::erro
         &input.atm,
         input.profile,
         &input.trust_registry_did,
-        &input.protocols,
         &input.mediator_did,
         &body,
         READ_RECORD_MESSAGE_TYPE,
@@ -139,7 +134,6 @@ pub async fn list_records(
     atm: &Arc<ATM>,
     profile: Arc<ATMProfile>,
     trust_registry_did: &str,
-    protocols: &Arc<Protocols>,
     mediator_did: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let body = json!({});
@@ -148,7 +142,6 @@ pub async fn list_records(
         atm,
         profile,
         trust_registry_did,
-        protocols,
         mediator_did,
         &body,
         LIST_RECORDS_MESSAGE_TYPE,
@@ -161,7 +154,6 @@ async fn send_admin_message(
     atm: &Arc<ATM>,
     profile: Arc<ATMProfile>,
     trust_registry_did: &str,
-    _protocols: &Arc<Protocols>,
     _mediator_did: &str,
     body: &Value,
     message_type: &str,
@@ -185,7 +177,6 @@ async fn send_admin_message(
             trust_registry_did,
             Some(&profile.inner.did),
             Some(&profile.inner.did),
-            None,
         )
         .await?;
 
