@@ -21,6 +21,7 @@ allow = [
     "MIT-0",
     "MIT",
     "Unlicense",
+    "Zlib",
     # As stated here https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html#spdx-identifiers
     # 3.11 versions of SPDX License List was used and below licenses are not included there.
     # They are commented to avoid "[license-not-encountered]" warnings.
