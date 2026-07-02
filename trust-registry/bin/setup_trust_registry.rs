@@ -240,14 +240,14 @@ fn create_keys() -> (Secret, Secret) {
 }
 
 pub fn create_did(mediator_did: String) -> (String, Vec<Secret>) {
-    let mut v_p256_key = Secret::generate_ed25519(None, None);
-    let mut e_secp256k1_key =
+    let mut v_ed25519_key = Secret::generate_ed25519(None, None);
+    let mut e_x25519_key =
         Secret::generate_x25519(None, None).expect("Couldn't create X25519 secret");
 
-    let v_multibase = v_p256_key
+    let v_multibase = v_ed25519_key
         .get_public_keymultibase()
         .expect("Couldn't get verification key multibase");
-    let e_multibase = e_secp256k1_key
+    let e_multibase = e_x25519_key
         .get_public_keymultibase()
         .expect("Couldn't get encryption key multibase");
 
@@ -266,10 +266,10 @@ pub fn create_did(mediator_did: String) -> (String, Vec<Secret>) {
         DIDCommon::generate_peer(&keys, services.as_deref()).expect("Failed to create did:peer");
     let did_peer_str = did_peer.to_string();
 
-    v_p256_key.id = [did_peer_str.as_str(), "#key-1"].concat();
-    e_secp256k1_key.id = [did_peer_str.as_str(), "#key-2"].concat();
+    v_ed25519_key.id = [did_peer_str.as_str(), "#key-1"].concat();
+    e_x25519_key.id = [did_peer_str.as_str(), "#key-2"].concat();
 
-    (did_peer_str, vec![v_p256_key, e_secp256k1_key])
+    (did_peer_str, vec![v_ed25519_key, e_x25519_key])
 }
 
 pub fn setup_did_peer_tr(mediator_did: String) -> (String, Vec<Secret>) {
