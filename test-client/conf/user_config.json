@@ -1,24 +1,24 @@
 {
-  "did:peer:2.Vz6MkqWMWaVzsEu6yxA5s68Sd1avGFAoqZruZ56R63jMFXjNM.Ez6LSqVcWbXXV12QF3JzCF5aJb3rxtBhCBa6cE9RkXj5EWZnZ.SeyJ0IjoiZG0iLCJzIjoiZGlkOndlYjptZWRpYXRvci5mYWJyaWMtZGVtby5vY3RvLmFmZmluaWRpLmlvIn0": {
+  "did:peer:2.Vz6Mkpd3oNkBtmpxT57kAEC6DXSDnUPVbHKiJ6MX8NyStEcmo.Ez6LSsSC3Q2k7LtvRaNZfRHaLvxu6ZuPNXhneGYKm3dhiu7gQ.SeyJ0IjoiZG0iLCJzIjoiZGlkOndlYnZoOlFtVG1qV28yQjduZEhuRDE4M3h4THRzZGVKeGZGZXIzazNLdE5rWnI1NkM2WG06bG9jYWwtbWVkaWF0b3IucHJveHkuZXV3MS5vY3RvLmFmZmluaWRpLmlvIn0": {
     "alias": "SampleTRAdmin",
     "secrets": [
       {
-        "id": "did:peer:2.Vz6MkqWMWaVzsEu6yxA5s68Sd1avGFAoqZruZ56R63jMFXjNM.Ez6LSqVcWbXXV12QF3JzCF5aJb3rxtBhCBa6cE9RkXj5EWZnZ.SeyJ0IjoiZG0iLCJzIjoiZGlkOndlYjptZWRpYXRvci5mYWJyaWMtZGVtby5vY3RvLmFmZmluaWRpLmlvIn0#key-1",
+        "id": "did:peer:2.Vz6Mkpd3oNkBtmpxT57kAEC6DXSDnUPVbHKiJ6MX8NyStEcmo.Ez6LSsSC3Q2k7LtvRaNZfRHaLvxu6ZuPNXhneGYKm3dhiu7gQ.SeyJ0IjoiZG0iLCJzIjoiZGlkOndlYnZoOlFtVG1qV28yQjduZEhuRDE4M3h4THRzZGVKeGZGZXIzazNLdE5rWnI1NkM2WG06bG9jYWwtbWVkaWF0b3IucHJveHkuZXV3MS5vY3RvLmFmZmluaWRpLmlvIn0#key-1",
         "privateKeyJwk": {
           "crv": "Ed25519",
-          "d": "7_va5jeuqwHQexnogQFQgExb2cg3kNYa_7KAW5r-Wt0",
+          "d": "bcUf1UoN8SSbdgAAmaR9X12dDvxrDCL6k0a-ILBZA4A",
           "kty": "OKP",
-          "x": "pDt6blzXFx-TTXzbmviFvWmtMFE11y1jJ9_5jRLs6U4"
+          "x": "lxbU75TWSMEBFPVKoeMho867Z1eqFBbkFN-pRg7wFmo"
         },
         "type": "JsonWebKey2020"
       },
       {
-        "id": "did:peer:2.Vz6MkqWMWaVzsEu6yxA5s68Sd1avGFAoqZruZ56R63jMFXjNM.Ez6LSqVcWbXXV12QF3JzCF5aJb3rxtBhCBa6cE9RkXj5EWZnZ.SeyJ0IjoiZG0iLCJzIjoiZGlkOndlYjptZWRpYXRvci5mYWJyaWMtZGVtby5vY3RvLmFmZmluaWRpLmlvIn0#key-2",
+        "id": "did:peer:2.Vz6Mkpd3oNkBtmpxT57kAEC6DXSDnUPVbHKiJ6MX8NyStEcmo.Ez6LSsSC3Q2k7LtvRaNZfRHaLvxu6ZuPNXhneGYKm3dhiu7gQ.SeyJ0IjoiZG0iLCJzIjoiZGlkOndlYnZoOlFtVG1qV28yQjduZEhuRDE4M3h4THRzZGVKeGZGZXIzazNLdE5rWnI1NkM2WG06bG9jYWwtbWVkaWF0b3IucHJveHkuZXV3MS5vY3RvLmFmZmluaWRpLmlvIn0#key-2",
         "privateKeyJwk": {
           "crv": "X25519",
-          "d": "YMExtG5__7mWyl1P0K_rOkB9tUXX7Bd74QeMTpk9b00",
+          "d": "sOC9wrym5MQ8PTasdoaI7p9XsJR93H42C6EmlXjC1mw",
           "kty": "OKP",
-          "x": "zU7jEM51WS83Duh3VLuhjhJohKmV6erAeRd4R_uYGio"
+          "x": "6iXZ7gM9or1dNFNv021z_EBT3pY8havnHCd7lnha2nU"
         },
         "type": "JsonWebKey2020"
       }

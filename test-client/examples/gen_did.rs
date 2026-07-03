@@ -8,7 +8,7 @@ use serde_json::json;
 
 fn main() {
     let mediator_did = std::env::var("MEDIATOR_DID")
-        .unwrap_or_else(|_| "did:web:mediator.fabric-demo.octo.affinidi.io".to_string());
+        .unwrap_or_else(|_| "did:webvh:QmTmjWo2B7ndHnD183xxLtsdeJxfFer3k3KtNkZr56C6Xm:local-mediator.proxy.euw1.octo.affinidi.io".to_string());
 
     let mut v_key = Secret::generate_ed25519(None, None);
     let mut e_key = Secret::generate_x25519(None, None).expect("Couldn't create X25519 secret");
