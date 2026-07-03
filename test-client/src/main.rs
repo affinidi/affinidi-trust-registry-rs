@@ -4,16 +4,10 @@ use std::sync::Arc;
 use affinidi_tdk::{
     TDK,
     common::{config::TDKConfig, profiles::TDKProfile},
-    messaging::{
-        ATM,
-        profiles::ATMProfile,
-        protocols::{
-            Protocols,
-            mediator::acls::{AccessListModeType, MediatorACLSet},
-        },
-    },
+    messaging::{ATM, profiles::ATMProfile},
 };
 use dotenvy::dotenv;
+use trust_tasks_rs::specs::messaging::acl::set::v0_1::{MediatorAcl, MediatorAclAccessListMode};
 
 use serde_json::json;
 use sha256::digest;
@@ -33,20 +27,13 @@ pub mod sender;
 pub mod service_configs;
 
 async fn set_public_acls_mode(atm: Arc<ATM>, profile: Arc<ATMProfile>) -> Result<()> {
-    let protocols = Protocols::new();
+    let acl = MediatorAcl {
+        access_list_mode: Some(MediatorAclAccessListMode::ExplicitDeny),
+        ..Default::default()
+    };
 
-    let account_get_result = protocols.mediator.account_get(&atm, &profile, None).await;
-
-    let account_info = account_get_result?.ok_or(anyhow::anyhow!(
-        "[profile = {}] Failed to get account info",
-        &profile.inner.alias
-    ))?;
-    let mut acls = MediatorACLSet::from_u64(account_info.acls);
-    acls.set_access_list_mode(AccessListModeType::ExplicitDeny, true, false)?;
-
-    protocols
-        .mediator
-        .acls_set(&atm, &profile, &digest(&profile.inner.did), &acls)
+    atm.trust_tasks()
+        .acl_set(&profile, digest(&profile.inner.did), acl)
         .await?;
     Ok(())
 }
@@ -54,7 +41,6 @@ async fn set_public_acls_mode(atm: Arc<ATM>, profile: Arc<ATMProfile>) -> Result
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
-    let protocols = Arc::new(Protocols::new());
     let user_configs = match load_user_config() {
         Ok(uc) => uc,
         Err(err) => {
@@ -115,7 +101,6 @@ async fn main() -> Result<()> {
                 .ok_or(anyhow::anyhow!("Failed to initialize ATM client"))?,
         );
         let atm_clone = Arc::clone(&atm);
-        let protocols_clone = Arc::clone(&protocols);
 
         let profile = atm
             .profile_add(&ATMProfile::from_tdk_profile(&atm, &profile).await?, true)
@@ -132,7 +117,6 @@ async fn main() -> Result<()> {
                     atm: Arc::clone(&atm),
                     profile: Arc::clone(&profile),
                     trust_registry_did: trust_registry_did.clone(),
-                    protocols: Arc::clone(&protocols),
                     mediator_did: mediator_did.clone(),
                     entity_id: "did:example:entity123".to_string(),
                     authority_id: "did:example:authority456".to_string(),
@@ -160,7 +144,6 @@ async fn main() -> Result<()> {
                 atm: Arc::clone(&atm),
                 profile: Arc::clone(&profile),
                 trust_registry_did: trust_registry_did.clone(),
-                protocols: Arc::clone(&protocols),
                 mediator_did: mediator_did.clone(),
                 entity_id: "did:example:entity123".to_string(),
                 authority_id: "did:example:authority456".to_string(),
@@ -181,7 +164,6 @@ async fn main() -> Result<()> {
                     atm: Arc::clone(&atm),
                     profile: Arc::clone(&profile),
                     trust_registry_did: trust_registry_did.clone(),
-                    protocols: Arc::clone(&protocols),
                     mediator_did: mediator_did.clone(),
                     entity_id: "did:example:entity123".to_string(),
                     authority_id: "did:example:authority456".to_string(),
@@ -205,15 +187,7 @@ async fn main() -> Result<()> {
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-            match list_records(
-                &atm,
-                profile.clone(),
-                &trust_registry_did,
-                &protocols,
-                &mediator_did,
-            )
-            .await
-            {
+            match list_records(&atm, profile.clone(), &trust_registry_did).await {
                 Ok(_) => println!("List records request sent - awaiting response..."),
                 Err(err) => println!("List records request failed: {err:#?}"),
             }
@@ -224,7 +198,6 @@ async fn main() -> Result<()> {
                 atm: Arc::clone(&atm),
                 profile: Arc::clone(&profile),
                 trust_registry_did: trust_registry_did.clone(),
-                protocols: Arc::clone(&protocols),
                 mediator_did: mediator_did.clone(),
                 entity_id: "did:example:entity123".to_string(),
                 authority_id: "did:example:authority456".to_string(),
@@ -244,7 +217,6 @@ async fn main() -> Result<()> {
                 atm: Arc::clone(&atm),
                 profile: Arc::clone(&profile),
                 trust_registry_did: trust_registry_did.clone(),
-                protocols: Arc::clone(&protocols),
                 mediator_did: mediator_did.clone(),
                 entity_id: "did:example:entity123".to_string(),
                 authority_id: "did:example:authority456".to_string(),
@@ -268,7 +240,7 @@ async fn main() -> Result<()> {
 
         if did_config.alias.eq("SampleTRAdmin") {
             println!("\nStart listening to responses from the Trust Registry...\n");
-            user_listener(did_config, &atm_clone, protocols_clone, &profile).await;
+            user_listener(did_config, &atm_clone, &profile).await;
         }
     }
     Ok(())

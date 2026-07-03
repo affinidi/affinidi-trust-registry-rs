@@ -1,5 +1,5 @@
 use crate::common::didcomm::build_message;
-use affinidi_tdk::messaging::{ATM, errors::ATMError, profiles::ATMProfile, protocols::Protocols};
+use affinidi_tdk::messaging::{ATM, errors::ATMError, profiles::ATMProfile};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -7,7 +7,6 @@ pub async fn send_request(
     atm: &ATM,
     issuer_profile: Arc<ATMProfile>,
     service_did: &str,
-    protocols: &Protocols,
     mediator_did: &str,
     body: &Value,
     operation: &str,
@@ -29,14 +28,12 @@ pub async fn send_request(
             service_did,
             Some(&issuer_profile.inner.did),
             Some(&issuer_profile.inner.did),
-            None,
         )
         .await?;
 
-    let (forward_id, forward_msg) = protocols
-        .routing
+    let (forward_id, forward_msg) = atm
+        .routing()
         .forward_message(
-            atm,
             &issuer_profile,
             false,
             &packed_msg.0,

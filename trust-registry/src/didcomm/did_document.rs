@@ -1,6 +1,9 @@
 use crate::configs::ProfileConfig;
+use tracing::warn;
 
-pub fn build_public_jwk(jwk: &affinidi_tdk::affinidi_crypto::JWK) -> serde_json::Value {
+/// Extracts the public portion of a JWK, stripping private key material.
+/// Returns `None` for unsupported key types (only EC and OKP are supported).
+pub fn build_public_jwk(jwk: &affinidi_tdk::affinidi_crypto::JWK) -> Option<serde_json::Value> {
     match &jwk.params {
         affinidi_tdk::affinidi_crypto::Params::EC(params) => {
             let mut jwk_obj = serde_json::json!({
@@ -12,7 +15,7 @@ pub fn build_public_jwk(jwk: &affinidi_tdk::affinidi_crypto::JWK) -> serde_json:
             if let Some(kid) = &jwk.key_id {
                 jwk_obj["kid"] = serde_json::json!(kid);
             }
-            jwk_obj
+            Some(jwk_obj)
         }
         affinidi_tdk::affinidi_crypto::Params::OKP(params) => {
             let mut jwk_obj = serde_json::json!({
@@ -23,7 +26,15 @@ pub fn build_public_jwk(jwk: &affinidi_tdk::affinidi_crypto::JWK) -> serde_json:
             if let Some(kid) = &jwk.key_id {
                 jwk_obj["kid"] = serde_json::json!(kid);
             }
-            jwk_obj
+            Some(jwk_obj)
+        }
+        other => {
+            warn!(
+                kid = ?jwk.key_id,
+                params_type = std::any::type_name_of_val(other),
+                "Skipping secret with unsupported JWK parameter type"
+            );
+            None
         }
     }
 }
@@ -33,20 +44,28 @@ pub fn build_verification_methods(profile_config: &ProfileConfig) -> Vec<serde_j
         .secrets
         .iter()
         .enumerate()
-        .map(|(index, secret)| {
+        .filter_map(|(index, secret)| {
             let public_jwk = match &secret.secret_material {
                 affinidi_tdk::secrets_resolver::secrets::SecretMaterial::JWK(jwk) => {
-                    build_public_jwk(jwk)
+                    build_public_jwk(jwk)?
                 }
-                _ => serde_json::json!({}),
+                other => {
+                    warn!(
+                        did = %profile_config.did,
+                        key_index = index,
+                        material_type = std::any::type_name_of_val(other),
+                        "Skipping secret with unsupported secret material type"
+                    );
+                    return None;
+                }
             };
 
-            serde_json::json!({
+            Some(serde_json::json!({
                 "id": format!("{}#key-{}", profile_config.did, index),
                 "type": "JsonWebKey2020",
                 "controller": profile_config.did,
                 "publicKeyJwk": public_jwk,
-            })
+            }))
         })
         .collect()
 }
@@ -98,7 +117,7 @@ mod tests {
           "d": "private part"
         }))
         .unwrap();
-        let result = build_public_jwk(&jwk);
+        let result = build_public_jwk(&jwk).expect("EC JWK should be supported");
 
         assert_eq!(result["kty"], "EC");
         assert!(result.get("x").is_some());
@@ -117,7 +136,7 @@ mod tests {
             "d": "private part"
         }))
         .unwrap();
-        let result = build_public_jwk(&jwk);
+        let result = build_public_jwk(&jwk).expect("OKP JWK should be supported");
 
         assert_eq!(result["kty"], "OKP");
         assert!(result.get("x").is_some());

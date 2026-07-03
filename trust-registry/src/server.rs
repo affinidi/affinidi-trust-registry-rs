@@ -15,7 +15,7 @@ use tracing_subscriber::EnvFilter;
 use crate::{
     SharedData,
     configs::{Configs, DidcommConfig, TrustRegistryConfig},
-    didcomm::listener::start_didcomm_listener,
+    didcomm::service::start_didcomm_service,
     http::application_routes,
 };
 
@@ -35,8 +35,9 @@ async fn start_didcomm_server(
     repository: Arc<dyn TrustRecordAdminRepository>,
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _ = start_didcomm_listener(config, repository, shutdown).await?;
-
+    let _service = start_didcomm_service(config, repository, shutdown.clone()).await?;
+    // The service runs in background tasks; hold this future alive until shutdown.
+    shutdown.cancelled().await;
     Ok(())
 }
 

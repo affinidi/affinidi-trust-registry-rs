@@ -6,13 +6,7 @@ use affinidi_tdk::{
         DID as DIDCommon, PeerCreateKey, PeerKeyPurpose, PeerService, PeerServiceEndpoint,
         PeerServiceEndpointLong, one_or_many::OneOrMany,
     },
-    messaging::{
-        profiles::ATMProfile,
-        protocols::{
-            Protocols,
-            mediator::acls::{AccessListModeType, MediatorACLSet},
-        },
-    },
+    messaging::profiles::ATMProfile,
     secrets_resolver::secrets::Secret,
 };
 use serde_json::json;
@@ -25,6 +19,7 @@ use std::{
     path::Path,
     sync::Arc,
 };
+use trust_tasks_rs::specs::messaging::acl::set::v0_1::{MediatorAcl, MediatorAclAccessListMode};
 
 fn insert_env_vars(
     file_path: &str,
@@ -109,44 +104,30 @@ pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Se
             return;
         }
     };
-    let protocols = Protocols::new();
-    let account_get_result = protocols.mediator.account_get(&atm, &profile, None).await;
 
-    if account_get_result.is_err() {
-        println!(
-            "Error in getting account info: {:#?}",
-            account_get_result.err()
-        );
-        println!("Current mediator does not support account_get");
-        return;
-    }
+    let acl = MediatorAcl {
+        access_list_mode: Some(MediatorAclAccessListMode::ExplicitDeny),
+        ..Default::default()
+    };
 
-    let account_info = account_get_result.unwrap();
-
-    if let Some(info) = account_info {
-        let mut acls = MediatorACLSet::from_u64(info.acls);
-        if acls.get_access_list_mode().0 == AccessListModeType::ExplicitAllow {
-            acls.set_access_list_mode(AccessListModeType::ExplicitDeny, true, false)
-                .unwrap();
-
-            protocols
-                .mediator
-                .acls_set(&atm, &profile, &digest(&profile.inner.did), &acls)
-                .await
-                .unwrap();
-        }
+    if let Err(e) = atm
+        .trust_tasks()
+        .acl_set(&profile, digest(&profile.inner.did), acl)
+        .await
+    {
+        println!("Error setting ACL: {:#?}", e);
     }
 }
 
 pub fn create_did(service: Option<Vec<String>>, auth_service: bool) -> (String, Vec<Secret>) {
-    let mut v_p256_key = Secret::generate_p256(None, None).expect("Couldn't create P256 secret");
-    let mut e_secp256k1_key =
-        Secret::generate_secp256k1(None, None).expect("Couldn't create Secp256k1 secret");
+    let mut v_ed25519_key = Secret::generate_ed25519(None, None);
+    let mut e_x25519_key =
+        Secret::generate_x25519(None, None).expect("Couldn't create X25519 secret");
 
-    let v_multibase = v_p256_key
+    let v_multibase = v_ed25519_key
         .get_public_keymultibase()
         .expect("Couldn't get verification key multibase");
-    let e_multibase = e_secp256k1_key
+    let e_multibase = e_x25519_key
         .get_public_keymultibase()
         .expect("Couldn't get encryption key multibase");
 
@@ -187,10 +168,10 @@ pub fn create_did(service: Option<Vec<String>>, auth_service: bool) -> (String, 
         DIDCommon::generate_peer(&keys, services.as_deref()).expect("Failed to create did:peer");
     let did_peer_str = did_peer.to_string();
 
-    v_p256_key.id = [did_peer_str.as_str(), "#key-1"].concat();
-    e_secp256k1_key.id = [did_peer_str.as_str(), "#key-2"].concat();
+    v_ed25519_key.id = [did_peer_str.as_str(), "#key-1"].concat();
+    e_x25519_key.id = [did_peer_str.as_str(), "#key-2"].concat();
 
-    (did_peer_str, vec![v_p256_key, e_secp256k1_key])
+    (did_peer_str, vec![v_ed25519_key, e_x25519_key])
 }
 
 #[tokio::main]

@@ -20,7 +20,7 @@ pub fn build_message(
         .expires_time(now + 10)
         .finalize();
 
-    println!("---  MESSAGE: '{}' ---", &m.type_);
+    println!("---  MESSAGE: '{}' ---", &m.typ);
     println!("{:?}", serde_json::to_string(&m));
     println!("------");
     Ok(m)

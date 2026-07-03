@@ -4,23 +4,16 @@ use affinidi_tdk::{
     common::{config::TDKConfig, profiles::TDKProfile},
     did_common::{
         DID as DIDCommon, Document, PeerCreateKey, PeerKeyPurpose, PeerService,
-        PeerServiceEndpoint,
-        service::{Endpoint, Service},
-        verification_method::{VerificationMethod, VerificationRelationship},
+        PeerServiceEndpoint, ServiceBuilder, VerificationMethodBuilder, service::Endpoint,
+        verification_method::VerificationRelationship,
     },
-    messaging::{
-        profiles::ATMProfile,
-        protocols::{
-            Protocols,
-            mediator::acls::{AccessListModeType, MediatorACLSet},
-        },
-    },
+    messaging::profiles::ATMProfile,
     secrets_resolver::secrets::{Secret, SecretMaterial},
 };
+use trust_tasks_rs::specs::messaging::acl::set::v0_1::{MediatorAcl, MediatorAclAccessListMode};
 
 use clap::Parser;
 use didwebvh_rs::{DIDWebVHState, parameters::Parameters, url::WebVHURL};
-use serde_json::Value;
 use serde_json::json;
 use sha256::digest;
 use std::str::FromStr;
@@ -220,40 +213,25 @@ pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Se
             return;
         }
     };
-    let protocols = Protocols::new();
-    let account_get_result = protocols.mediator.account_get(&atm, &profile, None).await;
 
-    if account_get_result.is_err() {
-        println!(
-            "Error in getting account info: {:#?}",
-            account_get_result.err()
-        );
-        println!("Current mediator does not support account_get");
-        return;
-    }
+    let acl = MediatorAcl {
+        access_list_mode: Some(MediatorAclAccessListMode::ExplicitDeny),
+        ..Default::default()
+    };
 
-    let account_info = account_get_result.unwrap();
-
-    if let Some(info) = account_info {
-        let mut acls = MediatorACLSet::from_u64(info.acls);
-        if acls.get_access_list_mode().0 == AccessListModeType::ExplicitAllow {
-            acls.set_access_list_mode(AccessListModeType::ExplicitDeny, true, false)
-                .unwrap();
-
-            protocols
-                .mediator
-                .acls_set(&atm, &profile, &digest(&profile.inner.did), &acls)
-                .await
-                .unwrap();
-        }
+    if let Err(e) = atm
+        .trust_tasks()
+        .acl_set(&profile, digest(&profile.inner.did), acl)
+        .await
+    {
+        println!("Error setting ACL: {:#?}", e);
     }
 }
 
 fn create_keys() -> (Secret, Secret) {
-    let mut verification_key =
-        Secret::generate_p256(None, None).expect("Failed to generate P256 key");
+    let mut verification_key = Secret::generate_ed25519(None, None);
     let mut encryption_key =
-        Secret::generate_secp256k1(None, None).expect("Failed to generate Secp256k1 key");
+        Secret::generate_x25519(None, None).expect("Failed to generate X25519 key");
 
     verification_key.id = verification_key.get_public_keymultibase().unwrap();
     encryption_key.id = encryption_key.get_public_keymultibase().unwrap();
@@ -262,14 +240,14 @@ fn create_keys() -> (Secret, Secret) {
 }
 
 pub fn create_did(mediator_did: String) -> (String, Vec<Secret>) {
-    let mut v_p256_key = Secret::generate_p256(None, None).expect("Couldn't create P256 secret");
-    let mut e_secp256k1_key =
-        Secret::generate_secp256k1(None, None).expect("Couldn't create Secp256k1 secret");
+    let mut v_ed25519_key = Secret::generate_ed25519(None, None);
+    let mut e_x25519_key =
+        Secret::generate_x25519(None, None).expect("Couldn't create X25519 secret");
 
-    let v_multibase = v_p256_key
+    let v_multibase = v_ed25519_key
         .get_public_keymultibase()
         .expect("Couldn't get verification key multibase");
-    let e_multibase = e_secp256k1_key
+    let e_multibase = e_x25519_key
         .get_public_keymultibase()
         .expect("Couldn't get encryption key multibase");
 
@@ -288,10 +266,10 @@ pub fn create_did(mediator_did: String) -> (String, Vec<Secret>) {
         DIDCommon::generate_peer(&keys, services.as_deref()).expect("Failed to create did:peer");
     let did_peer_str = did_peer.to_string();
 
-    v_p256_key.id = [did_peer_str.as_str(), "#key-1"].concat();
-    e_secp256k1_key.id = [did_peer_str.as_str(), "#key-2"].concat();
+    v_ed25519_key.id = [did_peer_str.as_str(), "#key-1"].concat();
+    e_x25519_key.id = [did_peer_str.as_str(), "#key-2"].concat();
 
-    (did_peer_str, vec![v_p256_key, e_secp256k1_key])
+    (did_peer_str, vec![v_ed25519_key, e_x25519_key])
 }
 
 pub fn setup_did_peer_tr(mediator_did: String) -> (String, Vec<Secret>) {
@@ -325,9 +303,6 @@ pub fn setup_did_web_tr(
     // Create the basic DID Document Structure
     let mut did_document = Document::new(&tr_did.to_string())?;
 
-    // Add the verification methods to the DID Document
-    let mut property_set: HashMap<String, Value> = HashMap::new();
-
     // Add JSON-LD contexts
     let mut parameters_set = HashMap::new();
     parameters_set.insert(
@@ -341,55 +316,38 @@ pub fn setup_did_web_tr(
     did_document.parameters_set = parameters_set;
 
     // Signing and Authentication Key
-    property_set.insert(
-        "publicKeyMultibase".to_string(),
-        Value::String(verification_key.id.clone()),
+    let v_key_id_str = [tr_did.to_string(), "#key-1".to_string()].concat();
+    did_document.verification_method.push(
+        VerificationMethodBuilder::new(&v_key_id_str, "Multikey", &tr_did)?
+            .public_key_multibase(&verification_key.id)
+            .build(),
     );
-    let v_key_id = Url::parse(&[tr_did.to_string(), "#key-1".to_string()].concat())?;
-    did_document.verification_method.push(VerificationMethod {
-        id: v_key_id.clone(),
-        type_: "Multikey".to_string(),
-        controller: Url::parse(&tr_did.to_string())?,
-        revoked: None,
-        expires: None,
-        property_set: property_set.clone(),
-    });
     did_document
         .assertion_method
-        .push(VerificationRelationship::Reference(v_key_id.clone()));
+        .push(VerificationRelationship::Reference(v_key_id_str.clone()));
 
     did_document
         .authentication
-        .push(VerificationRelationship::Reference(v_key_id.clone()));
+        .push(VerificationRelationship::Reference(v_key_id_str.clone()));
 
     // Encryption Key
-    property_set.insert(
-        "publicKeyMultibase".to_string(),
-        Value::String(encryption_key.id.clone()),
+    let e_key_id_str = [tr_did.to_string(), "#key-2".to_string()].concat();
+    did_document.verification_method.push(
+        VerificationMethodBuilder::new(&e_key_id_str, "Multikey", &tr_did)?
+            .public_key_multibase(&encryption_key.id)
+            .build(),
     );
-    let e_key_id = Url::parse(&[tr_did.to_string(), "#key-2".to_string()].concat())?;
-    did_document.verification_method.push(VerificationMethod {
-        id: e_key_id.clone(),
-        type_: "Multikey".to_string(),
-        controller: Url::parse(&tr_did.to_string())?,
-        revoked: None,
-        expires: None,
-        property_set: property_set.clone(),
-    });
     did_document
         .key_agreement
-        .push(VerificationRelationship::Reference(e_key_id.clone()));
+        .push(VerificationRelationship::Reference(e_key_id_str.clone()));
 
     // Add service endpoints to the DID Document
     let endpoint = Endpoint::Url(Url::from_str(&mediator_did.clone())?);
-    did_document.service.push(Service {
-        id: Some(Url::parse(
-            &[tr_did.to_string(), "#service".to_string()].concat(),
-        )?),
-        type_: vec!["DIDCommMessaging".to_string()],
-        property_set: HashMap::new(),
-        service_endpoint: endpoint,
-    });
+    did_document.service.push(
+        ServiceBuilder::new("DIDCommMessaging", endpoint)
+            .id(&[tr_did.to_string(), "#service".to_string()].concat())?
+            .build(),
+    );
 
     if did_method == "webvh" {
         // Create the WebVH Parameters

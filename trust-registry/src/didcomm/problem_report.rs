@@ -109,7 +109,6 @@ pub async fn send_problem_report(
             recipient,
             Some(&profile.inner.did),
             Some(&profile.inner.did),
-            None,
         )
         .await?;
 

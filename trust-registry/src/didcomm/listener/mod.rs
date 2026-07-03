@@ -7,7 +7,8 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use urlencoding::decode;
 
-use affinidi_tdk::didcomm::{Message, UnpackMetadata};
+use affinidi_tdk::didcomm::Message;
+use affinidi_tdk::messaging::messages::compat::UnpackMetadata;
 use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
 use async_trait::async_trait;
 use tracing::{info, warn};
