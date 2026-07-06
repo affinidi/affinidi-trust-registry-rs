@@ -185,7 +185,6 @@ async fn send_admin_message(
             trust_registry_did,
             Some(&profile.inner.did),
             Some(&profile.inner.did),
-            None,
         )
         .await?;
 

@@ -76,7 +76,6 @@ pub async fn send_response(
             recipient,
             Some(&profile.inner.did),
             Some(&profile.inner.did),
-            None,
         )
         .await?;
 
@@ -127,7 +126,7 @@ mod tests {
             Some("parent-456".to_string()),
         );
 
-        assert_eq!(msg.type_, "https://example.com/test");
+        assert_eq!(msg.typ, "https://example.com/test");
         assert_eq!(msg.from.as_ref().unwrap(), "did:example:alice");
         assert_eq!(msg.to.as_ref().unwrap()[0], "did:example:bob");
         assert_eq!(msg.thid.as_ref().unwrap(), "thread-123");
@@ -142,7 +141,7 @@ mod tests {
             Some("thread-123".to_string()),
             Some("parent-456".to_string()),
         );
-        assert_eq!(msg.type_, PROBLEM_REPORT_TYPE);
+        assert_eq!(msg.typ, PROBLEM_REPORT_TYPE);
         assert_eq!(msg.from.as_ref().unwrap(), "did:example:alice");
         assert_eq!(msg.to.as_ref().unwrap()[0], "did:example:bob");
         assert_eq!(msg.thid.as_ref().unwrap(), "thread-123");

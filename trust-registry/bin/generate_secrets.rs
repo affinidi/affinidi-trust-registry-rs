@@ -1,4 +1,7 @@
 #![cfg(feature = "dev-tools")]
+// `Protocols` is deprecated in affinidi-messaging-sdk 0.18 in favour of ATM
+// accessor methods; migrating this dev-only tool is a separate cleanup.
+#![allow(deprecated)]
 use affinidi_tdk::{
     TDK,
     common::{config::TDKConfig, profiles::TDKProfile},

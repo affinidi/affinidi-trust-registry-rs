@@ -25,6 +25,10 @@ pub fn build_public_jwk(jwk: &affinidi_tdk::affinidi_crypto::JWK) -> serde_json:
             }
             jwk_obj
         }
+        // The `Params` enum is non-exhaustive upstream (e.g. RSA, symmetric).
+        // The Trust Registry only publishes EC/OKP verification methods, so any
+        // other key type is not representable here.
+        _ => serde_json::json!({}),
     }
 }
 

@@ -1,6 +1,13 @@
+// The `Protocols` API is deprecated in affinidi-messaging-sdk 0.18 in favour of
+// ATM accessor methods (`atm.mediator()`, `atm.message_pickup()`, ...). Migrating
+// those call sites is a separate cleanup; this upgrade keeps the working code path
+// unchanged, so we suppress the deprecation warning here only.
+#![allow(deprecated)]
+
 use std::time::Duration;
 
-use affinidi_tdk::didcomm::{Message, UnpackMetadata};
+use affinidi_tdk::didcomm::Message;
+use affinidi_tdk::messaging::messages::compat::UnpackMetadata;
 use affinidi_tdk::messaging::protocols::Protocols;
 use affinidi_tdk::messaging::protocols::mediator::acls::{AccessListModeType, MediatorACLSet};
 use sha256::digest;

@@ -7,7 +7,8 @@ use crate::{
         problem_report, transport,
     },
 };
-use affinidi_tdk::didcomm::{Message, UnpackMetadata};
+use affinidi_tdk::didcomm::Message;
+use affinidi_tdk::messaging::messages::compat::UnpackMetadata;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -328,7 +329,7 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> ProtocolHandler for Admin
         message: Message,
         _meta: UnpackMetadata,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let message_type = message.type_.clone();
+        let message_type = message.typ.clone();
 
         if let Err(auth_error) = self.validate_admin_did(&ctx.sender_did) {
             self.handle_unauthorized(ctx, auth_error, &message_type)

@@ -1,3 +1,8 @@
+// The `Protocols` API is deprecated in affinidi-messaging-sdk 0.18 in favour of
+// ATM accessor methods. This is a test/helper client; migrating it is a separate
+// cleanup, so suppress the deprecation warning crate-wide here.
+#![allow(deprecated)]
+
 use anyhow::Result;
 use std::sync::Arc;
 

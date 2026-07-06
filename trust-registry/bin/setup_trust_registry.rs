@@ -1,12 +1,15 @@
 #![cfg(feature = "dev-tools")]
+// The `Protocols` API is deprecated in affinidi-messaging-sdk 0.18 in favour of
+// ATM accessor methods; migrating this dev-only tool is a separate cleanup.
+#![allow(deprecated)]
 use affinidi_tdk::{
     TDK,
     common::{config::TDKConfig, profiles::TDKProfile},
     did_common::{
         DID as DIDCommon, Document, PeerCreateKey, PeerKeyPurpose, PeerService,
-        PeerServiceEndpoint,
-        service::{Endpoint, Service},
-        verification_method::{VerificationMethod, VerificationRelationship},
+        PeerServiceEndpoint, ServiceBuilder, VerificationMethodBuilder,
+        service::Endpoint,
+        verification_method::VerificationRelationship,
     },
     messaging::{
         profiles::ATMProfile,
@@ -346,21 +349,22 @@ pub fn setup_did_web_tr(
         Value::String(verification_key.id.clone()),
     );
     let v_key_id = Url::parse(&[tr_did.to_string(), "#key-1".to_string()].concat())?;
-    did_document.verification_method.push(VerificationMethod {
-        id: v_key_id.clone(),
-        type_: "Multikey".to_string(),
-        controller: Url::parse(&tr_did.to_string())?,
-        revoked: None,
-        expires: None,
-        property_set: property_set.clone(),
-    });
+    did_document.verification_method.push(
+        VerificationMethodBuilder::from_urls(
+            v_key_id.clone(),
+            "Multikey".to_string(),
+            Url::parse(&tr_did.to_string())?,
+        )
+        .properties(property_set.clone())
+        .build(),
+    );
     did_document
         .assertion_method
-        .push(VerificationRelationship::Reference(v_key_id.clone()));
+        .push(VerificationRelationship::Reference(v_key_id.to_string()));
 
     did_document
         .authentication
-        .push(VerificationRelationship::Reference(v_key_id.clone()));
+        .push(VerificationRelationship::Reference(v_key_id.to_string()));
 
     // Encryption Key
     property_set.insert(
@@ -368,28 +372,28 @@ pub fn setup_did_web_tr(
         Value::String(encryption_key.id.clone()),
     );
     let e_key_id = Url::parse(&[tr_did.to_string(), "#key-2".to_string()].concat())?;
-    did_document.verification_method.push(VerificationMethod {
-        id: e_key_id.clone(),
-        type_: "Multikey".to_string(),
-        controller: Url::parse(&tr_did.to_string())?,
-        revoked: None,
-        expires: None,
-        property_set: property_set.clone(),
-    });
+    did_document.verification_method.push(
+        VerificationMethodBuilder::from_urls(
+            e_key_id.clone(),
+            "Multikey".to_string(),
+            Url::parse(&tr_did.to_string())?,
+        )
+        .properties(property_set.clone())
+        .build(),
+    );
     did_document
         .key_agreement
-        .push(VerificationRelationship::Reference(e_key_id.clone()));
+        .push(VerificationRelationship::Reference(e_key_id.to_string()));
 
     // Add service endpoints to the DID Document
     let endpoint = Endpoint::Url(Url::from_str(&mediator_did.clone())?);
-    did_document.service.push(Service {
-        id: Some(Url::parse(
-            &[tr_did.to_string(), "#service".to_string()].concat(),
-        )?),
-        type_: vec!["DIDCommMessaging".to_string()],
-        property_set: HashMap::new(),
-        service_endpoint: endpoint,
-    });
+    did_document.service.push(
+        ServiceBuilder::new("DIDCommMessaging", endpoint)
+            .id_url(Url::parse(
+                &[tr_did.to_string(), "#service".to_string()].concat(),
+            )?)
+            .build(),
+    );
 
     if did_method == "webvh" {
         // Create the WebVH Parameters

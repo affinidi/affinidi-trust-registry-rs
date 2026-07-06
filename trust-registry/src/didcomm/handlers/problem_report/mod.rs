@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use affinidi_tdk::didcomm::{Message, UnpackMetadata};
+use affinidi_tdk::didcomm::Message;
+use affinidi_tdk::messaging::messages::compat::UnpackMetadata;
 use async_trait::async_trait;
 use tracing::info;
 

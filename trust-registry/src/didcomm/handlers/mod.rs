@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::storage::repository::TrustRecordRepository;
 use affinidi_tdk::{
-    didcomm::{Message, UnpackMetadata},
-    messaging::{ATM, profiles::ATMProfile},
+    didcomm::Message,
+    messaging::{ATM, messages::compat::UnpackMetadata, profiles::ATMProfile},
 };
 use async_trait::async_trait;
 use tracing::{info, warn};
@@ -51,7 +51,7 @@ impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for BaseHandler
         meta: UnpackMetadata,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // TODO: validate UnpackMetadata, so in config the admin of TR can define would they allow unsign / anon / etc messages
-        let message_type = &message.type_;
+        let message_type = &message.typ;
         let from = message.from.clone().unwrap_or("anon".into());
         let thid = get_thread_id(&message).or_else(|| Some(message.id.clone()));
         let pthid = get_parent_thread_id(&message);
@@ -79,7 +79,7 @@ impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for BaseHandler
             // send problem report
             warn!(
                 "No handler found. Send problem report or ignore. message_type = {}, from = {}",
-                &message.type_, from
+                &message.typ, from
             );
         }
         Ok(())

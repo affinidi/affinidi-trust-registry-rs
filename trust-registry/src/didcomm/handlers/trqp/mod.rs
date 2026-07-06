@@ -4,7 +4,8 @@ use crate::{
     didcomm::error::DIDCommError,
     storage::repository::{TrustRecordQuery, TrustRecordRepository},
 };
-use affinidi_tdk::didcomm::{Message, UnpackMetadata};
+use affinidi_tdk::didcomm::Message;
+use affinidi_tdk::messaging::messages::compat::UnpackMetadata;
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use serde_json::json;
@@ -42,9 +43,9 @@ impl<R: ?Sized + TrustRecordRepository + 'static> ProtocolHandler for TRQPMessag
         _meta: UnpackMetadata,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let requested_at = Utc::now();
-        let is_authorization = message.type_ == QUERY_AUTHORIZATION_MESSAGE_TYPE;
+        let is_authorization = message.typ == QUERY_AUTHORIZATION_MESSAGE_TYPE;
 
-        let output_message_type: String = format!("{}/response", message.type_);
+        let output_message_type: String = format!("{}/response", message.typ);
         let query: TrustRecordQuery = serde_json::from_value(message.body)?;
         let record = self.repository.find_by_query(query).await?;
 
@@ -100,7 +101,6 @@ impl<R: ?Sized + TrustRecordRepository + 'static> ProtocolHandler for TRQPMessag
                 &ctx.sender_did,
                 Some(&ctx.profile.inner.did),
                 Some(&ctx.profile.inner.did),
-                None,
             )
             .await?;
 

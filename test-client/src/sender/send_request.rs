@@ -29,7 +29,6 @@ pub async fn send_request(
             service_did,
             Some(&issuer_profile.inner.did),
             Some(&issuer_profile.inner.did),
-            None,
         )
         .await?;
 
