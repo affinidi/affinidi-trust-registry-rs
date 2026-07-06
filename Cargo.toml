@@ -17,6 +17,7 @@ homepage = "https://affinidi.com/"
 [workspace.dependencies]
 
 affinidi-tdk = "0.8"
+trust-tasks-rs = "0.2"
 anyhow = "1.0"
 async-trait = "0.1.89"
 base64 = "0.22"
