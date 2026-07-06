@@ -167,17 +167,19 @@ TRQP v2.0 field contract (verbatim):
 - **Response** adds: `recognized`/`authorized` (bool), `time_evaluated` (required), `time_requested`, `message`, `context`.
 - HTTPS binding: `POST /recognition`, `POST /authorization` (already served by this repo).
 
-Spec/payload layout (slug namespace `trust-registry/`):
+Spec/payload layout (slug namespace `registry/`, canonical Type URI `https://trusttasks.org/spec/registry/<op>/0.1`):
 
-| Slug | Request Payload | Response Payload | Maps to today |
-|------|-----------------|------------------|---------------|
-| `trust-registry/recognition` | `RecognitionRequest` | `RecognitionResponse` | `trqp/1.0/query-recognition` + `POST /recognition` |
-| `trust-registry/authorization` | `AuthorizationRequest` | `AuthorizationResponse` | `trqp/1.0/query-authorization` + `POST /authorization` |
-| `trust-registry/record/create` | `RecordCreateRequest` (`TrustRecord`) | `RecordAck` | `tr-admin/1.0/create-record` |
-| `trust-registry/record/update` | `RecordUpdateRequest` | `RecordAck` | `tr-admin/1.0/update-record` |
-| `trust-registry/record/delete` | `RecordDeleteRequest` (4-tuple) | `RecordAck` | `tr-admin/1.0/delete-record` |
-| `trust-registry/record/read` | `RecordReadRequest` (4-tuple) | `TrustRecord` | `tr-admin/1.0/read-record` |
-| `trust-registry/record/list` | `RecordListRequest` | `TrustRecordList` | `tr-admin/1.0/list-records` |
+| Slug | Request Payload | Response Payload | `IS_PROOF_REQUIRED` | Maps to today |
+|------|-----------------|------------------|---------------------|---------------|
+| `registry/recognition` | `RecognitionRequest` | `RecognitionResponse` | false | `trqp/1.0/query-recognition` + `POST /recognition` |
+| `registry/authorization` | `AuthorizationRequest` | `AuthorizationResponse` | false | `trqp/1.0/query-authorization` + `POST /authorization` |
+| `registry/record/create` | `RecordCreateRequest` (`TrustRecord`) | `RecordAck` | **true** | `tr-admin/1.0/create-record` |
+| `registry/record/update` | `RecordUpdateRequest` | `RecordAck` | **true** | `tr-admin/1.0/update-record` |
+| `registry/record/delete` | `RecordDeleteRequest` (4-tuple) | `RecordAck` | **true** | `tr-admin/1.0/delete-record` |
+| `registry/record/read` | `RecordReadRequest` (4-tuple) | `TrustRecord` | false | `tr-admin/1.0/read-record` |
+| `registry/record/list` | `RecordListRequest` | `TrustRecordList` | false | `tr-admin/1.0/list-records` |
+
+**Proof policy (decided):** reads (recognition/authorization/read/list) rely on transport authentication only (DIDComm authcrypt / TSP sender = authenticated VID). Record **writes** (create/update/delete) set `IS_PROOF_REQUIRED = true` — a Data Integrity proof verified via `trust-tasks-proof` in the consume pipeline — in addition to the existing admin-DID ACL check.
 
 Single `Dispatcher` mapping payload types → existing repository logic:
 - recognition, authorization (reads) → `TrustRecordRepository::find_by_query`
