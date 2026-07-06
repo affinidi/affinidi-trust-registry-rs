@@ -157,9 +157,33 @@ Key principle: **one protocol model (Trust Tasks), three transports (HTTP / DIDC
 - Feature-gate behind `--features tsp`.
 
 ### 7.3 Trust Tasks for all protocol messages
-- Introduce a single `Dispatcher` mapping Trust Task payload types → the TR's existing repository logic:
-  - recognition, authorization (reads) → `TrustRecordRepository::find_by_query`
-  - create/update/delete/read/list record → existing admin repository ops.
+
+**Modeling decision:** the TR operations form a **Trust Task family** (one spec = one Type URI = one request/response Payload pair), *not* a single polymorphic "TRQP task". The `trust-tasks-rs` `Dispatcher` routes strictly by Type URI, so per-op specs preserve typed routing and typed responses. All ops register on one `Dispatcher` and are advertised together via `trust_task_discovery`.
+
+The TR query specs are grounded in **TRQP v2.0** (ToIP TSWG; JSON schemas `trqp_{recognition,authorization}_{request,response}.schema.json`). Payload structs reuse the **verbatim TRQP field names** so a single Rust type serializes for *both* the plain HTTP TRQP binding and the Trust Task payload.
+
+TRQP v2.0 field contract (verbatim):
+- Recognition/Authorization **request** (required): `entity_id`, `authority_id`, `action`, `resource`; optional `context.time` (RFC3339 Z), authorization also `context.locator`.
+- **Response** adds: `recognized`/`authorized` (bool), `time_evaluated` (required), `time_requested`, `message`, `context`.
+- HTTPS binding: `POST /recognition`, `POST /authorization` (already served by this repo).
+
+Spec/payload layout (slug namespace `trust-registry/`):
+
+| Slug | Request Payload | Response Payload | Maps to today |
+|------|-----------------|------------------|---------------|
+| `trust-registry/recognition` | `RecognitionRequest` | `RecognitionResponse` | `trqp/1.0/query-recognition` + `POST /recognition` |
+| `trust-registry/authorization` | `AuthorizationRequest` | `AuthorizationResponse` | `trqp/1.0/query-authorization` + `POST /authorization` |
+| `trust-registry/record/create` | `RecordCreateRequest` (`TrustRecord`) | `RecordAck` | `tr-admin/1.0/create-record` |
+| `trust-registry/record/update` | `RecordUpdateRequest` | `RecordAck` | `tr-admin/1.0/update-record` |
+| `trust-registry/record/delete` | `RecordDeleteRequest` (4-tuple) | `RecordAck` | `tr-admin/1.0/delete-record` |
+| `trust-registry/record/read` | `RecordReadRequest` (4-tuple) | `TrustRecord` | `tr-admin/1.0/read-record` |
+| `trust-registry/record/list` | `RecordListRequest` | `TrustRecordList` | `tr-admin/1.0/list-records` |
+
+Single `Dispatcher` mapping payload types → existing repository logic:
+- recognition, authorization (reads) → `TrustRecordRepository::find_by_query`
+- create/update/delete/read/list record → `TrustRecordAdminRepository` ops.
+
+**Not blocked by A5:** payload structs are hand-written `impl Payload` in A1 (the trait only needs a `TYPE_URI` const); A5 later formalizes identical slugs/field names as published specs in `dtgwg-trust-tasks-tf`.
 - Wire three bindings into that one dispatcher:
   - **DIDComm**: a new `ProtocolHandler` that matches the Trust Tasks envelope type and calls `unpack_trust_task` → `consume_inbound` → dispatcher (keep the legacy `trqp/1.0` + `tr-admin/1.0` handlers during a deprecation window).
   - **HTTP**: mount `trust-tasks-https` `POST /trust-tasks` beside the existing REST routes (existing routes stay for TRQP back-comp).
