@@ -13,4 +13,7 @@ pub mod payloads;
 pub mod router;
 
 pub use payloads::type_uris;
-pub use router::{build_dispatcher, handle_document, RegistryDispatcher, TaskFuture, TaskOutcome};
+pub use router::{
+    build_dispatcher, build_query_dispatcher, handle_document, RegistryDispatcher, TaskFuture,
+    TaskOutcome,
+};

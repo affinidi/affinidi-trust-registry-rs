@@ -6,6 +6,7 @@ use axum::{
 };
 
 pub mod trqp;
+pub mod trust_tasks;
 pub mod wellknown;
 
 pub fn application_routes<R>(api_prefix: &str, shared_data: SharedData<R>) -> Router
@@ -15,6 +16,7 @@ where
     let all_handlers = Router::new()
         .route("/authorization", post(trqp::handle_trqp_authorization::<R>))
         .route("/recognition", post(trqp::handle_trqp_recognition::<R>))
+        .route("/trust-tasks", post(trust_tasks::handle_trust_task::<R>))
         .route(
             "/.well-known/did.json",
             get(wellknown::handle_wellknown_did_json::<R>),

@@ -126,6 +126,27 @@ where
         })
 }
 
+/// Build a read-only [`RegistryDispatcher`] over `repository`.
+///
+/// Registers only the TRQP query operations (`registry/recognition` and
+/// `registry/authorization`), which need just [`TrustRecordRepository`]. Used by
+/// the HTTP binding, where — mirroring the existing REST TRQP surface — the
+/// registry is read-only and record CRUD stays on the DIDComm transport.
+pub fn build_query_dispatcher<R>(repository: Arc<R>) -> RegistryDispatcher
+where
+    R: TrustRecordRepository + ?Sized + 'static,
+{
+    Dispatcher::new()
+        .on::<RecognitionRequest, _>({
+            let repo = repository.clone();
+            move |doc| -> TaskFuture { Box::pin(handle_recognition(repo.clone(), doc)) }
+        })
+        .on::<AuthorizationRequest, _>({
+            let repo = repository.clone();
+            move |doc| -> TaskFuture { Box::pin(handle_authorization(repo.clone(), doc)) }
+        })
+}
+
 /// Route a raw inbound document and await its handler.
 ///
 /// Convenience for callers holding a `TrustTask<Value>`: routing/deserialisation
@@ -423,5 +444,45 @@ mod tests {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_dispatcher(repo);
         assert_eq!(dispatcher.registered_uris().len(), 7);
+    }
+
+    #[test]
+    fn query_dispatcher_registers_only_the_two_reads() {
+        let repo = Arc::new(MockRepo::default());
+        let dispatcher = build_query_dispatcher(repo);
+        assert_eq!(dispatcher.registered_uris().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn query_dispatcher_handles_recognition() {
+        let repo = Arc::new(MockRepo {
+            record: Some(sample_record()),
+            ..Default::default()
+        });
+        let dispatcher = build_query_dispatcher(repo);
+        let doc = value_doc(RecognitionRequest {
+            query: super::super::payloads::QueryTuple {
+                entity_id: "did:example:entity".into(),
+                authority_id: "did:example:authority".into(),
+                action: "issue".into(),
+                resource: "vc".into(),
+            },
+            context: None,
+        });
+        let out = handle_document(&dispatcher, doc).await.expect("ok");
+        let resp: RecognitionResponse = serde_json::from_value(out.payload).expect("parses");
+        assert!(resp.recognized);
+    }
+
+    #[tokio::test]
+    async fn query_dispatcher_rejects_record_writes() {
+        // Record CRUD is DIDComm-only; the HTTP query dispatcher must not route it.
+        let repo = Arc::new(MockRepo::default());
+        let dispatcher = build_query_dispatcher(repo);
+        let doc = value_doc(RecordCreateRequest {
+            record: sample_record(),
+        });
+        let out = handle_document(&dispatcher, doc).await;
+        assert!(out.is_err(), "write over the query dispatcher must be rejected");
     }
 }

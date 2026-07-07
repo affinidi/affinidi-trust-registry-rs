@@ -5999,9 +5999,24 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "trust-tasks-https",
  "trust-tasks-rs",
  "url",
  "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "trust-tasks-https"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8300322fc155f22289bd800eb2152ef300c99471bd71f2daa975aa6e7798b526"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "trust-tasks-rs",
  "uuid",
 ]
 
