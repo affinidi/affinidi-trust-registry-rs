@@ -2,6 +2,9 @@
 version = 2
 ignore = [
     { id = "RUSTSEC-2022-0092", reason = "askalono always provides valid utf-8 files from a cache, this is not relevant" },
+    { id = "RUSTSEC-2026-0098", reason = "transitive rustls-webpki 0.101.7 via AWS SDK (rustls 0.21); no fix until AWS SDK moves to rustls 0.23" },
+    { id = "RUSTSEC-2026-0099", reason = "transitive rustls-webpki 0.101.7 via AWS SDK (rustls 0.21); no fix until AWS SDK moves to rustls 0.23" },
+    { id = "RUSTSEC-2026-0104", reason = "transitive rustls-webpki 0.101.7 via AWS SDK (rustls 0.21); no fix until AWS SDK moves to rustls 0.23" },
 ]
 
 [bans]
