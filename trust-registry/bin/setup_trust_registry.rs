@@ -7,8 +7,7 @@ use affinidi_tdk::{
     common::{config::TDKConfig, profiles::TDKProfile},
     did_common::{
         DID as DIDCommon, Document, PeerCreateKey, PeerKeyPurpose, PeerService,
-        PeerServiceEndpoint, ServiceBuilder, VerificationMethodBuilder,
-        service::Endpoint,
+        PeerServiceEndpoint, ServiceBuilder, VerificationMethodBuilder, service::Endpoint,
         verification_method::VerificationRelationship,
     },
     messaging::{
