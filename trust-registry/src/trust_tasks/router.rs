@@ -56,16 +56,15 @@ fn rfc3339(t: chrono::DateTime<Utc>) -> String {
 fn map_repo_err(err: RepositoryError) -> RejectReason {
     match err {
         RepositoryError::ValidationError(reason) => RejectReason::MalformedRequest { reason },
-        RepositoryError::RecordNotFound(reason)
-        | RepositoryError::RecordAlreadyExists(reason) => RejectReason::TaskFailed {
-            reason,
-            details: None,
-        },
+        RepositoryError::RecordNotFound(reason) | RepositoryError::RecordAlreadyExists(reason) => {
+            RejectReason::TaskFailed {
+                reason,
+                details: None,
+            }
+        }
         RepositoryError::ConnectionFailed(reason)
         | RepositoryError::QueryFailed(reason)
-        | RepositoryError::SerializationFailed(reason) => {
-            RejectReason::InternalError { reason }
-        }
+        | RepositoryError::SerializationFailed(reason) => RejectReason::InternalError { reason },
         RepositoryError::LockPoisoned => RejectReason::InternalError {
             reason: "lock poisoned".to_string(),
         },
@@ -152,7 +151,10 @@ where
 /// Convenience for callers holding a `TrustTask<Value>`: routing/deserialisation
 /// failures become an [`ErrorResponse`] via SPEC §8.1, then the matched
 /// handler's own outcome is returned.
-pub async fn handle_document(dispatcher: &RegistryDispatcher, doc: TrustTask<Value>) -> TaskOutcome {
+pub async fn handle_document(
+    dispatcher: &RegistryDispatcher,
+    doc: TrustTask<Value>,
+) -> TaskOutcome {
     match dispatcher.dispatch_or_reject(doc, new_id()) {
         Ok(future) => future.await,
         Err(error_response) => Err(error_response),
@@ -319,7 +321,10 @@ mod tests {
     #[async_trait::async_trait]
     impl TrustRecordAdminRepository for MockRepo {
         async fn create(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-            self.created.lock().map_err(|_| RepositoryError::LockPoisoned)?.push(record);
+            self.created
+                .lock()
+                .map_err(|_| RepositoryError::LockPoisoned)?
+                .push(record);
             Ok(())
         }
         async fn update(&self, _record: TrustRecord) -> Result<(), RepositoryError> {
@@ -329,7 +334,9 @@ mod tests {
             Ok(())
         }
         async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
-            Ok(TrustRecordList::new(self.record.clone().into_iter().collect()))
+            Ok(TrustRecordList::new(
+                self.record.clone().into_iter().collect(),
+            ))
         }
         async fn read(&self, _query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
             self.record
@@ -361,7 +368,9 @@ mod tests {
             context: None,
         });
 
-        let out = handle_document(&dispatcher, doc).await.expect("ok response");
+        let out = handle_document(&dispatcher, doc)
+            .await
+            .expect("ok response");
         assert!(out.type_uri.is_response());
         let resp: RecognitionResponse =
             serde_json::from_value(out.payload).expect("response parses");
@@ -436,7 +445,10 @@ mod tests {
             serde_json::json!({}),
         );
         let out = handle_document(&dispatcher, doc).await;
-        assert!(out.is_err(), "unknown type should route to an error response");
+        assert!(
+            out.is_err(),
+            "unknown type should route to an error response"
+        );
     }
 
     #[test]
@@ -483,6 +495,9 @@ mod tests {
             record: sample_record(),
         });
         let out = handle_document(&dispatcher, doc).await;
-        assert!(out.is_err(), "write over the query dispatcher must be rejected");
+        assert!(
+            out.is_err(),
+            "write over the query dispatcher must be rejected"
+        );
     }
 }

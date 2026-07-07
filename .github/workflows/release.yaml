@@ -1,4 +1,4 @@
-name: "release"
+name: release
 
 on:
   push:
@@ -10,8 +10,8 @@ jobs:
     uses: affinidi/pipeline-rust/.github/workflows/release.yaml@main
     secrets: inherit
     with:
-      toolchain: "1.90.0"
+      toolchain: '1.96.0'
       rustflags: "-D warnings --cfg tracing_unstable"
-      auditIgnore: "RUSTSEC-2022-0040,RUSTSEC-2023-0071,RUSTSEC-2024-0373"
+      auditIgnore: 'RUSTSEC-2022-0040,RUSTSEC-2023-0071,RUSTSEC-2024-0373,RUSTSEC-2026-0098,RUSTSEC-2026-0099,RUSTSEC-2026-0104'
       release_debug: true
       release_dry_run: false

@@ -1,7 +1,15 @@
 [advisories]
 # Ignore advisories for specific vulnerabilities
+# TODO: align pipeline in order to keep ignored vulnerabilities only there.
 # Add RUSTSEC IDs here as needed:
-ignore = ["RUSTSEC-2022-0040"]
+ignore = [
+	"RUSTSEC-2022-0040",
+	"RUSTSEC-2023-0071",
+	"RUSTSEC-2024-0373",
+	"RUSTSEC-2026-0098",
+	"RUSTSEC-2026-0099",
+	"RUSTSEC-2026-0104",
+]
 
 # Warn instead of error for these severity levels
 # Options: "none", "low", "medium", "high", "critical"

@@ -15,15 +15,15 @@
 //! the read-only query surface.
 
 use axum::{
+    Json,
     body::Bytes,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use chrono::Utc;
 use serde_json::Value;
-use trust_tasks_https::{status_for_code, HttpsHandler};
+use trust_tasks_https::{HttpsHandler, status_for_code};
 use trust_tasks_rs::{ErrorResponse, RejectReason, TransportHandler, TrustTask};
 use uuid::Uuid;
 
