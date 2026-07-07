@@ -155,6 +155,11 @@ pub(crate) async fn start_one_did_listener(
     )
     .await?;
 
+    // Keep a repository handle for the (feature-gated) TSP dispatcher before the
+    // original is moved into the DIDComm handler.
+    #[cfg(feature = "tsp")]
+    let tsp_repository = repository.clone();
+
     let listener = Listener::build_listener(
         profile_config,
         &config.mediator_did,
@@ -167,6 +172,23 @@ pub(crate) async fn start_one_did_listener(
         "[profile = {}] Listener built",
         &listener.profile.inner.alias
     );
+
+    // Spawn the TSP inbound pipeline alongside the DIDComm listener (same
+    // mediator, same dispatcher). Off unless built with `--features tsp`.
+    #[cfg(feature = "tsp")]
+    {
+        let dispatcher = crate::trust_tasks::build_dispatcher(tsp_repository);
+        let admin_dids = config.admin_config.admin_dids.clone();
+        let atm = listener.atm.clone();
+        let profile = listener.profile.clone();
+        info!(
+            "[profile = {}] Spawning TSP receive loop",
+            &profile.inner.alias
+        );
+        tokio::spawn(crate::tsp::run_tsp_receive_loop(
+            atm, profile, dispatcher, admin_dids,
+        ));
+    }
 
     Arc::new(listener).start_listening(config).await?;
     Ok(())

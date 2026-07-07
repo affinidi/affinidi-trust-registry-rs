@@ -44,6 +44,10 @@ thiserror.workspace = true
 reqwest.workspace = true
 
 didwebvh-rs = { version = "0.1", optional = true }
+trust-tasks-tsp = { workspace = true, optional = true }
+# Direct optional dep solely to enable the SDK's `tsp` feature (atm.tsp()) on the
+# shared affinidi-messaging-sdk instance; affinidi-tdk/tsp only pulls affinidi-tsp.
+affinidi-messaging-sdk = { workspace = true, optional = true }
 url = "2.5"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"
@@ -71,6 +75,15 @@ required-features = ["dev-tools"]
 [features]
 default = []
 dev-tools = ["didwebvh-rs"]
+# Trust Spanning Protocol transport binding. Off by default (affinidi-tsp is a
+# moving 0.x dependency); pulls trust-tasks-tsp and enables affinidi-tdk's tsp
+# feature (affinidi-tsp + the SDK TspOps accessor).
+tsp = [
+    "dep:trust-tasks-tsp",
+    "dep:affinidi-messaging-sdk",
+    "affinidi-tdk/tsp",
+    "affinidi-messaging-sdk/tsp",
+]
 
 [lints]
 workspace = true
