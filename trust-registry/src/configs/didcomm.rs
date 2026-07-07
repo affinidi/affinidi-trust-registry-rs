@@ -26,6 +26,19 @@ async fn load_profile_from_secret_store() -> Result<Option<String>, String> {
     secret_store::read_profile(&cfg, &secret_store::data_dir()).await
 }
 
+/// Fetch the profile bundle from a configured VTA (feature `vta`); `Ok(None)`
+/// when the VTA path is disabled or unconfigured.
+async fn load_profile_from_vta() -> Result<Option<String>, String> {
+    #[cfg(feature = "vta")]
+    {
+        super::vta::startup_profile_json().await
+    }
+    #[cfg(not(feature = "vta"))]
+    {
+        Ok(None)
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuditLogFormat {
@@ -142,15 +155,18 @@ impl Configs for DidcommConfig {
 
         let mediator_did = required_env("MEDIATOR_DID")?;
 
-        // Prefer a configured secret-store backend (AWS/GCP/Azure/Vault/K8s/
-        // keyring/…) for the profile bundle; fall back to the inline
-        // PROFILE_CONFIG URI when no backend is configured or it is empty.
-        let profile_configs_str = match load_profile_from_secret_store().await? {
+        // Identity source precedence: a configured VTA (remote key custody) wins,
+        // then a configured secret-store backend (AWS/GCP/Azure/Vault/K8s/keyring),
+        // then the inline PROFILE_CONFIG URI.
+        let profile_configs_str = match load_profile_from_vta().await? {
             Some(bundle) => bundle,
-            None => {
-                let profile_configs_uri = required_env("PROFILE_CONFIG")?;
-                load(&profile_configs_uri).await?
-            }
+            None => match load_profile_from_secret_store().await? {
+                Some(bundle) => bundle,
+                None => {
+                    let profile_configs_uri = required_env("PROFILE_CONFIG")?;
+                    load(&profile_configs_uri).await?
+                }
+            },
         };
         let profile_config = parse_profile_from_secrets_str(&profile_configs_str)?;
 

@@ -52,6 +52,7 @@ affinidi-messaging-sdk = { workspace = true, optional = true }
 # Pluggable secret-store backends for the TR identity (profile bundle). Backends
 # are enabled via the `secrets-*` features below, mirroring vti-secrets.
 vti-secrets = { workspace = true, default-features = false }
+vta-sdk = { workspace = true, optional = true, features = ["integration"] }
 url = "2.5"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"
@@ -94,6 +95,8 @@ tsp = [
 # is on by default; cloud/keyring backends are opt-in to keep the default build
 # lean, and `secrets-all` turns everything on.
 secrets-config = ["vti-secrets/config-seed"]
+# VTA integration: fetch the TR DID + keys from a Verifiable Trust Agent at startup.
+vta = ["dep:vta-sdk"]
 secrets-aws = ["vti-secrets/aws-secrets"]
 secrets-gcp = ["vti-secrets/gcp-secrets"]
 secrets-azure = ["vti-secrets/azure-secrets"]

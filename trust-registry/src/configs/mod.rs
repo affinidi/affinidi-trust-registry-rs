@@ -4,6 +4,9 @@ pub mod secret_store;
 pub mod server;
 pub mod storage;
 
+#[cfg(feature = "vta")]
+pub mod vta;
+
 pub use didcomm::{AdminConfig, AuditConfig, AuditLogFormat, DidcommConfig, ProfileConfig};
 pub use server::ServerConfig;
 pub use storage::{

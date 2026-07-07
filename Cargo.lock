@@ -7175,6 +7175,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "vta-sdk",
  "vti-secrets",
 ]
 
@@ -7502,15 +7503,28 @@ version = "0.18.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b80aa9c42f45e9a6ed1b58dd2383188ecbf193e0a5a91c459d2424fbb375b487"
 dependencies = [
+ "affinidi-crypto 0.2.4",
+ "affinidi-did-resolver-cache-sdk",
+ "affinidi-messaging-didcomm",
  "affinidi-openid4vci",
  "affinidi-openid4vp",
+ "affinidi-tdk",
  "base64 0.22.1",
  "chrono",
+ "curve25519-dalek",
+ "didwebvh-rs 0.5.6",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
  "multibase",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
