@@ -393,6 +393,26 @@ pub fn setup_did_web_tr(
             .build(),
     );
 
+    // Optionally advertise TSP capability. The `#tsp` service (type
+    // "TSPTransport") points at the mediator DID, mirroring the DIDComm
+    // indirection: the real transport URL lives in the mediator's DID document.
+    // Only advertised when the operator runs the `tsp`-featured server (opt-in
+    // via TR_ADVERTISE_TSP=true), so the Trust Registry never claims a transport
+    // it cannot service.
+    if std::env::var("TR_ADVERTISE_TSP")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+    {
+        let tsp_endpoint = Endpoint::Url(Url::from_str(&mediator_did.clone())?);
+        did_document.service.push(
+            ServiceBuilder::new("TSPTransport", tsp_endpoint)
+                .id_url(Url::parse(
+                    &[tr_did.to_string(), "#tsp".to_string()].concat(),
+                )?)
+                .build(),
+        );
+    }
+
     if did_method == "webvh" {
         // Create the WebVH Parameters
         let mut update_secret = Secret::generate_ed25519(None, None);
