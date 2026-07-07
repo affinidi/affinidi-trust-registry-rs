@@ -1942,7 +1942,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -5698,7 +5698,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -6097,11 +6097,26 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "trust-tasks-didcomm",
  "trust-tasks-https",
  "trust-tasks-rs",
  "trust-tasks-tsp",
  "url",
  "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "trust-tasks-didcomm"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f8248839a7309223eee068da7f322dc2d2114f797e5b946e5a0d8526251a439"
+dependencies = [
+ "affinidi-messaging-didcomm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "trust-tasks-rs",
  "uuid",
 ]
 

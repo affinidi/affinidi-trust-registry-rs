@@ -21,6 +21,7 @@ affinidi-messaging-sdk = "0.18"
 trust-tasks-rs = "0.2"
 trust-tasks-https = { version = "0.2", default-features = false }
 trust-tasks-tsp = "0.2"
+trust-tasks-didcomm = "0.2"
 anyhow = "1.0"
 async-trait = "0.1.89"
 base64 = "0.22"

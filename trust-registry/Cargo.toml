@@ -16,6 +16,7 @@ axum.workspace = true
 affinidi-tdk.workspace = true
 trust-tasks-rs.workspace = true
 trust-tasks-https.workspace = true
+trust-tasks-didcomm.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 anyhow.workspace = true

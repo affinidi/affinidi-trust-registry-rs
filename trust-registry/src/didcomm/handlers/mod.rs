@@ -14,6 +14,7 @@ pub mod admin;
 pub mod build;
 pub mod problem_report;
 pub mod trqp;
+pub mod trust_tasks;
 
 pub struct HandlerContext {
     pub atm: Arc<ATM>,
