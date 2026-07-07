@@ -57,7 +57,11 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate code coverage
-        run: cargo llvm-cov --all-features -p trust-registry --summary-only --fail-under-lines=45
+        run: |
+          tail -n +1 -f server.log &
+          TAIL_PID=$!
+          trap 'kill $TAIL_PID 2>/dev/null || true' EXIT
+          cargo llvm-cov --all-features -p trust-registry --summary-only --fail-under-lines=45
       - name: Stop server
         if: always()
         run: |

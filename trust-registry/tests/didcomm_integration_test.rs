@@ -85,6 +85,9 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
     )
     .await;
 
+    println!("Test context setup complete. Client DID: {}, Mediator DID: {}, Trust Registry DID: {}, In Pipeline: {}, Message Wait Duration: {} seconds",
+        client_did, mediator_did, trust_registry_did, in_pipeline, message_wait_duration_secs
+    );
     (
         AtmTestContext {
             atm,
