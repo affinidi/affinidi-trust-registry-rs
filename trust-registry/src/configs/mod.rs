@@ -1,5 +1,6 @@
 pub mod didcomm;
 pub mod loaders;
+pub mod secret_store;
 pub mod server;
 pub mod storage;
 

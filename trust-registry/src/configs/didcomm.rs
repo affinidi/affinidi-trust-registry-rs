@@ -10,7 +10,21 @@ use crate::didcomm::did_document::build_did_document;
 use super::{
     Configs,
     loaders::{environment::*, load},
+    secret_store,
 };
+
+/// Load the profile bundle from a configured secret-store backend, if any.
+///
+/// Returns `Ok(None)` when no backend is configured (deployment uses inline
+/// `PROFILE_CONFIG`) or the backend holds no bundle yet, so the caller falls
+/// back to `PROFILE_CONFIG`.
+async fn load_profile_from_secret_store() -> Result<Option<String>, String> {
+    let cfg = secret_store::secrets_config_from_env();
+    if !secret_store::backend_selected(&cfg) {
+        return Ok(None);
+    }
+    secret_store::read_profile(&cfg, &secret_store::data_dir()).await
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -128,8 +142,16 @@ impl Configs for DidcommConfig {
 
         let mediator_did = required_env("MEDIATOR_DID")?;
 
-        let profile_configs_uri = required_env("PROFILE_CONFIG")?;
-        let profile_configs_str = load(&profile_configs_uri).await?;
+        // Prefer a configured secret-store backend (AWS/GCP/Azure/Vault/K8s/
+        // keyring/…) for the profile bundle; fall back to the inline
+        // PROFILE_CONFIG URI when no backend is configured or it is empty.
+        let profile_configs_str = match load_profile_from_secret_store().await? {
+            Some(bundle) => bundle,
+            None => {
+                let profile_configs_uri = required_env("PROFILE_CONFIG")?;
+                load(&profile_configs_uri).await?
+            }
+        };
         let profile_config = parse_profile_from_secrets_str(&profile_configs_str)?;
 
         let did_document = if let Some(doc) = optional_env("DID_DOCUMENT") {

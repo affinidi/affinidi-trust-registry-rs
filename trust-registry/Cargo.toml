@@ -49,6 +49,9 @@ trust-tasks-tsp = { workspace = true, optional = true }
 # Direct optional dep solely to enable the SDK's `tsp` feature (atm.tsp()) on the
 # shared affinidi-messaging-sdk instance; affinidi-tdk/tsp only pulls affinidi-tsp.
 affinidi-messaging-sdk = { workspace = true, optional = true }
+# Pluggable secret-store backends for the TR identity (profile bundle). Backends
+# are enabled via the `secrets-*` features below, mirroring vti-secrets.
+vti-secrets = { workspace = true, default-features = false }
 url = "2.5"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"
@@ -74,7 +77,7 @@ path = "bin/setup_trust_registry.rs"
 required-features = ["dev-tools"]
 
 [features]
-default = []
+default = ["secrets-config"]
 dev-tools = ["didwebvh-rs"]
 # Trust Spanning Protocol transport binding. Off by default (affinidi-tsp is a
 # moving 0.x dependency); pulls trust-tasks-tsp and enables affinidi-tdk's tsp
@@ -84,6 +87,27 @@ tsp = [
     "dep:affinidi-messaging-sdk",
     "affinidi-tdk/tsp",
     "affinidi-messaging-sdk/tsp",
+]
+
+# Secret-store backends for the Trust Registry identity, forwarded to vti-secrets.
+# `secrets-config` (config-inline + plaintext file) has no extra dependencies and
+# is on by default; cloud/keyring backends are opt-in to keep the default build
+# lean, and `secrets-all` turns everything on.
+secrets-config = ["vti-secrets/config-seed"]
+secrets-aws = ["vti-secrets/aws-secrets"]
+secrets-gcp = ["vti-secrets/gcp-secrets"]
+secrets-azure = ["vti-secrets/azure-secrets"]
+secrets-vault = ["vti-secrets/vault-secrets"]
+secrets-k8s = ["vti-secrets/k8s-secrets"]
+secrets-keyring = ["vti-secrets/keyring"]
+secrets-all = [
+    "secrets-config",
+    "secrets-aws",
+    "secrets-gcp",
+    "secrets-azure",
+    "secrets-vault",
+    "secrets-k8s",
+    "secrets-keyring",
 ]
 
 [lints]

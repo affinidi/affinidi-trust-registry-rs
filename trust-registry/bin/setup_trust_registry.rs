@@ -137,6 +137,11 @@ struct Args {
     /// Trust Registry only admin operations. use didcomm
     #[arg(long, short = 'x', default_value = "ExplicitDeny")]
     acl_mode: Option<String>,
+
+    /// Run without interactive prompts (CI / container provisioning). Skips the
+    /// "press any key after hosting the DID document" pause for did:web/webvh.
+    #[arg(long, default_value = "false")]
+    non_interactive: bool,
 }
 
 fn insert_env_vars(
@@ -308,6 +313,7 @@ pub fn setup_did_web_tr(
     mediator_did: String,
     web_url: String,
     did_method: String,
+    non_interactive: bool,
 ) -> Result<(String, Vec<Secret>), Box<dyn Error>> {
     println!("Setting up did:{} for Trust Registry...", did_method);
 
@@ -498,21 +504,31 @@ pub fn setup_did_web_tr(
     );
     println!();
 
-    println!("Press any key to continue after hosting the DID document...");
-    println!();
-    terminal::enable_raw_mode()?;
-    loop {
-        // Read the next event
-        match event::read()? {
-            // If it's a key event and a key press
-            Event::Key(key_event) if key_event.kind == event::KeyEventKind::Press => {
-                break;
+    if non_interactive {
+        // No prompt in CI/container provisioning — the operator is responsible
+        // for hosting the DID document before the Trust Registry starts (the
+        // server retries DID-document availability on startup).
+        println!(
+            "Non-interactive mode: ensure the DID document is hosted before starting the Trust Registry."
+        );
+        println!();
+    } else {
+        println!("Press any key to continue after hosting the DID document...");
+        println!();
+        terminal::enable_raw_mode()?;
+        loop {
+            // Read the next event
+            match event::read()? {
+                // If it's a key event and a key press
+                Event::Key(key_event) if key_event.kind == event::KeyEventKind::Press => {
+                    break;
+                }
+                _ => {} // Ignore other events (mouse, resize, etc.)
             }
-            _ => {} // Ignore other events (mouse, resize, etc.)
         }
+        // Disable raw mode when done
+        terminal::disable_raw_mode()?;
     }
-    // Disable raw mode when done
-    terminal::disable_raw_mode()?;
 
     Ok((tr_did, secrets))
 }
@@ -653,7 +669,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         did_method
                     ))?;
 
-                    setup_did_web_tr(mediator_did.to_string(), web_url, did_method.clone())?
+                    setup_did_web_tr(
+                        mediator_did.to_string(),
+                        web_url,
+                        did_method.clone(),
+                        args.non_interactive,
+                    )?
                 }
                 _ => {
                     return Err(format!("Unsupported DID method: {}.", did_method).into());
@@ -704,6 +725,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Set environment variables
     // Expected to be empty if DIDComm mediator is not specified
     server_vars.insert("PROFILE_CONFIG".to_string(), profile.clone());
+
+    // If a secret-store backend is configured (TR_SECRETS_*), provision the
+    // profile bundle into it so the running Trust Registry loads its identity
+    // from the backend (AWS/GCP/Azure/Vault/K8s/keyring/…) rather than the inline
+    // PROFILE_CONFIG. Non-fatal: the .env fallback is still written above.
+    {
+        let cfg = trust_registry::configs::secret_store::secrets_config_from_env();
+        if trust_registry::configs::secret_store::backend_selected(&cfg) {
+            // `profile` is the single-quoted JSON written to .env; the backend
+            // stores the raw bundle.
+            let bundle = profile.trim_matches('\'');
+            let dir = trust_registry::configs::secret_store::data_dir();
+            match trust_registry::configs::secret_store::write_profile(&cfg, &dir, bundle).await {
+                Ok(()) => {
+                    println!("✓ Profile bundle provisioned into the configured secret-store backend")
+                }
+                Err(e) => println!("⚠ Failed to write profile to secret store: {e}"),
+            }
+        }
+    }
     server_vars.insert("MEDIATOR_DID".to_string(), mediator_did.clone());
     server_vars.insert("ADMIN_DIDS".to_string(), admin_dids.clone());
     server_vars.insert("ACL_MODE".to_string(), acl_mode.to_string());
