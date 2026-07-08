@@ -52,9 +52,9 @@ impl SecretCache for VtaSecretCache {
             .await
             .map_err(BoxError::from)?
         {
-            Some(json) => {
-                Ok(Some(serde_json::from_str(&json).map_err(|e| Box::new(e) as BoxError)?))
-            }
+            Some(json) => Ok(Some(
+                serde_json::from_str(&json).map_err(|e| Box::new(e) as BoxError)?,
+            )),
             None => Ok(None),
         }
     }
