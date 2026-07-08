@@ -739,7 +739,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let dir = trust_registry::configs::secret_store::data_dir();
             match trust_registry::configs::secret_store::write_profile(&cfg, &dir, bundle).await {
                 Ok(()) => {
-                    println!("✓ Profile bundle provisioned into the configured secret-store backend")
+                    println!(
+                        "✓ Profile bundle provisioned into the configured secret-store backend"
+                    )
                 }
                 Err(e) => println!("⚠ Failed to write profile to secret store: {e}"),
             }
