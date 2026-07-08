@@ -10,7 +10,8 @@ pub mod vta;
 pub use didcomm::{AdminConfig, AuditConfig, AuditLogFormat, DidcommConfig, ProfileConfig};
 pub use server::ServerConfig;
 pub use storage::{
-    DynamoDbStorageConfig, FileStorageConfig, RedisStorageConfig, TrustStorageBackend,
+    DynamoDbStorageConfig, FileStorageConfig, FjallStorageConfig, RedisStorageConfig,
+    TrustStorageBackend,
 };
 
 use crate::configs::storage::StorageConfig;

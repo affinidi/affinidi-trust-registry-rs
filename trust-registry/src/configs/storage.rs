@@ -9,7 +9,11 @@ pub enum TrustStorageBackend {
     Csv,
     DynamoDb,
     Redis,
+    /// Embedded fjall LSM store (compiled with `--features storage-fjall`).
+    Fjall,
 }
+
+const DEFAULT_FJALL_PATH: &str = "./trust_records.fjall";
 
 #[derive(Debug, Clone, Default)]
 pub struct FileStorageConfig {
@@ -33,11 +37,18 @@ pub struct RedisStorageConfig {
     pub redis_url: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct FjallStorageConfig {
+    pub is_enabled: bool,
+    pub path: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
     pub ddb_storage_config: DynamoDbStorageConfig,
     pub file_storage_config: FileStorageConfig,
     pub redis_storage_config: RedisStorageConfig,
+    pub fjall_storage_config: FjallStorageConfig,
     pub storage_backend: TrustStorageBackend,
 }
 
@@ -46,6 +57,7 @@ fn load_storage_backend() -> TrustStorageBackend {
     match storage_backend_str.as_str() {
         "dynamodb" | "ddb" => TrustStorageBackend::DynamoDb,
         "redis" => TrustStorageBackend::Redis,
+        "fjall" => TrustStorageBackend::Fjall,
         _ => TrustStorageBackend::Csv,
     }
 }
@@ -102,6 +114,20 @@ impl Configs for RedisStorageConfig {
 }
 
 #[async_trait::async_trait]
+impl Configs for FjallStorageConfig {
+    async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        if load_storage_backend() == TrustStorageBackend::Fjall {
+            Ok(FjallStorageConfig {
+                is_enabled: true,
+                path: env_or("TR_FJALL_PATH", DEFAULT_FJALL_PATH),
+            })
+        } else {
+            Ok(Default::default())
+        }
+    }
+}
+
+#[async_trait::async_trait]
 impl Configs for StorageConfig {
     async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let storage_backend = load_storage_backend();
@@ -109,6 +135,7 @@ impl Configs for StorageConfig {
             ddb_storage_config: DynamoDbStorageConfig::load().await?,
             file_storage_config: FileStorageConfig::load().await?,
             redis_storage_config: RedisStorageConfig::load().await?,
+            fjall_storage_config: FjallStorageConfig::load().await?,
             storage_backend,
         })
     }

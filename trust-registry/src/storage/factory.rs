@@ -48,6 +48,25 @@ impl TrustStorageRepoFactory {
                         .map_err(|e| anyhow!(e.to_string()))?;
                     Arc::new(redis)
                 }
+                TrustStorageBackend::Fjall => {
+                    #[cfg(feature = "storage-fjall")]
+                    {
+                        let fjall_config = self.config.storage_config.fjall_storage_config.clone();
+                        let fjall = crate::storage::adapters::fjall_storage::FjallStorage::new(
+                            &fjall_config.path,
+                        )
+                        .map_err(|e| anyhow!(e.to_string()))?;
+                        Arc::new(fjall)
+                    }
+                    #[cfg(not(feature = "storage-fjall"))]
+                    {
+                        return Err(anyhow!(
+                            "TR_STORAGE_BACKEND=fjall selected but fjall support was not compiled; \
+                             rebuild with --features storage-fjall"
+                        )
+                        .into());
+                    }
+                }
             };
 
         Ok(repository)

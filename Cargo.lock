@@ -7151,6 +7151,7 @@ dependencies = [
  "csv",
  "didwebvh-rs 0.1.17",
  "dotenvy",
+ "fjall",
  "futures",
  "redis",
  "reqwest 0.13.4",
