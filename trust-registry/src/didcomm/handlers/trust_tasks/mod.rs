@@ -30,7 +30,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tracing::{error, info, warn};
 use trust_tasks_didcomm::ENVELOPE_TYPE;
-use trust_tasks_rs::{RejectReason, TransportHandler, TrustTask};
+use trust_tasks_rs::{ErrorResponse, RejectReason, TransportHandler, TrustTask};
 use uuid::Uuid;
 
 use trust_tasks_didcomm::DidcommHandler as TtDidcommHandler;
@@ -66,7 +66,10 @@ impl TrustTasksHandler {
 fn is_write_slug(slug: &str) -> bool {
     matches!(
         slug,
-        "registry/record/create" | "registry/record/update" | "registry/record/delete"
+        "registry/record/create"
+            | "registry/record/update"
+            | "registry/record/delete"
+            | "registry/did/rotate"
     )
 }
 
@@ -151,13 +154,24 @@ impl ProtocolHandler for TrustTasksHandler {
             return Ok(());
         }
 
-        // 5. Route through the shared dispatcher.
         info!(
             "[profile = {}, type = {}, from = {}] Trust Task",
             ctx.profile.inner.alias,
             doc.type_uri.slug(),
             ctx.sender_did
         );
+
+        // 5. `registry/did/rotate` is handled via the VTA (not the repository
+        // dispatcher). It rotates *our own* DID's keys.
+        if doc.type_uri.slug() == "registry/did/rotate" {
+            match self.handle_did_rotate(&ctx.profile.inner.did, &doc).await {
+                Ok(response) => self.send(ctx, &response).await,
+                Err(err) => self.send(ctx, &err).await,
+            }
+            return Ok(());
+        }
+
+        // 6. Route through the shared dispatcher.
         match handle_document(&self.dispatcher, doc).await {
             Ok(response) => self.send(ctx, &response).await,
             Err(err) => self.send(ctx, &err).await,
@@ -167,6 +181,59 @@ impl ProtocolHandler for TrustTasksHandler {
 }
 
 impl TrustTasksHandler {
+    /// Rotate the registry's own VTA-managed `did:webvh` keys in response to a
+    /// `registry/did/rotate` task. Requires the `vta` feature; otherwise the
+    /// request is rejected as unavailable.
+    async fn handle_did_rotate(
+        &self,
+        my_did: &str,
+        doc: &TrustTask<Value>,
+    ) -> Result<TrustTask<Value>, ErrorResponse> {
+        let _ = my_did;
+        #[cfg(feature = "vta")]
+        {
+            use crate::trust_tasks::payloads::{DidRotateRequest, DidRotateResponse};
+
+            let req: DidRotateRequest =
+                serde_json::from_value(doc.payload.clone()).map_err(|e| {
+                    doc.reject_with(
+                        new_id(),
+                        RejectReason::MalformedRequest {
+                            reason: e.to_string(),
+                        },
+                    )
+                })?;
+            match crate::configs::vta::rotate_did(my_did, req.pre_rotation_count, req.label).await {
+                Ok((did, new_scid, new_version_id)) => {
+                    let response = DidRotateResponse {
+                        did,
+                        new_scid,
+                        new_version_id,
+                    };
+                    let value = serde_json::to_value(response).unwrap_or(Value::Null);
+                    Ok(doc.respond_with(new_id(), value))
+                }
+                Err(reason) => Err(doc.reject_with(
+                    new_id(),
+                    RejectReason::TaskFailed {
+                        reason,
+                        details: None,
+                    },
+                )),
+            }
+        }
+        #[cfg(not(feature = "vta"))]
+        {
+            Err(doc.reject_with(
+                new_id(),
+                RejectReason::TaskFailed {
+                    reason: "DID rotation is unavailable: the Trust Registry was built without the `vta` feature".to_string(),
+                    details: None,
+                },
+            ))
+        }
+    }
+
     /// Pack `doc` as an [`ENVELOPE_TYPE`] DIDComm message and forward it to the
     /// original sender through the mediator. Errors are logged, not propagated —
     /// a failed reply must not tear down the listener.

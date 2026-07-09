@@ -11,6 +11,18 @@
 //! secret-store backends as the rest of the Trust Registry (see
 //! [`crate::configs::secret_store`]): AWS/GCP/Azure/Vault/K8s/keyring/plaintext.
 //!
+//! ## Mediator connection keys
+//!
+//! When the VTA path is enabled, the bundle it returns *is* the Trust Registry's
+//! `ProfileConfig` (`{did, alias, secrets}`), and those same `secrets` are the
+//! keys the DIDComm/TSP mediator connection authenticates with: the config
+//! layer feeds this profile into
+//! [`Listener::build_listener`](crate::didcomm::listener::Listener::build_listener),
+//! which builds a `TDKProfile::new(alias, did, Some(mediator_did), secrets)` and
+//! authenticates to the mediator with it. There is therefore no separate
+//! "mediator key" provisioning step — sourcing the profile from the VTA sources
+//! the mediator connection keys from the VTA in the same act.
+//!
 //! Configuration (env):
 //! - `TR_VTA_CREDENTIAL` — the VTA `CredentialBundle` JSON, or a loader URI
 //!   (`file://`, `aws_secrets://`, …) resolving to it. Presence enables the VTA path.
@@ -109,6 +121,52 @@ pub async fn startup_profile_json() -> Result<Option<String>, String> {
         "secrets": secrets,
     });
     Ok(Some(profile.to_string()))
+}
+
+/// Rotate the Trust Registry's VTA-managed `did:webvh` keys.
+///
+/// Builds a [`vta_sdk::client::VtaClient`] on demand from `TR_VTA_CREDENTIAL` /
+/// `TR_VTA_CONTEXT_ID`, extracts the SCID from `did` (which must be a
+/// `did:webvh`), and calls the VTA's rotate-keys op. Returns
+/// `(did, new_scid, new_version_id)` on success.
+pub async fn rotate_did(
+    did: &str,
+    pre_rotation_count: Option<u32>,
+    label: Option<String>,
+) -> Result<(String, String, String), String> {
+    use vta_sdk::client::VtaClient;
+    use vta_sdk::protocols::did_management::update::RotateDidWebvhKeysBody;
+
+    let credential_uri = optional_env("TR_VTA_CREDENTIAL")
+        .ok_or_else(|| "VTA is not configured (TR_VTA_CREDENTIAL unset)".to_string())?;
+    let context_id = optional_env("TR_VTA_CONTEXT_ID")
+        .ok_or_else(|| "TR_VTA_CONTEXT_ID is required to rotate the DID".to_string())?;
+
+    let scid = did
+        .strip_prefix("did:webvh:")
+        .and_then(|rest| rest.split(':').next())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("DID {did} is not a did:webvh; cannot rotate its keys"))?;
+
+    let credential_json = load(&credential_uri).await?;
+    let credential: CredentialBundle = serde_json::from_str(&credential_json)
+        .map_err(|e| format!("invalid TR_VTA_CREDENTIAL bundle: {e}"))?;
+    let url_override = optional_env("TR_VTA_URL");
+
+    let client = VtaClient::from_credential(&credential, url_override.as_deref())
+        .await
+        .map_err(|e| format!("VTA authentication failed: {e}"))?;
+
+    let body = RotateDidWebvhKeysBody {
+        pre_rotation_count,
+        label,
+    };
+    let result = client
+        .rotate_did_webvh_keys(&context_id, scid, body)
+        .await
+        .map_err(|e| format!("VTA did:webvh key rotation failed: {e}"))?;
+
+    Ok((result.did, result.new_scid, result.new_version_id))
 }
 
 #[cfg(test)]

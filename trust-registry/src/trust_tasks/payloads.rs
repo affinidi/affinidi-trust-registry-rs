@@ -40,6 +40,9 @@ pub mod type_uris {
     pub const RECORD_READ: &str = "https://trusttasks.org/spec/registry/record/read/0.1";
     /// `registry/record/list/0.1` request.
     pub const RECORD_LIST: &str = "https://trusttasks.org/spec/registry/record/list/0.1";
+    /// `registry/did/rotate/0.1` request — rotate the registry's own
+    /// VTA-managed `did:webvh` keys.
+    pub const DID_ROTATE: &str = "https://trusttasks.org/spec/registry/did/rotate/0.1";
 }
 
 /// TRQP query `context` object (SPEC v2.0). All members optional.
@@ -239,6 +242,38 @@ impl Payload for RecordListRequest {
     const TYPE_URI: &'static str = type_uris::RECORD_LIST;
 }
 
+/// `registry/did/rotate/0.1` request — rotate the registry's own VTA-managed
+/// `did:webvh` keys. **Proof required** (administrative, state-changing).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DidRotateRequest {
+    /// Override the pre-rotation commitment count for the new key set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_rotation_count: Option<u32>,
+    /// Operator-facing audit label for the rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl Payload for DidRotateRequest {
+    const TYPE_URI: &'static str = type_uris::DID_ROTATE;
+    const IS_PROOF_REQUIRED: bool = true;
+}
+
+/// `registry/did/rotate/0.1#response` — the outcome of a key rotation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DidRotateResponse {
+    /// The DID whose keys were rotated.
+    pub did: String,
+    /// The new SCID after rotation.
+    pub new_scid: String,
+    /// The new webvh log version id.
+    pub new_version_id: String,
+}
+
+impl Payload for DidRotateResponse {
+    const TYPE_URI: &'static str = "https://trusttasks.org/spec/registry/did/rotate/0.1#response";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +292,8 @@ mod tests {
         let _ = RecordDeleteRequest::type_uri();
         let _ = RecordReadRequest::type_uri();
         let _ = RecordListRequest::type_uri();
+        let _ = DidRotateRequest::type_uri();
+        let _ = DidRotateResponse::type_uri();
     }
 
     #[test]
@@ -264,6 +301,7 @@ mod tests {
         assert!(RecordCreateRequest::IS_PROOF_REQUIRED);
         assert!(RecordUpdateRequest::IS_PROOF_REQUIRED);
         assert!(RecordDeleteRequest::IS_PROOF_REQUIRED);
+        assert!(DidRotateRequest::IS_PROOF_REQUIRED);
         assert!(!RecordReadRequest::IS_PROOF_REQUIRED);
         assert!(!RecordListRequest::IS_PROOF_REQUIRED);
         assert!(!RecognitionRequest::IS_PROOF_REQUIRED);
