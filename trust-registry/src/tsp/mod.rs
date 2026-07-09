@@ -180,16 +180,15 @@ pub async fn run_tsp_receive_loop(
                         "[profile = {alias}, type = {}, from = {sender_did}] Trust Task (TSP)",
                         doc.type_uri.slug()
                     );
-                    let reply =
-                        handle_inbound(
-                            &dispatcher,
-                            &admin_dids,
-                            &verifier,
-                            &my_vid,
-                            &sender_did,
-                            doc,
-                        )
-                        .await;
+                    let reply = handle_inbound(
+                        &dispatcher,
+                        &admin_dids,
+                        &verifier,
+                        &my_vid,
+                        &sender_did,
+                        doc,
+                    )
+                    .await;
                     if let Err(e) = atm.tsp().send(&profile, &sender_did, &reply).await {
                         error!(
                             "[profile = {alias}] Failed to send TSP response to {sender_did}: {e}"
