@@ -18,21 +18,23 @@
 
 use std::sync::Arc;
 
-use chrono::{SecondsFormat, Utc};
+use chrono::Utc;
 use futures::future::BoxFuture;
 use serde::Serialize;
 use serde_json::Value;
 use trust_tasks_rs::{Dispatcher, ErrorResponse, RejectReason, TrustTask};
 use uuid::Uuid;
 
+use crate::domain::TrustRecord;
 use crate::storage::repository::{
     RepositoryError, TrustRecordAdminRepository, TrustRecordRepository,
 };
 
 use super::payloads::{
     AuthorizationRequest, AuthorizationResponse, RecognitionRequest, RecognitionResponse,
-    RecordAck, RecordCreateRequest, RecordDeleteRequest, RecordListRequest, RecordReadRequest,
-    RecordUpdateRequest,
+    RecordCreateRequest, RecordCreateResponse, RecordDeleteRequest, RecordDeleteResponse,
+    RecordListRequest, RecordListResponse, RecordReadRequest, RecordReadResponse,
+    RecordUpdateRequest, RecordUpdateResponse, query_of, reserialize,
 };
 
 /// A handler's result: a success response document or a routed error response.
@@ -46,10 +48,6 @@ pub type RegistryDispatcher = Dispatcher<TaskFuture>;
 
 fn new_id() -> String {
     Uuid::new_v4().to_string()
-}
-
-fn rfc3339(t: chrono::DateTime<Utc>) -> String {
-    t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 /// Map a repository error to the closest framework [`RejectReason`].
@@ -170,7 +168,9 @@ async fn handle_recognition<R>(
 where
     R: TrustRecordRepository + ?Sized + 'static,
 {
-    let record = match repository.find_by_query(doc.payload.query.to_query()).await {
+    let p = &doc.payload;
+    let query = query_of(&p.entity_id, &p.authority_id, &p.action, &p.resource);
+    let record = match repository.find_by_query(query).await {
         Ok(record) => record,
         Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
     };
@@ -184,10 +184,15 @@ where
         )
     });
     let response = RecognitionResponse {
-        query: doc.payload.query.clone(),
+        entity_id: p.entity_id.clone(),
+        authority_id: p.authority_id.clone(),
+        action: p.action.clone(),
+        resource: p.resource.clone(),
         recognized: record.map(|tr| tr.is_recognized()).unwrap_or(false),
-        time_evaluated: rfc3339(evaluated_at),
-        time_requested: doc.payload.context.as_ref().and_then(|c| c.time.clone()),
+        time_evaluated: evaluated_at,
+        time_requested: p.context.as_ref().and_then(|c| c.time),
+        context: None,
+        ext: None,
         message,
     };
     respond(&doc, response)
@@ -200,7 +205,9 @@ async fn handle_authorization<R>(
 where
     R: TrustRecordRepository + ?Sized + 'static,
 {
-    let record = match repository.find_by_query(doc.payload.query.to_query()).await {
+    let p = &doc.payload;
+    let query = query_of(&p.entity_id, &p.authority_id, &p.action, &p.resource);
+    let record = match repository.find_by_query(query).await {
         Ok(record) => record,
         Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
     };
@@ -216,21 +223,45 @@ where
         )
     });
     let response = AuthorizationResponse {
-        query: doc.payload.query.clone(),
+        entity_id: p.entity_id.clone(),
+        authority_id: p.authority_id.clone(),
+        action: p.action.clone(),
+        resource: p.resource.clone(),
         authorized: record.map(|tr| tr.is_authorized()).unwrap_or(false),
-        time_evaluated: rfc3339(evaluated_at),
-        time_requested: doc.payload.context.as_ref().and_then(|c| c.time.clone()),
+        time_evaluated: evaluated_at,
+        time_requested: p.context.as_ref().and_then(|c| c.time),
+        context: None,
+        ext: None,
         message,
     };
     respond(&doc, response)
+}
+
+/// Convert a spec record (carried by a create/update payload) into the domain
+/// record the repository operates on, mapping a malformed record to a
+/// `MalformedRequest` rejection.
+fn record_from_payload<P>(
+    doc: &TrustTask<P>,
+    spec: &impl Serialize,
+) -> Result<TrustRecord, ErrorResponse> {
+    reserialize(spec)
+        .map_err(|reason| doc.reject_with(new_id(), RejectReason::MalformedRequest { reason }))
 }
 
 async fn handle_create<R>(repository: Arc<R>, doc: TrustTask<RecordCreateRequest>) -> TaskOutcome
 where
     R: TrustRecordAdminRepository + ?Sized + 'static,
 {
-    match repository.create(doc.payload.record.clone()).await {
-        Ok(()) => respond(&doc, RecordAck::ok()),
+    let record = record_from_payload(&doc, &doc.payload.record)?;
+    match repository.create(record).await {
+        Ok(()) => respond(
+            &doc,
+            RecordCreateResponse {
+                ok: true,
+                message: None,
+                ext: None,
+            },
+        ),
         Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
     }
 }
@@ -239,8 +270,16 @@ async fn handle_update<R>(repository: Arc<R>, doc: TrustTask<RecordUpdateRequest
 where
     R: TrustRecordAdminRepository + ?Sized + 'static,
 {
-    match repository.update(doc.payload.record.clone()).await {
-        Ok(()) => respond(&doc, RecordAck::ok()),
+    let record = record_from_payload(&doc, &doc.payload.record)?;
+    match repository.update(record).await {
+        Ok(()) => respond(
+            &doc,
+            RecordUpdateResponse {
+                ok: true,
+                message: None,
+                ext: None,
+            },
+        ),
         Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
     }
 }
@@ -249,8 +288,17 @@ async fn handle_delete<R>(repository: Arc<R>, doc: TrustTask<RecordDeleteRequest
 where
     R: TrustRecordAdminRepository + ?Sized + 'static,
 {
-    match repository.delete(doc.payload.query.to_query()).await {
-        Ok(()) => respond(&doc, RecordAck::ok()),
+    let p = &doc.payload;
+    let query = query_of(&p.entity_id, &p.authority_id, &p.action, &p.resource);
+    match repository.delete(query).await {
+        Ok(()) => respond(
+            &doc,
+            RecordDeleteResponse {
+                ok: true,
+                message: None,
+                ext: None,
+            },
+        ),
         Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
     }
 }
@@ -259,8 +307,13 @@ async fn handle_read<R>(repository: Arc<R>, doc: TrustTask<RecordReadRequest>) -
 where
     R: TrustRecordAdminRepository + ?Sized + 'static,
 {
-    match repository.read(doc.payload.query.to_query()).await {
-        Ok(record) => respond(&doc, record),
+    let p = &doc.payload;
+    let query = query_of(&p.entity_id, &p.authority_id, &p.action, &p.resource);
+    match repository.read(query).await {
+        Ok(record) => match reserialize::<_, RecordReadResponse>(&record) {
+            Ok(response) => respond(&doc, response),
+            Err(reason) => Err(doc.reject_with(new_id(), RejectReason::InternalError { reason })),
+        },
         Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
     }
 }
@@ -270,7 +323,12 @@ where
     R: TrustRecordAdminRepository + ?Sized + 'static,
 {
     match repository.list().await {
-        Ok(list) => respond(&doc, list),
+        // `TrustRecordList` serialises as `{ "records": [...] }`, matching the
+        // spec list response, so the round-trip is a straight re-serialise.
+        Ok(list) => match reserialize::<_, RecordListResponse>(&list) {
+            Ok(response) => respond(&doc, response),
+            Err(reason) => Err(doc.reject_with(new_id(), RejectReason::InternalError { reason })),
+        },
         Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
     }
 }
@@ -359,13 +417,12 @@ mod tests {
         let dispatcher = build_dispatcher(repo);
 
         let doc = value_doc(RecognitionRequest {
-            query: super::super::payloads::QueryTuple {
-                entity_id: "did:example:entity".into(),
-                authority_id: "did:example:authority".into(),
-                action: "issue".into(),
-                resource: "vc".into(),
-            },
+            entity_id: "did:example:entity".into(),
+            authority_id: "did:example:authority".into(),
+            action: "issue".into(),
+            resource: "vc".into(),
             context: None,
+            ext: None,
         });
 
         let out = handle_document(&dispatcher, doc)
@@ -375,10 +432,8 @@ mod tests {
         let resp: RecognitionResponse =
             serde_json::from_value(out.payload).expect("response parses");
         assert!(resp.recognized);
-        assert_eq!(resp.query.entity_id, "did:example:entity");
+        assert_eq!(resp.entity_id, "did:example:entity");
         assert!(resp.message.is_some());
-        // authorization field must be filtered out of a recognition response
-        assert!(!resp.time_evaluated.is_empty());
     }
 
     #[tokio::test]
@@ -386,13 +441,12 @@ mod tests {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_dispatcher(repo);
         let doc = value_doc(RecognitionRequest {
-            query: super::super::payloads::QueryTuple {
-                entity_id: "x".into(),
-                authority_id: "y".into(),
-                action: "a".into(),
-                resource: "r".into(),
-            },
+            entity_id: "x".into(),
+            authority_id: "y".into(),
+            action: "a".into(),
+            resource: "r".into(),
             context: None,
+            ext: None,
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
         let resp: RecognitionResponse = serde_json::from_value(out.payload).expect("parses");
@@ -405,10 +459,11 @@ mod tests {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordCreateRequest {
-            record: sample_record(),
+            record: reserialize(&sample_record()).expect("domain -> spec record"),
+            ext: None,
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
-        let ack: RecordAck = serde_json::from_value(out.payload).expect("ack parses");
+        let ack: RecordCreateResponse = serde_json::from_value(out.payload).expect("ack parses");
         assert!(ack.ok);
         assert_eq!(repo.created.lock().unwrap().len(), 1);
     }
@@ -421,13 +476,12 @@ mod tests {
         });
         let dispatcher = build_dispatcher(repo);
         let doc = value_doc(RecognitionRequest {
-            query: super::super::payloads::QueryTuple {
-                entity_id: "x".into(),
-                authority_id: "y".into(),
-                action: "a".into(),
-                resource: "r".into(),
-            },
+            entity_id: "x".into(),
+            authority_id: "y".into(),
+            action: "a".into(),
+            resource: "r".into(),
             context: None,
+            ext: None,
         });
         let out = handle_document(&dispatcher, doc).await;
         assert!(out.is_err(), "repository failure should reject");
@@ -473,13 +527,12 @@ mod tests {
         });
         let dispatcher = build_query_dispatcher(repo);
         let doc = value_doc(RecognitionRequest {
-            query: super::super::payloads::QueryTuple {
-                entity_id: "did:example:entity".into(),
-                authority_id: "did:example:authority".into(),
-                action: "issue".into(),
-                resource: "vc".into(),
-            },
+            entity_id: "did:example:entity".into(),
+            authority_id: "did:example:authority".into(),
+            action: "issue".into(),
+            resource: "vc".into(),
             context: None,
+            ext: None,
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
         let resp: RecognitionResponse = serde_json::from_value(out.payload).expect("parses");
@@ -492,7 +545,8 @@ mod tests {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_query_dispatcher(repo);
         let doc = value_doc(RecordCreateRequest {
-            record: sample_record(),
+            record: reserialize(&sample_record()).expect("domain -> spec record"),
+            ext: None,
         });
         let out = handle_document(&dispatcher, doc).await;
         assert!(

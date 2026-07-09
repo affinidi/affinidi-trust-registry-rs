@@ -191,6 +191,10 @@ pub struct TrustRecord {
     recognized: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     authorized: Option<bool>,
+    // The published `registry/*` spec omits an empty `context` on the wire
+    // (`skip_serializing_if` empty map), so accept a missing one as empty to
+    // stay interop-compatible with the generated spec records.
+    #[serde(default)]
     context: Context,
     record_type: RecordType,
 }
