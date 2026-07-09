@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::storage::{
@@ -7,6 +8,7 @@ use crate::storage::{
 use axum::{Json, Router, routing::get};
 use dotenvy::dotenv;
 use serde_json::json;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, warn};
@@ -19,10 +21,10 @@ use crate::{
     http::application_routes,
 };
 
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
 fn setup_logging() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        // .with_max_level(tracing::Level::DEBUG)
         .with_env_filter(EnvFilter::from_default_env()) // reads RUST_LOG
         .with_target(false)
         .with_level(true)
@@ -30,45 +32,65 @@ fn setup_logging() {
         .try_init();
 }
 
-async fn start_didcomm_server(
-    config: DidcommConfig,
-    repository: Arc<dyn TrustRecordAdminRepository>,
+/// A running Trust Registry server.
+///
+/// Returned by [`serve`]. Holds the bound HTTP address, the shutdown token, and
+/// the background task handles so a caller (production `main` or an integration
+/// test) can learn where the server is listening, wait for it, or stop it
+/// cleanly — without the process-global side effects (`dotenv`,
+/// `std::process::exit`) that [`start`] performs.
+pub struct ServerHandle {
+    http_addr: SocketAddr,
     shutdown: CancellationToken,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _ = start_didcomm_listener(config, repository, shutdown).await?;
-
-    Ok(())
+    http_task: JoinHandle<Result<(), BoxError>>,
+    didcomm_task: Option<JoinHandle<Result<(), BoxError>>>,
 }
 
-/// The main purpose is just to handle health check of container
-async fn start_http_server(
-    config: Arc<TrustRegistryConfig>,
-    repository: Arc<dyn TrustRecordRepository>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let listen_address = config.server_config.listen_address.clone();
+impl ServerHandle {
+    /// The address the HTTP server bound to. When the config requested an
+    /// ephemeral port (`…:0`), this is the concrete port the OS assigned.
+    pub fn http_addr(&self) -> SocketAddr {
+        self.http_addr
+    }
 
-    let shared_data = SharedData {
-        config: config.clone(),
-        service_start_timestamp: chrono::Utc::now(),
-        repository,
-    };
+    /// Convenience `http://<addr>` base URL for the REST/TRQP surface.
+    pub fn base_url(&self) -> String {
+        format!("http://{}", self.http_addr)
+    }
 
-    let cors = build_cors_layer(&config.server_config.cors_allowed_origins);
+    /// A clone of the shutdown token, so callers can trigger (or observe)
+    /// shutdown without consuming the handle.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
 
-    let health_route =
-        Router::new().route("/health", get(|| async { Json(json!({ "status": "OK" })) }));
+    /// Signal shutdown and await the background tasks. The HTTP server stops
+    /// via graceful shutdown; the DIDComm/TSP listeners observe the same token.
+    pub async fn shutdown(self) {
+        self.shutdown.cancel();
+        self.join().await;
+    }
 
-    let main_router = health_route
-        .merge(application_routes("", shared_data))
-        .layer(cors);
+    /// Await the background tasks without signalling shutdown (they run until
+    /// the shutdown token is cancelled elsewhere, or a task fails).
+    pub async fn join(self) {
+        if let Some(didcomm_task) = self.didcomm_task {
+            tokio::select! {
+                result = didcomm_task => log_task_exit("didcomm", result),
+                result = self.http_task => log_task_exit("http", result),
+            }
+        } else if let Err(e) = self.http_task.await {
+            error!("http task panicked: {e:?}");
+        }
+    }
+}
 
-    info!("HTTP server is starting on {}...", listen_address);
-    debug!("CONFIGS: {:?}", &config);
-
-    let listener = tokio::net::TcpListener::bind(&listen_address).await?;
-    axum::serve(listener, main_router).await?;
-
-    Ok(())
+fn log_task_exit(name: &str, result: Result<Result<(), BoxError>, tokio::task::JoinError>) {
+    match result {
+        Ok(Ok(())) => info!("{name} task exited"),
+        Ok(Err(e)) => error!("{name} task failed: {e}"),
+        Err(e) => error!("{name} task panicked: {e:?}"),
+    }
 }
 
 fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
@@ -93,6 +115,92 @@ fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
         .allow_origin(origins)
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
+}
+
+/// Build the top-level HTTP router (health check + TRQP application routes + CORS).
+fn build_router(
+    config: Arc<TrustRegistryConfig>,
+    repository: Arc<dyn TrustRecordRepository>,
+) -> Router {
+    let shared_data = SharedData {
+        config: config.clone(),
+        service_start_timestamp: chrono::Utc::now(),
+        repository,
+    };
+
+    let cors = build_cors_layer(&config.server_config.cors_allowed_origins);
+
+    let health_route =
+        Router::new().route("/health", get(|| async { Json(json!({ "status": "OK" })) }));
+
+    health_route
+        .merge(application_routes("", shared_data))
+        .layer(cors)
+}
+
+async fn start_didcomm_server(
+    config: DidcommConfig,
+    repository: Arc<dyn TrustRecordAdminRepository>,
+    shutdown: CancellationToken,
+) -> Result<(), BoxError> {
+    // `start_didcomm_listener` returns the listener task's own result nested
+    // inside the join result; the inner listener outcome is discarded here.
+    let _ = start_didcomm_listener(config, repository, shutdown).await?;
+    Ok(())
+}
+
+/// Start the Trust Registry servers over `repository` and return a
+/// [`ServerHandle`] once the HTTP listener is bound.
+///
+/// This is the reusable core of [`start`]: it performs **no** process-global
+/// setup (no `dotenv`, no logging init, no `std::process::exit`) and binds
+/// whatever `config.server_config.listen_address` requests — including an
+/// ephemeral `…:0` port, which the returned handle reports via
+/// [`ServerHandle::http_addr`]. The HTTP server is wired for graceful shutdown
+/// on `shutdown`; the DIDComm listener (and, with the `tsp` feature, the TSP
+/// receive loop) is started only when `config.didcomm_config.is_enabled`.
+pub async fn serve(
+    config: Arc<TrustRegistryConfig>,
+    repository: Arc<dyn TrustRecordAdminRepository>,
+    shutdown: CancellationToken,
+) -> Result<ServerHandle, BoxError> {
+    // Bind first so the caller (and the returned handle) learns the concrete
+    // address before any request can race against it.
+    let listener = tokio::net::TcpListener::bind(&config.server_config.listen_address).await?;
+    let http_addr = listener.local_addr()?;
+
+    // The read-only HTTP surface upcasts from the admin repository.
+    let read_repository: Arc<dyn TrustRecordRepository> = repository.clone();
+    let router = build_router(config.clone(), read_repository);
+
+    info!("HTTP server is starting on {http_addr}...");
+    debug!("CONFIGS: {:?}", &config);
+
+    let http_shutdown = shutdown.clone();
+    let http_task = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move { http_shutdown.cancelled().await })
+            .await
+            .map_err(BoxError::from)
+    });
+
+    let didcomm_task = if config.didcomm_config.is_enabled {
+        Some(tokio::spawn(start_didcomm_server(
+            config.didcomm_config.clone(),
+            repository,
+            shutdown.clone(),
+        )))
+    } else {
+        warn!("DIDComm server is disabled.");
+        None
+    };
+
+    Ok(ServerHandle {
+        http_addr,
+        shutdown,
+        http_task,
+        didcomm_task,
+    })
 }
 
 pub async fn start() {
@@ -122,37 +230,19 @@ pub async fn start() {
         }
     };
 
-    // Shutdown token for graceful termination of background tasks
+    // Shutdown token for graceful termination of background tasks.
     let shutdown = CancellationToken::new();
 
-    // tasks section
-    let http_task = tokio::spawn(start_http_server(config.clone(), repository.clone()));
-
-    if config.didcomm_config.is_enabled {
-        let didcomm_task = tokio::spawn(start_didcomm_server(
-            config.didcomm_config.clone(),
-            repository,
-            shutdown.clone(),
-        ));
-
-        tokio::select! {
-            result = didcomm_task => {
-                error!("didcomm_task failed: {:?}", result);
-                shutdown.cancel();
-            }
-            result = http_task => {
-                error!("http_task failed: {:?}", result);
-                shutdown.cancel();
-            }
+    let handle = match serve(config, repository, shutdown).await {
+        Ok(handle) => handle,
+        Err(e) => {
+            error!("Failed to start Trust Registry server: {e}");
+            panic!("Failed to start Trust Registry server: {e}");
         }
-    } else {
-        warn!("DIDComm server is disabled.");
+    };
 
-        if let Err(e) = http_task.await {
-            error!("http_task failed: {:?}", e);
-        }
-        shutdown.cancel();
-    }
-
+    // Block until a server task exits (which, in production, only happens on
+    // failure), then terminate the process so a supervisor restarts us.
+    handle.join().await;
     std::process::exit(1);
 }
