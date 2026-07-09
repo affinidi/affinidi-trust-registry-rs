@@ -29,6 +29,12 @@ A high-performance, Rust-based implementation of a Trust Registry, fully complia
   - [Recognition Query](#recognition-query)
   - [Authorization Query](#authorization-query)
 - [Manage Trust Records](#manage-trust-records)
+- [Trust Tasks, Transports & Identity](#trust-tasks-transports--identity)
+  - [Cargo feature flags](#cargo-feature-flags)
+  - [Trust Task protocol surface](#trust-task-protocol-surface)
+  - [Identity from a VTA (`vta`)](#identity-from-a-vta-vta)
+  - [Secret-store backends (`secrets-*`)](#secret-store-backends-secrets-)
+  - [Embedded fjall storage (`storage-fjall`)](#embedded-fjall-storage-storage-fjall)
 - [Environment Variables](#environment-variables)
   - [Profile Config Options](#profile-config-options)
 - [Additional Resources](#additional-resources)
@@ -117,6 +123,11 @@ This ensures **security**, **compliance**, and **interoperability** across decen
   - CSV file storage
   - AWS DynamoDB
   - Redis
+  - Embedded [fjall](https://github.com/fjall-rs/fjall) LSM store (behind the `storage-fjall` feature)
+
+- **Trust Tasks & transports** _(optional)_: Every Trust Registry operation is also modelled as a versioned [Trust Task](https://trusttasks.org) (`registry/*`) that verifiers and communities (VTC/OpenVTC) can invoke over DIDComm, HTTP, or TSP. See [Trust Tasks, Transports & Identity](#trust-tasks-transports--identity).
+
+- **VTA identity** _(optional)_: The Trust Registry can source its DID and keys from a [Verifiable Trust Agent](https://docs.affinidi.com) instead of a local `PROFILE_CONFIG` (behind the `vta` feature).
 
 ## Requirements
 
@@ -449,13 +460,111 @@ For a working reference, see the [test-client implementation](https://github.com
 
 See [Trust Registry Administration](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/DIDCOMM_PROTOCOLS.md#trust-registry-administration) section for more details.
 
+## Trust Tasks, Transports & Identity
+
+Beyond the core REST/DIDComm server, the Trust Registry ships a set of **optional,
+feature-gated** capabilities that let Verifiable Trust Communities (VTC/OpenVTC)
+and verifiers interact with it as a first-class [Trust Tasks](https://trusttasks.org)
+participant, and let it delegate its own identity and secret custody. All of these
+are **off by default** — the default build is the REST + DIDComm server described
+above.
+
+### Cargo feature flags
+
+| Feature          | Default | Enables                                                                                                                       |
+| ---------------- | :-----: | ----------------------------------------------------------------------------------------------------------------------------- |
+| `secrets-config` |   ✅    | Inline / plaintext-file secret store for the profile bundle (no extra dependencies).                                          |
+| `tsp`            |         | [TSP](https://trustoverip.github.io/tswg-tsp-specification/) transport binding for the `registry/*` Trust Tasks.              |
+| `vta`            |         | Fetch the Trust Registry DID + keys from a Verifiable Trust Agent at startup; enables the `registry/did/rotate` admin task.   |
+| `storage-fjall`  |         | Embedded fjall LSM storage backend for trust records (`TR_STORAGE_BACKEND=fjall`).                                            |
+| `secrets-aws`    |         | AWS Secrets Manager backend for the identity secret store.                                                                    |
+| `secrets-gcp`    |         | GCP Secret Manager backend.                                                                                                   |
+| `secrets-azure`  |         | Azure Key Vault backend.                                                                                                      |
+| `secrets-vault`  |         | HashiCorp Vault backend.                                                                                                      |
+| `secrets-k8s`    |         | Kubernetes Secret backend.                                                                                                    |
+| `secrets-keyring`|         | OS keyring backend.                                                                                                           |
+| `secrets-all`    |         | All of the `secrets-*` backends at once.                                                                                      |
+
+```bash
+# Example: build the server with VTA identity, the TSP binding and the AWS secret store
+cargo run --bin trust-registry --features "vta,tsp,secrets-aws"
+```
+
+### Trust Task protocol surface
+
+Each Trust Registry operation is a versioned Trust Task in the `registry/*` family.
+The **same** typed payloads are served over every transport (DIDComm always-on;
+HTTP; TSP behind the `tsp` feature), so a VTC can talk to the registry with one
+message shape regardless of carrier.
+
+| Trust Task (`slug`)                                   | Kind  | Auth                          |
+| ----------------------------------------------------- | ----- | ----------------------------- |
+| `registry/recognition/0.1`                            | read  | none (TRQP recognition query) |
+| `registry/authorization/0.1`                          | read  | none (TRQP authorization query)|
+| `registry/record/read/0.1`, `registry/record/list/0.1`| read  | none                          |
+| `registry/record/create/0.1`                          | write | admin DID + proof             |
+| `registry/record/update/0.1`                          | write | admin DID + proof             |
+| `registry/record/delete/0.1`                          | write | admin DID + proof             |
+| `registry/did/rotate/0.1`                             | write | admin DID + proof (`vta` only)|
+
+**Writes** (record mutations and DID rotation) require the sender DID to be in
+`ADMIN_DIDS` **and** the Trust Task to carry a Data-Integrity proof. The reads map
+verbatim onto the [TRQP v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/)
+recognition/authorization field names, so the plain HTTP TRQP endpoints and the
+Trust Task payloads share a single schema.
+
+### Identity from a VTA (`vta`)
+
+With `--features vta`, the Trust Registry authenticates to a Verifiable Trust Agent
+at startup and pulls its DID and private keys from a VTA context (remote key
+custody) instead of loading a local `PROFILE_CONFIG`. The bundle is cached through
+the configured [secret-store backend](#secret-store-backends-secrets-) so the
+service can still boot while the VTA is briefly unreachable.
+
+The registry's DID is a VTA-managed `did:webvh`; its keys can be rotated in place
+via the `registry/did/rotate/0.1` admin Trust Task (admin-DID + proof gated).
+
+| Variable            | Description                                                                                               | Required                    |
+| ------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------- |
+| `TR_VTA_CREDENTIAL` | VTA `CredentialBundle` JSON, or a loader URI (`file://`, `aws_secrets://`, …) resolving to it. Its presence enables the VTA path. | Yes (`vta`)   |
+| `TR_VTA_CONTEXT_ID` | The VTA context holding this service's DID + keys.                                                        | Yes (`vta`)                 |
+| `TR_VTA_URL`        | VTA URL override (otherwise taken from the credential).                                                   | No                          |
+| `TR_ALIAS`          | Profile alias. Default `Trust Registry`.                                                                  | No                          |
+
+### Secret-store backends (`secrets-*`)
+
+The `secrets-*` features select where the Trust Registry persists the identity it
+custodies (the profile bundle, or — in VTA mode — the offline identity cache).
+`secrets-config` (inline / plaintext file) is on by default; cloud, Vault, K8s and
+keyring backends are opt-in. Non-interactive self-provisioning mirrors the
+mediator-setup and did-hosting tooling.
+
+| Variable                                                                              | Backend                       |
+| ------------------------------------------------------------------------------------- | ----------------------------- |
+| `TR_SECRETS_SEED`, `TR_SECRETS_ALLOW_PLAINTEXT`, `TR_SECRETS_DATA_DIR`                 | config / plaintext file       |
+| `TR_SECRETS_AWS_REGION`, `TR_SECRETS_AWS_SECRET_NAME`                                  | AWS Secrets Manager           |
+| `TR_SECRETS_GCP_PROJECT`, `TR_SECRETS_GCP_SECRET_NAME`                                 | GCP Secret Manager            |
+| `TR_SECRETS_AZURE_VAULT_URL`, `TR_SECRETS_AZURE_SECRET_NAME`                           | Azure Key Vault               |
+| `TR_SECRETS_VAULT_ADDR`, `TR_SECRETS_VAULT_TOKEN`, `TR_SECRETS_VAULT_NAMESPACE`, `TR_SECRETS_VAULT_SECRET_PATH` | HashiCorp Vault  |
+| `TR_SECRETS_KEYRING_SERVICE`                                                           | OS keyring                    |
+
+### Embedded fjall storage (`storage-fjall`)
+
+With `--features storage-fjall` and `TR_STORAGE_BACKEND=fjall`, trust records are
+stored in an embedded [fjall](https://github.com/fjall-rs/fjall) LSM store — a
+single-node, on-disk option that needs no external database.
+
+| Variable         | Description                                                | Required                                       |
+| ---------------- | ---------------------------------------------------------- | ---------------------------------------------- |
+| `TR_FJALL_PATH`  | Directory for the embedded fjall keyspace.                 | Required when `TR_STORAGE_BACKEND` = `fjall`   |
+
 ## Environment Variables
 
 See the list of environment variables and their usage.
 
 | Variable Name           | Description                                                                                                                                                                               | Required                                     |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| `TR_STORAGE_BACKEND`    | Storage backend for trust records. Options: `csv`, `ddb`, `redis`.                                                                                                                       | Yes                                          |
+| `TR_STORAGE_BACKEND`    | Storage backend for trust records. Options: `csv`, `ddb`, `redis`, and `fjall` (with the `storage-fjall` feature).                                                                        | Yes                                          |
 | `FILE_STORAGE_PATH`     | Path to the CSV file when using CSV as the storage backend.                                                                                                                               | Required when `TR_STORAGE_BACKEND` = `csv`   |
 | `DDB_TABLE_NAME`        | DynamoDB table name for storing trust records when using DDB as the storage backend.                                                                                                      | Required when `TR_STORAGE_BACKEND` = `ddb`   |
 | `REDIS_URL`             | Redis connection URL when using Redis as the storage backend. Format: `redis://host:port` or `redis://username:password@host:port/db`.                                                    | Required when `TR_STORAGE_BACKEND` = `redis` |
