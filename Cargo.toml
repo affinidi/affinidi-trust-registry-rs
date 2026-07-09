@@ -19,6 +19,7 @@ homepage = "https://affinidi.com/"
 affinidi-tdk = "0.8"
 affinidi-messaging-sdk = "0.18"
 trust-tasks-rs = "0.2"
+trust-tasks-proof = "0.2"
 vti-secrets = { version = "0.1", default-features = false }
 fjall = "3"
 vta-sdk = { version = "0.18", default-features = false }

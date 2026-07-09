@@ -8,15 +8,14 @@
 //! 2. resolves the framework's parties via [`DidcommHandler`] (SPEC §4.8.1) —
 //!    the authcrypt sender is the `issuer`, our profile DID the `recipient`;
 //! 3. applies the framework freshness/recipient checks ([`TrustTask::validate_basic`]);
-//! 4. gates record **writes** on proof-presence (`IS_PROOF_REQUIRED`) and the
-//!    existing admin-DID ACL;
+//! 4. gates record **writes** on the admin-DID ACL, proof presence
+//!    (`IS_PROOF_REQUIRED`), and cryptographic Data-Integrity proof
+//!    verification via [`crate::trust_tasks::verify_write_proof`];
 //! 5. routes the document through the shared [`RegistryDispatcher`] (see
 //!    [`crate::trust_tasks`]); and
 //! 6. packs the resulting success or error document back into an [`ENVELOPE_TYPE`]
 //!    message and returns it to the sender through the mediator.
 //!
-//! Full Data-Integrity proof *verification* (beyond presence) is deferred to a
-//! follow-up that wires a `trust-tasks-proof` verifier into the consume path.
 //! The legacy `trqp/1.0` and `tr-admin/1.0` handlers remain registered for
 //! backward compatibility.
 
@@ -45,18 +44,25 @@ use crate::trust_tasks::{RegistryDispatcher, build_dispatcher, handle_document};
 pub struct TrustTasksHandler {
     dispatcher: RegistryDispatcher,
     admin_config: AdminConfig,
+    verifier: std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
 }
 
 impl TrustTasksHandler {
-    /// Build the handler over `repository`, wiring the shared dispatcher and the
-    /// admin-DID ACL used to gate record writes.
-    pub fn new<R>(repository: Arc<R>, admin_config: AdminConfig) -> Self
+    /// Build the handler over `repository`, wiring the shared dispatcher, the
+    /// admin-DID ACL used to gate record writes, and the Data Integrity proof
+    /// verifier applied to writes.
+    pub fn new<R>(
+        repository: Arc<R>,
+        admin_config: AdminConfig,
+        verifier: std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    ) -> Self
     where
         R: TrustRecordAdminRepository + ?Sized + 'static,
     {
         Self {
             dispatcher: build_dispatcher(repository),
             admin_config,
+            verifier,
         }
     }
 }
@@ -146,6 +152,13 @@ impl ProtocolHandler for TrustTasksHandler {
 
         // 4. Write-only ACL + proof presence.
         if let Err(reason) = authorize_write(&doc, &ctx.sender_did, &self.admin_config.admin_dids) {
+            let err = doc.reject_with(new_id(), reason);
+            self.send(ctx, &err).await;
+            return Ok(());
+        }
+
+        // 4b. Cryptographically verify the write's Data Integrity proof.
+        if let Err(reason) = crate::trust_tasks::verify_write_proof(&self.verifier, &doc).await {
             let err = doc.reject_with(new_id(), reason);
             self.send(ctx, &err).await;
             return Ok(());
