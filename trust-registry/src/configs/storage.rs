@@ -4,8 +4,10 @@ const DEFAULT_TRUST_REGISTRY_FILE_PATH: &str = "trust_records.csv";
 const DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC: u64 = 60;
 const DEFAULT_REGION: &str = "ap-southeast-1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrustStorageBackend {
+    /// CSV file storage — the default, matching `load_storage_backend`'s fallback.
+    #[default]
     Csv,
     DynamoDb,
     Redis,
@@ -43,7 +45,7 @@ pub struct FjallStorageConfig {
     pub path: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StorageConfig {
     pub ddb_storage_config: DynamoDbStorageConfig,
     pub file_storage_config: FileStorageConfig,

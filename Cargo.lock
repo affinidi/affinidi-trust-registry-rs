@@ -6739,6 +6739,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-trust-registry"
+version = "0.7.0"
+dependencies = [
+ "reqwest 0.13.4",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "trust-registry",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
