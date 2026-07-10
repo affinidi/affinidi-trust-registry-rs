@@ -1,8 +1,11 @@
 //! TSP (Trust Spanning Protocol) transport binding for the Trust Registry.
 //!
 //! Feature-gated behind `tsp` (off by default — `affinidi-tsp` is a moving 0.x
-//! dependency). Runs a second inbound pipeline alongside DIDComm, over the **same
-//! mediator**, feeding the same [`RegistryDispatcher`](crate::trust_tasks::RegistryDispatcher).
+//! dependency). TSP frames arrive **multiplexed on the same mediator websocket**
+//! as DIDComm (the DIDComm listener pulls both via `live_stream_next_frame` and
+//! routes `InboundFrame::Tsp` frames here) and feed the same
+//! [`RegistryDispatcher`](crate::trust_tasks::RegistryDispatcher). The registry
+//! must not open a second websocket: the mediator allows only one per DID.
 //!
 //! ## Wire format
 //!
@@ -129,83 +132,50 @@ async fn handle_inbound(
     }
 }
 
-/// Run the TSP inbound pipeline: connect the mediator's raw-TSP websocket, and
-/// for each sealed message decrypt it via `atm.tsp()`, route it through the
-/// shared dispatcher, and seal the response back to the sender.
+/// Process one inbound TSP frame delivered on the **shared** mediator pickup
+/// socket (the same websocket the DIDComm listener drives via
+/// `live_stream_next_frame`). Decrypts it via `atm.tsp()`, routes it through the
+/// shared dispatcher (proof-verifying writes), and seals the response back to the
+/// sender.
 ///
-/// Reconnects on websocket close/error with a short backoff. Never returns under
-/// normal operation.
-pub async fn run_tsp_receive_loop(
-    atm: Arc<ATM>,
-    profile: Arc<ATMProfile>,
-    dispatcher: RegistryDispatcher,
-    admin_dids: Vec<String>,
-    verifier: std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
+/// `packed` is the CESR/qb64 stored string carried by `InboundFrame::Tsp` — so we
+/// unpack with `atm.tsp().unpack` (which base64url-decodes first), **not**
+/// `unpack_bytes` (that is for the raw `connect_websocket` path, which yields
+/// already-decoded qb2). The mediator permits only one websocket per DID, so the
+/// registry must never open a second TSP socket — TSP frames arrive multiplexed
+/// on the DIDComm pickup stream.
+pub async fn process_tsp_frame(
+    atm: &Arc<ATM>,
+    profile: &Arc<ATMProfile>,
+    dispatcher: &RegistryDispatcher,
+    admin_dids: &[String],
+    verifier: &std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    packed: &str,
 ) {
-    let my_vid = profile.inner.did.clone();
-    let alias = profile.inner.alias.clone();
-    loop {
-        let mut ws = match atm.tsp().connect_websocket(&profile).await {
-            Ok(ws) => {
-                info!("[profile = {alias}] TSP websocket connected");
-                ws
-            }
-            Err(e) => {
-                warn!("[profile = {alias}] TSP websocket connect failed: {e}; retrying");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                continue;
-            }
-        };
+    let alias = &profile.inner.alias;
+    let my_vid = &profile.inner.did;
 
-        loop {
-            match ws.recv().await {
-                Ok(Some(qb2)) => {
-                    let (payload, sender_did) = match atm.tsp().unpack_bytes(&profile, &qb2).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            warn!("[profile = {alias}] TSP unpack failed: {e}");
-                            continue;
-                        }
-                    };
-                    let doc = match parse_envelope(&payload) {
-                        Ok(doc) => doc,
-                        Err(e) => {
-                            warn!(
-                                "[profile = {alias}] Dropping TSP message from {sender_did}: {e}"
-                            );
-                            continue;
-                        }
-                    };
-                    info!(
-                        "[profile = {alias}, type = {}, from = {sender_did}] Trust Task (TSP)",
-                        doc.type_uri.slug()
-                    );
-                    let reply = handle_inbound(
-                        &dispatcher,
-                        &admin_dids,
-                        &verifier,
-                        &my_vid,
-                        &sender_did,
-                        doc,
-                    )
-                    .await;
-                    if let Err(e) = atm.tsp().send(&profile, &sender_did, &reply).await {
-                        error!(
-                            "[profile = {alias}] Failed to send TSP response to {sender_did}: {e}"
-                        );
-                    }
-                }
-                Ok(None) => {
-                    warn!("[profile = {alias}] TSP websocket closed; reconnecting");
-                    break;
-                }
-                Err(e) => {
-                    warn!("[profile = {alias}] TSP websocket error: {e}; reconnecting");
-                    break;
-                }
-            }
+    let (payload, sender_did) = match atm.tsp().unpack(profile, packed).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("[profile = {alias}] TSP unpack failed: {e}");
+            return;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    };
+    let doc = match parse_envelope(&payload) {
+        Ok(doc) => doc,
+        Err(e) => {
+            warn!("[profile = {alias}] Dropping TSP message from {sender_did}: {e}");
+            return;
+        }
+    };
+    info!(
+        "[profile = {alias}, type = {}, from = {sender_did}] Trust Task (TSP)",
+        doc.type_uri.slug()
+    );
+    let reply = handle_inbound(dispatcher, admin_dids, verifier, my_vid, &sender_did, doc).await;
+    if let Err(e) = atm.tsp().send(profile, &sender_did, &reply).await {
+        error!("[profile = {alias}] Failed to send TSP response to {sender_did}: {e}");
     }
 }
 

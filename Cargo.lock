@@ -7226,6 +7226,7 @@ dependencies = [
  "trust-registry",
  "trust-tasks-didcomm",
  "trust-tasks-rs",
+ "trust-tasks-tsp",
  "uuid",
 ]
 

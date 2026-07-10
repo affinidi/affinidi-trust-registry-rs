@@ -10,6 +10,7 @@ use affinidi_tdk::didcomm::Message;
 use affinidi_tdk::messaging::messages::compat::UnpackMetadata;
 use affinidi_tdk::messaging::protocols::Protocols;
 use affinidi_tdk::messaging::protocols::mediator::acls::{AccessListModeType, MediatorACLSet};
+use affinidi_tdk::messaging::protocols::message_pickup::InboundFrame;
 use sha256::digest;
 use tracing::{debug, error, info, warn};
 
@@ -96,15 +97,53 @@ impl<H: MessageHandler> Listener<H> {
         let auto_delete = true;
         let wait_duration = Duration::from_secs(MESSAGE_WAIT_DURATION_SECS);
         let protocols = Protocols::new();
-        let next_message_packet = protocols
+        // `live_stream_next_frame` pulls DIDComm *and* TSP frames off the single
+        // pickup socket (the mediator allows one websocket per DID), so both
+        // transports are multiplexed here instead of on a second TSP socket.
+        let frame = protocols
             .message_pickup
-            .live_stream_next(&self.atm, &self.profile, Some(wait_duration), auto_delete)
+            .live_stream_next_frame(&self.atm, &self.profile, Some(wait_duration), auto_delete)
             .await?;
 
-        if let Some((message, meta)) = next_message_packet {
-            self.spawn_handler(message, *meta);
+        match frame {
+            Some(InboundFrame::DidComm(message, meta)) => self.spawn_handler(*message, *meta),
+            #[cfg(feature = "tsp")]
+            Some(InboundFrame::Tsp(packed)) => self.spawn_tsp_handler(*packed),
+            // Non-exhaustive frame kinds — and, without `--features tsp`, TSP
+            // frames — are ignored.
+            Some(_) => {}
+            None => {}
         }
         Ok(())
+    }
+
+    /// Route a multiplexed TSP frame through the shared registry dispatcher on a
+    /// spawned task, so TSP crypto/dispatch never blocks the DIDComm receive loop.
+    #[cfg(feature = "tsp")]
+    fn spawn_tsp_handler(&self, packed: String) {
+        let Some(tsp) = &self.tsp else {
+            warn!(
+                "[profile = {}] TSP frame received but no TSP dispatcher is configured",
+                &self.profile.inner.alias
+            );
+            return;
+        };
+        let atm = self.atm.clone();
+        let profile = self.profile.clone();
+        let dispatcher = tsp.dispatcher.clone();
+        let admin_dids = tsp.admin_dids.clone();
+        let verifier = tsp.verifier.clone();
+        tokio::spawn(async move {
+            crate::tsp::process_tsp_frame(
+                &atm,
+                &profile,
+                &dispatcher,
+                &admin_dids,
+                &verifier,
+                &packed,
+            )
+            .await;
+        });
     }
 
     pub(crate) async fn sync_and_process_offline_messages(

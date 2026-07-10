@@ -42,11 +42,26 @@ pub trait MessageHandler: Send + Sync + 'static {
 pub struct DefaultHandler {}
 
 impl MessageHandler for DefaultHandler {}
+
+/// TSP routing context attached to a [`Listener`] when built with `--features
+/// tsp`. The dispatcher is shared (`Arc`) so per-frame handlers can be spawned
+/// without cloning the closures; the proof verifier is the same one the DIDComm
+/// handler uses.
+#[cfg(feature = "tsp")]
+pub(crate) struct TspContext {
+    pub(crate) dispatcher: Arc<crate::trust_tasks::RegistryDispatcher>,
+    pub(crate) admin_dids: Vec<String>,
+    pub(crate) verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
+}
+
 pub struct Listener<H: MessageHandler> {
     pub atm: Arc<ATM>,
     pub profile: Arc<ATMProfile>,
     pub handler: Arc<H>,
     pub(crate) shutdown: CancellationToken,
+    /// Routing for TSP frames multiplexed onto the DIDComm pickup socket.
+    #[cfg(feature = "tsp")]
+    pub(crate) tsp: Option<TspContext>,
 }
 
 impl<H: MessageHandler> Listener<H> {
@@ -61,7 +76,27 @@ impl<H: MessageHandler> Listener<H> {
             profile,
             handler,
             shutdown,
+            #[cfg(feature = "tsp")]
+            tsp: None,
         }
+    }
+
+    /// Attach the TSP dispatcher + proof verifier so TSP frames arriving on the
+    /// shared pickup socket are routed through the same registry dispatcher as
+    /// DIDComm.
+    #[cfg(feature = "tsp")]
+    pub(crate) fn with_tsp(
+        mut self,
+        dispatcher: crate::trust_tasks::RegistryDispatcher,
+        admin_dids: Vec<String>,
+        verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    ) -> Self {
+        self.tsp = Some(TspContext {
+            dispatcher: Arc::new(dispatcher),
+            admin_dids,
+            verifier,
+        });
+        self
     }
 }
 
@@ -177,26 +212,22 @@ pub(crate) async fn start_one_did_listener(
         &listener.profile.inner.alias
     );
 
-    // Spawn the TSP inbound pipeline alongside the DIDComm listener (same
-    // mediator, same dispatcher). Off unless built with `--features tsp`.
+    // TSP shares the DIDComm pickup socket (the mediator allows one websocket per
+    // DID). Attach the TSP dispatcher + verifier so the receive loop routes
+    // multiplexed `InboundFrame::Tsp` frames alongside DIDComm. Off unless built
+    // with `--features tsp`.
     #[cfg(feature = "tsp")]
-    {
-        let dispatcher = crate::trust_tasks::build_dispatcher(tsp_repository);
-        let admin_dids = config.admin_config.admin_dids.clone();
-        let atm = listener.atm.clone();
-        let profile = listener.profile.clone();
+    let listener = {
         info!(
-            "[profile = {}] Spawning TSP receive loop",
-            &profile.inner.alias
+            "[profile = {}] TSP frames multiplexed on the DIDComm socket",
+            &listener.profile.inner.alias
         );
-        tokio::spawn(crate::tsp::run_tsp_receive_loop(
-            atm,
-            profile,
-            dispatcher,
-            admin_dids,
+        listener.with_tsp(
+            crate::trust_tasks::build_dispatcher(tsp_repository),
+            config.admin_config.admin_dids.clone(),
             verifier.clone(),
-        ));
-    }
+        )
+    };
 
     Arc::new(listener).start_listening(config).await?;
     Ok(())
