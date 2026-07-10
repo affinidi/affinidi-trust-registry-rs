@@ -160,10 +160,14 @@ pub(crate) async fn start_one_did_listener(
     #[cfg(feature = "tsp")]
     let tsp_repository = repository.clone();
 
+    // Build the Data Integrity proof verifier once and share it across the
+    // DIDComm and TSP write paths.
+    let verifier = crate::trust_tasks::build_verifier().await;
+
     let listener = Listener::build_listener(
         profile_config,
         &config.mediator_did,
-        BaseHandler::build_from_arc(repository, config.clone()),
+        BaseHandler::build_from_arc(repository, config.clone(), verifier.clone()),
         shutdown,
     )
     .await?;
@@ -186,7 +190,11 @@ pub(crate) async fn start_one_did_listener(
             &profile.inner.alias
         );
         tokio::spawn(crate::tsp::run_tsp_receive_loop(
-            atm, profile, dispatcher, admin_dids,
+            atm,
+            profile,
+            dispatcher,
+            admin_dids,
+            verifier.clone(),
         ));
     }
 

@@ -98,6 +98,7 @@ fn build_envelope<T: serde::Serialize>(doc: &T) -> Vec<u8> {
 async fn handle_inbound(
     dispatcher: &RegistryDispatcher,
     admin_dids: &[String],
+    verifier: &std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
     my_vid: &str,
     sender_did: &str,
     doc: TrustTask<Value>,
@@ -118,6 +119,10 @@ async fn handle_inbound(
     if let Err(reason) = authorize_write(&doc, sender_did, admin_dids) {
         return build_envelope(&doc.reject_with(new_id(), reason));
     }
+    // Cryptographically verify the write's Data Integrity proof.
+    if let Err(reason) = crate::trust_tasks::verify_write_proof(verifier, &doc).await {
+        return build_envelope(&doc.reject_with(new_id(), reason));
+    }
     match handle_document(dispatcher, doc).await {
         Ok(response) => build_envelope(&response),
         Err(err) => build_envelope(&err),
@@ -135,6 +140,7 @@ pub async fn run_tsp_receive_loop(
     profile: Arc<ATMProfile>,
     dispatcher: RegistryDispatcher,
     admin_dids: Vec<String>,
+    verifier: std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
 ) {
     let my_vid = profile.inner.did.clone();
     let alias = profile.inner.alias.clone();
@@ -174,8 +180,15 @@ pub async fn run_tsp_receive_loop(
                         "[profile = {alias}, type = {}, from = {sender_did}] Trust Task (TSP)",
                         doc.type_uri.slug()
                     );
-                    let reply =
-                        handle_inbound(&dispatcher, &admin_dids, &my_vid, &sender_did, doc).await;
+                    let reply = handle_inbound(
+                        &dispatcher,
+                        &admin_dids,
+                        &verifier,
+                        &my_vid,
+                        &sender_did,
+                        doc,
+                    )
+                    .await;
                     if let Err(e) = atm.tsp().send(&profile, &sender_did, &reply).await {
                         error!(
                             "[profile = {alias}] Failed to send TSP response to {sender_did}: {e}"

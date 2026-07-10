@@ -10,9 +10,11 @@
 //! mapping from the legacy `trqp/1.0` and `tr-admin/1.0` DIDComm protocols.
 
 pub mod payloads;
+pub mod proof;
 pub mod router;
 
 pub use payloads::type_uris;
+pub use proof::{build_verifier, verify_write_proof};
 pub use router::{
     RegistryDispatcher, TaskFuture, TaskOutcome, build_dispatcher, build_query_dispatcher,
     handle_document,
