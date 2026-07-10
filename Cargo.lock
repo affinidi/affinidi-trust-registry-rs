@@ -7171,6 +7171,7 @@ dependencies = [
  "tracing-subscriber",
  "trust-tasks-didcomm",
  "trust-tasks-https",
+ "trust-tasks-proof",
  "trust-tasks-rs",
  "trust-tasks-tsp",
  "url",
@@ -7206,6 +7207,23 @@ dependencies = [
  "thiserror 2.0.18",
  "trust-tasks-rs",
  "uuid",
+]
+
+[[package]]
+name = "trust-tasks-proof"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0138696d9a4d052ee0c7d780a7ba28d469c41dc3157312ae222c9e54d484fe9"
+dependencies = [
+ "affinidi-crypto 0.2.4",
+ "affinidi-data-integrity 0.7.6",
+ "affinidi-did-resolver-cache-sdk",
+ "affinidi-encoding",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "trust-tasks-rs",
 ]
 
 [[package]]

@@ -12,10 +12,11 @@
 //! add the small glue that bridges the spec payloads to the Trust Registry's
 //! own [`crate::domain`] types (query construction + record conversion).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 
 use trust_tasks_rs::specs::registry;
+use trust_tasks_rs::Payload;
 
 use crate::domain::{Action, AuthorityId, EntityId, Resource};
 use crate::storage::repository::TrustRecordQuery;
@@ -37,6 +38,9 @@ pub use registry::record::delete::v0_1::{
 pub use registry::record::list::v0_1::{
     Payload as RecordListRequest, Response as RecordListResponse,
 };
+// pub use registry::record::did_rotate::v0_1::{
+//     Payload as DidRotateRequest, Response as DidRotateResponse,
+// };
 pub use registry::record::read::v0_1::{
     Payload as RecordReadRequest, Response as RecordReadResponse,
 };
@@ -67,6 +71,9 @@ pub mod type_uris {
     pub const RECORD_READ: &str = RecordReadRequest::TYPE_URI;
     /// `registry/record/list/0.1` request.
     pub const RECORD_LIST: &str = RecordListRequest::TYPE_URI;
+    /// `registry/did/rotate/0.1` request — rotate the registry's own
+    /// VTA-managed `did:webvh` keys.
+    pub const DID_ROTATE: &str = "https://trusttasks.org/spec/registry/did/rotate/0.1";
 }
 
 // --- Glue between the spec payloads and the domain --------------------------
@@ -106,6 +113,38 @@ where
     serde_json::from_value(json).map_err(|e| e.to_string())
 }
 
+/// `registry/did/rotate/0.1` request — rotate the registry's own VTA-managed
+/// `did:webvh` keys. **Proof required** (administrative, state-changing).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DidRotateRequest {
+    /// Override the pre-rotation commitment count for the new key set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_rotation_count: Option<u32>,
+    /// Operator-facing audit label for the rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl Payload for DidRotateRequest {
+    const TYPE_URI: &'static str = type_uris::DID_ROTATE;
+    const IS_PROOF_REQUIRED: bool = true;
+}
+
+/// `registry/did/rotate/0.1#response` — the outcome of a key rotation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DidRotateResponse {
+    /// The DID whose keys were rotated.
+    pub did: String,
+    /// The new SCID after rotation.
+    pub new_scid: String,
+    /// The new webvh log version id.
+    pub new_version_id: String,
+}
+
+impl Payload for DidRotateResponse {
+    const TYPE_URI: &'static str = "https://trusttasks.org/spec/registry/did/rotate/0.1#response";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +162,8 @@ mod tests {
         let _ = RecordDeleteRequest::type_uri();
         let _ = RecordReadRequest::type_uri();
         let _ = RecordListRequest::type_uri();
+        let _ = DidRotateRequest::type_uri();
+        let _ = DidRotateResponse::type_uri();
     }
 
     #[test]
@@ -143,6 +184,7 @@ mod tests {
         assert!(RecordCreateRequest::IS_PROOF_REQUIRED);
         assert!(RecordUpdateRequest::IS_PROOF_REQUIRED);
         assert!(RecordDeleteRequest::IS_PROOF_REQUIRED);
+        assert!(DidRotateRequest::IS_PROOF_REQUIRED);
         assert!(!RecordReadRequest::IS_PROOF_REQUIRED);
         assert!(!RecordListRequest::IS_PROOF_REQUIRED);
         assert!(!RecognitionRequest::IS_PROOF_REQUIRED);
