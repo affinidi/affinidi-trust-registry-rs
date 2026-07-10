@@ -10,15 +10,31 @@ description = "Embedded Trust Registry fixture for integration tests — spawn()
 readme = "README.md"
 publish = true
 
+[features]
+default = []
+# Wire the DIDComm Trust Task listener against an affinidi-messaging-test-mediator.
+mediator = ["dep:affinidi-messaging-test-mediator"]
+# Additionally start (and exercise) the TSP Trust Task receive loop.
+tsp = ["mediator", "trust-registry/tsp", "affinidi-messaging-test-mediator/tsp"]
+
 [dependencies]
 trust-registry = { path = "../trust-registry", version = "0.7" }
 
 tokio.workspace = true
 tokio-util.workspace = true
 
+affinidi-messaging-test-mediator = { version = "0.2", optional = true }
+
 [dev-dependencies]
 reqwest.workspace = true
 serde_json.workspace = true
+# Client side of the routed Trust Task round-trip (mediator/tsp tests).
+affinidi-tdk.workspace = true
+affinidi-messaging-sdk.workspace = true
+trust-tasks-rs.workspace = true
+trust-tasks-didcomm.workspace = true
+chrono.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
