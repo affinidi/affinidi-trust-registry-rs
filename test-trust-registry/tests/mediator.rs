@@ -216,3 +216,69 @@ async fn tsp_enabled_registry_spawns_against_a_mediator() {
     tr.shutdown().await;
     env.shutdown().await.ok();
 }
+
+/// Full routed TSP round-trip: a client sends a recognition Trust Task to the
+/// registry over TSP (through the mediator's TSP relay), and the registry —
+/// receiving it multiplexed on its single DIDComm pickup socket — dispatches and
+/// seals the response back over TSP.
+#[cfg(feature = "tsp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "routed TSP round-trip through the mediator; run with --ignored"]
+async fn recognition_round_trips_over_tsp() {
+    let env = TestEnvironment::spawn().await.expect("spawn test mediator");
+    let tr = TestTrustRegistry::builder()
+        .record(sample_record())
+        .spawn_with_mediator(&env.mediator)
+        .await
+        .expect("spawn trust registry");
+    let tr_did = tr.did().expect("tr did").to_string();
+    let client = env.add_user("client").await.expect("add client");
+
+    // Give the registry's pickup socket a moment to establish live delivery.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // The TSP binding envelope is `{ type, document }` bytes — and uses the
+    // *TSP* binding envelope type, not the DIDComm one.
+    let request = build_request(&client.did, &tr_did);
+    let envelope = json!({ "type": trust_tasks_tsp::ENVELOPE_TYPE, "document": request });
+    let bytes = serde_json::to_vec(&envelope).expect("serialise tsp envelope");
+    env.atm
+        .tsp()
+        .send(&client.profile, &tr_did, &bytes)
+        .await
+        .expect("tsp send");
+
+    let mut recognized = None;
+    for _ in 0..40 {
+        let fetched = env
+            .atm
+            .fetch_messages(&client.profile, &FetchOptions::default())
+            .await
+            .expect("fetch messages");
+        for item in fetched.success {
+            let Some(stored) = item.msg else { continue };
+            if !env.atm.tsp().is_tsp(&stored) {
+                continue;
+            }
+            let (payload, _sender) = env
+                .atm
+                .tsp()
+                .unpack(&client.profile, &stored)
+                .await
+                .expect("tsp unpack");
+            let envelope: Value = serde_json::from_slice(&payload).expect("parse tsp envelope");
+            let task: TrustTask<Value> =
+                serde_json::from_value(envelope["document"].clone()).expect("parse response task");
+            recognized = Some(task.payload["recognized"] == json!(true));
+        }
+        if recognized.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    assert_eq!(recognized, Some(true), "seeded record should be recognized");
+
+    tr.shutdown().await;
+    env.shutdown().await.ok();
+}

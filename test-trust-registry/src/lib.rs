@@ -38,6 +38,8 @@ use trust_registry::storage::repository::TrustRecordAdminRepository;
 #[cfg(feature = "mediator")]
 use affinidi_messaging_test_mediator::TestMediatorHandle;
 #[cfg(feature = "mediator")]
+use affinidi_tdk::messaging::protocols::mediator::acls::AccessListModeType;
+#[cfg(feature = "mediator")]
 use trust_registry::configs::{AdminConfig, ProfileConfig};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -155,6 +157,10 @@ impl TestTrustRegistryBuilder {
 
         let didcomm_config = DidcommConfig {
             is_enabled: true,
+            // Public mode: accept Trust Tasks from any client DID (the default
+            // config mode is private/ExplicitAllow, which would deny test
+            // clients). Writes are still gated by `admin_dids` + proof.
+            acl_mode: AccessListModeType::ExplicitDeny,
             profile_config: ProfileConfig {
                 did: did.clone(),
                 alias: "Trust Registry".to_string(),

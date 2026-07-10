@@ -13,7 +13,7 @@ publish = true
 [features]
 default = []
 # Wire the DIDComm Trust Task listener against an affinidi-messaging-test-mediator.
-mediator = ["dep:affinidi-messaging-test-mediator"]
+mediator = ["dep:affinidi-messaging-test-mediator", "dep:affinidi-tdk"]
 # Additionally start (and exercise) the TSP Trust Task receive loop.
 tsp = ["mediator", "trust-registry/tsp", "affinidi-messaging-test-mediator/tsp"]
 
@@ -24,6 +24,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 
 affinidi-messaging-test-mediator = { version = "0.2", optional = true }
+affinidi-tdk = { workspace = true, optional = true }
 
 [dev-dependencies]
 reqwest.workspace = true
@@ -33,6 +34,7 @@ affinidi-tdk.workspace = true
 affinidi-messaging-sdk.workspace = true
 trust-tasks-rs.workspace = true
 trust-tasks-didcomm.workspace = true
+trust-tasks-tsp.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 
