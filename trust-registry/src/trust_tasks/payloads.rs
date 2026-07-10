@@ -12,11 +12,11 @@
 //! add the small glue that bridges the spec payloads to the Trust Registry's
 //! own [`crate::domain`] types (query construction + record conversion).
 
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
-use trust_tasks_rs::specs::registry;
 use trust_tasks_rs::Payload;
+use trust_tasks_rs::specs::registry;
 
 use crate::domain::{Action, AuthorityId, EntityId, Resource};
 use crate::storage::repository::TrustRecordQuery;
@@ -38,9 +38,6 @@ pub use registry::record::delete::v0_1::{
 pub use registry::record::list::v0_1::{
     Payload as RecordListRequest, Response as RecordListResponse,
 };
-// pub use registry::record::did_rotate::v0_1::{
-//     Payload as DidRotateRequest, Response as DidRotateResponse,
-// };
 pub use registry::record::read::v0_1::{
     Payload as RecordReadRequest, Response as RecordReadResponse,
 };
