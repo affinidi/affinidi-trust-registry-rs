@@ -174,33 +174,67 @@ impl<H: MessageHandler> Listener<H> {
             return Ok(());
         }
 
-        // retrieve messages from mediator queue
-        let offline_arrived_messages = protocols
-            .message_pickup
-            .send_delivery_request(
-                &self.atm,
-                &self.profile,
-                Some(messages_limit),
-                wait_for_response,
-            )
-            .await?;
+        // Retrieve + dispatch the queued backlog. With `--features tsp` we fetch
+        // it as classified frames so a queued TSP message is routed to the TSP
+        // handler instead of being DIDComm-unpacked and dropped (mirrors the SDK's
+        // own TSP-aware offline sync). Every retrieved id is acked so the mediator
+        // stops redelivering it.
+        #[cfg(feature = "tsp")]
+        let messages_to_delete: Vec<String> = {
+            let frames = protocols
+                .message_pickup
+                .send_delivery_request_frames(
+                    &self.atm,
+                    &self.profile,
+                    Some(messages_limit),
+                    wait_for_response,
+                )
+                .await?;
 
-        debug!(
-            "[profile = {}] delivery_reply = {:?}",
-            &self.profile.inner.alias, offline_arrived_messages
-        );
+            let ack_ids: Vec<String> = frames.iter().map(|(_, id)| id.clone()).collect();
+            for (frame, _id) in frames {
+                match frame {
+                    Some(InboundFrame::DidComm(message, meta)) => {
+                        self.spawn_handler(*message, *meta)
+                    }
+                    Some(InboundFrame::Tsp(packed)) => self.spawn_tsp_handler(*packed),
+                    Some(_) => {}
+                    None => {}
+                }
+            }
+            ack_ids
+        };
 
-        let messages_to_delete: Vec<_> = offline_arrived_messages
-            .iter()
-            .map(|(m, _)| m.id.clone())
-            .collect();
+        #[cfg(not(feature = "tsp"))]
+        let messages_to_delete: Vec<String> = {
+            let offline_arrived_messages = protocols
+                .message_pickup
+                .send_delivery_request(
+                    &self.atm,
+                    &self.profile,
+                    Some(messages_limit),
+                    wait_for_response,
+                )
+                .await?;
 
-        offline_arrived_messages
-            .into_iter()
-            .for_each(|(message, meta)| self.spawn_handler(message, meta));
+            debug!(
+                "[profile = {}] delivery_reply = {:?}",
+                &self.profile.inner.alias, offline_arrived_messages
+            );
+
+            let ids: Vec<String> = offline_arrived_messages
+                .iter()
+                .map(|(m, _)| m.id.clone())
+                .collect();
+
+            offline_arrived_messages
+                .into_iter()
+                .for_each(|(message, meta)| self.spawn_handler(message, meta));
+
+            ids
+        };
 
         // delete these from mediator queue
-
         let delete_messages_reply = protocols
             .message_pickup
             .send_messages_received(
