@@ -2,12 +2,12 @@
 //! wire contract (JSON body = the request document; a 2xx body is the reply
 //! document, a non-2xx body is a `trust-task-error` document).
 //!
-//! Implemented directly on `reqwest` rather than `trust_tasks_https::HttpsClient`
-//! for two reasons: that client builds its `reqwest::Client` without any
-//! timeout (a hung registry would hang the caller forever), and its typed
-//! `send` bounds don't admit the untyped `TrustTask<Value>` seam. The wire
-//! contract is identical and is pinned by the round-trip test against an
-//! in-process server.
+//! Implemented directly on `reqwest` rather than `trust_tasks_https::HttpsClient`:
+//! that client's typed `send` bounds (`Payload` on both sides) don't admit the
+//! untyped `TrustTask<Value>` seam this crate routes every binding through.
+//! (Its historical lack of timeouts was fixed upstream in trust-tasks-https
+//! 0.2.1.) The wire contract is identical and is pinned by the round-trip
+//! test against an in-process server.
 
 use std::time::Duration;
 
