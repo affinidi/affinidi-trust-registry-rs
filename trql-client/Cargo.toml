@@ -3,7 +3,7 @@ name = "trql-client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description.workspace = true
+description = "Transport-agnostic Trust Registry query client (TRQP over Trust Tasks): HTTPS, DIDComm, TSP"
 readme.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -12,7 +12,49 @@ repository.workspace = true
 
 publish = true
 
+[features]
+default = ["https"]
+# HTTPS binding: POST /trust-tasks (trust-tasks-https wire contract).
+https = ["dep:reqwest"]
+# DIDComm binding over the ATM mediator (trust-tasks-didcomm envelope).
+didcomm = ["dep:affinidi-tdk", "dep:trust-tasks-didcomm", "dep:tokio", "dep:uuid"]
+# TSP binding, multiplexed on the same mediator websocket (trust-tasks-tsp
+# envelope). Mirrors the trust-registry `tsp` feature: affinidi-tsp is a moving
+# 0.x dependency, so this stays opt-in.
+tsp = [
+    "dep:affinidi-tdk",
+    "dep:affinidi-messaging-sdk",
+    "dep:trust-tasks-tsp",
+    "dep:tokio",
+    "dep:uuid",
+    "affinidi-tdk/tsp",
+    "affinidi-messaging-sdk/tsp",
+]
+
 [dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+trust-tasks-rs.workspace = true
+uuid = { workspace = true, optional = true }
+
+# https
+reqwest = { workspace = true, optional = true }
+
+# didcomm / tsp
+affinidi-tdk = { workspace = true, optional = true }
+affinidi-messaging-sdk = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+trust-tasks-didcomm = { workspace = true, optional = true }
+trust-tasks-tsp = { workspace = true, optional = true }
+
+[dev-dependencies]
+axum.workspace = true
+tokio.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
