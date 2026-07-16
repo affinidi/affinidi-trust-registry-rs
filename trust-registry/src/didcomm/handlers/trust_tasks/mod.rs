@@ -265,11 +265,22 @@ impl TrustTasksHandler {
         doc: &T,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let body = serde_json::to_value(doc)?;
+        // Mirror the client-side binding (`pack_trust_task` sets the DIDComm
+        // `thid`): carry the document's `threadId` on the envelope too, so
+        // clients can correlate replies at the transport layer without
+        // parsing the body first.
+        let thread_id = body
+            .get("threadId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let message_id = new_id();
-        let envelope = Message::build(message_id.clone(), ENVELOPE_TYPE.to_string(), body)
+        let mut builder = Message::build(message_id.clone(), ENVELOPE_TYPE.to_string(), body)
             .from(ctx.profile.inner.did.clone())
-            .to(ctx.sender_did.clone())
-            .finalize();
+            .to(ctx.sender_did.clone());
+        if let Some(thid) = thread_id {
+            builder = builder.thid(thid);
+        }
+        let envelope = builder.finalize();
 
         let packed = ctx
             .atm
