@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 description = "Embedded Trust Registry fixture for integration tests — spawn() an in-process server on an ephemeral port."
 readme = "README.md"
-publish = true
+publish = false
 
 [features]
 default = []
