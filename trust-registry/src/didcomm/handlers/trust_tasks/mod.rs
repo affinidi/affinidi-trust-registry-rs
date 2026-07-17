@@ -69,15 +69,7 @@ impl TrustTasksHandler {
 
 /// Slugs whose operations mutate the registry and therefore require the
 /// admin-DID ACL plus a proof (per the `IS_PROOF_REQUIRED` policy).
-fn is_write_slug(slug: &str) -> bool {
-    matches!(
-        slug,
-        "registry/record/create"
-            | "registry/record/update"
-            | "registry/record/delete"
-            | "registry/did/rotate"
-    )
-}
+use crate::trust_tasks::proof::is_write_slug;
 
 /// Apply the write-only preconditions (proof presence + admin ACL) that the
 /// transport-agnostic dispatcher does not enforce. Reads pass through.

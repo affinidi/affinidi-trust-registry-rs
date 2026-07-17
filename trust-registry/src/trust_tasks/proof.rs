@@ -17,11 +17,19 @@ use trust_tasks_proof::affinidi::{CachedDidResolver, Verifier};
 use trust_tasks_rs::{DynProofVerifier, RejectReason, TrustTask, erase_verifier};
 
 /// Slugs whose operations mutate the registry and therefore carry a required,
-/// verifiable proof.
+/// verifiable proof plus the admin ACL. The single source of truth — the
+/// DIDComm and TSP bindings both gate on this list (they previously carried
+/// diverging local copies: `registry/did/rotate` was gated over DIDComm but
+/// not over TSP).
 pub fn is_write_slug(slug: &str) -> bool {
     matches!(
         slug,
-        "registry/record/create" | "registry/record/update" | "registry/record/delete"
+        "registry/record/create"
+            | "registry/record/update"
+            | "registry/record/delete"
+            | "registry/did/rotate"
+            | "governance/capability/enable"
+            | "governance/capability/disable"
     )
 }
 

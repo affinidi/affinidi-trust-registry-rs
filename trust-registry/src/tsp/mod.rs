@@ -43,12 +43,7 @@ fn new_id() -> String {
 }
 
 /// Slugs whose operations mutate the registry (admin ACL + proof required).
-fn is_write_slug(slug: &str) -> bool {
-    matches!(
-        slug,
-        "registry/record/create" | "registry/record/update" | "registry/record/delete"
-    )
-}
+use crate::trust_tasks::proof::is_write_slug;
 
 /// Write-only preconditions the transport-agnostic dispatcher does not enforce:
 /// proof presence + admin-DID ACL. Reads pass through.
