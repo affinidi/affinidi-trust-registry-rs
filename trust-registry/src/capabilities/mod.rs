@@ -250,7 +250,9 @@ impl CapabilitySet {
         self.available
             .values()
             .filter_map(|d| {
-                let s = state.get(d.manifest.capability.to_string().as_str()).cloned();
+                let s = state
+                    .get(d.manifest.capability.to_string().as_str())
+                    .cloned();
                 let enabled = s.as_ref().is_some_and(|s| s.enabled);
                 (enabled || include_available).then(|| (d.manifest.clone(), s))
             })

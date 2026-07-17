@@ -251,10 +251,7 @@ impl<H: MessageHandler> Listener<H> {
         );
 
         if delete_messages_reply.is_some() {
-            info!(
-                "[profile = {}] messages deleted.",
-                self.profile.inner.alias
-            );
+            info!("[profile = {}] messages deleted.", self.profile.inner.alias);
         } else {
             warn!(
                 "[profile = {}] no status reply for messages received ack. Messages might be deleted or not",
