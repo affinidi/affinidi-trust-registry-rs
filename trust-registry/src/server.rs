@@ -180,8 +180,11 @@ pub async fn serve(
         .unwrap_or_else(|_| "./.trust-registry/capabilities.json".to_string());
     let base_repository = repository.clone();
     let query_repository = repository.clone();
+    let capability_repository = repository.clone();
     let capabilities = crate::capabilities::CapabilitySet::new(
-        Vec::new(),
+        vec![crate::capabilities::git_trust::definition(
+            capability_repository,
+        )],
         Box::new(crate::capabilities::FileCapabilityStore::new(
             capability_state_path,
         )),

@@ -30,6 +30,8 @@ pub fn is_write_slug(slug: &str) -> bool {
             | "registry/did/rotate"
             | "governance/capability/enable"
             | "governance/capability/disable"
+            | "git-trust/grant"
+            | "git-trust/revoke"
     )
 }
 

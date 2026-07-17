@@ -39,8 +39,11 @@ pub type ConfigValidator = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Syn
 /// registrations it contributes when enabled.
 pub struct CapabilityDefinition {
     pub manifest: CapabilityManifest,
-    /// Contributes the capability's `.on::<P, _>()` registrations.
-    pub register: Arc<dyn Fn(RegistryDispatcher) -> RegistryDispatcher + Send + Sync>,
+    /// Contributes the capability's `.on::<P, _>()` registrations. Receives
+    /// the community's enablement state (version, config, delegate) so
+    /// handlers can bind per-community configuration.
+    pub register:
+        Arc<dyn Fn(RegistryDispatcher, &CapabilityState) -> RegistryDispatcher + Send + Sync>,
     /// Validates a per-community `config` document. `None` = no config
     /// accepted beyond an empty object.
     pub validate_config: Option<ConfigValidator>,
@@ -205,8 +208,9 @@ impl CapabilitySet {
             .available
             .get(capability)
             .ok_or(CapabilityError::UnknownCapability)?;
-        if let (Some(config), Some(validate)) = (&config, &definition.validate_config) {
-            validate(config).map_err(CapabilityError::ConfigInvalid)?;
+        if let Some(validate) = &definition.validate_config {
+            let empty = Value::Object(serde_json::Map::new());
+            validate(config.as_ref().unwrap_or(&empty)).map_err(CapabilityError::ConfigInvalid)?;
         }
         let mut state = self.state.write().await;
         if state.get(capability).is_some_and(|s| s.enabled) {
@@ -308,8 +312,8 @@ fn compose(
         });
     }
     for (slug, definition) in available {
-        if state.get(slug).is_some_and(|s| s.enabled) {
-            dispatcher = (definition.register)(dispatcher);
+        if let Some(entry) = state.get(slug).filter(|s| s.enabled) {
+            dispatcher = (definition.register)(dispatcher, entry);
         }
     }
     dispatcher
@@ -460,6 +464,9 @@ async fn handle_list(
 }
 
 #[cfg(test)]
+pub mod git_trust;
+
+#[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -481,7 +488,7 @@ mod tests {
         use trust_tasks_rs::specs::registry::recognition::v0_1 as recognition;
         CapabilityDefinition {
             manifest: manifest(slug),
-            register: Arc::new(|d: RegistryDispatcher| {
+            register: Arc::new(|d: RegistryDispatcher, _state: &CapabilityState| {
                 d.on::<recognition::Payload, _>(|doc| -> crate::trust_tasks::TaskFuture {
                     Box::pin(async move {
                         Ok(doc.respond_with(
