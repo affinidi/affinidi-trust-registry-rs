@@ -18,7 +18,7 @@ homepage = "https://affinidi.com/"
 
 affinidi-tdk = "0.8"
 affinidi-messaging-sdk = "0.18"
-trust-tasks-rs = "0.2.17"
+trust-tasks-rs = "0.2.18"
 trust-tasks-proof = "0.2"
 vti-secrets = { version = "0.1", default-features = false }
 fjall = "3"
@@ -67,8 +67,3 @@ tower = { version = "0.5", features = ["util"] }
 [workspace.lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"
-
-# TEMP: trust-tasks-rs 0.2.18 (the git-trust/* specs) is in review upstream
-# (dtgwg #120); publish fires on merge. Remove once 0.2.18 is on crates.io.
-[patch.crates-io]
-trust-tasks-rs = { git = "https://github.com/trustoverip/dtgwg-trust-tasks-tf.git", rev = "0225e67394cdc3891eb329ada98177a0848ae9ff" }
