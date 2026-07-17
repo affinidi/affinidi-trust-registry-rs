@@ -18,7 +18,7 @@ homepage = "https://affinidi.com/"
 
 affinidi-tdk = "0.8"
 affinidi-messaging-sdk = "0.18"
-trust-tasks-rs = "0.2.13"
+trust-tasks-rs = "0.2.17"
 trust-tasks-proof = "0.2"
 vti-secrets = { version = "0.1", default-features = false }
 fjall = "3"
@@ -67,3 +67,9 @@ tower = { version = "0.5", features = ["util"] }
 [workspace.lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"
+
+# TEMP: trust-tasks-rs 0.2.17 (the governance/capability/* specs) is merged
+# upstream but not yet on crates.io (publish fires on the dtgwg merge).
+# Remove this patch once 0.2.17 is published.
+[patch.crates-io]
+trust-tasks-rs = { git = "https://github.com/trustoverip/dtgwg-trust-tasks-tf.git", rev = "0d54088b7d479ce9054b3d145931717682271245" }

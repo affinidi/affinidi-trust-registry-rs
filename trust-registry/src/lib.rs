@@ -5,6 +5,7 @@ use std::{fmt, sync::Arc};
 pub mod audit;
 pub mod configs;
 pub mod didcomm;
+pub mod capabilities;
 pub mod domain;
 pub mod http;
 pub mod server;

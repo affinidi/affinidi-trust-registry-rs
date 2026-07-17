@@ -2383,7 +2383,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.118",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -7181,7 +7181,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -7776,9 +7776,8 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-rs"
-version = "0.2.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5598194a3fd82fe7eefe7f56e4dc01c09a32bdb92d2abf5fc5bdc6bd1cce5df3"
+version = "0.2.17"
+source = "git+https://github.com/trustoverip/dtgwg-trust-tasks-tf.git?rev=0d54088b7d479ce9054b3d145931717682271245#0d54088b7d479ce9054b3d145931717682271245"
 dependencies = [
  "async-trait",
  "chrono",
