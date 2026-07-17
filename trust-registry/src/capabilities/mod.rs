@@ -22,11 +22,18 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
+use trust_tasks_rs::specs::governance::capability::disable::v0_1 as disable_spec;
 use trust_tasks_rs::specs::governance::capability::enable::v0_1 as enable_spec;
+use trust_tasks_rs::specs::governance::capability::list::v0_1 as list_spec;
+use trust_tasks_rs::{RejectReason, TrustTask};
+use uuid::Uuid;
 
-use crate::trust_tasks::RegistryDispatcher;
+use crate::trust_tasks::{RegistryDispatcher, TaskFuture, TaskOutcome};
 
 pub use enable_spec::CapabilityManifest;
+
+/// Validates a per-community `config` document.
+pub type ConfigValidator = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 
 /// A capability the host can serve: its manifest plus the dispatcher
 /// registrations it contributes when enabled.
@@ -36,7 +43,7 @@ pub struct CapabilityDefinition {
     pub register: Arc<dyn Fn(RegistryDispatcher) -> RegistryDispatcher + Send + Sync>,
     /// Validates a per-community `config` document. `None` = no config
     /// accepted beyond an empty object.
-    pub validate_config: Option<Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>>,
+    pub validate_config: Option<ConfigValidator>,
 }
 
 /// Persisted per-capability enablement state.
@@ -101,11 +108,7 @@ pub struct MemoryCapabilityStore {
 
 impl CapabilityStateStore for MemoryCapabilityStore {
     fn load(&self) -> Result<BTreeMap<String, CapabilityState>, String> {
-        Ok(self
-            .state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone())
+        Ok(self.state.lock().unwrap_or_else(|p| p.into_inner()).clone())
     }
     fn save(&self, state: &BTreeMap<String, CapabilityState>) -> Result<(), String> {
         *self.state.lock().unwrap_or_else(|p| p.into_inner()) = state.clone();
@@ -138,6 +141,7 @@ pub struct CapabilitySet {
     base_query: Box<dyn Fn() -> RegistryDispatcher + Send + Sync>,
     dispatcher: DispatcherHandle,
     query_dispatcher: DispatcherHandle,
+    weak: std::sync::Weak<Self>,
 }
 
 impl CapabilitySet {
@@ -155,22 +159,28 @@ impl CapabilitySet {
             .into_iter()
             .map(|d| (d.manifest.capability.to_string(), d))
             .collect();
-        let set = Self {
+        Ok(Arc::new_cyclic(|weak: &std::sync::Weak<Self>| Self {
             dispatcher: Arc::new(RwLock::new(Arc::new(compose(
-                &base, &available, &state,
+                &base,
+                &available,
+                &state,
+                weak.clone(),
+                true,
             )))),
             query_dispatcher: Arc::new(RwLock::new(Arc::new(compose(
                 &base_query,
                 &available,
                 &state,
+                weak.clone(),
+                false,
             )))),
+            weak: weak.clone(),
             available,
             state: RwLock::new(state),
             store,
             base,
             base_query,
-        };
-        Ok(Arc::new(set))
+        }))
     }
 
     /// The full (admin) dispatcher handle for the DIDComm/TSP bindings.
@@ -212,9 +222,7 @@ impl CapabilitySet {
         state.insert(capability.to_string(), entry.clone());
         // Persist first (Remote-First): a crash after this line re-converges
         // at startup; a crash before it loses nothing.
-        self.store
-            .save(&state)
-            .map_err(CapabilityError::Storage)?;
+        self.store.save(&state).map_err(CapabilityError::Storage)?;
         self.rebuild(&state).await;
         Ok(entry)
     }
@@ -227,9 +235,7 @@ impl CapabilitySet {
             Some(entry) if entry.enabled => entry.enabled = false,
             _ => return Err(CapabilityError::NotEnabled),
         }
-        self.store
-            .save(&state)
-            .map_err(CapabilityError::Storage)?;
+        self.store.save(&state).map_err(CapabilityError::Storage)?;
         self.rebuild(&state).await;
         Ok(())
     }
@@ -244,7 +250,7 @@ impl CapabilitySet {
         self.available
             .values()
             .filter_map(|d| {
-                let s = state.get(&d.manifest.capability.to_string()).cloned();
+                let s = state.get(d.manifest.capability.to_string().as_str()).cloned();
                 let enabled = s.as_ref().is_some_and(|s| s.enabled);
                 (enabled || include_available).then(|| (d.manifest.clone(), s))
             })
@@ -252,25 +258,203 @@ impl CapabilitySet {
     }
 
     async fn rebuild(&self, state: &BTreeMap<String, CapabilityState>) {
-        *self.dispatcher.write().await = Arc::new(compose(&self.base, &self.available, state));
-        *self.query_dispatcher.write().await =
-            Arc::new(compose(&self.base_query, &self.available, state));
+        *self.dispatcher.write().await = Arc::new(compose(
+            &self.base,
+            &self.available,
+            state,
+            self.weak.clone(),
+            true,
+        ));
+        *self.query_dispatcher.write().await = Arc::new(compose(
+            &self.base_query,
+            &self.available,
+            state,
+            self.weak.clone(),
+            false,
+        ));
     }
 }
 
-/// Base registrations plus every enabled capability's registrations.
+/// Base registrations plus the governance surface plus every enabled
+/// capability's registrations. The admin surface gets enable/disable/list;
+/// the read-only (query) surface gets only list.
 fn compose(
     base: &(impl Fn() -> RegistryDispatcher + ?Sized),
     available: &BTreeMap<String, CapabilityDefinition>,
     state: &BTreeMap<String, CapabilityState>,
+    set: std::sync::Weak<CapabilitySet>,
+    admin: bool,
 ) -> RegistryDispatcher {
     let mut dispatcher = base();
+    dispatcher = {
+        let list_set = set.clone();
+        dispatcher.on::<list_spec::Payload, _>(move |doc| -> TaskFuture {
+            let set = list_set.clone();
+            Box::pin(handle_list(set, doc))
+        })
+    };
+    if admin {
+        let enable_set = set.clone();
+        dispatcher = dispatcher.on::<enable_spec::Payload, _>(move |doc| -> TaskFuture {
+            let set = enable_set.clone();
+            Box::pin(handle_enable(set, doc))
+        });
+        let disable_set = set.clone();
+        dispatcher = dispatcher.on::<disable_spec::Payload, _>(move |doc| -> TaskFuture {
+            let set = disable_set.clone();
+            Box::pin(handle_disable(set, doc))
+        });
+    }
     for (slug, definition) in available {
         if state.get(slug).is_some_and(|s| s.enabled) {
             dispatcher = (definition.register)(dispatcher);
         }
     }
     dispatcher
+}
+
+// --- governance wire handlers -------------------------------------------------
+
+fn new_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+fn upgraded(set: &std::sync::Weak<CapabilitySet>) -> Result<Arc<CapabilitySet>, RejectReason> {
+    set.upgrade().ok_or(RejectReason::InternalError {
+        reason: "capability set is shutting down".to_string(),
+    })
+}
+
+fn reject_of(
+    doc_reject: impl FnOnce(RejectReason) -> trust_tasks_rs::ErrorResponse,
+    e: CapabilityError,
+) -> trust_tasks_rs::ErrorResponse {
+    let reason = match e {
+        CapabilityError::UnknownCapability => RejectReason::TaskFailed {
+            reason: "unknown_capability: not built into this host and no manifest supplied"
+                .to_string(),
+            details: None,
+        },
+        CapabilityError::AlreadyEnabled => RejectReason::TaskFailed {
+            reason: "already_enabled: the capability is already enabled for this community"
+                .to_string(),
+            details: None,
+        },
+        CapabilityError::NotEnabled => RejectReason::TaskFailed {
+            reason: "not_enabled: the capability is not currently enabled".to_string(),
+            details: None,
+        },
+        CapabilityError::ConfigInvalid(detail) => RejectReason::MalformedRequest {
+            reason: format!("config_invalid: {detail}"),
+        },
+        CapabilityError::Storage(detail) => RejectReason::InternalError { reason: detail },
+    };
+    doc_reject(reason)
+}
+
+// TaskOutcome's Err is intentionally large (a full trust-task-error document);
+// matching the module-wide allowance in trust_tasks/router.rs.
+#[allow(clippy::result_large_err)]
+fn respond_json<P, T: Serialize>(doc: &TrustTask<P>, payload: T) -> TaskOutcome {
+    match serde_json::to_value(payload) {
+        Ok(value) => Ok(doc.respond_with(new_id(), value)),
+        Err(e) => Err(doc.reject_with(
+            new_id(),
+            RejectReason::InternalError {
+                reason: e.to_string(),
+            },
+        )),
+    }
+}
+
+async fn handle_enable(
+    set: std::sync::Weak<CapabilitySet>,
+    doc: TrustTask<enable_spec::Payload>,
+) -> TaskOutcome {
+    let set = match upgraded(&set) {
+        Ok(set) => set,
+        Err(reason) => return Err(doc.reject_with(new_id(), reason)),
+    };
+    let capability = doc.payload.capability.to_string();
+    let version = doc.payload.version.to_string();
+    // Codegen models the optional object as a Map defaulting to empty.
+    let config = (!doc.payload.config.is_empty())
+        .then(|| serde_json::Value::Object(doc.payload.config.clone().into_iter().collect()));
+    let delegate = doc.payload.delegate.clone();
+    match set.enable(&capability, &version, config, delegate).await {
+        Ok(entry) => respond_json(
+            &doc,
+            serde_json::json!({
+                "capability": capability,
+                "version": entry.version,
+                "enabled": true,
+                "enabledAt": entry.enabled_at,
+            }),
+        ),
+        Err(e) => Err(reject_of(|r| doc.reject_with(new_id(), r), e)),
+    }
+}
+
+async fn handle_disable(
+    set: std::sync::Weak<CapabilitySet>,
+    doc: TrustTask<disable_spec::Payload>,
+) -> TaskOutcome {
+    let set = match upgraded(&set) {
+        Ok(set) => set,
+        Err(reason) => return Err(doc.reject_with(new_id(), reason)),
+    };
+    let capability = doc.payload.capability.to_string();
+    match set.disable(&capability).await {
+        Ok(()) => respond_json(
+            &doc,
+            serde_json::json!({ "capability": capability, "enabled": false }),
+        ),
+        Err(e) => Err(reject_of(|r| doc.reject_with(new_id(), r), e)),
+    }
+}
+
+async fn handle_list(
+    set: std::sync::Weak<CapabilitySet>,
+    doc: TrustTask<list_spec::Payload>,
+) -> TaskOutcome {
+    let set = match upgraded(&set) {
+        Ok(set) => set,
+        Err(reason) => return Err(doc.reject_with(new_id(), reason)),
+    };
+    // Absence means `enabled` — the most restrictive listing.
+    let status = doc
+        .payload
+        .status
+        .as_ref()
+        .map(|s| format!("{s:?}").to_ascii_lowercase())
+        .unwrap_or_else(|| "enabled".to_string());
+    let include_available = status != "enabled";
+    let entries: Vec<serde_json::Value> = set
+        .list(include_available)
+        .await
+        .into_iter()
+        .filter(|(_, s)| match status.as_str() {
+            "available" => !s.as_ref().is_some_and(|s| s.enabled),
+            _ => true,
+        })
+        .map(|(manifest, s)| {
+            let enabled = s.as_ref().is_some_and(|s| s.enabled);
+            let mut entry = serde_json::json!({
+                "manifest": manifest,
+                "enabled": enabled,
+            });
+            if let Some(state) = s {
+                if enabled {
+                    entry["enabledAt"] = serde_json::json!(state.enabled_at);
+                }
+                if let Some(delegate) = state.delegate {
+                    entry["delegate"] = serde_json::json!(delegate);
+                }
+            }
+            entry
+        })
+        .collect();
+    respond_json(&doc, serde_json::json!({ "capabilities": entries }))
 }
 
 #[cfg(test)]
@@ -411,6 +595,53 @@ mod tests {
         )
         .unwrap();
         assert!(dispatch_ok(&set).await, "enablement survives restart");
+    }
+
+    #[tokio::test]
+    async fn enable_and_list_work_over_the_wire() {
+        use trust_tasks_rs::Payload as _;
+        let set = set_with("demo");
+
+        // governance/capability/enable as a dispatched document.
+        let enable_doc = TrustTask::new(
+            "urn:uuid:en".to_string(),
+            enable_spec::Payload::type_uri(),
+            serde_json::json!({ "capability": "demo", "version": "0.1" }),
+        );
+        let d = set.dispatcher().read().await.clone();
+        let out = crate::trust_tasks::handle_document(&d, enable_doc)
+            .await
+            .expect("enable succeeds");
+        assert_eq!(out.payload["enabled"], serde_json::json!(true));
+        assert!(
+            dispatch_ok(&set).await,
+            "capability serves after wire enable"
+        );
+
+        // list over the read-only surface reports it.
+        let list_doc = TrustTask::new(
+            "urn:uuid:ls".to_string(),
+            list_spec::Payload::type_uri(),
+            serde_json::json!({}),
+        );
+        let q = set.query_dispatcher().read().await.clone();
+        let out = crate::trust_tasks::handle_document(&q, list_doc)
+            .await
+            .expect("list succeeds");
+        assert_eq!(out.payload["capabilities"].as_array().unwrap().len(), 1);
+
+        // enable/disable are NOT on the read-only surface.
+        let enable_on_query = TrustTask::new(
+            "urn:uuid:en2".to_string(),
+            enable_spec::Payload::type_uri(),
+            serde_json::json!({ "capability": "demo", "version": "0.1" }),
+        );
+        assert!(
+            crate::trust_tasks::handle_document(&q, enable_on_query)
+                .await
+                .is_err(),
+            "writes must not route on the query surface"
+        );
     }
 
     #[tokio::test]

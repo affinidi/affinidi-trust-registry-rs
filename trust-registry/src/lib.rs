@@ -3,9 +3,9 @@ use chrono::{DateTime, Utc};
 use std::{fmt, sync::Arc};
 
 pub mod audit;
+pub mod capabilities;
 pub mod configs;
 pub mod didcomm;
-pub mod capabilities;
 pub mod domain;
 pub mod http;
 pub mod server;
