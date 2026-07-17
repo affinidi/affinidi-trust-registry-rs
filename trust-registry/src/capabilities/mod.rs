@@ -463,7 +463,6 @@ async fn handle_list(
     respond_json(&doc, serde_json::json!({ "capabilities": entries }))
 }
 
-#[cfg(test)]
 pub mod git_trust;
 
 #[cfg(test)]
