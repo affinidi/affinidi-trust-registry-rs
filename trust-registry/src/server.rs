@@ -182,9 +182,10 @@ pub async fn serve(
     let query_repository = repository.clone();
     let capability_repository = repository.clone();
     let capabilities = crate::capabilities::CapabilitySet::new(
-        vec![crate::capabilities::git_trust::definition(
-            capability_repository,
-        )],
+        vec![
+            crate::capabilities::git_trust::definition(capability_repository)
+                .map_err(BoxError::from)?,
+        ],
         Box::new(crate::capabilities::FileCapabilityStore::new(
             capability_state_path,
         )),

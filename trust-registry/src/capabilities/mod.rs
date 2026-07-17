@@ -35,6 +35,11 @@ pub use enable_spec::CapabilityManifest;
 /// Validates a per-community `config` document.
 pub type ConfigValidator = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 
+/// Contributes a capability's dispatcher registrations, given the
+/// community's enablement state.
+pub type RegisterFn =
+    Arc<dyn Fn(RegistryDispatcher, &CapabilityState) -> RegistryDispatcher + Send + Sync>;
+
 /// A capability the host can serve: its manifest plus the dispatcher
 /// registrations it contributes when enabled.
 pub struct CapabilityDefinition {
@@ -42,8 +47,7 @@ pub struct CapabilityDefinition {
     /// Contributes the capability's `.on::<P, _>()` registrations. Receives
     /// the community's enablement state (version, config, delegate) so
     /// handlers can bind per-community configuration.
-    pub register:
-        Arc<dyn Fn(RegistryDispatcher, &CapabilityState) -> RegistryDispatcher + Send + Sync>,
+    pub register: RegisterFn,
     /// Validates a per-community `config` document. `None` = no config
     /// accepted beyond an empty object.
     pub validate_config: Option<ConfigValidator>,

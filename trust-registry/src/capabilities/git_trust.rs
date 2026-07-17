@@ -28,7 +28,13 @@ use super::{CapabilityDefinition, CapabilityState};
 pub const ACTION: &str = "git.commit.sign";
 
 /// Build the git-trust [`CapabilityDefinition`] over `repository`.
-pub fn definition(repository: Arc<dyn TrustRecordAdminRepository>) -> CapabilityDefinition {
+///
+/// Errs only if the static manifest literal stops matching the generated
+/// `CapabilityManifest` shape (i.e. a spec upgrade) — surfaced at startup,
+/// never panicking.
+pub fn definition(
+    repository: Arc<dyn TrustRecordAdminRepository>,
+) -> Result<CapabilityDefinition, String> {
     let manifest = serde_json::from_value(serde_json::json!({
         "capability": "git-trust",
         "version": "0.1",
@@ -44,9 +50,9 @@ pub fn definition(repository: Arc<dyn TrustRecordAdminRepository>) -> Capability
             { "kind": "github-action", "ref": "OpenVTC/openvtc/.github/actions/verify-trust" }
         ]
     }))
-    .expect("static git-trust manifest is valid");
+    .map_err(|e| format!("git-trust manifest does not match the spec shape: {e}"))?;
 
-    CapabilityDefinition {
+    Ok(CapabilityDefinition {
         manifest,
         register: Arc::new(
             move |dispatcher: RegistryDispatcher, state: &CapabilityState| {
@@ -74,7 +80,7 @@ pub fn definition(repository: Arc<dyn TrustRecordAdminRepository>) -> Capability
                 "git-trust config requires `authority` (the community's authority DID)".to_string(),
             ),
         })),
-    }
+    })
 }
 
 /// The community authority DID from the enablement config. Enable-time
@@ -233,7 +239,7 @@ mod tests {
     fn set_over(repository: Arc<dyn TrustRecordAdminRepository>) -> Arc<CapabilitySet> {
         let query_repo = repository.clone();
         CapabilitySet::new(
-            vec![definition(repository)],
+            vec![definition(repository).unwrap()],
             Box::new(MemoryCapabilityStore::default()),
             Box::new(Dispatcher::new),
             // Query surface serves real TRQP reads, like the HTTP binding.
