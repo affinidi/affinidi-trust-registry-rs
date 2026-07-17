@@ -49,7 +49,7 @@ impl MessageHandler for DefaultHandler {}
 /// handler uses.
 #[cfg(feature = "tsp")]
 pub(crate) struct TspContext {
-    pub(crate) dispatcher: Arc<crate::trust_tasks::RegistryDispatcher>,
+    pub(crate) dispatcher: crate::capabilities::DispatcherHandle,
     pub(crate) admin_dids: Vec<String>,
     pub(crate) verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
 }
@@ -87,12 +87,12 @@ impl<H: MessageHandler> Listener<H> {
     #[cfg(feature = "tsp")]
     pub(crate) fn with_tsp(
         mut self,
-        dispatcher: crate::trust_tasks::RegistryDispatcher,
+        dispatcher: crate::capabilities::DispatcherHandle,
         admin_dids: Vec<String>,
         verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     ) -> Self {
         self.tsp = Some(TspContext {
-            dispatcher: Arc::new(dispatcher),
+            dispatcher,
             admin_dids,
             verifier,
         });
@@ -179,6 +179,7 @@ pub(crate) async fn start_one_did_listener(
     profile_config: ProfileConfig,
     config: Arc<DidcommConfig>,
     repository: Arc<dyn TrustRecordAdminRepository>,
+    dispatcher: crate::capabilities::DispatcherHandle,
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
     // Check if DID document is available before building listener
@@ -190,11 +191,6 @@ pub(crate) async fn start_one_did_listener(
     )
     .await?;
 
-    // Keep a repository handle for the (feature-gated) TSP dispatcher before the
-    // original is moved into the DIDComm handler.
-    #[cfg(feature = "tsp")]
-    let tsp_repository = repository.clone();
-
     // Build the Data Integrity proof verifier once and share it across the
     // DIDComm and TSP write paths.
     let verifier = crate::trust_tasks::build_verifier().await;
@@ -202,7 +198,12 @@ pub(crate) async fn start_one_did_listener(
     let listener = Listener::build_listener(
         profile_config,
         &config.mediator_did,
-        BaseHandler::build_from_arc(repository, config.clone(), verifier.clone()),
+        BaseHandler::build_from_arc(
+            repository,
+            config.clone(),
+            verifier.clone(),
+            dispatcher.clone(),
+        ),
         shutdown,
     )
     .await?;
@@ -223,7 +224,7 @@ pub(crate) async fn start_one_did_listener(
             &listener.profile.inner.alias
         );
         listener.with_tsp(
-            crate::trust_tasks::build_dispatcher(tsp_repository),
+            dispatcher.clone(),
             config.admin_config.admin_dids.clone(),
             verifier.clone(),
         )
@@ -237,6 +238,7 @@ pub(crate) async fn start_one_did_listener(
 pub(crate) async fn start_didcomm_listener(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
+    dispatcher: crate::capabilities::DispatcherHandle,
     shutdown: CancellationToken,
 ) -> Result<Result<(), DIDCommError>, JoinError> {
     let profile_config = config.profile_config.clone();
@@ -246,6 +248,7 @@ pub(crate) async fn start_didcomm_listener(
         profile_config,
         config,
         repository,
+        dispatcher,
         shutdown,
     ));
 

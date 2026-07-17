@@ -134,6 +134,7 @@ impl<H: MessageHandler> Listener<H> {
         let admin_dids = tsp.admin_dids.clone();
         let verifier = tsp.verifier.clone();
         tokio::spawn(async move {
+            let dispatcher = dispatcher.read().await.clone();
             crate::tsp::process_tsp_frame(
                 &atm,
                 &profile,

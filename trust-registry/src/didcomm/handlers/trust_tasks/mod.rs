@@ -34,33 +34,31 @@ use uuid::Uuid;
 
 use trust_tasks_didcomm::DidcommHandler as TtDidcommHandler;
 
+use crate::capabilities::DispatcherHandle;
 use crate::configs::AdminConfig;
 use crate::didcomm::error::DIDCommError;
 use crate::didcomm::handlers::{HandlerContext, ProtocolHandler};
-use crate::storage::repository::TrustRecordAdminRepository;
-use crate::trust_tasks::{RegistryDispatcher, build_dispatcher, handle_document};
+use crate::trust_tasks::handle_document;
 
 /// DIDComm binding handler for the `registry/*` Trust Task family.
 pub struct TrustTasksHandler {
-    dispatcher: RegistryDispatcher,
+    dispatcher: DispatcherHandle,
     admin_config: AdminConfig,
     verifier: std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
 }
 
 impl TrustTasksHandler {
-    /// Build the handler over `repository`, wiring the shared dispatcher, the
-    /// admin-DID ACL used to gate record writes, and the Data Integrity proof
-    /// verifier applied to writes.
-    pub fn new<R>(
-        repository: Arc<R>,
+    /// Build the handler over the live dispatcher handle (owned by the
+    /// CapabilitySet, so capability enable/disable swaps take effect here
+    /// without a restart), the admin-DID ACL used to gate writes, and the
+    /// Data Integrity proof verifier applied to writes.
+    pub fn new(
+        dispatcher: DispatcherHandle,
         admin_config: AdminConfig,
         verifier: std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
-    ) -> Self
-    where
-        R: TrustRecordAdminRepository + ?Sized + 'static,
-    {
+    ) -> Self {
         Self {
-            dispatcher: build_dispatcher(repository),
+            dispatcher,
             admin_config,
             verifier,
         }
@@ -177,7 +175,8 @@ impl ProtocolHandler for TrustTasksHandler {
         }
 
         // 6. Route through the shared dispatcher.
-        match handle_document(&self.dispatcher, doc).await {
+        let dispatcher = self.dispatcher.read().await.clone();
+        match handle_document(&dispatcher, doc).await {
             Ok(response) => self.send(ctx, &response).await,
             Err(err) => self.send(ctx, &err).await,
         }

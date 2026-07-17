@@ -15,6 +15,7 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
         repository: Arc<R>,
         config: Arc<DidcommConfig>,
         verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
+        dispatcher: crate::capabilities::DispatcherHandle,
     ) -> BaseHandler<R> {
         let trqp = TRQPMessagesHandler {
             repository: repository.clone(),
@@ -34,8 +35,7 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
         // Trust Task DIDComm binding: routes the `registry/*` task family over
         // the same mediator connection, alongside the legacy trqp/1.0 and
         // tr-admin/1.0 protocols.
-        let trust_tasks =
-            TrustTasksHandler::new(repository.clone(), config.admin_config.clone(), verifier);
+        let trust_tasks = TrustTasksHandler::new(dispatcher, config.admin_config.clone(), verifier);
 
         BaseHandler {
             repository,

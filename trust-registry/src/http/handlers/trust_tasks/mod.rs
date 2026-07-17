@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::SharedData;
 use crate::storage::repository::TrustRecordRepository;
-use crate::trust_tasks::{build_query_dispatcher, handle_document};
+use crate::trust_tasks::handle_document;
 
 fn new_id() -> String {
     Uuid::new_v4().to_string()
@@ -76,7 +76,7 @@ where
         return error_response(doc.reject_with(new_id(), reason));
     }
 
-    let dispatcher = build_query_dispatcher(state.repository.clone());
+    let dispatcher = state.query_dispatcher.read().await.clone();
     match handle_document(&dispatcher, doc).await {
         Ok(response) => {
             let body = serde_json::to_value(&response).unwrap_or_else(|_| serde_json::json!({}));

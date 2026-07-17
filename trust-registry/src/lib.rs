@@ -22,6 +22,10 @@ where
     pub config: Arc<configs::TrustRegistryConfig>,
     pub service_start_timestamp: DateTime<Utc>,
     pub repository: Arc<R>,
+    /// Live read-only dispatcher (list + TRQP query tasks), owned by the
+    /// CapabilitySet so capability enable/disable takes effect without a
+    /// restart.
+    pub query_dispatcher: capabilities::DispatcherHandle,
 }
 
 impl<R: TrustRecordRepository> fmt::Debug for SharedData<R> {
@@ -42,6 +46,7 @@ where
             config: self.config.clone(),
             service_start_timestamp: self.service_start_timestamp,
             repository: Arc::clone(&self.repository),
+            query_dispatcher: self.query_dispatcher.clone(),
         }
     }
 }

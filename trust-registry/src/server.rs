@@ -121,11 +121,13 @@ fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
 fn build_router(
     config: Arc<TrustRegistryConfig>,
     repository: Arc<dyn TrustRecordRepository>,
+    query_dispatcher: crate::capabilities::DispatcherHandle,
 ) -> Router {
     let shared_data = SharedData {
         config: config.clone(),
         service_start_timestamp: chrono::Utc::now(),
         repository,
+        query_dispatcher,
     };
 
     let cors = build_cors_layer(&config.server_config.cors_allowed_origins);
@@ -141,11 +143,12 @@ fn build_router(
 async fn start_didcomm_server(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
+    dispatcher: crate::capabilities::DispatcherHandle,
     shutdown: CancellationToken,
 ) -> Result<(), BoxError> {
     // `start_didcomm_listener` returns the listener task's own result nested
     // inside the join result; the inner listener outcome is discarded here.
-    let _ = start_didcomm_listener(config, repository, shutdown).await?;
+    let _ = start_didcomm_listener(config, repository, dispatcher, shutdown).await?;
     Ok(())
 }
 
@@ -169,9 +172,31 @@ pub async fn serve(
     let listener = tokio::net::TcpListener::bind(&config.server_config.listen_address).await?;
     let http_addr = listener.local_addr()?;
 
+    // Capability composition: one set owns the live dispatchers every
+    // transport reads through. No capabilities are compiled in yet — the
+    // framework ships wired but empty; the first module (git-trust) registers
+    // here.
+    let capability_state_path = std::env::var("TR_CAPABILITY_STATE")
+        .unwrap_or_else(|_| "./.trust-registry/capabilities.json".to_string());
+    let base_repository = repository.clone();
+    let query_repository = repository.clone();
+    let capabilities = crate::capabilities::CapabilitySet::new(
+        Vec::new(),
+        Box::new(crate::capabilities::FileCapabilityStore::new(
+            capability_state_path,
+        )),
+        Box::new(move || crate::trust_tasks::build_dispatcher(base_repository.clone())),
+        Box::new(move || crate::trust_tasks::build_query_dispatcher(query_repository.clone())),
+    )
+    .map_err(BoxError::from)?;
+
     // The read-only HTTP surface upcasts from the admin repository.
     let read_repository: Arc<dyn TrustRecordRepository> = repository.clone();
-    let router = build_router(config.clone(), read_repository);
+    let router = build_router(
+        config.clone(),
+        read_repository,
+        capabilities.query_dispatcher(),
+    );
 
     info!("HTTP server is starting on {http_addr}...");
     debug!("CONFIGS: {:?}", &config);
@@ -188,6 +213,7 @@ pub async fn serve(
         Some(tokio::spawn(start_didcomm_server(
             config.didcomm_config.clone(),
             repository,
+            capabilities.dispatcher(),
             shutdown.clone(),
         )))
     } else {
