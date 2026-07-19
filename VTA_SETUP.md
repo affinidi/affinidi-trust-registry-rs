@@ -92,12 +92,14 @@ to a file (e.g. `tr-sealed.txt`) and send both the file **and the digest**
 ```bash
 pnm bootstrap open \
   --bundle tr-sealed.txt \
-  --expect-digest <sha256-hex-from-step-2>
+  --expect-digest <sha256-hex-from-step-2> \
+  --out /etc/trust-registry/vta-credential.json
 ```
 
 The digest check is **mandatory** by default (there is no silent
-trust-on-first-use; `--no-verify-digest` exists for testing only). This recovers
-the **credential bundle** JSON:
+trust-on-first-use; `--no-verify-digest` exists for testing only).
+
+`--out` writes the **credential bundle** as JSON, created `0600`:
 
 ```json
 {
@@ -108,8 +110,21 @@ the **credential bundle** JSON:
 }
 ```
 
-Save that JSON to a file — e.g. `/etc/trust-registry/vta-credential.json`.
-**This file is `TR_VTA_CREDENTIAL`.**
+**That file is `TR_VTA_CREDENTIAL`.**
+
+> **Do not omit `--out`.** Without it, `bootstrap open` only *inspects* the
+> bundle: it prints a payload summary and writes nothing. It never prints
+> `privateKeyMultibase`, so there is no way to recover the credential from the
+> terminal output afterwards.
+>
+> Opening also **consumes the single-use bootstrap secret** at
+> `~/.config/pnm/bootstrap-secrets/<bundle-id>.key`. A second `open` on the same
+> file fails — recovering from a missed `--out` means starting over from Step 1
+> with a fresh `pnm bootstrap request` *and* a fresh `pnm contexts provision`.
+
+`--out` requires `pnm` built from a revision that carries it. On an older
+build the flag is rejected by the argument parser; there is no file-writing
+path in `pnm` before it, so upgrade rather than working around it.
 
 ---
 
@@ -196,7 +211,7 @@ driven as an admin DIDComm task, not a `pnm` command.
 | Point PNM at a VTA | `export VTA_URL=https://vta.example.com` |
 | TR operator: make recipient request | `pnm bootstrap request --out tr-request.json --label trust-registry` |
 | VTA operator: provision context + DID | `pnm contexts provision --id <ctx> --name "Trust Registry" --server <webvh> --mediator-service --recipient tr-request.json` |
-| TR operator: open sealed bundle | `pnm bootstrap open --bundle tr-sealed.txt --expect-digest <hex>` |
+| TR operator: open sealed bundle | `pnm bootstrap open --bundle tr-sealed.txt --expect-digest <hex> --out <path>` |
 | Lighter admin-only credential (no DID) | `pnm contexts bootstrap --id <ctx> --name … --recipient tr-request.json` |
 | Re-mint bundle for existing context | `pnm contexts reprovision …` |
 
