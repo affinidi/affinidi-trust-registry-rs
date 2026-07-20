@@ -27,8 +27,9 @@
 //! — is unit-tested here; the websocket transport is not.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
+use affinidi_tdk::messaging::{ATM, errors::ATMError, profiles::ATMProfile};
 use chrono::Utc;
 use serde_json::Value;
 use tracing::{error, info, warn};
@@ -40,6 +41,88 @@ use crate::trust_tasks::{RegistryDispatcher, handle_document};
 
 fn new_id() -> String {
     Uuid::new_v4().to_string()
+}
+
+/// Attempts (including the first) for an unpack whose failure looks transient.
+const UNPACK_MAX_ATTEMPTS: u32 = 3;
+/// Backoff before the second attempt; doubles up to [`UNPACK_MAX_BACKOFF`].
+const UNPACK_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
+/// Ceiling on the backoff. The receive loop has already moved on (each frame is
+/// handled on its own task), but a stuck resolver should not pin a task for long.
+const UNPACK_MAX_BACKOFF: Duration = Duration::from_millis(1_000);
+
+/// Is this unpack failure worth retrying, or is the frame poison?
+///
+/// The distinction matters because the frame has **already been deleted from
+/// the mediator** by the time we unpack it (R1.6): whatever we drop here is
+/// gone for good. A transient failure is therefore the dangerous case — a
+/// momentary resolver outage would otherwise discard a valid signed registry
+/// write — so anything resolution- or network-shaped is retried, and only
+/// failures that are deterministic properties of the bytes are treated as
+/// poison.
+///
+/// Mapping (see `affinidi-messaging-sdk` `protocols/tsp.rs`):
+///
+/// - [`ATMError::DIDError`] — resolving the sender's VID or our own DID failed.
+///   The overwhelmingly common transient case.
+/// - [`ATMError::TransportError`] / [`ATMError::Disconnected`] /
+///   [`ATMError::TDKError`] — network or resolver-cache trouble underneath.
+/// - [`ATMError::MsgReceiveError`] — envelope parse failure, a message addressed
+///   to another DID, or decrypt/verify failure. Retrying identical bytes cannot
+///   change any of these.
+/// - Everything else (notably [`ATMError::SecretsError`], our own key material
+///   missing) is a local misconfiguration that retrying will not fix; it is
+///   logged at error level rather than silently dropped.
+///
+/// `DIDError` does conflate "the resolver is briefly unreachable" with "this DID
+/// does not exist", and the SDK gives us only a string to go on. Treating both
+/// as transient is the deliberate choice: retrying a genuinely bad DID costs a
+/// few hundred milliseconds on a task that has already been spawned, while
+/// dropping a good one loses a signed write permanently.
+fn is_transient_unpack_error(err: &ATMError) -> bool {
+    matches!(
+        err,
+        ATMError::DIDError(_)
+            | ATMError::TransportError(_)
+            | ATMError::Disconnected(_)
+            | ATMError::TDKError(_)
+    )
+}
+
+/// Run `op`, retrying with exponential backoff while it fails transiently.
+///
+/// Returns the first success, or the final error once attempts are exhausted or
+/// a non-transient error is seen. Generic over the operation so the retry policy
+/// is testable without a live mediator.
+async fn retry_transient<T, F, Fut>(
+    attempts: u32,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+    mut op: F,
+) -> Result<T, ATMError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ATMError>>,
+{
+    let mut backoff = initial_backoff;
+    let mut attempt = 1;
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                if attempt >= attempts || !is_transient_unpack_error(&err) {
+                    return Err(err);
+                }
+                warn!(
+                    "TSP unpack failed transiently (attempt {attempt}/{attempts}), \
+                     retrying in {backoff:?}: {err}"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+                attempt += 1;
+            }
+        }
+    }
 }
 
 /// Slugs whose operations mutate the registry (admin ACL + proof required).
@@ -150,16 +233,52 @@ pub async fn process_tsp_frame(
     let alias = &profile.inner.alias;
     let my_vid = &profile.inner.did;
 
-    let (payload, sender_did) = match atm.tsp().unpack(profile, packed).await {
+    // R1.6 — deliberate ack-first, with the loss window narrowed rather than
+    // closed. `process_next_message` pulls frames with `auto_delete = true`, so
+    // the mediator has already deleted this frame before we see it: there is no
+    // ack left to withhold. Acking first is retained as poison defence — a frame
+    // that cannot be unpacked would otherwise be redelivered forever, and the
+    // registry has no message-id dedup yet (R1.4), so redelivery would duplicate
+    // mutations rather than recover them.
+    //
+    // What we can do is stop *transient* failures from consuming the one chance
+    // we get. The packed bytes are still in memory, so a resolver hiccup is
+    // retried in-process instead of discarding a valid signed registry write.
+    // Closing the window properly means deferring the delete until after durable
+    // handoff, which requires message-id dedup first; tracked separately.
+    let unpacked = retry_transient(
+        UNPACK_MAX_ATTEMPTS,
+        UNPACK_INITIAL_BACKOFF,
+        UNPACK_MAX_BACKOFF,
+        // `atm.tsp()` returns a temporary, so build the future inside the async
+        // block where that temporary outlives the borrow.
+        || async { atm.tsp().unpack(profile, packed).await },
+    )
+    .await;
+
+    let (payload, sender_did) = match unpacked {
         Ok(v) => v,
+        Err(e) if is_transient_unpack_error(&e) => {
+            // Retries exhausted on a recoverable fault: this is a lost write,
+            // not a rejected one. Logged at error level because it is a
+            // durability event an operator needs to see, not routine noise.
+            error!(
+                "[profile = {alias}] TSP unpack still failing after {UNPACK_MAX_ATTEMPTS} \
+                 attempts; the frame is already deleted from the mediator, so a signed \
+                 registry write may have been lost: {e}"
+            );
+            return;
+        }
         Err(e) => {
-            warn!("[profile = {alias}] TSP unpack failed: {e}");
+            // Poison: retrying identical bytes cannot succeed.
+            warn!("[profile = {alias}] Dropping unusable TSP frame: {e}");
             return;
         }
     };
     let doc = match parse_envelope(&payload) {
         Ok(doc) => doc,
         Err(e) => {
+            // Also poison — it decrypted cleanly and the contents are wrong.
             warn!("[profile = {alias}] Dropping TSP message from {sender_did}: {e}");
             return;
         }
@@ -240,6 +359,116 @@ mod tests {
         let bytes = build_envelope(&doc);
         let parsed = parse_envelope(&bytes).expect("round-trips");
         assert_eq!(parsed.type_uri.slug(), "registry/recognition");
+    }
+
+    // --- R1.6 transient/poison classification --------------------------
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Fast backoffs so the retry tests do not sleep for real.
+    const TEST_BACKOFF: Duration = Duration::from_millis(1);
+
+    #[test]
+    fn resolver_failures_are_transient() {
+        // The case R1.6 exists for: a momentary resolver outage must not be
+        // mistaken for a bad message.
+        assert!(is_transient_unpack_error(&ATMError::DIDError(
+            "couldn't resolve TSP VID did:web:peer".into()
+        )));
+        assert!(is_transient_unpack_error(&ATMError::TransportError(
+            "connection reset".into()
+        )));
+        assert!(is_transient_unpack_error(&ATMError::TDKError(
+            "resolver cache miss".into()
+        )));
+    }
+
+    /// Bytes that cannot decrypt or parse will never succeed, however often we
+    /// try — retrying them would just delay the drop.
+    #[test]
+    fn crypto_and_parse_failures_are_poison() {
+        assert!(!is_transient_unpack_error(&ATMError::MsgReceiveError(
+            "couldn't unpack TSP message: bad signature".into()
+        )));
+        assert!(!is_transient_unpack_error(&ATMError::MsgReceiveError(
+            "couldn't parse TSP envelope: truncated".into()
+        )));
+        // Our own key material missing is a local misconfiguration.
+        assert!(!is_transient_unpack_error(&ATMError::SecretsError(
+            "no Ed25519 authentication key".into()
+        )));
+    }
+
+    #[tokio::test]
+    async fn transient_failure_is_retried_until_it_succeeds() {
+        let calls = AtomicU32::new(0);
+        let result: Result<&str, ATMError> =
+            retry_transient(3, TEST_BACKOFF, TEST_BACKOFF, || async {
+                // Fail twice, then succeed — the resolver-recovers case.
+                if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(ATMError::DIDError("resolver down".into()))
+                } else {
+                    Ok("unpacked")
+                }
+            })
+            .await;
+
+        assert_eq!(result.expect("succeeds on third attempt"), "unpacked");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn poison_is_not_retried() {
+        let calls = AtomicU32::new(0);
+        let result: Result<&str, ATMError> =
+            retry_transient(3, TEST_BACKOFF, TEST_BACKOFF, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(ATMError::MsgReceiveError("bad signature".into()))
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "poison must fail on the first attempt, not burn the retry budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_failure_gives_up_after_the_attempt_budget() {
+        let calls = AtomicU32::new(0);
+        let result: Result<&str, ATMError> =
+            retry_transient(3, TEST_BACKOFF, TEST_BACKOFF, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(ATMError::DIDError("resolver still down".into()))
+            })
+            .await;
+
+        // The final error stays transient-classified so the call site can log
+        // it as a possible lost write rather than a rejection.
+        let err = result.expect_err("gives up");
+        assert!(is_transient_unpack_error(&err));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn first_attempt_success_does_not_sleep() {
+        let calls = AtomicU32::new(0);
+        let result: Result<&str, ATMError> = retry_transient(
+            3,
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok("unpacked")
+            },
+        )
+        .await;
+
+        // A 30s backoff would hang the test if the happy path slept.
+        assert!(result.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
