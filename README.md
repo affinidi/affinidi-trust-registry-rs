@@ -574,7 +574,39 @@ See the list of environment variables and their usage.
 | `ADMIN_DIDS`            | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry.                                                                                                    | Required when DIDComm is enabled             |
 | `PROFILE_CONFIG`        | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. **_Sensitive information, do not share._** | Required when DIDComm is enabled             |
 | `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enabled. ExplicitDeny - public mode, ExplicitAllow - private mode                                                                                                          | default: `ExplicitDeny`                             |
-| `TR_PUBLIC_URL`         | Externally reachable base URL of the REST/TRQP surface (e.g. `https://registry.example.org`). When set, the generated DID document advertises a `TRQPRest` service entry so peers can discover the REST endpoint by resolving the registry's DID. Must be `https://` (loopback `http://` allowed for local dev). Unset ⇒ no REST service is advertised. | No                                           |
+| `TR_PUBLIC_URL`         | Externally reachable base URL of the REST/TRQP surface (e.g. `https://registry.example.org`). When set, the generated DID document advertises a `TRQPRest` service entry so peers can discover the REST endpoint by resolving the registry's DID. Must be `https://` (loopback `http://` allowed for local dev). Unset ⇒ REST is still served, but not advertised. | No                                           |
+| `ENABLE_REST`           | Serve TRQP over REST and advertise `TRQPRest` (needs `TR_PUBLIC_URL` to be advertised).                                                                                                    | default: `true`                              |
+| `ENABLE_DIDCOMM`        | Run the DIDComm listener and advertise `DIDCommMessaging`.                                                                                                                                | default: `true`                              |
+| `ENABLE_TSP`            | Route multiplexed TSP frames and advertise `TSPTransport`. Requires `ENABLE_DIDCOMM=true` and a binary built with `--features tsp`.                                                        | default: `false`                             |
+
+### Transport selection
+
+`ENABLE_REST`, `ENABLE_DIDCOMM` and `ENABLE_TSP` each govern **both** halves of a
+transport: whether it is served, and whether the DID document advertises it. A
+single flag per protocol is deliberate — a registry that advertises a service
+entry nothing answers sends clients to a dead endpoint, and `trql-client`
+refuses to silently downgrade to another transport when the selected one fails.
+
+Rules enforced at startup (and by `setup_trust_registry` when generating the
+DID document, which reads the same flags):
+
+- **At least one transport must be enabled.** All three `false` is refused.
+- **`ENABLE_TSP=true` requires `ENABLE_DIDCOMM=true`.** TSP frames are
+  multiplexed onto the DIDComm mediator socket — the mediator permits one
+  websocket per DID — so there is no TSP-only receive loop.
+- **`ENABLE_TSP=true` requires `--features tsp`.** A runtime flag cannot enable
+  a compiled-out binding; the build fails startup rather than advertise TSP.
+- **`ENABLE_REST=true` without `TR_PUBLIC_URL`** serves REST but does not
+  advertise it, and warns at startup. The bind address in `LISTEN_ADDRESS` is
+  not a fallback: it is frequently `0.0.0.0`.
+
+The DIDComm and TSP service endpoints both carry the **mediator DID**, not a
+URL — the transport URL lives in the mediator's own DID document. REST carries
+its URL directly.
+
+> **Note:** with `ENABLE_DIDCOMM=false` no DID document is built at all, since
+> the registry's DID profile is loaded on the DIDComm path. A REST-only registry
+> is reached by URL rather than by resolving its DID.
 
 ### Profile Config Options
 
