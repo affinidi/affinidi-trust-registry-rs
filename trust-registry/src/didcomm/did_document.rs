@@ -56,13 +56,21 @@ pub fn build_verification_methods(profile_config: &ProfileConfig) -> Vec<serde_j
         .collect()
 }
 
-/// DID-document service `type` for the REST/TRQP surface.
+/// DID-document service `type` for the Trust Registry's REST/TRQP surface.
 ///
-/// `VTARest` is the workspace-wide constant every consumer matches on — see
-/// `vta_sdk::protocol::matching::REST_SERVICE_TYPE`. The name is historical
-/// (it predates non-VTA services advertising REST); it is the wire value, so
-/// it must not be "corrected" here without changing every matcher.
-pub const REST_SERVICE_TYPE: &str = "VTARest";
+/// `TRQPRest` names the interface actually served — TRQP over REST — matching
+/// how the sibling types `TSPTransport` and `DIDCommMessaging` name protocols
+/// rather than products. Any TRQP-compliant registry can advertise it.
+///
+/// Deliberately **not** `VTARest`. That type belongs to a VTA's REST API and
+/// remains correct there; a Trust Registry is not a VTA, and claiming that
+/// type would tell a consumer it can expect a VTA's endpoints. No legacy
+/// alias is carried because the registry has never advertised a REST service
+/// before — there is no deployed DID document to stay compatible with.
+///
+/// Consumers must match this in addition to `VTARest`, not instead of it:
+/// see `vta_sdk::protocol::matching::REST_SERVICE_TYPES`.
+pub const REST_SERVICE_TYPE: &str = "TRQPRest";
 
 /// DID-document service `type` for the DIDComm v2 mediator endpoint.
 pub const DIDCOMM_SERVICE_TYPE: &str = "DIDCommMessaging";
@@ -127,7 +135,7 @@ pub fn build_services(did: &str, mediator_did: &str, public_url: Option<&str>) -
     })];
 
     if let Some(url) = public_url.map(str::trim).filter(|u| !u.is_empty()) {
-        // Plain-string endpoint, matching the VTA's `VTARest` entry. Consumers
+        // Plain-string endpoint, matching the VTA's REST entry. Consumers
         // tolerate string / {uri} / array forms, but the string form is what
         // the rest of the workspace emits for REST.
         services.push(serde_json::json!({
@@ -388,7 +396,9 @@ mod tests {
         assert_eq!(services.len(), 2);
 
         let rest = rest_entry(&services).expect("REST entry");
-        assert_eq!(rest["type"], "VTARest");
+        assert_eq!(rest["type"], "TRQPRest");
+        // A Trust Registry must never claim to be a VTA REST endpoint.
+        assert_ne!(rest["type"], "VTARest");
         assert_eq!(rest["id"], format!("{DID}#rest"));
         assert_eq!(
             rest["serviceEndpoint"],
