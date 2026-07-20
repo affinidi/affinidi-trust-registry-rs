@@ -144,11 +144,12 @@ async fn start_didcomm_server(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
     dispatcher: crate::capabilities::DispatcherHandle,
+    dedup: Arc<dyn crate::dedup::MessageIdStore>,
     shutdown: CancellationToken,
 ) -> Result<(), BoxError> {
     // `start_didcomm_listener` returns the listener task's own result nested
     // inside the join result; the inner listener outcome is discarded here.
-    let _ = start_didcomm_listener(config, repository, dispatcher, shutdown).await?;
+    let _ = start_didcomm_listener(config, repository, dispatcher, dedup, shutdown).await?;
     Ok(())
 }
 
@@ -213,11 +214,25 @@ pub async fn serve(
             .map_err(BoxError::from)
     });
 
+    // Write-path message-id dedup (R1.4). DIDComm and TSP are at-least-once, so
+    // without this a redelivered mutation is applied twice. Only the in-memory
+    // store exists so far — durable per-backend stores land next — so warn
+    // rather than let a deployment assume dedup survives a restart.
+    let dedup: Arc<dyn crate::dedup::MessageIdStore> =
+        Arc::new(crate::dedup::MemoryMessageIdStore::default());
+    if config.didcomm_config.is_enabled {
+        warn!(
+            "Message-id dedup is in-memory: duplicate writes are suppressed while this \
+             process lives, but a restart forgets them and a redelivery could re-apply."
+        );
+    }
+
     let didcomm_task = if config.didcomm_config.is_enabled {
         Some(tokio::spawn(start_didcomm_server(
             config.didcomm_config.clone(),
             repository,
             capabilities.dispatcher(),
+            dedup,
             shutdown.clone(),
         )))
     } else {

@@ -36,15 +36,18 @@ use trust_tasks_didcomm::DidcommHandler as TtDidcommHandler;
 
 use crate::capabilities::DispatcherHandle;
 use crate::configs::AdminConfig;
+use crate::dedup::{MessageIdStore, dispatch_idempotent};
 use crate::didcomm::error::DIDCommError;
 use crate::didcomm::handlers::{HandlerContext, ProtocolHandler};
-use crate::trust_tasks::handle_document;
 
 /// DIDComm binding handler for the `registry/*` Trust Task family.
 pub struct TrustTasksHandler {
     dispatcher: DispatcherHandle,
     admin_config: AdminConfig,
     verifier: std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    /// Write-path message-id dedup (R1.4). DIDComm is at-least-once, so a
+    /// redelivered mutation must replay its original response, not re-apply.
+    dedup: std::sync::Arc<dyn MessageIdStore>,
 }
 
 impl TrustTasksHandler {
@@ -56,11 +59,13 @@ impl TrustTasksHandler {
         dispatcher: DispatcherHandle,
         admin_config: AdminConfig,
         verifier: std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
+        dedup: std::sync::Arc<dyn MessageIdStore>,
     ) -> Self {
         Self {
             dispatcher,
             admin_config,
             verifier,
+            dedup,
         }
     }
 }
@@ -176,7 +181,7 @@ impl ProtocolHandler for TrustTasksHandler {
 
         // 6. Route through the shared dispatcher.
         let dispatcher = self.dispatcher.read().await.clone();
-        match handle_document(&dispatcher, doc).await {
+        match dispatch_idempotent(&dispatcher, self.dedup.as_ref(), doc).await {
             Ok(response) => self.send(ctx, &response).await,
             Err(err) => self.send(ctx, &err).await,
         }
