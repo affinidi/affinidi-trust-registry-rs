@@ -41,6 +41,7 @@
 //! ```
 
 mod client;
+mod discovery;
 mod error;
 mod transport;
 
@@ -54,6 +55,10 @@ mod pending;
 mod tsp;
 
 pub use client::{TrqlClient, TrqpQuery};
+pub use discovery::{
+    DIDCOMM_SERVICE_TYPE, PREFERENCE_ORDER, REST_SERVICE_TYPE, ServiceCapabilities,
+    TSP_SERVICE_TYPE, TransportChoice,
+};
 pub use error::TrqlError;
 pub use transport::{TransportKind, TrqlTransport};
 
