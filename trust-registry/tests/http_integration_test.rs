@@ -38,8 +38,17 @@ async fn test_health_endpoint() {
 
     assert_eq!(response.status(), 200);
 
+    // Asserted field-by-field rather than as a whole body: `/health` now also
+    // reports write-path state, and an exact-equality assertion would break on
+    // every additive field.
     let json: Value = response.json().await.unwrap();
-    assert_eq!(json, json!({"status": "OK"}));
+    assert_eq!(json["status"], "OK");
+    // This server runs with DIDComm configured, so writes are either up or
+    // reported unavailable — never absent.
+    assert!(
+        json.get("writes").is_some(),
+        "health must report write-path state, got {json}"
+    );
 }
 
 #[tokio::test]

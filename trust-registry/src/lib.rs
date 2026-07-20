@@ -7,6 +7,7 @@ pub mod capabilities;
 pub mod configs;
 pub mod didcomm;
 pub mod domain;
+pub mod health;
 pub mod http;
 pub mod server;
 pub mod storage;
