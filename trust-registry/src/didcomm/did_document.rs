@@ -388,10 +388,10 @@ mod tests {
     }
 
     /// The REST entry is what makes DID-only linking possible, so assert its
-    /// exact wire shape: plain-string endpoint (as the VTA emits) and the
-    /// `VTARest` type every consumer matches on.
+    /// exact wire shape: a plain-string endpoint and the `TRQPRest` type that
+    /// consumers match on for a Trust Registry.
     #[test]
-    fn public_url_adds_a_vtarest_entry() {
+    fn public_url_adds_a_trqp_rest_entry() {
         let services = build_services(DID, MEDIATOR, Some("https://registry.example"));
         assert_eq!(services.len(), 2);
 
