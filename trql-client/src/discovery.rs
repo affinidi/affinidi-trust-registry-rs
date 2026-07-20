@@ -48,12 +48,25 @@ pub const TSP_SERVICE_TYPE: &str = "TSPTransport";
 /// DID-document service `type` for a DIDComm v2 mediator endpoint (W3C).
 pub const DIDCOMM_SERVICE_TYPE: &str = "DIDCommMessaging";
 
-/// DID-document service `type` for a REST endpoint.
+/// DID-document service `type` for a Trust Registry's REST/TRQP surface.
 ///
-/// The `VTARest` name is historical — it predates non-VTA services advertising
-/// REST — but it is the wire value every consumer in the workspace matches on,
-/// so it must not be "corrected" here independently.
-pub const REST_SERVICE_TYPE: &str = "VTARest";
+/// Names the interface served — TRQP over REST — matching how the sibling
+/// types name protocols rather than products.
+pub const REST_SERVICE_TYPE: &str = "TRQPRest";
+
+/// A VTA's REST API service `type`.
+///
+/// Accepted when discovering a peer because a caller may point this client at
+/// a VTA-hosted endpoint, and because `vta-sdk` and `vta-service` continue to
+/// use it — correctly, for VTAs. A Trust Registry must **not** advertise it:
+/// see `trust_registry::didcomm::did_document::REST_SERVICE_TYPE`.
+pub const VTA_REST_SERVICE_TYPE: &str = "VTARest";
+
+/// Every service `type` that denotes a REST endpoint, in match order.
+///
+/// Matching a set rather than one string is what lets a consumer discover both
+/// kinds of peer without either having to claim the other's identity.
+pub const REST_SERVICE_TYPES: [&str; 2] = [REST_SERVICE_TYPE, VTA_REST_SERVICE_TYPE];
 
 /// Transports in descending preference order: TSP, then DIDComm, then HTTPS.
 ///
@@ -152,7 +165,7 @@ impl ServiceCapabilities {
                 caps.tsp.get_or_insert(uri);
             } else if service_has_type(svc, DIDCOMM_SERVICE_TYPE) {
                 caps.didcomm.get_or_insert(uri);
-            } else if service_has_type(svc, REST_SERVICE_TYPE) {
+            } else if REST_SERVICE_TYPES.iter().any(|t| service_has_type(svc, t)) {
                 caps.https.get_or_insert(uri);
             }
         }
@@ -246,7 +259,7 @@ mod tests {
             { "id": "#tsp", "type": "TSPTransport", "serviceEndpoint": "did:web:mediator" },
             { "id": "#didcomm", "type": "DIDCommMessaging",
               "serviceEndpoint": { "uri": "did:web:mediator", "accept": ["didcomm/v2"] } },
-            { "id": "#rest", "type": "VTARest", "serviceEndpoint": "https://registry.example" },
+            { "id": "#rest", "type": "TRQPRest", "serviceEndpoint": "https://registry.example" },
         ])));
         assert_eq!(caps.tsp.as_deref(), Some("did:web:mediator"));
         assert_eq!(caps.didcomm.as_deref(), Some("did:web:mediator"));
@@ -274,7 +287,7 @@ mod tests {
     fn matches_on_type_not_fragment() {
         let caps = ServiceCapabilities::from_document(&doc(json!([
             { "id": "did:x#tsp-transport", "type": "TSPTransport", "serviceEndpoint": "did:web:m" },
-            { "id": "did:x#tsp", "type": "VTARest", "serviceEndpoint": "https://r.example" },
+            { "id": "did:x#tsp", "type": "TRQPRest", "serviceEndpoint": "https://r.example" },
         ])));
         assert_eq!(caps.tsp.as_deref(), Some("did:web:m"));
         // The `#tsp`-fragmented entry is REST by type, and must be read as such.
@@ -293,7 +306,7 @@ mod tests {
     fn ignores_unknown_types_empty_and_missing_endpoints() {
         let caps = ServiceCapabilities::from_document(&doc(json!([
             { "id": "#a", "type": "SomethingElse", "serviceEndpoint": "https://x" },
-            { "id": "#b", "type": "VTARest", "serviceEndpoint": "" },
+            { "id": "#b", "type": "TRQPRest", "serviceEndpoint": "" },
             { "id": "#c", "type": "TSPTransport" },
             { "id": "#d", "type": "DIDCommMessaging", "serviceEndpoint": 42 },
         ])));
@@ -312,8 +325,8 @@ mod tests {
     #[test]
     fn first_entry_of_a_type_wins() {
         let caps = ServiceCapabilities::from_document(&doc(json!([
-            { "id": "#r1", "type": "VTARest", "serviceEndpoint": "https://first.example" },
-            { "id": "#r2", "type": "VTARest", "serviceEndpoint": "https://second.example" },
+            { "id": "#r1", "type": "TRQPRest", "serviceEndpoint": "https://first.example" },
+            { "id": "#r2", "type": "TRQPRest", "serviceEndpoint": "https://second.example" },
         ])));
         assert_eq!(caps.https.as_deref(), Some("https://first.example"));
     }
@@ -382,7 +395,24 @@ mod tests {
     fn service_types_match_the_workspace_constants() {
         assert_eq!(TransportKind::Tsp.service_type(), "TSPTransport");
         assert_eq!(TransportKind::Didcomm.service_type(), "DIDCommMessaging");
-        assert_eq!(TransportKind::Https.service_type(), "VTARest");
+        assert_eq!(TransportKind::Https.service_type(), "TRQPRest");
+    }
+
+    /// A registry advertises `TRQPRest`; a VTA advertises `VTARest`. Both are
+    /// REST endpoints, and neither has to claim the other's type for a
+    /// consumer to find it.
+    #[test]
+    fn both_rest_type_names_are_discovered() {
+        for ty in ["TRQPRest", "VTARest"] {
+            let caps = ServiceCapabilities::from_document(&doc(json!([
+                { "id": "#rest", "type": ty, "serviceEndpoint": "https://r.example" }
+            ])));
+            assert_eq!(
+                caps.https.as_deref(),
+                Some("https://r.example"),
+                "{ty} must be recognised as REST"
+            );
+        }
     }
 
     #[test]

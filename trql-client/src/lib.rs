@@ -56,8 +56,8 @@ mod tsp;
 
 pub use client::{TrqlClient, TrqpQuery};
 pub use discovery::{
-    DIDCOMM_SERVICE_TYPE, PREFERENCE_ORDER, REST_SERVICE_TYPE, ServiceCapabilities,
-    TSP_SERVICE_TYPE, TransportChoice,
+    DIDCOMM_SERVICE_TYPE, PREFERENCE_ORDER, REST_SERVICE_TYPE, REST_SERVICE_TYPES,
+    ServiceCapabilities, TSP_SERVICE_TYPE, TransportChoice, VTA_REST_SERVICE_TYPE,
 };
 pub use error::TrqlError;
 pub use transport::{TransportKind, TrqlTransport};
