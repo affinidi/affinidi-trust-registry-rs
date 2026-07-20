@@ -1,4 +1,5 @@
 use crate::configs::ProfileConfig;
+use serde_json::Value;
 
 pub fn build_public_jwk(jwk: &affinidi_tdk::affinidi_crypto::JWK) -> serde_json::Value {
     match &jwk.params {
@@ -55,7 +56,95 @@ pub fn build_verification_methods(profile_config: &ProfileConfig) -> Vec<serde_j
         .collect()
 }
 
-pub fn build_did_document(profile_config: &ProfileConfig, mediator_did: &str) -> String {
+/// DID-document service `type` for the REST/TRQP surface.
+///
+/// `VTARest` is the workspace-wide constant every consumer matches on — see
+/// `vta_sdk::protocol::matching::REST_SERVICE_TYPE`. The name is historical
+/// (it predates non-VTA services advertising REST); it is the wire value, so
+/// it must not be "corrected" here without changing every matcher.
+pub const REST_SERVICE_TYPE: &str = "VTARest";
+
+/// DID-document service `type` for the DIDComm v2 mediator endpoint.
+pub const DIDCOMM_SERVICE_TYPE: &str = "DIDCommMessaging";
+
+/// Fragment for the DIDComm service entry. Consumers match on `type`, never
+/// on the fragment (it is an arbitrary label), but keeping one value across
+/// both builders in this repo avoids two DID documents that describe the same
+/// registry differently.
+pub const DIDCOMM_SERVICE_FRAGMENT: &str = "#didcomm";
+
+/// Fragment for the REST service entry.
+pub const REST_SERVICE_FRAGMENT: &str = "#rest";
+
+/// DID-document service `type` for a TSP transport endpoint. Matches
+/// `vta_sdk::protocol::matching::TSP_SERVICE_TYPE`.
+pub const TSP_SERVICE_TYPE: &str = "TSPTransport";
+
+/// Fragment for the TSP service entry.
+pub const TSP_SERVICE_FRAGMENT: &str = "#tsp";
+
+/// Reject a public URL the registry should not advertise.
+///
+/// Mirrors `vtc-service`'s `validate_registry_scheme` exactly: consumers
+/// reject a cleartext registry URL as spoofable by an on-path attacker, so
+/// advertising one would publish an endpoint the other side refuses to use.
+/// Loopback `http://` stays allowed for local development.
+pub fn validate_public_url(url: &str) -> Result<(), String> {
+    if url.starts_with("https://") {
+        return Ok(());
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        let host = rest.split(['/', ':', '?']).next().unwrap_or("");
+        if host == "localhost" || host == "127.0.0.1" || rest.starts_with("[::1]") {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "TR_PUBLIC_URL must be https:// (got '{url}'); cleartext TRQP is spoofable by an \
+         on-path attacker. http:// is allowed only to loopback for local dev."
+    ))
+}
+
+/// Build the service array for a Trust Registry DID document.
+///
+/// DIDComm is always advertised — the registry cannot run without a mediator.
+/// REST is advertised **only** when a non-empty `public_url` is supplied, so
+/// the registry never claims a transport it cannot service (the bind address
+/// in `LISTEN_ADDRESS` is not necessarily reachable, and is often `0.0.0.0`).
+///
+/// The DIDComm `serviceEndpoint` carries the **mediator DID**, not a URL: the
+/// transport URL lives in the mediator's own DID document. REST carries a URL
+/// directly, since there is no indirection.
+pub fn build_services(did: &str, mediator_did: &str, public_url: Option<&str>) -> Vec<Value> {
+    let mut services = vec![serde_json::json!({
+        "id": format!("{did}{DIDCOMM_SERVICE_FRAGMENT}"),
+        "type": DIDCOMM_SERVICE_TYPE,
+        "serviceEndpoint": {
+            "uri": mediator_did,
+            "accept": ["didcomm/v2"],
+            "routingKeys": []
+        }
+    })];
+
+    if let Some(url) = public_url.map(str::trim).filter(|u| !u.is_empty()) {
+        // Plain-string endpoint, matching the VTA's `VTARest` entry. Consumers
+        // tolerate string / {uri} / array forms, but the string form is what
+        // the rest of the workspace emits for REST.
+        services.push(serde_json::json!({
+            "id": format!("{did}{REST_SERVICE_FRAGMENT}"),
+            "type": REST_SERVICE_TYPE,
+            "serviceEndpoint": url.trim_end_matches('/'),
+        }));
+    }
+
+    services
+}
+
+pub fn build_did_document(
+    profile_config: &ProfileConfig,
+    mediator_did: &str,
+    public_url: Option<&str>,
+) -> String {
     let verification_methods = build_verification_methods(profile_config);
 
     let key_refs: Vec<String> = (0..profile_config.secrets.len())
@@ -72,15 +161,7 @@ pub fn build_did_document(profile_config: &ProfileConfig, mediator_did: &str) ->
         "authentication": key_refs,
         "assertionMethod": key_refs,
         "keyAgreement": key_refs,
-        "service": [{
-            "id": format!("{}#didcomm", profile_config.did),
-            "type": "DIDCommMessaging",
-            "serviceEndpoint": {
-                "uri": mediator_did,
-                "accept": ["didcomm/v2"],
-                "routingKeys": []
-            }
-        }]
+        "service": build_services(&profile_config.did, mediator_did, public_url)
     })
     .to_string()
 }
@@ -239,7 +320,7 @@ mod tests {
             secrets: vec![/* test secret */],
         };
 
-        let doc = build_did_document(&profile, "did:web:mediator.example.com");
+        let doc = build_did_document(&profile, "did:web:mediator.example.com", None);
         let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
 
         assert_eq!(parsed["id"], "did:web:localhost%3A3232");
@@ -259,12 +340,102 @@ mod tests {
             secrets: vec![],
         };
 
-        let doc = build_did_document(&profile, "did:web:mediator.com");
+        let doc = build_did_document(&profile, "did:web:mediator.com", None);
         let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
 
         let service = &parsed["service"][0];
         assert_eq!(service["type"], "DIDCommMessaging");
         assert_eq!(service["serviceEndpoint"]["uri"], "did:web:mediator.com");
         assert_eq!(service["serviceEndpoint"]["accept"][0], "didcomm/v2");
+    }
+
+    const DID: &str = "did:web:registry.example";
+    const MEDIATOR: &str = "did:web:mediator.example";
+
+    fn rest_entry(services: &[Value]) -> Option<&Value> {
+        services.iter().find(|s| s["type"] == REST_SERVICE_TYPE)
+    }
+
+    /// Without a public URL the registry must not claim REST — a peer that
+    /// selected it would route to nothing.
+    #[test]
+    fn no_public_url_advertises_didcomm_only() {
+        let services = build_services(DID, MEDIATOR, None);
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0]["type"], DIDCOMM_SERVICE_TYPE);
+        assert!(rest_entry(&services).is_none());
+    }
+
+    /// An empty or whitespace-only value is "unset", not "advertise an empty
+    /// endpoint" — absence means the restrictive reading.
+    #[test]
+    fn blank_public_url_is_treated_as_absent() {
+        for blank in ["", "   ", "\t\n"] {
+            let services = build_services(DID, MEDIATOR, Some(blank));
+            assert!(
+                rest_entry(&services).is_none(),
+                "blank {blank:?} must not advertise REST"
+            );
+        }
+    }
+
+    /// The REST entry is what makes DID-only linking possible, so assert its
+    /// exact wire shape: plain-string endpoint (as the VTA emits) and the
+    /// `VTARest` type every consumer matches on.
+    #[test]
+    fn public_url_adds_a_vtarest_entry() {
+        let services = build_services(DID, MEDIATOR, Some("https://registry.example"));
+        assert_eq!(services.len(), 2);
+
+        let rest = rest_entry(&services).expect("REST entry");
+        assert_eq!(rest["type"], "VTARest");
+        assert_eq!(rest["id"], format!("{DID}#rest"));
+        assert_eq!(
+            rest["serviceEndpoint"],
+            Value::String("https://registry.example".into()),
+            "REST endpoint must be a plain string, not the DIDComm object form"
+        );
+    }
+
+    /// A trailing slash would make consumers build `https://host//recognition`.
+    #[test]
+    fn public_url_trailing_slash_is_trimmed() {
+        let services = build_services(DID, MEDIATOR, Some("https://registry.example/"));
+        assert_eq!(
+            rest_entry(&services).unwrap()["serviceEndpoint"],
+            Value::String("https://registry.example".into())
+        );
+    }
+
+    /// Both builders in this repo must spell the DIDComm fragment the same
+    /// way; the setup binary previously used `#service`.
+    #[test]
+    fn didcomm_fragment_is_stable() {
+        let services = build_services(DID, MEDIATOR, None);
+        assert_eq!(services[0]["id"], format!("{DID}#didcomm"));
+    }
+
+    /// Advertising cleartext publishes an endpoint consumers reject outright
+    /// (vtc-service refuses a non-https registry URL), so fail early.
+    #[test]
+    fn cleartext_public_url_is_rejected() {
+        assert!(validate_public_url("http://registry.example").is_err());
+        assert!(validate_public_url("ftp://registry.example").is_err());
+        assert!(validate_public_url("registry.example").is_err());
+    }
+
+    #[test]
+    fn https_and_loopback_public_urls_are_accepted() {
+        assert!(validate_public_url("https://registry.example").is_ok());
+        assert!(validate_public_url("http://localhost:3232").is_ok());
+        assert!(validate_public_url("http://127.0.0.1:3232").is_ok());
+        assert!(validate_public_url("http://[::1]:3232").is_ok());
+    }
+
+    /// `http://localhost.evil.com` must not pass by prefix match.
+    #[test]
+    fn loopback_exception_does_not_leak_to_lookalike_hosts() {
+        assert!(validate_public_url("http://localhost.evil.com").is_err());
+        assert!(validate_public_url("http://127.0.0.1.evil.com").is_err());
     }
 }

@@ -5,7 +5,7 @@ use serde_derive::{Deserialize, Serialize};
 use std::fmt;
 use tracing::warn;
 
-use crate::didcomm::did_document::build_did_document;
+use crate::didcomm::did_document::{build_did_document, validate_public_url};
 
 use super::{
     Configs,
@@ -170,10 +170,22 @@ impl Configs for DidcommConfig {
         };
         let profile_config = parse_profile_from_secrets_str(&profile_configs_str)?;
 
+        // Externally reachable base URL for the REST/TRQP surface. Absent =>
+        // no `VTARest` service entry, so the registry never advertises a
+        // transport a peer cannot reach. LISTEN_ADDRESS is deliberately not a
+        // fallback: it is a bind address, frequently `0.0.0.0`.
+        let public_url = optional_env("TR_PUBLIC_URL")
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty());
+        if let Some(url) = public_url.as_deref() {
+            // Fail at startup rather than publish an endpoint consumers reject.
+            validate_public_url(url)?;
+        }
+
         let did_document = if let Some(doc) = optional_env("DID_DOCUMENT") {
             load(&doc).await?
         } else {
-            build_did_document(&profile_config, &mediator_did)
+            build_did_document(&profile_config, &mediator_did, public_url.as_deref())
         };
 
         let retry_config = DidDocumentRetryConfig {
