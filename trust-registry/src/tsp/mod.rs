@@ -37,7 +37,8 @@ use trust_tasks_rs::{RejectReason, TransportHandler, TrustTask};
 use trust_tasks_tsp::{ENVELOPE_TYPE, TspHandler};
 use uuid::Uuid;
 
-use crate::trust_tasks::{RegistryDispatcher, handle_document};
+use crate::dedup::{MessageIdStore, dispatch_idempotent};
+use crate::trust_tasks::RegistryDispatcher;
 
 fn new_id() -> String {
     Uuid::new_v4().to_string()
@@ -176,8 +177,10 @@ fn build_envelope<T: serde::Serialize>(doc: &T) -> Vec<u8> {
 /// and produce the response envelope bytes to return to `sender_did`.
 ///
 /// `sender_did` is the TSP-authenticated peer VID; `my_vid` is our own DID.
+#[allow(clippy::too_many_arguments)]
 async fn handle_inbound(
     dispatcher: &RegistryDispatcher,
+    dedup: &dyn MessageIdStore,
     admin_dids: &[String],
     verifier: &std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
     my_vid: &str,
@@ -204,7 +207,7 @@ async fn handle_inbound(
     if let Err(reason) = crate::trust_tasks::verify_write_proof(verifier, &doc).await {
         return build_envelope(&doc.reject_with(new_id(), reason));
     }
-    match handle_document(dispatcher, doc).await {
+    match dispatch_idempotent(dispatcher, dedup, doc).await {
         Ok(response) => build_envelope(&response),
         Err(err) => build_envelope(&err),
     }
@@ -222,10 +225,12 @@ async fn handle_inbound(
 /// already-decoded qb2). The mediator permits only one websocket per DID, so the
 /// registry must never open a second TSP socket — TSP frames arrive multiplexed
 /// on the DIDComm pickup stream.
+#[allow(clippy::too_many_arguments)]
 pub async fn process_tsp_frame(
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
     dispatcher: &RegistryDispatcher,
+    dedup: &dyn MessageIdStore,
     admin_dids: &[String],
     verifier: &std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
     packed: &str,
@@ -237,15 +242,16 @@ pub async fn process_tsp_frame(
     // closed. `process_next_message` pulls frames with `auto_delete = true`, so
     // the mediator has already deleted this frame before we see it: there is no
     // ack left to withhold. Acking first is retained as poison defence — a frame
-    // that cannot be unpacked would otherwise be redelivered forever, and the
-    // registry has no message-id dedup yet (R1.4), so redelivery would duplicate
-    // mutations rather than recover them.
+    // that cannot be unpacked would otherwise be redelivered forever.
     //
     // What we can do is stop *transient* failures from consuming the one chance
     // we get. The packed bytes are still in memory, so a resolver hiccup is
     // retried in-process instead of discarding a valid signed registry write.
-    // Closing the window properly means deferring the delete until after durable
-    // handoff, which requires message-id dedup first; tracked separately.
+    //
+    // Write-path dedup now exists ([`crate::dedup`]), so a redelivery would
+    // replay rather than duplicate — but only the in-memory store is wired up,
+    // and it forgets across a restart. Deferring the delete until after durable
+    // handoff therefore waits on a durable dedup store; tracked separately.
     let unpacked = retry_transient(
         UNPACK_MAX_ATTEMPTS,
         UNPACK_INITIAL_BACKOFF,
@@ -287,7 +293,16 @@ pub async fn process_tsp_frame(
         "[profile = {alias}, type = {}, from = {sender_did}] Trust Task (TSP)",
         doc.type_uri.slug()
     );
-    let reply = handle_inbound(dispatcher, admin_dids, verifier, my_vid, &sender_did, doc).await;
+    let reply = handle_inbound(
+        dispatcher,
+        dedup,
+        admin_dids,
+        verifier,
+        my_vid,
+        &sender_did,
+        doc,
+    )
+    .await;
     if let Err(e) = atm.tsp().send(profile, &sender_did, &reply).await {
         error!("[profile = {alias}] Failed to send TSP response to {sender_did}: {e}");
     }

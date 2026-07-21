@@ -52,6 +52,9 @@ pub(crate) struct TspContext {
     pub(crate) dispatcher: crate::capabilities::DispatcherHandle,
     pub(crate) admin_dids: Vec<String>,
     pub(crate) verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    /// Write-path message-id dedup (R1.4), shared with the DIDComm binding so
+    /// the same document redelivered over either transport is applied once.
+    pub(crate) dedup: Arc<dyn crate::dedup::MessageIdStore>,
 }
 
 pub struct Listener<H: MessageHandler> {
@@ -90,11 +93,13 @@ impl<H: MessageHandler> Listener<H> {
         dispatcher: crate::capabilities::DispatcherHandle,
         admin_dids: Vec<String>,
         verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
+        dedup: Arc<dyn crate::dedup::MessageIdStore>,
     ) -> Self {
         self.tsp = Some(TspContext {
             dispatcher,
             admin_dids,
             verifier,
+            dedup,
         });
         self
     }
@@ -180,6 +185,7 @@ pub(crate) async fn start_one_did_listener(
     config: Arc<DidcommConfig>,
     repository: Arc<dyn TrustRecordAdminRepository>,
     dispatcher: crate::capabilities::DispatcherHandle,
+    dedup: Arc<dyn crate::dedup::MessageIdStore>,
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
     // Check if DID document is available before building listener
@@ -203,6 +209,7 @@ pub(crate) async fn start_one_did_listener(
             config.clone(),
             verifier.clone(),
             dispatcher.clone(),
+            dedup.clone(),
         ),
         shutdown,
     )
@@ -227,6 +234,7 @@ pub(crate) async fn start_one_did_listener(
             dispatcher.clone(),
             config.admin_config.admin_dids.clone(),
             verifier.clone(),
+            dedup.clone(),
         )
     };
 
@@ -239,6 +247,7 @@ pub(crate) async fn start_didcomm_listener(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
     dispatcher: crate::capabilities::DispatcherHandle,
+    dedup: Arc<dyn crate::dedup::MessageIdStore>,
     shutdown: CancellationToken,
 ) -> Result<Result<(), DIDCommError>, JoinError> {
     let profile_config = config.profile_config.clone();
@@ -249,6 +258,7 @@ pub(crate) async fn start_didcomm_listener(
         config,
         repository,
         dispatcher,
+        dedup,
         shutdown,
     ));
 
