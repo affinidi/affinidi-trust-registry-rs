@@ -37,7 +37,9 @@ async fn health_endpoint_is_ok() {
         .expect("health request");
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.expect("json");
-    assert_eq!(body, json!({ "status": "OK" }));
+    // `spawn()` runs without DIDComm, so the write path is deliberately off
+    // rather than broken — that must read as healthy, not degraded.
+    assert_eq!(body, json!({ "status": "OK", "writes": "disabled" }));
     tr.shutdown().await;
 }
 

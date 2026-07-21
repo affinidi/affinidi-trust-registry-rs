@@ -17,6 +17,7 @@ jobs:
     name: Test Suite
     runs-on: ubuntu-24.04
     env:
+      IN_PIPELINE: 'true'
       MEDIATOR_DID: ${{ vars.MEDIATOR_DID }}
       MEDIATOR_URL: ${{ vars.MEDIATOR_URL }}
     steps:
@@ -35,7 +36,11 @@ jobs:
         with:
           shared-key: 'rust-cache'
       - name: generate configs
-        run: IN_PIPELINE=true cargo run --bin generate-secrets --features dev-tools -p trust-registry
+        run: |
+          cargo run --bin setup-trust-registry --features dev-tools -p trust-registry -- \
+            --mediator-did="$MEDIATOR_DID" \
+            --test-in-pipeline=true \
+            --file-storage-path=trust-registry/tests/tmp/data.csv
       - name: Setup environment
         run: cp .env.pipeline .env.test
       - name: Prepare test data
