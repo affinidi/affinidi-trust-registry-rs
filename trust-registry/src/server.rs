@@ -7,7 +7,6 @@ use crate::storage::{
 };
 use axum::{Json, Router, routing::get};
 use dotenvy::dotenv;
-use serde_json::json;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
@@ -18,6 +17,7 @@ use crate::{
     SharedData,
     configs::{Configs, DidcommConfig, TrustRegistryConfig},
     didcomm::listener::start_didcomm_listener,
+    health::RegistryHealth,
     http::application_routes,
 };
 
@@ -44,6 +44,7 @@ pub struct ServerHandle {
     shutdown: CancellationToken,
     http_task: JoinHandle<Result<(), BoxError>>,
     didcomm_task: Option<JoinHandle<Result<(), BoxError>>>,
+    health: Arc<RegistryHealth>,
 }
 
 impl ServerHandle {
@@ -71,21 +72,64 @@ impl ServerHandle {
         self.join().await;
     }
 
-    /// Await the background tasks without signalling shutdown (they run until
-    /// the shutdown token is cancelled elsewhere, or a task fails).
+    /// The shared health state, so callers (and tests) can observe whether the
+    /// write path is still up.
+    pub fn health(&self) -> &Arc<RegistryHealth> {
+        &self.health
+    }
+
+    /// Await the background tasks without signalling shutdown.
+    ///
+    /// Returns when the **HTTP** task ends. A DIDComm listener failure does not
+    /// end this: it degrades health and leaves the read path serving.
     pub async fn join(self) {
-        if let Some(didcomm_task) = self.didcomm_task {
-            tokio::select! {
-                result = didcomm_task => log_task_exit("didcomm", result),
-                result = self.http_task => log_task_exit("http", result),
+        let Self {
+            mut http_task,
+            didcomm_task,
+            health,
+            ..
+        } = self;
+
+        let Some(didcomm_task) = didcomm_task else {
+            if let Err(e) = http_task.await {
+                error!("http task panicked: {e:?}");
             }
-        } else if let Err(e) = self.http_task.await {
-            error!("http task panicked: {e:?}");
+            return;
+        };
+
+        tokio::select! {
+            result = didcomm_task => {
+                // The DIDComm listener stopping must NOT bring the process
+                // down: the read path (REST/TRQP) is independent and still
+                // useful. Previously this arm ended `join`, so an unreachable
+                // mediator killed the HTTP server too. Degrade, keep serving
+                // reads, and let the operator see it on /health.
+                log_task_exit("didcomm", &result);
+                health.mark_writes_unavailable(describe_task_exit(&result));
+                error!(
+                    "DIDComm listener stopped; continuing to serve reads. \
+                     Record mutations cannot be received until it recovers \
+                     (/health reports status=degraded)."
+                );
+                if let Err(e) = http_task.await {
+                    error!("http task panicked: {e:?}");
+                }
+            }
+            result = &mut http_task => log_task_exit("http", &result),
         }
     }
 }
 
-fn log_task_exit(name: &str, result: Result<Result<(), BoxError>, tokio::task::JoinError>) {
+/// One-line reason a task ended, for the `/health` `detail` field.
+fn describe_task_exit(result: &Result<Result<(), BoxError>, tokio::task::JoinError>) -> String {
+    match result {
+        Ok(Ok(())) => "didcomm listener exited cleanly".to_string(),
+        Ok(Err(e)) => format!("didcomm listener failed: {e}"),
+        Err(e) => format!("didcomm listener panicked: {e}"),
+    }
+}
+
+fn log_task_exit(name: &str, result: &Result<Result<(), BoxError>, tokio::task::JoinError>) {
     match result {
         Ok(Ok(())) => info!("{name} task exited"),
         Ok(Err(e)) => error!("{name} task failed: {e}"),
@@ -122,6 +166,7 @@ fn build_router(
     config: Arc<TrustRegistryConfig>,
     repository: Arc<dyn TrustRecordRepository>,
     query_dispatcher: crate::capabilities::DispatcherHandle,
+    health: Arc<RegistryHealth>,
 ) -> Router {
     let shared_data = SharedData {
         config: config.clone(),
@@ -132,8 +177,16 @@ fn build_router(
 
     let cors = build_cors_layer(&config.server_config.cors_allowed_origins);
 
-    let health_route =
-        Router::new().route("/health", get(|| async { Json(json!({ "status": "OK" })) }));
+    let health_route = Router::new().route(
+        "/health",
+        get({
+            let health = health.clone();
+            move || {
+                let health = health.clone();
+                async move { Json(health.to_json()) }
+            }
+        }),
+    );
 
     health_route
         .merge(application_routes("", shared_data))
@@ -196,10 +249,12 @@ pub async fn serve(
 
     // The read-only HTTP surface upcasts from the admin repository.
     let read_repository: Arc<dyn TrustRecordRepository> = repository.clone();
+    let health = Arc::new(RegistryHealth::new(config.didcomm_config.is_enabled));
     let router = build_router(
         config.clone(),
         read_repository,
         capabilities.query_dispatcher(),
+        health.clone(),
     );
 
     info!("HTTP server is starting on {http_addr}...");
@@ -230,6 +285,7 @@ pub async fn serve(
         shutdown,
         http_task,
         didcomm_task,
+        health,
     })
 }
 
