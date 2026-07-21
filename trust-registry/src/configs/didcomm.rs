@@ -5,7 +5,7 @@ use serde_derive::{Deserialize, Serialize};
 use std::fmt;
 use tracing::warn;
 
-use crate::didcomm::did_document::{build_did_document, validate_public_url};
+use crate::didcomm::did_document::{TransportFlags, build_did_document, validate_public_url};
 
 use super::{
     Configs,
@@ -106,6 +106,10 @@ impl Default for DidDocumentRetryConfig {
 #[derive(Debug, Clone, Default)]
 pub struct DidcommConfig {
     pub is_enabled: bool,
+    /// Which transports this process serves and advertises. Carried here even
+    /// when DIDComm itself is disabled, so the server can gate the TSP receive
+    /// loop and report the effective transport set at startup.
+    pub transport_flags: TransportFlags,
     pub acl_mode: AccessListModeType,
     pub profile_config: ProfileConfig,
     pub mediator_did: String,
@@ -124,9 +128,21 @@ pub fn parse_profile_from_secrets_str(
 #[async_trait::async_trait]
 impl Configs for DidcommConfig {
     async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let enable_didcomm = env_or("ENABLE_DIDCOMM", "true");
-        if enable_didcomm != "true" {
-            return Ok(Default::default());
+        // Parsed before the DIDComm short-circuit so an invalid or empty
+        // transport set is rejected even for a REST-only deployment.
+        let transport_flags = TransportFlags::from_env()?;
+        if !transport_flags.didcomm {
+            // No mediator profile is loaded on this path, so no DID document is
+            // built either: a REST-only registry is reached by URL, not by DID.
+            warn!(
+                "DIDComm is disabled; no DID document will be published. \
+                 Consumers must reach this registry by URL."
+            );
+            return Ok(DidcommConfig {
+                is_enabled: false,
+                transport_flags,
+                ..Default::default()
+            });
         }
         let acl_mode_raw = env_or("ACL_MODE", "ExplicitDeny");
         let acl_mode = if acl_mode_raw == "ExplicitAllow" {
@@ -171,7 +187,7 @@ impl Configs for DidcommConfig {
         let profile_config = parse_profile_from_secrets_str(&profile_configs_str)?;
 
         // Externally reachable base URL for the REST/TRQP surface. Absent =>
-        // no `VTARest` service entry, so the registry never advertises a
+        // no `TRQPRest` service entry, so the registry never advertises a
         // transport a peer cannot reach. LISTEN_ADDRESS is deliberately not a
         // fallback: it is a bind address, frequently `0.0.0.0`.
         let public_url = optional_env("TR_PUBLIC_URL")
@@ -181,11 +197,22 @@ impl Configs for DidcommConfig {
             // Fail at startup rather than publish an endpoint consumers reject.
             validate_public_url(url)?;
         }
+        if transport_flags.rest && public_url.is_none() {
+            warn!(
+                "ENABLE_REST=true but TR_PUBLIC_URL is unset: REST is served but not \
+                 advertised in the DID document. Set TR_PUBLIC_URL to make it discoverable."
+            );
+        }
 
         let did_document = if let Some(doc) = optional_env("DID_DOCUMENT") {
             load(&doc).await?
         } else {
-            build_did_document(&profile_config, &mediator_did, public_url.as_deref())
+            build_did_document(
+                &profile_config,
+                &mediator_did,
+                public_url.as_deref(),
+                transport_flags,
+            )
         };
 
         let retry_config = DidDocumentRetryConfig {
@@ -200,6 +227,7 @@ impl Configs for DidcommConfig {
 
         Ok(DidcommConfig {
             is_enabled: true,
+            transport_flags,
             acl_mode,
             mediator_did,
             profile_config,

@@ -91,6 +91,103 @@ pub const TSP_SERVICE_TYPE: &str = "TSPTransport";
 /// Fragment for the TSP service entry.
 pub const TSP_SERVICE_FRAGMENT: &str = "#tsp";
 
+/// Which transports the registry serves, and therefore advertises.
+///
+/// One flag per protocol governs **both** halves — whether the listener runs
+/// and whether the DID document carries the service entry — so the served
+/// document can never claim a transport the process does not answer. Both DID
+/// document builders (the runtime [`build_services`] and the `setup_trust_registry`
+/// binary) take this same struct for the same reason: two builders reading two
+/// sets of environment variables is how they drifted apart before.
+///
+/// REST is on by default: it is the transport a registry can always serve, and
+/// it needs no mediator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportFlags {
+    /// Serve TRQP over REST, and advertise `TRQPRest` when a public URL is set.
+    pub rest: bool,
+    /// Run the DIDComm listener, and advertise `DIDCommMessaging`.
+    pub didcomm: bool,
+    /// Route multiplexed TSP frames, and advertise `TSPTransport`.
+    pub tsp: bool,
+}
+
+impl Default for TransportFlags {
+    fn default() -> Self {
+        Self {
+            rest: true,
+            didcomm: true,
+            tsp: false,
+        }
+    }
+}
+
+/// Parse a boolean environment flag, defaulting when unset or empty.
+///
+/// Only `true`/`false` are accepted (case-insensitively): a typo like
+/// `ENABLE_TSP=yes` must not silently read as "off" and leave the operator
+/// believing TSP is running.
+fn env_flag(name: &str, default: bool) -> Result<bool, String> {
+    match std::env::var(name) {
+        Err(_) => Ok(default),
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" => Ok(default),
+            "true" => Ok(true),
+            "false" => Ok(false),
+            other => Err(format!("{name} must be 'true' or 'false' (got '{other}')")),
+        },
+    }
+}
+
+impl TransportFlags {
+    /// Read the flags from the environment and reject incoherent combinations.
+    ///
+    /// Defaults: `ENABLE_REST=true`, `ENABLE_DIDCOMM=true`, `ENABLE_TSP=false`.
+    pub fn from_env() -> Result<Self, String> {
+        let flags = Self {
+            rest: env_flag("ENABLE_REST", true)?,
+            didcomm: env_flag("ENABLE_DIDCOMM", true)?,
+            tsp: env_flag("ENABLE_TSP", false)?,
+        };
+        flags.validate()?;
+        Ok(flags)
+    }
+
+    /// Reject combinations the registry cannot honour.
+    ///
+    /// Each rule exists because the alternative is a registry that advertises a
+    /// transport nothing answers — the failure this struct was introduced to
+    /// prevent.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.rest && !self.didcomm && !self.tsp {
+            return Err(
+                "at least one transport must be enabled: set ENABLE_REST, ENABLE_DIDCOMM \
+                 or ENABLE_TSP to 'true' (a registry with no transport can serve nobody)"
+                    .to_string(),
+            );
+        }
+        // TSP frames arrive multiplexed on the DIDComm pickup socket — the
+        // mediator permits one websocket per DID, so there is no TSP-only
+        // receive loop to fall back on.
+        if self.tsp && !self.didcomm {
+            return Err(
+                "ENABLE_TSP=true requires ENABLE_DIDCOMM=true: TSP frames are multiplexed \
+                 on the DIDComm mediator socket and cannot be received without it"
+                    .to_string(),
+            );
+        }
+        // A runtime flag cannot conjure the compiled-out TSP binding.
+        if self.tsp && !cfg!(feature = "tsp") {
+            return Err(
+                "ENABLE_TSP=true requires a binary built with `--features tsp`; this build \
+                 cannot serve TSP and must not advertise it"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Reject a public URL the registry should not advertise.
 ///
 /// Mirrors `vtc-service`'s `validate_registry_scheme` exactly: consumers
@@ -115,26 +212,39 @@ pub fn validate_public_url(url: &str) -> Result<(), String> {
 
 /// Build the service array for a Trust Registry DID document.
 ///
-/// DIDComm is always advertised — the registry cannot run without a mediator.
-/// REST is advertised **only** when a non-empty `public_url` is supplied, so
-/// the registry never claims a transport it cannot service (the bind address
-/// in `LISTEN_ADDRESS` is not necessarily reachable, and is often `0.0.0.0`).
+/// Every entry is gated on the matching [`TransportFlags`] field, so the
+/// document advertises exactly the transports this process serves. REST carries
+/// the additional condition of a non-empty `public_url`: `ENABLE_REST=true`
+/// still serves the HTTP routes, but with nowhere externally reachable to point
+/// at there is nothing honest to advertise (the bind address in
+/// `LISTEN_ADDRESS` is not necessarily reachable, and is often `0.0.0.0`).
 ///
-/// The DIDComm `serviceEndpoint` carries the **mediator DID**, not a URL: the
-/// transport URL lives in the mediator's own DID document. REST carries a URL
-/// directly, since there is no indirection.
-pub fn build_services(did: &str, mediator_did: &str, public_url: Option<&str>) -> Vec<Value> {
-    let mut services = vec![serde_json::json!({
-        "id": format!("{did}{DIDCOMM_SERVICE_FRAGMENT}"),
-        "type": DIDCOMM_SERVICE_TYPE,
-        "serviceEndpoint": {
-            "uri": mediator_did,
-            "accept": ["didcomm/v2"],
-            "routingKeys": []
-        }
-    })];
+/// The DIDComm and TSP `serviceEndpoint`s carry the **mediator DID**, not a
+/// URL: the transport URL lives in the mediator's own DID document. REST
+/// carries a URL directly, since there is no indirection.
+pub fn build_services(
+    did: &str,
+    mediator_did: &str,
+    public_url: Option<&str>,
+    flags: TransportFlags,
+) -> Vec<Value> {
+    let mut services = Vec::new();
 
-    if let Some(url) = public_url.map(str::trim).filter(|u| !u.is_empty()) {
+    if flags.didcomm {
+        services.push(serde_json::json!({
+            "id": format!("{did}{DIDCOMM_SERVICE_FRAGMENT}"),
+            "type": DIDCOMM_SERVICE_TYPE,
+            "serviceEndpoint": {
+                "uri": mediator_did,
+                "accept": ["didcomm/v2"],
+                "routingKeys": []
+            }
+        }));
+    }
+
+    if flags.rest
+        && let Some(url) = public_url.map(str::trim).filter(|u| !u.is_empty())
+    {
         // Plain-string endpoint, matching the VTA's REST entry. Consumers
         // tolerate string / {uri} / array forms, but the string form is what
         // the rest of the workspace emits for REST.
@@ -145,6 +255,14 @@ pub fn build_services(did: &str, mediator_did: &str, public_url: Option<&str>) -
         }));
     }
 
+    if flags.tsp {
+        services.push(serde_json::json!({
+            "id": format!("{did}{TSP_SERVICE_FRAGMENT}"),
+            "type": TSP_SERVICE_TYPE,
+            "serviceEndpoint": mediator_did,
+        }));
+    }
+
     services
 }
 
@@ -152,6 +270,7 @@ pub fn build_did_document(
     profile_config: &ProfileConfig,
     mediator_did: &str,
     public_url: Option<&str>,
+    flags: TransportFlags,
 ) -> String {
     let verification_methods = build_verification_methods(profile_config);
 
@@ -169,7 +288,7 @@ pub fn build_did_document(
         "authentication": key_refs,
         "assertionMethod": key_refs,
         "keyAgreement": key_refs,
-        "service": build_services(&profile_config.did, mediator_did, public_url)
+        "service": build_services(&profile_config.did, mediator_did, public_url, flags)
     })
     .to_string()
 }
@@ -328,7 +447,12 @@ mod tests {
             secrets: vec![/* test secret */],
         };
 
-        let doc = build_did_document(&profile, "did:web:mediator.example.com", None);
+        let doc = build_did_document(
+            &profile,
+            "did:web:mediator.example.com",
+            None,
+            TransportFlags::default(),
+        );
         let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
 
         assert_eq!(parsed["id"], "did:web:localhost%3A3232");
@@ -348,7 +472,12 @@ mod tests {
             secrets: vec![],
         };
 
-        let doc = build_did_document(&profile, "did:web:mediator.com", None);
+        let doc = build_did_document(
+            &profile,
+            "did:web:mediator.com",
+            None,
+            TransportFlags::default(),
+        );
         let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
 
         let service = &parsed["service"][0];
@@ -368,7 +497,7 @@ mod tests {
     /// selected it would route to nothing.
     #[test]
     fn no_public_url_advertises_didcomm_only() {
-        let services = build_services(DID, MEDIATOR, None);
+        let services = build_services(DID, MEDIATOR, None, TransportFlags::default());
         assert_eq!(services.len(), 1);
         assert_eq!(services[0]["type"], DIDCOMM_SERVICE_TYPE);
         assert!(rest_entry(&services).is_none());
@@ -379,7 +508,7 @@ mod tests {
     #[test]
     fn blank_public_url_is_treated_as_absent() {
         for blank in ["", "   ", "\t\n"] {
-            let services = build_services(DID, MEDIATOR, Some(blank));
+            let services = build_services(DID, MEDIATOR, Some(blank), TransportFlags::default());
             assert!(
                 rest_entry(&services).is_none(),
                 "blank {blank:?} must not advertise REST"
@@ -392,7 +521,12 @@ mod tests {
     /// consumers match on for a Trust Registry.
     #[test]
     fn public_url_adds_a_trqp_rest_entry() {
-        let services = build_services(DID, MEDIATOR, Some("https://registry.example"));
+        let services = build_services(
+            DID,
+            MEDIATOR,
+            Some("https://registry.example"),
+            TransportFlags::default(),
+        );
         assert_eq!(services.len(), 2);
 
         let rest = rest_entry(&services).expect("REST entry");
@@ -410,7 +544,12 @@ mod tests {
     /// A trailing slash would make consumers build `https://host//recognition`.
     #[test]
     fn public_url_trailing_slash_is_trimmed() {
-        let services = build_services(DID, MEDIATOR, Some("https://registry.example/"));
+        let services = build_services(
+            DID,
+            MEDIATOR,
+            Some("https://registry.example/"),
+            TransportFlags::default(),
+        );
         assert_eq!(
             rest_entry(&services).unwrap()["serviceEndpoint"],
             Value::String("https://registry.example".into())
@@ -421,7 +560,7 @@ mod tests {
     /// way; the setup binary previously used `#service`.
     #[test]
     fn didcomm_fragment_is_stable() {
-        let services = build_services(DID, MEDIATOR, None);
+        let services = build_services(DID, MEDIATOR, None, TransportFlags::default());
         assert_eq!(services[0]["id"], format!("{DID}#didcomm"));
     }
 
@@ -447,5 +586,112 @@ mod tests {
     fn loopback_exception_does_not_leak_to_lookalike_hosts() {
         assert!(validate_public_url("http://localhost.evil.com").is_err());
         assert!(validate_public_url("http://127.0.0.1.evil.com").is_err());
+    }
+
+    // --- TransportFlags -------------------------------------------------
+    //
+    // `validate()` is exercised directly rather than `from_env()`: the latter
+    // mutates process-global state and would race with every other test in
+    // this binary.
+
+    fn types_of(services: &[Value]) -> Vec<&str> {
+        services.iter().filter_map(|s| s["type"].as_str()).collect()
+    }
+
+    /// REST on, everything else off — the default posture for a registry with
+    /// no mediator. Nothing DIDComm-shaped may appear.
+    #[test]
+    fn rest_only_advertises_rest_only() {
+        let flags = TransportFlags {
+            rest: true,
+            didcomm: false,
+            tsp: false,
+        };
+        let services = build_services(DID, MEDIATOR, Some("https://registry.example"), flags);
+        assert_eq!(types_of(&services), vec![REST_SERVICE_TYPE]);
+    }
+
+    /// Disabling REST must drop the entry even when TR_PUBLIC_URL is set —
+    /// the flag governs, not the presence of a URL.
+    #[test]
+    fn rest_disabled_suppresses_entry_despite_public_url() {
+        let flags = TransportFlags {
+            rest: false,
+            didcomm: true,
+            tsp: false,
+        };
+        let services = build_services(DID, MEDIATOR, Some("https://registry.example"), flags);
+        assert_eq!(types_of(&services), vec![DIDCOMM_SERVICE_TYPE]);
+    }
+
+    /// The bug this struct exists to prevent: TSP was serviceable but the
+    /// runtime builder never emitted the entry, so no client could select it.
+    #[test]
+    fn tsp_enabled_advertises_tsp_at_the_mediator_did() {
+        let flags = TransportFlags {
+            rest: false,
+            didcomm: true,
+            tsp: true,
+        };
+        let services = build_services(DID, MEDIATOR, None, flags);
+        let tsp = services
+            .iter()
+            .find(|s| s["type"] == TSP_SERVICE_TYPE)
+            .expect("TSP entry");
+        assert_eq!(tsp["id"], format!("{DID}#tsp"));
+        assert_eq!(
+            tsp["serviceEndpoint"],
+            Value::String(MEDIATOR.into()),
+            "TSP endpoint is the mediator DID, mirroring DIDComm's indirection"
+        );
+    }
+
+    #[test]
+    fn default_is_rest_and_didcomm_without_tsp() {
+        let flags = TransportFlags::default();
+        assert!(flags.rest && flags.didcomm && !flags.tsp);
+        assert!(flags.validate().is_ok());
+    }
+
+    /// A registry serving no transport can answer nobody; fail at startup
+    /// rather than run as an unreachable process.
+    #[test]
+    fn no_transport_enabled_is_rejected() {
+        let flags = TransportFlags {
+            rest: false,
+            didcomm: false,
+            tsp: false,
+        };
+        assert!(flags.validate().is_err());
+    }
+
+    /// TSP frames are multiplexed on the DIDComm pickup socket, so TSP without
+    /// DIDComm has no socket to arrive on.
+    #[test]
+    fn tsp_without_didcomm_is_rejected() {
+        let flags = TransportFlags {
+            rest: true,
+            didcomm: false,
+            tsp: true,
+        };
+        let err = flags.validate().expect_err("TSP requires DIDComm");
+        assert!(err.contains("ENABLE_DIDCOMM"), "unhelpful error: {err}");
+    }
+
+    /// A runtime flag cannot enable a compiled-out binding. Asserted in both
+    /// directions so the rule is covered whichever way the suite is built.
+    #[test]
+    fn tsp_requires_the_tsp_build_feature() {
+        let flags = TransportFlags {
+            rest: true,
+            didcomm: true,
+            tsp: true,
+        };
+        if cfg!(feature = "tsp") {
+            assert!(flags.validate().is_ok());
+        } else {
+            let err = flags.validate().expect_err("no tsp feature compiled in");
+            assert!(err.contains("--features tsp"), "unhelpful error: {err}");
+        }
     }
 }

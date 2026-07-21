@@ -215,10 +215,11 @@ pub(crate) async fn start_one_did_listener(
 
     // TSP shares the DIDComm pickup socket (the mediator allows one websocket per
     // DID). Attach the TSP dispatcher + verifier so the receive loop routes
-    // multiplexed `InboundFrame::Tsp` frames alongside DIDComm. Off unless built
-    // with `--features tsp`.
+    // multiplexed `InboundFrame::Tsp` frames alongside DIDComm. Requires both the
+    // `tsp` build feature and ENABLE_TSP=true — the same flag that decides whether
+    // the DID document advertises `TSPTransport`, so the two cannot disagree.
     #[cfg(feature = "tsp")]
-    let listener = {
+    let listener = if config.transport_flags.tsp {
         info!(
             "[profile = {}] TSP frames multiplexed on the DIDComm socket",
             &listener.profile.inner.alias
@@ -228,6 +229,13 @@ pub(crate) async fn start_one_did_listener(
             config.admin_config.admin_dids.clone(),
             verifier.clone(),
         )
+    } else {
+        info!(
+            "[profile = {}] TSP disabled (ENABLE_TSP is not 'true'); \
+             multiplexed TSP frames will be ignored",
+            &listener.profile.inner.alias
+        );
+        listener
     };
 
     Arc::new(listener).start_listening(config).await?;
