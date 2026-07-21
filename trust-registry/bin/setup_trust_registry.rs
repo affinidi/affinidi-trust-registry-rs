@@ -26,6 +26,10 @@ use serde_json::Value;
 use serde_json::json;
 use sha256::digest;
 use std::str::FromStr;
+use trust_registry::didcomm::did_document::{
+    DIDCOMM_SERVICE_FRAGMENT, DIDCOMM_SERVICE_TYPE, REST_SERVICE_FRAGMENT, REST_SERVICE_TYPE,
+    TSP_SERVICE_FRAGMENT, TSP_SERVICE_TYPE, TransportFlags, validate_public_url,
+};
 use url::Url;
 // use base64;
 use crossterm::{
@@ -389,31 +393,64 @@ pub fn setup_did_web_tr(
         .key_agreement
         .push(VerificationRelationship::Reference(e_key_id.to_string()));
 
-    // Add service endpoints to the DID Document
-    let endpoint = Endpoint::Url(Url::from_str(&mediator_did.clone())?);
-    did_document.service.push(
-        ServiceBuilder::new("DIDCommMessaging", endpoint)
-            .id_url(Url::parse(
-                &[tr_did.to_string(), "#service".to_string()].concat(),
-            )?)
-            .build(),
-    );
+    // Add service endpoints to the DID Document.
+    //
+    // Gated on the same `TransportFlags` the server reads at startup, and using
+    // the same fragments as the runtime builder (`did_document::build_services`),
+    // so a generated document and a served one describe the registry identically.
+    // Consumers match on `type`, never the fragment, but two spellings for one
+    // service is a needless trap for anyone diffing the two.
+    let transport_flags = TransportFlags::from_env()?;
 
-    // Optionally advertise TSP capability. The `#tsp` service (type
-    // "TSPTransport") points at the mediator DID, mirroring the DIDComm
-    // indirection: the real transport URL lives in the mediator's DID document.
-    // Only advertised when the operator runs the `tsp`-featured server (opt-in
-    // via TR_ADVERTISE_TSP=true), so the Trust Registry never claims a transport
-    // it cannot service.
-    if std::env::var("TR_ADVERTISE_TSP")
-        .map(|v| v == "true")
-        .unwrap_or(false)
-    {
+    if transport_flags.didcomm {
+        let endpoint = Endpoint::Url(Url::from_str(&mediator_did.clone())?);
+        did_document.service.push(
+            ServiceBuilder::new(DIDCOMM_SERVICE_TYPE, endpoint)
+                .id_url(Url::parse(
+                    &[tr_did.to_string(), DIDCOMM_SERVICE_FRAGMENT.to_string()].concat(),
+                )?)
+                .build(),
+        );
+    }
+
+    // Advertise the REST/TRQP surface when REST is enabled *and* the operator
+    // has told us where the registry is externally reachable. Absent URL => no
+    // entry: never claim a transport a peer cannot reach.
+    if transport_flags.rest {
+        match std::env::var("TR_PUBLIC_URL")
+            .ok()
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+        {
+            Some(public_url) => {
+                validate_public_url(&public_url)?;
+                let rest_endpoint = Endpoint::Url(Url::from_str(public_url.trim_end_matches('/'))?);
+                did_document.service.push(
+                    ServiceBuilder::new(REST_SERVICE_TYPE, rest_endpoint)
+                        .id_url(Url::parse(
+                            &[tr_did.to_string(), REST_SERVICE_FRAGMENT.to_string()].concat(),
+                        )?)
+                        .build(),
+                );
+            }
+            None => println!(
+                "  ! ENABLE_REST=true but TR_PUBLIC_URL is unset — REST will be served but \
+                 not advertised in the DID document."
+            ),
+        }
+    }
+
+    // The `#tsp` service (type "TSPTransport") points at the mediator DID,
+    // mirroring the DIDComm indirection: the real transport URL lives in the
+    // mediator's DID document. `TransportFlags::validate` has already refused
+    // ENABLE_TSP=true without DIDComm, so this never advertises a transport
+    // with no socket to arrive on.
+    if transport_flags.tsp {
         let tsp_endpoint = Endpoint::Url(Url::from_str(&mediator_did.clone())?);
         did_document.service.push(
-            ServiceBuilder::new("TSPTransport", tsp_endpoint)
+            ServiceBuilder::new(TSP_SERVICE_TYPE, tsp_endpoint)
                 .id_url(Url::parse(
-                    &[tr_did.to_string(), "#tsp".to_string()].concat(),
+                    &[tr_did.to_string(), TSP_SERVICE_FRAGMENT.to_string()].concat(),
                 )?)
                 .build(),
         );

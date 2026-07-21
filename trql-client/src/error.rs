@@ -56,6 +56,36 @@ pub enum TrqlError {
     /// never worth retrying.
     #[error("contract violation: {0}")]
     Contract(String),
+
+    /// The registry advertises no transport this client also speaks.
+    ///
+    /// Carries both sides' sets so an operator can see what to enable rather
+    /// than guess. Never a silent downgrade to a transport the registry did
+    /// not advertise.
+    #[error(
+        "no shared transport with the registry (we speak [{}], it advertises [{}])",
+        format_kinds(ours),
+        format_kinds(theirs)
+    )]
+    NoMatchingTransport {
+        /// Transports this client can use (compiled in and offered).
+        ours: Vec<TransportKind>,
+        /// Transports the registry advertises in its DID document.
+        theirs: Vec<TransportKind>,
+    },
+}
+
+/// Render a transport list for an error message; `"none"` when empty, so a
+/// registry advertising nothing reads clearly rather than as `[]`.
+fn format_kinds(kinds: &[TransportKind]) -> String {
+    if kinds.is_empty() {
+        return "none".to_string();
+    }
+    kinds
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl TrqlError {
@@ -67,7 +97,9 @@ impl TrqlError {
         match self {
             Self::Transport { .. } | Self::Timeout { .. } => true,
             Self::Rejected { retryable, .. } => *retryable,
-            Self::Config(_) | Self::Contract(_) => false,
+            // A capability mismatch is a deployment fact, not a transient
+            // condition: retrying the same pair of DID documents cannot help.
+            Self::Config(_) | Self::Contract(_) | Self::NoMatchingTransport { .. } => false,
         }
     }
 }

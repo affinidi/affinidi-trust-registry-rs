@@ -8,6 +8,7 @@ pub mod configs;
 pub mod dedup;
 pub mod didcomm;
 pub mod domain;
+pub mod health;
 pub mod http;
 pub mod server;
 pub mod storage;
