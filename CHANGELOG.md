@@ -12,6 +12,36 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [0.8.1] – 2026‑07‑24
+
+### Fixed
+
+- **Secret-store env configuration now covers every backend field.**
+  `secrets_config_from_env()` previously mapped only four `vault_*` fields, so
+  selecting the HashiCorp Vault backend from the environment left
+  `vault_auth_method` at its `kubernetes` default with no way to supply the
+  required `vault_k8s_role` — the backend failed to initialise the moment
+  `TR_SECRETS_VAULT_ADDR` was set. Token auth was likewise unreachable (the
+  token was read but the auth method could not be switched).
+
+  - **Impact:** the Vault backend (`secrets-vault`) is now usable from the
+    environment for all three auth methods (`kubernetes`, `token`, `approle`).
+  - Newly mapped: `TR_SECRETS_VAULT_AUTH_METHOD`, `TR_SECRETS_VAULT_K8S_ROLE`,
+    `TR_SECRETS_VAULT_K8S_MOUNT`, `TR_SECRETS_VAULT_K8S_JWT_PATH`,
+    `TR_SECRETS_VAULT_KV_MOUNT`, `TR_SECRETS_VAULT_SECRET_KEY`,
+    `TR_SECRETS_VAULT_APPROLE_ROLE_ID`, `TR_SECRETS_VAULT_APPROLE_SECRET_ID`,
+    `TR_SECRETS_VAULT_APPROLE_MOUNT`, `TR_SECRETS_VAULT_SKIP_VERIFY`, and
+    `TR_SECRETS_K8S_SECRET_KEY`.
+  - The canonical `VAULT_ADDR` / `VAULT_NAMESPACE` / `VAULT_TOKEN` /
+    `VAULT_SKIP_VERIFY` names are now honoured (taking precedence over the
+    `TR_SECRETS_VAULT_*` spelling), matching `vta-service`.
+
+### Documentation
+
+- Expanded the README "Secret-store backends" section into a full per-backend
+  setup reference (activating variable, defaults, priority order, in-cluster
+  Vault example) and added a matching commented block to `.env.example`.
+
 ## [0.6.0] – 2026‑02‑18
 
 ### Changed
