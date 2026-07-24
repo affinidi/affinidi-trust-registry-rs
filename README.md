@@ -537,16 +537,115 @@ The `secrets-*` features select where the Trust Registry persists the identity i
 custodies (the profile bundle, or — in VTA mode — the offline identity cache).
 `secrets-config` (inline / plaintext file) is on by default; cloud, Vault, K8s and
 keyring backends are opt-in. Non-interactive self-provisioning mirrors the
-mediator-setup and did-hosting tooling.
+mediator-setup and did-hosting tooling, and every backend is configured through
+the same shared `vti-secrets` crate the VTA uses — so the config field names line
+up one-to-one with the VTA's `[secrets]` table.
 
-| Variable                                                                              | Backend                       |
-| ------------------------------------------------------------------------------------- | ----------------------------- |
-| `TR_SECRETS_SEED`, `TR_SECRETS_ALLOW_PLAINTEXT`, `TR_SECRETS_DATA_DIR`                 | config / plaintext file       |
-| `TR_SECRETS_AWS_REGION`, `TR_SECRETS_AWS_SECRET_NAME`                                  | AWS Secrets Manager           |
-| `TR_SECRETS_GCP_PROJECT`, `TR_SECRETS_GCP_SECRET_NAME`                                 | GCP Secret Manager            |
-| `TR_SECRETS_AZURE_VAULT_URL`, `TR_SECRETS_AZURE_SECRET_NAME`                           | Azure Key Vault               |
-| `TR_SECRETS_VAULT_ADDR`, `TR_SECRETS_VAULT_TOKEN`, `TR_SECRETS_VAULT_NAMESPACE`, `TR_SECRETS_VAULT_SECRET_PATH` | HashiCorp Vault  |
-| `TR_SECRETS_KEYRING_SERVICE`                                                           | OS keyring                    |
+**Backend selection** follows the `vti-secrets` priority factory: the first backend
+whose feature is compiled in *and* whose activating variable is set wins, in this
+order — AWS → GCP → Azure → Vault → Kubernetes `Secret` → config-seed → keyring →
+plaintext file. Setting a backend's activating variable (below, in **bold**) is
+what turns it on.
+
+The seed / bundle is stored identically (hex-encoded) across every backend, so you
+can migrate by copying the value between two vendor CLIs and swapping the
+`TR_SECRETS_*` variables.
+
+#### Config-seed / plaintext file (`secrets-config`, default)
+
+| Variable                     | Description                                                                                   |
+| ---------------------------- | --------------------------------------------------------------------------------------------- |
+| **`TR_SECRETS_SEED`**        | Hex-encoded seed read straight from the environment (config-seed). Its presence activates it. |
+| `TR_SECRETS_ALLOW_PLAINTEXT` | Set `true` to permit the plaintext-file fallback (`<data_dir>/seed.hex`). **Dev/test only.**  |
+| `TR_SECRETS_DATA_DIR`        | On-disk directory for file-backed backends. Default `./.trust-registry`.                      |
+
+#### AWS Secrets Manager (`secrets-aws`)
+
+| Variable                       | Description                                                                                      |
+| ------------------------------ | ------------------------------------------------------------------------------------------------ |
+| **`TR_SECRETS_AWS_SECRET_NAME`** | Secrets Manager secret name/ARN. Activates the backend. Credentials from the standard SDK chain. |
+| `TR_SECRETS_AWS_REGION`        | Region override. Falls back to `AWS_REGION` / IMDS.                                               |
+
+First-boot provisioning needs `secretsmanager:CreateSecret`; steady state needs only
+`GetSecretValue` + `PutSecretValue`.
+
+#### GCP Secret Manager (`secrets-gcp`)
+
+| Variable                        | Description                                                              |
+| ------------------------------- | ------------------------------------------------------------------------ |
+| **`TR_SECRETS_GCP_SECRET_NAME`** | Secret Manager secret name. Activates the backend.                       |
+| `TR_SECRETS_GCP_PROJECT`        | GCP project ID. Auth via Application Default Credentials / Workload Identity. |
+
+#### Azure Key Vault (`secrets-azure`)
+
+| Variable                          | Description                                                                      |
+| --------------------------------- | -------------------------------------------------------------------------------- |
+| **`TR_SECRETS_AZURE_VAULT_URL`**  | Key Vault URL, e.g. `https://my-vault.vault.azure.net`. Activates the backend.    |
+| `TR_SECRETS_AZURE_SECRET_NAME`    | Secret name. Auth via the DefaultAzureCredential chain (Managed Identity, etc.).  |
+
+#### HashiCorp Vault (`secrets-vault`)
+
+Stores the seed as a field in a KV v2 secret. Designed for in-cluster Kubernetes but
+works anywhere; the Vault token is auto-renewed in the background. Three auth methods,
+chosen by `TR_SECRETS_VAULT_AUTH_METHOD` (**default `kubernetes`**). The canonical
+`VAULT_ADDR` / `VAULT_NAMESPACE` / `VAULT_TOKEN` / `VAULT_SKIP_VERIFY` names are
+honoured too (they take precedence over the `TR_SECRETS_VAULT_*` spelling), so the
+same Vault env carries across services.
+
+| Variable                            | Description                                                                                          |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| **`TR_SECRETS_VAULT_ADDR`** (or `VAULT_ADDR`) | Vault server URL. Activates the backend.                                                   |
+| `TR_SECRETS_VAULT_SECRET_PATH`      | KV v2 path under the mount, e.g. `tr/master-seed`. **Required** once `..._ADDR` is set.              |
+| `TR_SECRETS_VAULT_KV_MOUNT`         | KV v2 mount. Default `secret`. (No `/data/` segment — vaultrs injects it.)                           |
+| `TR_SECRETS_VAULT_SECRET_KEY`       | Field within the secret holding the hex seed. Default `seed`.                                        |
+| `TR_SECRETS_VAULT_NAMESPACE` (or `VAULT_NAMESPACE`) | Vault Enterprise namespace, if any.                                                   |
+| `TR_SECRETS_VAULT_AUTH_METHOD`      | `kubernetes` (default), `token`, or `approle`.                                                       |
+| `TR_SECRETS_VAULT_K8S_ROLE`         | Kubernetes auth role. **Required for the `kubernetes` method** (the default — startup errors without it). |
+| `TR_SECRETS_VAULT_K8S_MOUNT`        | Kubernetes auth mount. Default `kubernetes`.                                                         |
+| `TR_SECRETS_VAULT_K8S_JWT_PATH`     | ServiceAccount JWT path. Default `/var/run/secrets/kubernetes.io/serviceaccount/token`.             |
+| `VAULT_TOKEN` (or `TR_SECRETS_VAULT_TOKEN`) | Static token for the `token` method. Prefer the env var over config.                        |
+| `TR_SECRETS_VAULT_APPROLE_ROLE_ID`  | AppRole `role_id` for the `approle` method.                                                          |
+| `TR_SECRETS_VAULT_APPROLE_SECRET_ID`| AppRole `secret_id` for the `approle` method.                                                        |
+| `TR_SECRETS_VAULT_APPROLE_MOUNT`    | AppRole mount. Default `approle`.                                                                    |
+| `TR_SECRETS_VAULT_SKIP_VERIFY` (or `VAULT_SKIP_VERIFY`) | Disable TLS verification. **Dev/test only.**                                     |
+
+Minimal in-cluster (Kubernetes auth) env — this is the common case, and the two that
+were previously impossible to set from the environment are the auth method and role:
+
+```bash
+TR_SECRETS_VAULT_ADDR=https://vault.svc.cluster.local:8200
+TR_SECRETS_VAULT_SECRET_PATH=tr/master-seed
+TR_SECRETS_VAULT_AUTH_METHOD=kubernetes     # default; shown for clarity
+TR_SECRETS_VAULT_K8S_ROLE=trust-registry    # required for kubernetes auth
+```
+
+Vault server side (one-time): enable the `kubernetes` auth method, write
+`auth/kubernetes/config`, bind the registry's ServiceAccount to a policy granting
+`read`/`create`/`update` on `secret/data/tr/master-seed`, and create the role named
+above with matching `bound_service_account_names` / `bound_service_account_namespaces`.
+
+#### Kubernetes `Secret` (`secrets-k8s`)
+
+Native namespaced `Secret`, no extra infra. Credentials resolve from the pod's mounted
+ServiceAccount in-cluster, or your kubeconfig when running `setup` out-of-cluster.
+
+| Variable                       | Description                                                                                     |
+| ------------------------------ | ----------------------------------------------------------------------------------------------- |
+| **`TR_SECRETS_K8S_SECRET_NAME`** | `Secret` name holding the hex seed. Activates the backend.                                       |
+| `TR_SECRETS_K8S_NAMESPACE`     | Namespace. Unset ⇒ the pod's own namespace in-cluster (inject via Downward API), else `default`. |
+| `TR_SECRETS_K8S_SECRET_KEY`    | Key within the `Secret`'s `data`. Default `seed`.                                               |
+
+RBAC: the ServiceAccount needs `get` (+ `create`/`update` for first-boot / re-key) on the
+`Secret`. A bare `Secret` is only base64-encoded in etcd — enable encryption-at-rest (or
+use Vault / a cloud manager) before treating this as production-grade.
+
+#### OS keyring (`secrets-keyring`)
+
+| Variable                     | Description                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------ |
+| `TR_SECRETS_KEYRING_SERVICE` | OS-native credential-store service name. Set a distinct value per co-located instance. |
+
+Interactive on macOS (Keychain unlock prompt) — use a different backend for headless / CI.
 
 ### Embedded fjall storage (`storage-fjall`)
 
