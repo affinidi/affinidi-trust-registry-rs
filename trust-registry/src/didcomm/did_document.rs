@@ -122,37 +122,7 @@ impl Default for TransportFlags {
     }
 }
 
-/// Parse a boolean environment flag, defaulting when unset or empty.
-///
-/// Only `true`/`false` are accepted (case-insensitively): a typo like
-/// `ENABLE_TSP=yes` must not silently read as "off" and leave the operator
-/// believing TSP is running.
-fn env_flag(name: &str, default: bool) -> Result<bool, String> {
-    match std::env::var(name) {
-        Err(_) => Ok(default),
-        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "" => Ok(default),
-            "true" => Ok(true),
-            "false" => Ok(false),
-            other => Err(format!("{name} must be 'true' or 'false' (got '{other}')")),
-        },
-    }
-}
-
 impl TransportFlags {
-    /// Read the flags from the environment and reject incoherent combinations.
-    ///
-    /// Defaults: `ENABLE_REST=true`, `ENABLE_DIDCOMM=true`, `ENABLE_TSP=false`.
-    pub fn from_env() -> Result<Self, String> {
-        let flags = Self {
-            rest: env_flag("ENABLE_REST", true)?,
-            didcomm: env_flag("ENABLE_DIDCOMM", true)?,
-            tsp: env_flag("ENABLE_TSP", false)?,
-        };
-        flags.validate()?;
-        Ok(flags)
-    }
-
     /// Reject combinations the registry cannot honour.
     ///
     /// Each rule exists because the alternative is a registry that advertises a
