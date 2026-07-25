@@ -29,6 +29,12 @@ A high-performance, Rust-based implementation of a Trust Registry, fully complia
   - [Recognition Query](#recognition-query)
   - [Authorization Query](#authorization-query)
 - [Manage Trust Records](#manage-trust-records)
+- [Embedding the Trust Registry](#embedding-the-trust-registry)
+  - [Mounting into an existing axum app](#mounting-into-an-existing-axum-app)
+  - [Driving it from your own transport](#driving-it-from-your-own-transport)
+  - [DIDComm: who owns the socket](#didcomm-who-owns-the-socket)
+  - [A lean dependency tree](#a-lean-dependency-tree)
+  - [What the registry never does to its host](#what-the-registry-never-does-to-its-host)
 - [Trust Tasks, Transports & Identity](#trust-tasks-transports--identity)
   - [Cargo feature flags](#cargo-feature-flags)
   - [Trust Task protocol surface](#trust-task-protocol-surface)
@@ -460,6 +466,116 @@ For a working reference, see the [test-client implementation](https://github.com
 
 See [Trust Registry Administration](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/DIDCOMM_PROTOCOLS.md#trust-registry-administration) section for more details.
 
+## Embedding the Trust Registry
+
+The Trust Registry runs two ways from the same code: as its own service, or as a
+component inside a host application — a VTC, say — that already has an axum
+server, a tokio runtime, storage and a mediator connection. Both are supported
+first-class; embedding is not a test-only mode.
+
+Everything below is in `trust-registry/examples/embedded_axum.rs`, which is a
+complete host application you can run:
+
+```bash
+cargo run -p trust-registry --example embedded_axum --no-default-features
+```
+
+### Mounting into an existing axum app
+
+```rust
+use std::sync::Arc;
+use trust_registry::{TrustRegistry, configs::TrustRegistryConfig};
+use trust_registry::capabilities::MemoryCapabilityStore;
+
+let registry = TrustRegistry::builder(TrustRegistryConfig::embedded("/srv/app/registry"))
+    .repository(my_repository)            // any TrustRecordAdminRepository
+    .capability_store(Box::new(MemoryCapabilityStore::default()))
+    .dedup_store(my_durable_dedup)        // see the note below
+    .shutdown(host_shutdown_token)
+    .build()
+    .await?;
+
+let app = host_router.nest("/registry", registry.router());
+```
+
+`router()` carries the TRQP endpoints, the Trust Tasks HTTPS binding and
+`/.well-known/did.json`. It deliberately ships **no CORS layer and no
+`/health`** — both belong to the host, and applying ours would override or
+collide with theirs. Use `registry.health()` to fold the registry's health into
+the host's own endpoint, or `registry.health_router()` for a ready-made one.
+
+`/.well-known/did.json` is only meaningful at the server root, so a host nesting
+under a prefix should serve the registry's DID document itself, or mount at `/`.
+
+### Driving it from your own transport
+
+A host that already speaks DIDComm, or anything else, can skip HTTP entirely:
+
+```rust
+// A decoded Trust Task from a transport you authenticated yourself.
+let outcome = registry.task_handler().handle(doc, Some(sender_did)).await;
+
+// Or, for a DIDComm envelope, letting the registry do the decode and
+// §4.8.1 party resolution:
+let outcome = registry.route_didcomm_envelope(message.body, &sender_did).await;
+```
+
+Pass `None` for the sender when the caller is unauthenticated; writes are then
+denied on the admin ACL.
+
+### DIDComm: who owns the socket
+
+The mediator permits **one websocket per DID**. `DidCommSource` says which side
+holds it:
+
+| Source                        | Who opens the socket | Use when                                                            |
+| ----------------------------- | -------------------- | ------------------------------------------------------------------- |
+| `Managed` (default)           | the registry         | the registry's DID is not already connected anywhere else            |
+| `SharedAtm { atm, profile }`  | the host, lent over  | the host holds the connection but does not need to keep reading it   |
+| `HostDriven`                  | the host, kept       | the host drains the stream itself and routes documents in            |
+
+```rust
+let registry = TrustRegistry::builder(config)
+    .repository(repo)
+    .didcomm_source(DidCommSource::SharedAtm { atm, profile })
+    .build()
+    .await?;
+```
+
+Under `SharedAtm` the host must not still be draining that profile's live
+stream — frames go to whichever reader takes them first, so two readers split
+the traffic silently. If the host needs to keep reading, use `HostDriven`.
+
+### A lean dependency tree
+
+The standalone service's backends are all default-on. An embedded registry
+should turn them off and add back only what it uses:
+
+```toml
+[dependencies]
+trust-registry = { version = "0.9", default-features = false, features = ["storage-fjall"] }
+```
+
+That drops the AWS SDKs, Redis, `serde_dynamo`, `dotenvy` and `crossterm` —
+roughly 750 crates down to 680. (`csv` and `clap` still appear, but transitively
+via `affinidi-tdk`, not as the registry's own dependencies.) The example above
+builds with **no features at all**, using the dependency-free in-memory
+`LocalStorage`.
+
+### What the registry never does to its host
+
+Nothing in the embedded path touches process-global state: it does not read
+environment variables (only `configs::Configs::load`, which embedding bypasses,
+ever does), install a tracing subscriber, load a `.env` file, or call
+`std::process::exit`. Those all live behind the `standalone` feature. Only
+`TrustRegistry::serve()` binds a socket, and only when you ask for it.
+
+One default is worth changing deliberately: `dedup_store` falls back to an
+in-memory store, which forgets across a restart, so a redelivered mutation could
+be applied twice (R1.4). It is the one injection point that changes a
+correctness property rather than a convenience — a host with durable storage
+should supply its own.
+
 ## Trust Tasks, Transports & Identity
 
 Beyond the core REST/DIDComm server, the Trust Registry ships a set of **optional,
@@ -474,6 +590,11 @@ above.
 | Feature          | Default | Enables                                                                                                                       |
 | ---------------- | :-----: | ----------------------------------------------------------------------------------------------------------------------------- |
 | `secrets-config` |   ✅    | Inline / plaintext-file secret store for the profile bundle (no extra dependencies).                                          |
+| `standalone`     |   ✅    | `server::start()` — the process-owning entrypoint (`.env`, global tracing, `process::exit`). Required by the `trust-registry` binary; an embedded registry does not need it. |
+| `storage-csv`    |   ✅    | CSV file storage backend (`TR_STORAGE_BACKEND=csv`, the standalone default).                                                  |
+| `storage-ddb`    |   ✅    | DynamoDB storage backend (`TR_STORAGE_BACKEND=dynamodb`).                                                                     |
+| `storage-redis`  |   ✅    | Redis storage backend (`TR_STORAGE_BACKEND=redis`).                                                                           |
+| `loaders-aws`    |   ✅    | `aws_secrets://` and `aws_parameter_store://` config-loader URI schemes.                                                      |
 | `tsp`            |         | [TSP](https://trustoverip.github.io/tswg-tsp-specification/) transport binding for the `registry/*` Trust Tasks.              |
 | `vta`            |         | Fetch the Trust Registry DID + keys from a Verifiable Trust Agent at startup; enables the `registry/did/rotate` admin task.   |
 | `storage-fjall`  |         | Embedded fjall LSM storage backend for trust records (`TR_STORAGE_BACKEND=fjall`).                                            |
@@ -484,6 +605,10 @@ above.
 | `secrets-k8s`    |         | Kubernetes Secret backend.                                                                                                    |
 | `secrets-keyring`|         | OS keyring backend.                                                                                                           |
 | `secrets-all`    |         | All of the `secrets-*` backends at once.                                                                                      |
+
+Selecting a storage backend that was not compiled in is a startup error naming
+the missing feature, never a silent fallback to a different store. The
+in-memory `LocalStorage` needs no feature and is always available.
 
 ```bash
 # Example: build the server with VTA identity, the TSP binding and the AWS secret store
