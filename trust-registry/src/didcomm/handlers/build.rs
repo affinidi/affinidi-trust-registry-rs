@@ -36,8 +36,13 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
         // Trust Task DIDComm binding: routes the `registry/*` task family over
         // the same mediator connection, alongside the legacy trqp/1.0 and
         // tr-admin/1.0 protocols.
-        let trust_tasks =
-            TrustTasksHandler::new(dispatcher, config.admin_config.clone(), verifier, dedup);
+        let trust_tasks = TrustTasksHandler::new(
+            dispatcher,
+            config.admin_config.clone(),
+            verifier,
+            dedup,
+            config.profile_config.did.clone(),
+        );
 
         BaseHandler {
             repository,

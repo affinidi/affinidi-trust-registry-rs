@@ -9,10 +9,12 @@
 //! See `docs/design/vta-tsp-didcomm-trust-tasks.md` for the design and the
 //! mapping from the legacy `trqp/1.0` and `tr-admin/1.0` DIDComm protocols.
 
+pub mod handler;
 pub mod payloads;
 pub mod proof;
 pub mod router;
 
+pub use handler::TaskHandler;
 pub use payloads::type_uris;
 pub use proof::{build_verifier, verify_write_proof};
 pub use router::{

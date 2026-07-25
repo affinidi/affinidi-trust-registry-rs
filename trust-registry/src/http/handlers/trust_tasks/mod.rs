@@ -21,7 +21,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use chrono::Utc;
 use serde_json::Value;
 use trust_tasks_https::{HttpsHandler, status_for_code};
 use trust_tasks_rs::{ErrorResponse, RejectReason, TransportHandler, TrustTask};
@@ -29,7 +28,7 @@ use uuid::Uuid;
 
 use crate::SharedData;
 use crate::storage::repository::TrustRecordRepository;
-use crate::trust_tasks::handle_document;
+use crate::trust_tasks::TaskHandler;
 
 fn new_id() -> String {
     Uuid::new_v4().to_string()
@@ -72,12 +71,19 @@ where
     if let Err(consistency) = transport.resolve_parties(&doc) {
         return error_response(doc.reject_with(new_id(), RejectReason::from(consistency)));
     }
-    if let Err(reason) = doc.validate_basic(Utc::now(), &my_vid) {
-        return error_response(doc.reject_with(new_id(), reason));
-    }
 
-    let dispatcher = state.query_dispatcher.read().await.clone();
-    match handle_document(&dispatcher, doc).await {
+    // The read-only query dispatcher, and no dedup store: there is no mutation
+    // to replay, and keying read answers by message id would change their
+    // semantics. `sender_did: None` says the caller is unauthenticated, so the
+    // shared handler denies any write outright — the surface stays read-only
+    // even if it is ever pointed at a dispatcher that does register writes.
+    let tasks = TaskHandler::new(
+        state.query_dispatcher.clone(),
+        my_vid,
+        Vec::new(),
+        state.verifier.clone(),
+    );
+    match tasks.handle(doc, None).await {
         Ok(response) => {
             let body = serde_json::to_value(&response).unwrap_or_else(|_| serde_json::json!({}));
             (StatusCode::OK, Json(body)).into_response()

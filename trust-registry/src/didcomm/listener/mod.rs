@@ -49,12 +49,12 @@ impl MessageHandler for DefaultHandler {}
 /// handler uses.
 #[cfg(feature = "tsp")]
 pub(crate) struct TspContext {
-    pub(crate) dispatcher: crate::capabilities::DispatcherHandle,
-    pub(crate) admin_dids: Vec<String>,
-    pub(crate) verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
-    /// Write-path message-id dedup (R1.4), shared with the DIDComm binding so
-    /// the same document redelivered over either transport is applied once.
-    pub(crate) dedup: Arc<dyn crate::dedup::MessageIdStore>,
+    /// The same [`TaskHandler`](crate::trust_tasks::TaskHandler) the DIDComm
+    /// binding routes through, so a document arriving over either transport
+    /// gets the same freshness checks, write ACL, proof verification and
+    /// message-id dedup — including replaying rather than re-applying a
+    /// mutation redelivered over the *other* transport.
+    pub(crate) tasks: crate::trust_tasks::TaskHandler,
 }
 
 pub struct Listener<H: MessageHandler> {
@@ -88,19 +88,8 @@ impl<H: MessageHandler> Listener<H> {
     /// shared pickup socket are routed through the same registry dispatcher as
     /// DIDComm.
     #[cfg(feature = "tsp")]
-    pub(crate) fn with_tsp(
-        mut self,
-        dispatcher: crate::capabilities::DispatcherHandle,
-        admin_dids: Vec<String>,
-        verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
-        dedup: Arc<dyn crate::dedup::MessageIdStore>,
-    ) -> Self {
-        self.tsp = Some(TspContext {
-            dispatcher,
-            admin_dids,
-            verifier,
-            dedup,
-        });
+    pub(crate) fn with_tsp(mut self, tasks: crate::trust_tasks::TaskHandler) -> Self {
+        self.tsp = Some(TspContext { tasks });
         self
     }
 }
@@ -180,12 +169,14 @@ async fn check_did_document_availability(
     Err(DIDCommError::UnreachableDidDocument)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_one_did_listener(
     profile_config: ProfileConfig,
     config: Arc<DidcommConfig>,
     repository: Arc<dyn TrustRecordAdminRepository>,
     dispatcher: crate::capabilities::DispatcherHandle,
     dedup: Arc<dyn crate::dedup::MessageIdStore>,
+    verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
     // Check if DID document is available before building listener
@@ -197,12 +188,8 @@ pub(crate) async fn start_one_did_listener(
     )
     .await?;
 
-    // Build the Data Integrity proof verifier once and share it across the
-    // DIDComm and TSP write paths.
-    let verifier = crate::trust_tasks::build_verifier().await;
-
     let listener = Listener::build_listener(
-        profile_config,
+        profile_config.clone(),
         &config.mediator_did,
         BaseHandler::build_from_arc(
             repository,
@@ -232,10 +219,13 @@ pub(crate) async fn start_one_did_listener(
             &listener.profile.inner.alias
         );
         listener.with_tsp(
-            dispatcher.clone(),
-            config.admin_config.admin_dids.clone(),
-            verifier.clone(),
-            dedup.clone(),
+            crate::trust_tasks::TaskHandler::new(
+                dispatcher.clone(),
+                profile_config.did.clone(),
+                config.admin_config.admin_dids.clone(),
+                verifier.clone(),
+            )
+            .with_dedup(dedup.clone()),
         )
     } else {
         info!(
@@ -251,11 +241,13 @@ pub(crate) async fn start_one_did_listener(
 }
 
 /// starts DIDComm listener for the configured DID profile
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_didcomm_listener(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
     dispatcher: crate::capabilities::DispatcherHandle,
     dedup: Arc<dyn crate::dedup::MessageIdStore>,
+    verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     shutdown: CancellationToken,
 ) -> Result<Result<(), DIDCommError>, JoinError> {
     let profile_config = config.profile_config.clone();
@@ -267,6 +259,7 @@ pub(crate) async fn start_didcomm_listener(
         repository,
         dispatcher,
         dedup,
+        verifier,
         shutdown,
     ));
 
