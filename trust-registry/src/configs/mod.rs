@@ -1,5 +1,11 @@
 pub mod didcomm;
 pub mod loaders;
+/// Pluggable secret stores for the registry's own identity bundle.
+///
+/// Compiled only when a `secrets-*` feature is on. Without one the registry has
+/// no secret store, and the identity comes from `PROFILE_CONFIG` or from the
+/// host that embedded it.
+#[cfg(feature = "secrets")]
 pub mod secret_store;
 pub mod server;
 pub mod storage;

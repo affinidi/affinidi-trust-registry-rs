@@ -313,7 +313,10 @@ pub fn setup_did_peer_tr(mediator_did: String) -> (String, Vec<Secret>) {
     (tr_did.0, tr_did.1)
 }
 
-pub fn setup_did_web_tr(
+/// `async` because `didwebvh-rs` 0.6 made `create_log_entry` async (it may
+/// resolve a witness/watcher list). `main` is already `#[tokio::main]`, so this
+/// just propagates.
+pub async fn setup_did_web_tr(
     mediator_did: String,
     web_url: String,
     did_method: String,
@@ -478,12 +481,14 @@ pub fn setup_did_web_tr(
 
         // Create the WebVH DID
         let mut didwebvh = DIDWebVHState::default();
-        let log_entry = didwebvh.create_log_entry(
-            None,
-            &serde_json::to_value(&did_document)?,
-            &parameters,
-            &update_secret,
-        )?;
+        let log_entry = didwebvh
+            .create_log_entry(
+                None,
+                &serde_json::to_value(&did_document)?,
+                &parameters,
+                &update_secret,
+            )
+            .await?;
         // Get the final DID after log entry creation
         tr_did = log_entry.get_state().get("id").unwrap().to_string();
         tr_did = tr_did.replace("\"", "");
@@ -711,7 +716,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         web_url,
                         did_method.clone(),
                         args.non_interactive,
-                    )?
+                    )
+                    .await?
                 }
                 _ => {
                     return Err(format!("Unsupported DID method: {}.", did_method).into());

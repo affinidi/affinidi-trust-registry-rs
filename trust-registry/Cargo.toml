@@ -52,14 +52,21 @@ serde_dynamo = { workspace = true, optional = true }
 # embedded registry takes its config from the host.
 dotenvy = { workspace = true, optional = true }
 
-didwebvh-rs = { version = "0.1", optional = true }
+didwebvh-rs = { version = "0.6", optional = true }
 trust-tasks-tsp = { workspace = true, optional = true }
 # Direct optional dep solely to enable the SDK's `tsp` feature (atm.tsp()) on the
 # shared affinidi-messaging-sdk instance; affinidi-tdk/tsp only pulls affinidi-tsp.
 affinidi-messaging-sdk = { workspace = true, optional = true }
 # Pluggable secret-store backends for the TR identity (profile bundle). Backends
 # are enabled via the `secrets-*` features below, mirroring vti-secrets.
-vti-secrets = { workspace = true, default-features = false }
+#
+# Optional so a host embedding the registry without a secret store does not pull
+# it. That matters beyond build size: `vti-secrets` is a workspace member of
+# `verifiable-trust-infrastructure`, so a VTC embedding us would otherwise carry
+# both its own path copy and a crates.io copy of this crate (and of
+# `vti-common` underneath it) — two copies of the same version from different
+# sources.
+vti-secrets = { workspace = true, default-features = false, optional = true }
 fjall = { workspace = true, optional = true }
 vta-sdk = { workspace = true, optional = true, features = ["integration"] }
 url = "2.5"
@@ -101,7 +108,9 @@ default = [
     "loaders-aws",
     "standalone",
 ]
-dev-tools = ["didwebvh-rs", "dep:clap", "dep:crossterm"]
+# The `setup-trust-registry` / `generate-secrets` binaries. `secrets-config`
+# because the setup wizard writes the profile bundle through the secret store.
+dev-tools = ["didwebvh-rs", "dep:clap", "dep:crossterm", "secrets-config"]
 # Trust Spanning Protocol transport binding. Off by default (affinidi-tsp is a
 # moving 0.x dependency); pulls trust-tasks-tsp and enables affinidi-tdk's tsp
 # feature (affinidi-tsp + the SDK TspOps accessor).
@@ -116,7 +125,13 @@ tsp = [
 # `secrets-config` (config-inline + plaintext file) has no extra dependencies and
 # is on by default; cloud/keyring backends are opt-in to keep the default build
 # lean, and `secrets-all` turns everything on.
-secrets-config = ["vti-secrets/config-seed"]
+#
+# `secrets` is an internal umbrella: it compiles `configs::secret_store` and
+# pulls the shared implementation crate. Every `secrets-*` turns it on; nothing
+# else should name it directly. With none of them the registry has no secret
+# store at all — the right shape for a host that supplies the identity itself.
+secrets = ["dep:vti-secrets"]
+secrets-config = ["secrets", "vti-secrets/config-seed"]
 
 # Storage backends for trust records. Exactly the ones you enable are compiled;
 # `TR_STORAGE_BACKEND` selecting a backend that was not compiled in is a startup
@@ -150,13 +165,15 @@ loaders-aws = ["dep:aws-config", "dep:aws-sdk-ssm", "dep:aws-sdk-secretsmanager"
 # `server::serve()` / the builder API remain available without it.
 standalone = ["dep:dotenvy"]
 # VTA integration: fetch the TR DID + keys from a Verifiable Trust Agent at startup.
-vta = ["dep:vta-sdk"]
-secrets-aws = ["vti-secrets/aws-secrets"]
-secrets-gcp = ["vti-secrets/gcp-secrets"]
-secrets-azure = ["vti-secrets/azure-secrets"]
-secrets-vault = ["vti-secrets/vault-secrets"]
-secrets-k8s = ["vti-secrets/k8s-secrets"]
-secrets-keyring = ["vti-secrets/keyring"]
+# `secrets-config` because the VTA path caches the fetched bundle through the
+# secret store, so it can boot while the VTA is unreachable.
+vta = ["dep:vta-sdk", "secrets-config"]
+secrets-aws = ["secrets", "vti-secrets/aws-secrets"]
+secrets-gcp = ["secrets", "vti-secrets/gcp-secrets"]
+secrets-azure = ["secrets", "vti-secrets/azure-secrets"]
+secrets-vault = ["secrets", "vti-secrets/vault-secrets"]
+secrets-k8s = ["secrets", "vti-secrets/k8s-secrets"]
+secrets-keyring = ["secrets", "vti-secrets/keyring"]
 secrets-all = [
     "secrets-config",
     "secrets-aws",
