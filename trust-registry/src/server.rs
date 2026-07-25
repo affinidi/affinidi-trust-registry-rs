@@ -1,21 +1,16 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::storage::{
-    factory::TrustStorageRepoFactory,
-    repository::{TrustRecordAdminRepository, TrustRecordRepository},
-};
+use crate::storage::repository::{TrustRecordAdminRepository, TrustRecordRepository};
 use axum::{Json, Router, routing::get};
-use dotenvy::dotenv;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, warn};
-use tracing_subscriber::EnvFilter;
 
 use crate::{
     SharedData,
-    configs::{Configs, DidcommConfig, TrustRegistryConfig},
+    configs::{DidcommConfig, TrustRegistryConfig},
     didcomm::listener::start_didcomm_listener,
     health::RegistryHealth,
     http::application_routes,
@@ -23,7 +18,10 @@ use crate::{
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+#[cfg(feature = "standalone")]
 fn setup_logging() {
+    use tracing_subscriber::EnvFilter;
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env()) // reads RUST_LOG
         .with_target(false)
@@ -304,9 +302,20 @@ pub async fn serve(
     })
 }
 
+/// Standalone entrypoint: own the process.
+///
+/// Loads `.env`, installs a global tracing subscriber, reads the whole config
+/// from the environment, and exits the process when a server task dies so a
+/// supervisor restarts it. Every one of those is a process-global side effect a
+/// host must not inherit, which is why this sits behind the `standalone`
+/// feature — an embedded registry uses [`serve`] (or the builder) instead.
+#[cfg(feature = "standalone")]
 pub async fn start() {
+    use crate::configs::Configs;
+    use crate::storage::factory::TrustStorageRepoFactory;
+
     // resources section
-    dotenv().ok();
+    dotenvy::dotenv().ok();
 
     setup_logging();
 
