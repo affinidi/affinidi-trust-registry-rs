@@ -66,7 +66,32 @@ pub const VTA_REST_SERVICE_TYPE: &str = "VTARest";
 ///
 /// Matching a set rather than one string is what lets a consumer discover both
 /// kinds of peer without either having to claim the other's identity.
+///
+/// [`TRUST_REGISTRY_SERVICE_TYPE`] is deliberately **absent**. It is not a
+/// transport: in a VTC's document it carries a DID, and admitting it here
+/// would land that DID in `ServiceCapabilities::https`, where [`select`] would
+/// hand an HTTPS transport a `did:webvh:` string to POST to.
+///
+/// [`select`]: ServiceCapabilities::select
 pub const REST_SERVICE_TYPES: [&str; 2] = [REST_SERVICE_TYPE, VTA_REST_SERVICE_TYPE];
+
+/// DID-document service `type` for a Trust Registry, per the
+/// [ToIP Trust Registry Service Profile][profile].
+///
+/// The type means two different things depending on whose document carries it,
+/// and the difference is which kind of URI the endpoint holds:
+///
+/// * in a **registry's own** document — an endpoint, alongside `TRQPRest`,
+///   pointing at the registry's TRQP surface;
+/// * in a **VTC's** document — a referral, whose `uri` is the *DID* of the
+///   registry authoritative for that community.
+///
+/// [`registry_referral`] draws that line. TRQP v2 recommends the referral form
+/// without naming a service type, which is why this one comes from the Service
+/// Profile spec rather than the protocol spec.
+///
+/// [profile]: https://github.com/trustoverip/tswg-trust-registry-service-profile/blob/main/spec.md
+pub const TRUST_REGISTRY_SERVICE_TYPE: &str = "TrustRegistry";
 
 /// Transports in descending preference order: TSP, then DIDComm, then HTTPS.
 ///
@@ -215,6 +240,56 @@ impl ServiceCapabilities {
     }
 }
 
+/// The DID this document refers a TRQP query on to, if it refers at all.
+///
+/// A `TrustRegistry` entry is a **referral** when its `uri` is a DID other
+/// than this document's own `id` — the shape a VTC publishes to name the
+/// registry authoritative for it. Any other `TrustRegistry` entry is an
+/// **endpoint** (the registry describing its own surface) and yields `None`,
+/// so the caller parses capabilities from the document it already has.
+///
+/// The `did:` test is unambiguous because the other DID-valued endpoints in a
+/// document are mediator addresses, and those always carry
+/// `DIDCommMessaging` or `TSPTransport`, never `TrustRegistry`.
+///
+/// # Following a referral
+///
+/// Resolve the returned DID, then parse [`ServiceCapabilities`] from *that*
+/// document:
+///
+/// ```ignore
+/// let mut doc = resolve(start_did).await?;
+/// if let Some(target) = registry_referral(&doc) {
+///     doc = resolve(&target).await?;   // one hop, no loop
+/// }
+/// let choice = ServiceCapabilities::from_document(&doc).select(&TransportKind::compiled())?;
+/// ```
+///
+/// **Cap at one hop.** TRQP's wording assumes the registry's own document
+/// holds the endpoints, so a second referral is a misconfiguration rather than
+/// a chain to follow, and chasing it invites cycles. This function is
+/// deliberately pure and single-shot: it cannot resolve, so it cannot loop.
+///
+/// # This does not establish authority
+///
+/// A referral is a **self-assertion**. Anyone can publish a document naming
+/// any registry, and nothing here checks that the named registry agrees.
+/// Authority flows registry → subject, never the reverse, so a caller that
+/// follows a referral must close the loop: confirm the registry's answer
+/// carries an `authority_id` equal to the DID the referral started from.
+/// Until then the referral has established *where to ask* and nothing about
+/// the answer.
+#[must_use]
+pub fn registry_referral(doc: &Value) -> Option<String> {
+    let own_id = doc.get("id").and_then(Value::as_str);
+    doc.get("service")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter(|svc| service_has_type(svc, TRUST_REGISTRY_SERVICE_TYPE))
+        .filter_map(|svc| svc.get("serviceEndpoint").and_then(endpoint_uri))
+        .find(|uri| uri.starts_with("did:") && Some(uri.as_str()) != own_id)
+}
+
 /// Does this service entry carry `type_`?
 ///
 /// `type` may be a string or an array of strings per the DID Core spec.
@@ -252,6 +327,126 @@ mod tests {
         TransportKind::Didcomm,
         TransportKind::Https,
     ];
+
+    // --- VTC → registry referral ---
+
+    /// A VTC names the registry authoritative for it: same service `type`,
+    /// but the endpoint holds a DID rather than a URL.
+    #[test]
+    fn a_vtc_pointing_at_a_registry_did_is_a_referral() {
+        let vtc = json!({
+            "id": "did:webvh:QmVtcScid:community.example",
+            "service": [
+                { "id": "#trust-registry", "type": "TrustRegistry",
+                  "serviceEndpoint": { "uri": "did:webvh:QmRegistryScid:registry.example",
+                                       "profile": "https://trustoverip.org/profiles/trqp/v2" } },
+                { "id": "#didcomm", "type": "DIDCommMessaging",
+                  "serviceEndpoint": { "uri": "did:web:mediator.example" } },
+            ]
+        });
+        assert_eq!(
+            registry_referral(&vtc).as_deref(),
+            Some("did:webvh:QmRegistryScid:registry.example")
+        );
+    }
+
+    /// The same type in the registry's own document describes its surface, so
+    /// there is nowhere to be referred to — the caller uses this document.
+    #[test]
+    fn a_registry_describing_its_own_surface_is_not_a_referral() {
+        let registry = json!({
+            "id": "did:webvh:QmRegistryScid:registry.example",
+            "service": [
+                { "id": "#rest", "type": ["TRQPRest", "TrustRegistry"],
+                  "serviceEndpoint": { "uri": "https://registry.example",
+                                       "profile": "https://trustoverip.org/profiles/trqp/v2" } },
+            ]
+        });
+        assert_eq!(registry_referral(&registry), None);
+    }
+
+    /// A document naming *itself* is a misconfiguration, not a hop: following
+    /// it would resolve the same document forever.
+    #[test]
+    fn a_self_referential_entry_is_not_a_referral() {
+        let doc = json!({
+            "id": "did:webvh:QmRegistryScid:registry.example",
+            "service": [
+                { "id": "#trust-registry", "type": "TrustRegistry",
+                  "serviceEndpoint": "did:webvh:QmRegistryScid:registry.example" },
+            ]
+        });
+        assert_eq!(registry_referral(&doc), None);
+    }
+
+    /// The trap §5 of the design note calls out: a referral DID must never be
+    /// treated as a REST base URL, or `select` hands an HTTPS transport a DID
+    /// to POST to.
+    #[test]
+    fn a_referral_did_never_becomes_an_https_endpoint() {
+        let vtc = json!({
+            "id": "did:webvh:QmVtcScid:community.example",
+            "service": [
+                { "id": "#trust-registry", "type": "TrustRegistry",
+                  "serviceEndpoint": { "uri": "did:webvh:QmRegistryScid:registry.example" } },
+            ]
+        });
+        let caps = ServiceCapabilities::from_document(&vtc);
+        assert_eq!(caps, ServiceCapabilities::default(), "{caps:?}");
+        assert!(
+            caps.select(&ALL).is_err(),
+            "a referral advertises no transport of its own"
+        );
+    }
+
+    /// Mediator entries are DID-valued too; only `TrustRegistry` ones refer.
+    #[test]
+    fn a_mediator_did_is_not_mistaken_for_a_referral() {
+        let doc = json!({
+            "id": "did:webvh:QmRegistryScid:registry.example",
+            "service": [
+                { "id": "#tsp", "type": "TSPTransport", "serviceEndpoint": "did:web:mediator" },
+                { "id": "#didcomm", "type": "DIDCommMessaging",
+                  "serviceEndpoint": { "uri": "did:web:mediator" } },
+            ]
+        });
+        assert_eq!(registry_referral(&doc), None);
+    }
+
+    /// Both halves of the walk, in the order a caller performs them: the VTC
+    /// refers, the registry's own document supplies the transports.
+    #[test]
+    fn one_hop_lands_on_the_registrys_capabilities() {
+        let vtc = json!({
+            "id": "did:webvh:QmVtcScid:community.example",
+            "service": [{ "id": "#trust-registry", "type": "TrustRegistry",
+                          "serviceEndpoint": { "uri": "did:webvh:QmRegistryScid:registry.example" } }]
+        });
+        let registry = json!({
+            "id": "did:webvh:QmRegistryScid:registry.example",
+            "service": [
+                { "id": "#rest", "type": ["TRQPRest", "TrustRegistry"],
+                  "serviceEndpoint": { "uri": "https://registry.example" } },
+                { "id": "#tsp", "type": "TSPTransport", "serviceEndpoint": "did:web:mediator" },
+            ]
+        });
+
+        let target = registry_referral(&vtc).expect("the VTC refers");
+        assert_eq!(target, registry["id"].as_str().unwrap());
+        // Second hop is not taken: the registry's document does not refer on.
+        assert_eq!(registry_referral(&registry), None);
+
+        let choice = ServiceCapabilities::from_document(&registry)
+            .select(&ALL)
+            .unwrap();
+        assert_eq!(choice.kind, TransportKind::Tsp);
+        assert_eq!(choice.endpoint, "did:web:mediator");
+    }
+
+    #[test]
+    fn a_document_with_no_services_refers_nowhere() {
+        assert_eq!(registry_referral(&json!({ "id": "did:webvh:x" })), None);
+    }
 
     #[test]
     fn parses_each_service_type() {
