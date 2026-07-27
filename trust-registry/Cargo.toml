@@ -23,8 +23,6 @@ futures.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true
-csv.workspace = true
-dotenvy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_derive.workspace = true
@@ -34,16 +32,25 @@ tower-http = { workspace = true, features = ["cors"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 sha256.workspace = true
-aws-types.workspace = true
-aws-config.workspace = true
-aws-sdk-dynamodb.workspace = true
-aws-sdk-ssm.workspace = true
-aws-sdk-secretsmanager.workspace = true
-serde_dynamo.workspace = true
 uuid.workspace = true
-redis.workspace = true
 thiserror.workspace = true
 reqwest.workspace = true
+
+# --- Optional backends -------------------------------------------------------
+# Everything below is gated by a feature so a host embedding the registry as a
+# library only compiles the backends it actually uses. All are on by default
+# (see `[features]`), so a standalone build is unchanged.
+csv = { workspace = true, optional = true }
+redis = { workspace = true, optional = true }
+aws-types = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+aws-sdk-dynamodb = { workspace = true, optional = true }
+aws-sdk-ssm = { workspace = true, optional = true }
+aws-sdk-secretsmanager = { workspace = true, optional = true }
+serde_dynamo = { workspace = true, optional = true }
+# Only `server::start()` (the standalone entrypoint) reads a `.env` file; an
+# embedded registry takes its config from the host.
+dotenvy = { workspace = true, optional = true }
 
 didwebvh-rs = { version = "0.1", optional = true }
 trust-tasks-tsp = { workspace = true, optional = true }
@@ -56,8 +63,9 @@ vti-secrets = { workspace = true, default-features = false }
 fjall = { workspace = true, optional = true }
 vta-sdk = { workspace = true, optional = true, features = ["integration"] }
 url = "2.5"
-clap = { version = "4.5", features = ["derive"] }
-crossterm = "0.29"
+# `setup-trust-registry` only (gated by `dev-tools`).
+clap = { version = "4.5", features = ["derive"], optional = true }
+crossterm = { version = "0.29", optional = true }
 urlencoding = "2.1.3"
 
 [dev-dependencies]
@@ -68,6 +76,8 @@ tower.workspace = true
 [[bin]]
 name = "trust-registry"
 path = "src/main.rs"
+# `main` is a one-liner over `server::start()`, which is what `standalone` gates.
+required-features = ["standalone"]
 
 [[bin]]
 name = "generate-secrets"
@@ -80,8 +90,18 @@ path = "bin/setup_trust_registry.rs"
 required-features = ["dev-tools"]
 
 [features]
-default = ["secrets-config"]
-dev-tools = ["didwebvh-rs"]
+# Everything the standalone service needs. A host embedding the registry as a
+# library should build with `default-features = false` and add back only the
+# backends it uses — see the "Embedding" section of the README.
+default = [
+    "secrets-config",
+    "storage-csv",
+    "storage-ddb",
+    "storage-redis",
+    "loaders-aws",
+    "standalone",
+]
+dev-tools = ["didwebvh-rs", "dep:clap", "dep:crossterm"]
 # Trust Spanning Protocol transport binding. Off by default (affinidi-tsp is a
 # moving 0.x dependency); pulls trust-tasks-tsp and enables affinidi-tdk's tsp
 # feature (affinidi-tsp + the SDK TspOps accessor).
@@ -97,8 +117,38 @@ tsp = [
 # is on by default; cloud/keyring backends are opt-in to keep the default build
 # lean, and `secrets-all` turns everything on.
 secrets-config = ["vti-secrets/config-seed"]
-# Embedded fjall LSM storage backend for trust records.
+
+# Storage backends for trust records. Exactly the ones you enable are compiled;
+# `TR_STORAGE_BACKEND` selecting a backend that was not compiled in is a startup
+# error naming the missing feature, not a silent fallback.
+#
+# `LocalStorage` (in-memory) has no dependencies and is always available — it is
+# the zero-config choice for tests and for a host that keeps its own mirror.
+#
+# Embedded fjall LSM store. No external service; the natural pick when embedding.
 storage-fjall = ["dep:fjall"]
+# CSV file store — the default backend for the standalone service.
+storage-csv = ["dep:csv"]
+# DynamoDB store.
+storage-ddb = [
+    "dep:aws-types",
+    "dep:aws-config",
+    "dep:aws-sdk-dynamodb",
+    "dep:serde_dynamo",
+]
+# Redis store.
+storage-redis = ["dep:redis"]
+
+# `aws_secrets://` and `aws_parameter_store://` config-loader URI schemes. With
+# this off, those schemes are rejected with a message naming the feature; the
+# dependency-free `string://` and `file://` schemes always work.
+loaders-aws = ["dep:aws-config", "dep:aws-sdk-ssm", "dep:aws-sdk-secretsmanager"]
+
+# The standalone entrypoint (`server::start()`): `.env` loading, global logging
+# init, and `std::process::exit` on listener death. An embedded registry wants
+# none of that — the host owns its process — so this is off in a lean build and
+# `server::serve()` / the builder API remain available without it.
+standalone = ["dep:dotenvy"]
 # VTA integration: fetch the TR DID + keys from a Verifiable Trust Agent at startup.
 vta = ["dep:vta-sdk"]
 secrets-aws = ["vti-secrets/aws-secrets"]

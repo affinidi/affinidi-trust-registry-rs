@@ -1,18 +1,39 @@
+#[cfg(feature = "loaders-aws")]
 pub mod aws_parameter_store;
+#[cfg(feature = "loaders-aws")]
 pub mod aws_secrets;
 pub mod environment;
 pub mod file;
 pub mod string;
 
+/// Resolve a config value from a loader URI.
+///
+/// `string://` and `file://` are dependency-free and always available. The AWS
+/// schemes are behind `loaders-aws`; when that feature is off they are rejected
+/// by name rather than silently falling through to `string::load`, which would
+/// hand the caller the literal URI as if it were the secret.
 pub async fn load(input: &str) -> Result<String, String> {
     if let Some(content) = input.strip_prefix("string://") {
         string::load(content)
     } else if let Some(path) = input.strip_prefix("file://") {
         file::load(path)
-    } else if let Some(secret_name) = input.strip_prefix("aws_secrets://") {
-        aws_secrets::load(secret_name).await
-    } else if let Some(param_name) = input.strip_prefix("aws_parameter_store://") {
-        aws_parameter_store::load(param_name).await
+    } else if let Some(_secret_name) = input.strip_prefix("aws_secrets://") {
+        #[cfg(feature = "loaders-aws")]
+        {
+            aws_secrets::load(_secret_name).await
+        }
+        #[cfg(not(feature = "loaders-aws"))]
+        Err("aws_secrets:// requires the `loaders-aws` feature, which is not compiled in".into())
+    } else if let Some(_param_name) = input.strip_prefix("aws_parameter_store://") {
+        #[cfg(feature = "loaders-aws")]
+        {
+            aws_parameter_store::load(_param_name).await
+        }
+        #[cfg(not(feature = "loaders-aws"))]
+        Err(
+            "aws_parameter_store:// requires the `loaders-aws` feature, which is not compiled in"
+                .into(),
+        )
     } else {
         string::load(input)
     }
