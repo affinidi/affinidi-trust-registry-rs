@@ -12,6 +12,69 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [0.9.0] – 2026‑07‑25
+
+### Added
+
+- **The Trust Registry can be embedded in a host application.** `TrustRegistry`
+  (via `TrustRegistry::builder`) assembles a registry that binds no socket,
+  reads no environment, installs no tracing subscriber and never calls
+  `process::exit`. A host mounts `registry.router()` into its own axum app —
+  deliberately with no CORS layer and no `/health`, both of which belong to the
+  host — or skips HTTP entirely and feeds documents to
+  `registry.task_handler()`. See the "Embedding the Trust Registry" section of
+  the README and `examples/embedded_axum.rs`, which is a complete host
+  application.
+
+  Injectable: the repository, capability definitions, the capability-state
+  store, the message-id dedup store, the proof verifier, the DIDComm source and
+  the shutdown token. Each falls back to what the standalone service uses.
+
+- **`DidCommSource` decides who owns the mediator websocket.** The mediator
+  permits one per DID, so a host that already holds the registry's connection
+  can now lend it (`SharedAtm`) or keep the receive loop and route documents in
+  itself (`HostDriven`, with `TrustRegistry::route_didcomm_envelope`). Default
+  is `Managed` — the registry opens its own, as before.
+
+- **`TrustRegistryConfig::embedded(data_dir)` and `DidcommConfig::disabled()`**
+  for building configuration programmatically.
+
+### Changed
+
+- **Optional backends are behind features, all default-on.** New `storage-csv`,
+  `storage-ddb`, `storage-redis`, `loaders-aws` and `standalone` features join
+  the existing `storage-fjall`, so an embedded registry can build with
+  `default-features = false` and skip the AWS SDKs, Redis, `serde_dynamo`,
+  `dotenvy` and `crossterm` (~750 crates to ~680). Standalone builds are
+  unchanged.
+
+- **One shared apply path across every transport.** The
+  `validate_basic` → write-ACL → proof-verification → dispatch sequence, and
+  the `authorize_write` that was copy-pasted between the DIDComm and TSP
+  bindings, now live once in `trust_tasks::handler::TaskHandler`. Three
+  behaviour changes follow:
+  - `registry/did/rotate` now works over TSP; it was previously intercepted
+    only in the DIDComm binding and came back `UnsupportedType` over TSP.
+  - An unauthenticated caller is denied every write on the ACL, rather than
+    relying on the read-only dispatcher registering no write types. Anonymous
+    writes over HTTP now return `PermissionDenied` instead of
+    `UnsupportedType`.
+  - The Data-Integrity verifier is built once in `serve()` and shared, instead
+    of separately inside the listener.
+
+- **`TR_CAPABILITY_STATE` moved onto `ServerConfig`.** `serve()` no longer reads
+  it from the environment, so an embedded registry's capability-state location
+  is not decided by the host's environment. Unset keeps the previous default.
+  `configs` is now the only module in the crate that reads environment
+  variables.
+
+- **`vta-sdk` updated to 0.19**, along with the `affinidi-tdk` chain and
+  `vti-secrets`, so the graph carries a single `vta-sdk` node. Required for any
+  host in the `verifiable-trust-infrastructure` workspace, which patches
+  `vta-sdk` to a local 0.19.
+
+---
+
 ## [0.8.1] – 2026‑07‑24
 
 ### Fixed
