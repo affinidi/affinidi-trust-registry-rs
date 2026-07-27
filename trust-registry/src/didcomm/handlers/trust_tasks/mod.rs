@@ -31,7 +31,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tracing::{error, warn};
 use trust_tasks_didcomm::ENVELOPE_TYPE;
-use trust_tasks_rs::{ErrorResponse, RejectReason, TransportHandler, TrustTask};
+use trust_tasks_rs::{RejectReason, TransportHandler, TrustTask};
 use uuid::Uuid;
 
 use trust_tasks_didcomm::DidcommHandler as TtDidcommHandler;
