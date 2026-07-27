@@ -30,15 +30,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use affinidi_tdk::messaging::{ATM, errors::ATMError, profiles::ATMProfile};
-use chrono::Utc;
 use serde_json::Value;
 use tracing::{error, info, warn};
 use trust_tasks_rs::{RejectReason, TransportHandler, TrustTask};
 use trust_tasks_tsp::{ENVELOPE_TYPE, TspHandler};
 use uuid::Uuid;
 
-use crate::dedup::{MessageIdStore, dispatch_idempotent};
-use crate::trust_tasks::RegistryDispatcher;
+use crate::trust_tasks::TaskHandler;
 
 fn new_id() -> String {
     Uuid::new_v4().to_string()
@@ -126,30 +124,6 @@ where
     }
 }
 
-/// Slugs whose operations mutate the registry (admin ACL + proof required).
-use crate::trust_tasks::proof::is_write_slug;
-
-/// Write-only preconditions the transport-agnostic dispatcher does not enforce:
-/// proof presence + admin-DID ACL. Reads pass through.
-fn authorize_write(
-    doc: &TrustTask<Value>,
-    sender_did: &str,
-    admin_dids: &[String],
-) -> Result<(), RejectReason> {
-    if !is_write_slug(doc.type_uri.slug()) {
-        return Ok(());
-    }
-    if doc.proof.is_none() {
-        return Err(RejectReason::ProofRequired);
-    }
-    if !admin_dids.iter().any(|d| d == sender_did) {
-        return Err(RejectReason::PermissionDenied {
-            reason: format!("DID {sender_did} is not authorised to modify the registry"),
-        });
-    }
-    Ok(())
-}
-
 /// Parse a `trust-tasks-tsp` binding envelope (`{type, document}`) into a
 /// framework document. Rejects a wrong or missing envelope type.
 fn parse_envelope(payload: &[u8]) -> Result<TrustTask<Value>, String> {
@@ -176,19 +150,16 @@ fn build_envelope<T: serde::Serialize>(doc: &T) -> Vec<u8> {
 /// Route one decrypted inbound document (already authenticated by the TSP layer)
 /// and produce the response envelope bytes to return to `sender_did`.
 ///
-/// `sender_did` is the TSP-authenticated peer VID; `my_vid` is our own DID.
-#[allow(clippy::too_many_arguments)]
-async fn handle_inbound(
-    dispatcher: &RegistryDispatcher,
-    dedup: &dyn MessageIdStore,
-    admin_dids: &[String],
-    verifier: &std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
-    my_vid: &str,
-    sender_did: &str,
-    doc: TrustTask<Value>,
-) -> Vec<u8> {
+/// `sender_did` is the TSP-authenticated peer VID. Only party resolution and
+/// envelope packing are TSP's business; everything else is the shared
+/// [`TaskHandler`], which is what keeps this transport's write ACL, proof
+/// verification and dedup identical to DIDComm's.
+async fn handle_inbound(tasks: &TaskHandler, sender_did: &str, doc: TrustTask<Value>) -> Vec<u8> {
     // §4.8.1 party resolution: TSP-authenticated sender -> issuer, us -> recipient.
-    let transport = TspHandler::new(Some(my_vid.to_string()), Some(sender_did.to_string()));
+    let transport = TspHandler::new(
+        Some(tasks.my_did().to_string()),
+        Some(sender_did.to_string()),
+    );
     if let Err(consistency) = transport.resolve_parties(&doc) {
         let err = doc.reject_with_recipient(
             new_id(),
@@ -197,17 +168,7 @@ async fn handle_inbound(
         );
         return build_envelope(&err);
     }
-    if let Err(reason) = doc.validate_basic(Utc::now(), my_vid) {
-        return build_envelope(&doc.reject_with(new_id(), reason));
-    }
-    if let Err(reason) = authorize_write(&doc, sender_did, admin_dids) {
-        return build_envelope(&doc.reject_with(new_id(), reason));
-    }
-    // Cryptographically verify the write's Data Integrity proof.
-    if let Err(reason) = crate::trust_tasks::verify_write_proof(verifier, &doc).await {
-        return build_envelope(&doc.reject_with(new_id(), reason));
-    }
-    match dispatch_idempotent(dispatcher, dedup, doc).await {
+    match tasks.handle(doc, Some(sender_did)).await {
         Ok(response) => build_envelope(&response),
         Err(err) => build_envelope(&err),
     }
@@ -225,18 +186,13 @@ async fn handle_inbound(
 /// already-decoded qb2). The mediator permits only one websocket per DID, so the
 /// registry must never open a second TSP socket — TSP frames arrive multiplexed
 /// on the DIDComm pickup stream.
-#[allow(clippy::too_many_arguments)]
 pub async fn process_tsp_frame(
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
-    dispatcher: &RegistryDispatcher,
-    dedup: &dyn MessageIdStore,
-    admin_dids: &[String],
-    verifier: &std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    tasks: &TaskHandler,
     packed: &str,
 ) {
     let alias = &profile.inner.alias;
-    let my_vid = &profile.inner.did;
 
     // R1.6 — deliberate ack-first, with the loss window narrowed rather than
     // closed. `process_next_message` pulls frames with `auto_delete = true`, so
@@ -293,16 +249,7 @@ pub async fn process_tsp_frame(
         "[profile = {alias}, type = {}, from = {sender_did}] Trust Task (TSP)",
         doc.type_uri.slug()
     );
-    let reply = handle_inbound(
-        dispatcher,
-        dedup,
-        admin_dids,
-        verifier,
-        my_vid,
-        &sender_did,
-        doc,
-    )
-    .await;
+    let reply = handle_inbound(tasks, &sender_did, doc).await;
     if let Err(e) = atm.tsp().send(profile, &sender_did, &reply).await {
         error!("[profile = {alias}] Failed to send TSP response to {sender_did}: {e}");
     }
@@ -334,39 +281,12 @@ mod tests {
         doc
     }
 
-    const ADMIN: &str = "did:example:admin";
-    const CREATE: &str = "https://trusttasks.org/spec/registry/record/create/0.1";
     const RECOGNITION: &str = "https://trusttasks.org/spec/registry/recognition/0.1";
 
-    #[test]
-    fn reads_bypass_write_authorization() {
-        let doc = doc_with(RECOGNITION, false);
-        assert!(authorize_write(&doc, "did:example:anyone", &[]).is_ok());
-    }
-
-    #[test]
-    fn write_without_proof_is_rejected() {
-        let doc = doc_with(CREATE, false);
-        assert!(matches!(
-            authorize_write(&doc, ADMIN, &[ADMIN.to_string()]),
-            Err(RejectReason::ProofRequired)
-        ));
-    }
-
-    #[test]
-    fn write_from_non_admin_is_denied() {
-        let doc = doc_with(CREATE, true);
-        assert!(matches!(
-            authorize_write(&doc, "did:example:intruder", &[ADMIN.to_string()]),
-            Err(RejectReason::PermissionDenied { .. })
-        ));
-    }
-
-    #[test]
-    fn write_from_admin_with_proof_is_allowed() {
-        let doc = doc_with(CREATE, true);
-        assert!(authorize_write(&doc, ADMIN, &[ADMIN.to_string()]).is_ok());
-    }
+    // The write ACL these tests used to cover moved to
+    // `crate::trust_tasks::handler`, along with `authorize_write` itself — it is
+    // now shared with the DIDComm binding rather than duplicated here, and is
+    // tested once at its new home.
 
     #[test]
     fn envelope_round_trips() {

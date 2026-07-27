@@ -28,6 +28,12 @@ where
     /// CapabilitySet so capability enable/disable takes effect without a
     /// restart.
     pub query_dispatcher: capabilities::DispatcherHandle,
+    /// Data-Integrity proof verifier, built once and shared with the DIDComm
+    /// and TSP write paths. The HTTP surface is read-only and denies writes on
+    /// the ACL before verification is reached, so it never exercises this —
+    /// but it holds it so the surface stays correct if authenticated HTTP
+    /// writes are ever wired up.
+    pub verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
 }
 
 impl<R: TrustRecordRepository> fmt::Debug for SharedData<R> {
@@ -49,6 +55,7 @@ where
             service_start_timestamp: self.service_start_timestamp,
             repository: Arc::clone(&self.repository),
             query_dispatcher: self.query_dispatcher.clone(),
+            verifier: self.verifier.clone(),
         }
     }
 }

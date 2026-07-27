@@ -130,22 +130,12 @@ impl<H: MessageHandler> Listener<H> {
         };
         let atm = self.atm.clone();
         let profile = self.profile.clone();
-        let dispatcher = tsp.dispatcher.clone();
-        let admin_dids = tsp.admin_dids.clone();
-        let verifier = tsp.verifier.clone();
-        let dedup = tsp.dedup.clone();
+        // Cloning the handler shares its collaborators, including the live
+        // dispatcher handle — so a capability enabled after this frame was
+        // received still takes effect when it is routed.
+        let tasks = tsp.tasks.clone();
         tokio::spawn(async move {
-            let dispatcher = dispatcher.read().await.clone();
-            crate::tsp::process_tsp_frame(
-                &atm,
-                &profile,
-                &dispatcher,
-                dedup.as_ref(),
-                &admin_dids,
-                &verifier,
-                &packed,
-            )
-            .await;
+            crate::tsp::process_tsp_frame(&atm, &profile, &tasks, &packed).await;
         });
     }
 

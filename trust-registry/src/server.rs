@@ -164,6 +164,7 @@ fn build_router(
     config: Arc<TrustRegistryConfig>,
     repository: Arc<dyn TrustRecordRepository>,
     query_dispatcher: crate::capabilities::DispatcherHandle,
+    verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     health: Arc<RegistryHealth>,
 ) -> Router {
     let shared_data = SharedData {
@@ -171,6 +172,7 @@ fn build_router(
         service_start_timestamp: chrono::Utc::now(),
         repository,
         query_dispatcher,
+        verifier,
     };
 
     let cors = build_cors_layer(&config.server_config.cors_allowed_origins);
@@ -191,16 +193,19 @@ fn build_router(
         .layer(cors)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_didcomm_server(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
     dispatcher: crate::capabilities::DispatcherHandle,
     dedup: Arc<dyn crate::dedup::MessageIdStore>,
+    verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     shutdown: CancellationToken,
 ) -> Result<(), BoxError> {
     // `start_didcomm_listener` returns the listener task's own result nested
     // inside the join result; the inner listener outcome is discarded here.
-    let _ = start_didcomm_listener(config, repository, dispatcher, dedup, shutdown).await?;
+    let _ =
+        start_didcomm_listener(config, repository, dispatcher, dedup, verifier, shutdown).await?;
     Ok(())
 }
 
@@ -245,6 +250,10 @@ pub async fn serve(
     )
     .map_err(BoxError::from)?;
 
+    // One Data-Integrity proof verifier, built here and shared by every
+    // transport, so they cannot end up verifying against different resolvers.
+    let verifier = crate::trust_tasks::build_verifier().await;
+
     // The read-only HTTP surface upcasts from the admin repository.
     let read_repository: Arc<dyn TrustRecordRepository> = repository.clone();
     let health = Arc::new(RegistryHealth::new(config.didcomm_config.is_enabled));
@@ -252,6 +261,7 @@ pub async fn serve(
         config.clone(),
         read_repository,
         capabilities.query_dispatcher(),
+        verifier.clone(),
         health.clone(),
     );
 
@@ -285,6 +295,7 @@ pub async fn serve(
             repository,
             capabilities.dispatcher(),
             dedup,
+            verifier,
             shutdown.clone(),
         )))
     } else {
