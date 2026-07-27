@@ -28,7 +28,7 @@ trust-tasks-rs = "0.2.18"
 trust-tasks-proof = "0.2"
 vti-secrets = { version = "0.1", default-features = false }
 fjall = "3"
-vta-sdk = { version = "0.18", default-features = false }
+vta-sdk = { version = "0.19", default-features = false }
 trust-tasks-https = { version = "0.2", default-features = false }
 trust-tasks-tsp = "0.2"
 trust-tasks-didcomm = "0.2"
