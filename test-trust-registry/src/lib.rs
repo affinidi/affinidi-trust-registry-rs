@@ -115,11 +115,14 @@ impl TestTrustRegistryBuilder {
         let config = Arc::new(TrustRegistryConfig {
             server_config: ServerConfig {
                 listen_address: "127.0.0.1:0".to_string(),
-                cors_allowed_origins: Vec::new(),
+                ..Default::default()
             },
             storage_config: StorageConfig::default(),
-            // is_enabled defaults to false -> REST-only.
-            didcomm_config: DidcommConfig::default(),
+            // REST-only. `disabled()` rather than `default()`: the derived
+            // default leaves `transport_flags.didcomm` true while `is_enabled`
+            // is false, so `/health` would advertise a transport nothing
+            // answers.
+            didcomm_config: DidcommConfig::disabled(),
         });
 
         let shutdown = CancellationToken::new();

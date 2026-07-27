@@ -228,8 +228,7 @@ pub async fn serve(
     // transport reads through. No capabilities are compiled in yet — the
     // framework ships wired but empty; the first module (git-trust) registers
     // here.
-    let capability_state_path = std::env::var("TR_CAPABILITY_STATE")
-        .unwrap_or_else(|_| "./.trust-registry/capabilities.json".to_string());
+    let capability_state_path = config.server_config.capability_state_path();
     let base_repository = repository.clone();
     let query_repository = repository.clone();
     let capability_repository = repository.clone();

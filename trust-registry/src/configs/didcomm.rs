@@ -118,6 +118,30 @@ pub struct DidcommConfig {
     pub retry_config: DidDocumentRetryConfig,
 }
 
+impl DidcommConfig {
+    /// A REST-only configuration: no listener, no mediator, no DID document.
+    ///
+    /// Prefer this over `DidcommConfig::default()` when building a config
+    /// programmatically. The derived default leaves `transport_flags.didcomm`
+    /// at its own default of `true` while `is_enabled` is `false`, so the two
+    /// halves disagree — `/health` and the startup transport summary would
+    /// report DIDComm as served while nothing answers it. This constructor
+    /// keeps them consistent.
+    ///
+    /// It matches what [`Configs::load`] produces when `ENABLE_DIDCOMM=false`.
+    pub fn disabled() -> Self {
+        Self {
+            is_enabled: false,
+            transport_flags: TransportFlags {
+                rest: true,
+                didcomm: false,
+                tsp: false,
+            },
+            ..Default::default()
+        }
+    }
+}
+
 pub fn parse_profile_from_secrets_str(
     did_and_secrets_as_str: &str,
 ) -> Result<ProfileConfig, Box<dyn std::error::Error + Send + Sync>> {
@@ -125,12 +149,49 @@ pub fn parse_profile_from_secrets_str(
     Ok(profile_config)
 }
 
+/// Parse a boolean environment flag, defaulting when unset or empty.
+///
+/// Only `true`/`false` are accepted (case-insensitively): a typo like
+/// `ENABLE_TSP=yes` must not silently read as "off" and leave the operator
+/// believing TSP is running.
+fn env_flag(name: &str, default: bool) -> Result<bool, String> {
+    match std::env::var(name) {
+        Err(_) => Ok(default),
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" => Ok(default),
+            "true" => Ok(true),
+            "false" => Ok(false),
+            other => Err(format!("{name} must be 'true' or 'false' (got '{other}')")),
+        },
+    }
+}
+
+/// Read [`TransportFlags`] from the environment and reject incoherent
+/// combinations.
+///
+/// Defaults: `ENABLE_REST=true`, `ENABLE_DIDCOMM=true`, `ENABLE_TSP=false`.
+///
+/// Lives here rather than next to `TransportFlags` so that every environment
+/// read in the crate sits under `configs`. The struct itself is plain public
+/// data with a `Default`, so an embedding host constructs it directly and the
+/// environment never reaches it. `TransportFlags::validate` still runs on both
+/// paths, so a host cannot build an incoherent set either.
+pub fn transport_flags_from_env() -> Result<TransportFlags, String> {
+    let flags = TransportFlags {
+        rest: env_flag("ENABLE_REST", true)?,
+        didcomm: env_flag("ENABLE_DIDCOMM", true)?,
+        tsp: env_flag("ENABLE_TSP", false)?,
+    };
+    flags.validate()?;
+    Ok(flags)
+}
+
 #[async_trait::async_trait]
 impl Configs for DidcommConfig {
     async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Parsed before the DIDComm short-circuit so an invalid or empty
         // transport set is rejected even for a REST-only deployment.
-        let transport_flags = TransportFlags::from_env()?;
+        let transport_flags = transport_flags_from_env()?;
         if !transport_flags.didcomm {
             // No mediator profile is loaded on this path, so no DID document is
             // built either: a REST-only registry is reached by URL, not by DID.

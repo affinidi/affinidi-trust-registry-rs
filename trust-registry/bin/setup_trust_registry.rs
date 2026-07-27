@@ -400,7 +400,7 @@ pub fn setup_did_web_tr(
     // so a generated document and a served one describe the registry identically.
     // Consumers match on `type`, never the fragment, but two spellings for one
     // service is a needless trap for anyone diffing the two.
-    let transport_flags = TransportFlags::from_env()?;
+    let transport_flags = trust_registry::configs::didcomm::transport_flags_from_env()?;
 
     if transport_flags.didcomm {
         let endpoint = Endpoint::Url(Url::from_str(&mediator_did.clone())?);
