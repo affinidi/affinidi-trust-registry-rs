@@ -8,11 +8,14 @@ pub mod configs;
 pub mod dedup;
 pub mod didcomm;
 pub mod domain;
+pub mod embed;
 pub mod health;
 pub mod http;
 pub mod server;
 pub mod storage;
 pub mod trust_tasks;
+
+pub use embed::{TrustRegistry, TrustRegistryBuilder};
 
 #[cfg(feature = "tsp")]
 pub mod tsp;

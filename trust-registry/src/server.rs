@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::storage::repository::{TrustRecordAdminRepository, TrustRecordRepository};
+use crate::storage::repository::TrustRecordAdminRepository;
 use axum::{Json, Router, routing::get};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -9,7 +9,6 @@ use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    SharedData,
     configs::{DidcommConfig, TrustRegistryConfig},
     didcomm::listener::start_didcomm_listener,
     health::RegistryHealth,
@@ -160,36 +159,25 @@ fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
 }
 
 /// Build the top-level HTTP router (health check + TRQP application routes + CORS).
-fn build_router(
-    config: Arc<TrustRegistryConfig>,
-    repository: Arc<dyn TrustRecordRepository>,
-    query_dispatcher: crate::capabilities::DispatcherHandle,
-    verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
-    health: Arc<RegistryHealth>,
-) -> Router {
-    let shared_data = SharedData {
-        config: config.clone(),
-        service_start_timestamp: chrono::Utc::now(),
-        repository,
-        query_dispatcher,
-        verifier,
-    };
+///
+/// The service form of the router. The application routes themselves are the
+/// same ones [`crate::TrustRegistry::router`] hands an embedding host; what the
+/// service adds on top is `/health` and the CORS layer, both of which a host
+/// owns for itself.
+fn build_router(parts: &crate::embed::RegistryParts) -> Router {
+    let cors = build_cors_layer(&parts.config.server_config.cors_allowed_origins);
 
-    let cors = build_cors_layer(&config.server_config.cors_allowed_origins);
-
+    let health = parts.health.clone();
     let health_route = Router::new().route(
         "/health",
-        get({
+        get(move || {
             let health = health.clone();
-            move || {
-                let health = health.clone();
-                async move { Json(health.to_json()) }
-            }
+            async move { Json(health.to_json()) }
         }),
     );
 
     health_route
-        .merge(application_routes("", shared_data))
+        .merge(application_routes("", parts.shared_data()))
         .layer(cors)
 }
 
@@ -224,51 +212,36 @@ pub async fn serve(
     repository: Arc<dyn TrustRecordAdminRepository>,
     shutdown: CancellationToken,
 ) -> Result<ServerHandle, BoxError> {
+    let registry = crate::TrustRegistry::builder(config)
+        .repository(repository)
+        .shutdown(shutdown)
+        .build()
+        .await?;
+    serve_registry(registry).await
+}
+
+/// Run an assembled [`TrustRegistry`](crate::TrustRegistry) as a service.
+///
+/// The service half of the split: the registry itself binds nothing, and this
+/// adds the socket, the CORS layer, `/health` and the DIDComm listener on top.
+/// Reached via [`serve`] or [`crate::TrustRegistry::serve`].
+pub(crate) async fn serve_registry(
+    registry: crate::TrustRegistry,
+) -> Result<ServerHandle, BoxError> {
+    let parts = registry.into_parts();
+
     // Bind first so the caller (and the returned handle) learns the concrete
     // address before any request can race against it.
-    let listener = tokio::net::TcpListener::bind(&config.server_config.listen_address).await?;
+    let listener =
+        tokio::net::TcpListener::bind(&parts.config.server_config.listen_address).await?;
     let http_addr = listener.local_addr()?;
 
-    // Capability composition: one set owns the live dispatchers every
-    // transport reads through. No capabilities are compiled in yet — the
-    // framework ships wired but empty; the first module (git-trust) registers
-    // here.
-    let capability_state_path = config.server_config.capability_state_path();
-    let base_repository = repository.clone();
-    let query_repository = repository.clone();
-    let capability_repository = repository.clone();
-    let capabilities = crate::capabilities::CapabilitySet::new(
-        vec![
-            crate::capabilities::git_trust::definition(capability_repository)
-                .map_err(BoxError::from)?,
-        ],
-        Box::new(crate::capabilities::FileCapabilityStore::new(
-            capability_state_path,
-        )),
-        Box::new(move || crate::trust_tasks::build_dispatcher(base_repository.clone())),
-        Box::new(move || crate::trust_tasks::build_query_dispatcher(query_repository.clone())),
-    )
-    .map_err(BoxError::from)?;
-
-    // One Data-Integrity proof verifier, built here and shared by every
-    // transport, so they cannot end up verifying against different resolvers.
-    let verifier = crate::trust_tasks::build_verifier().await;
-
-    // The read-only HTTP surface upcasts from the admin repository.
-    let read_repository: Arc<dyn TrustRecordRepository> = repository.clone();
-    let health = Arc::new(RegistryHealth::new(config.didcomm_config.is_enabled));
-    let router = build_router(
-        config.clone(),
-        read_repository,
-        capabilities.query_dispatcher(),
-        verifier.clone(),
-        health.clone(),
-    );
+    let router = build_router(&parts);
 
     info!("HTTP server is starting on {http_addr}...");
-    debug!("CONFIGS: {:?}", &config);
+    debug!("CONFIGS: {:?}", &parts.config);
 
-    let http_shutdown = shutdown.clone();
+    let http_shutdown = parts.shutdown.clone();
     let http_task = tokio::spawn(async move {
         axum::serve(listener, router)
             .with_graceful_shutdown(async move { http_shutdown.cancelled().await })
@@ -276,27 +249,14 @@ pub async fn serve(
             .map_err(BoxError::from)
     });
 
-    // Write-path message-id dedup (R1.4). DIDComm and TSP are at-least-once, so
-    // without this a redelivered mutation is applied twice. Only the in-memory
-    // store exists so far — durable per-backend stores land next — so warn
-    // rather than let a deployment assume dedup survives a restart.
-    let dedup: Arc<dyn crate::dedup::MessageIdStore> =
-        Arc::new(crate::dedup::MemoryMessageIdStore::default());
-    if config.didcomm_config.is_enabled {
-        warn!(
-            "Message-id dedup is in-memory: duplicate writes are suppressed while this \
-             process lives, but a restart forgets them and a redelivery could re-apply."
-        );
-    }
-
-    let didcomm_task = if config.didcomm_config.is_enabled {
+    let didcomm_task = if parts.config.didcomm_config.is_enabled {
         Some(tokio::spawn(start_didcomm_server(
-            config.didcomm_config.clone(),
-            repository,
-            capabilities.dispatcher(),
-            dedup,
-            verifier,
-            shutdown.clone(),
+            parts.config.didcomm_config.clone(),
+            parts.repository.clone(),
+            parts.capabilities.dispatcher(),
+            parts.dedup.clone(),
+            parts.verifier.clone(),
+            parts.shutdown.clone(),
         )))
     } else {
         warn!("DIDComm server is disabled.");
@@ -305,10 +265,10 @@ pub async fn serve(
 
     Ok(ServerHandle {
         http_addr,
-        shutdown,
+        shutdown: parts.shutdown,
         http_task,
         didcomm_task,
-        health,
+        health: parts.health,
     })
 }
 
