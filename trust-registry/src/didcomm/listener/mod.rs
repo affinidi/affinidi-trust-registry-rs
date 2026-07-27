@@ -43,6 +43,56 @@ pub struct DefaultHandler {}
 
 impl MessageHandler for DefaultHandler {}
 
+/// Where the registry's DIDComm connection comes from.
+///
+/// The mediator permits **one websocket per DID**. That single constraint is
+/// why this enum exists: a host that already holds a mediator connection for
+/// the registry's DID cannot have the registry open a second one, so it must
+/// either lend its connection ([`SharedAtm`](Self::SharedAtm)) or keep the
+/// receive loop to itself ([`HostDriven`](Self::HostDriven)). It is the same
+/// constraint that makes TSP frames arrive multiplexed on the DIDComm pickup
+/// socket rather than on a socket of their own.
+#[derive(Default, Clone)]
+pub enum DidCommSource {
+    /// The registry opens and owns its own mediator connection, building a
+    /// `TDK`/`ATM` from `config.didcomm_config.profile_config`.
+    ///
+    /// The standalone default, and correct whenever the registry's DID is not
+    /// already connected elsewhere.
+    #[default]
+    Managed,
+    /// The host lends its existing connection. The registry attaches its
+    /// handlers and drives the receive loop on the host's socket, opening none
+    /// of its own.
+    ///
+    /// The host must **not** also be draining this profile's live stream:
+    /// frames go to whichever reader takes them first, so two readers on one
+    /// socket silently split the traffic. If the host needs to keep reading,
+    /// use [`HostDriven`](Self::HostDriven) instead.
+    SharedAtm {
+        atm: Arc<ATM>,
+        profile: Arc<ATMProfile>,
+    },
+    /// The registry never touches a socket. The host owns the receive loop and
+    /// feeds documents in through
+    /// [`TrustRegistry::route_didcomm_envelope`](crate::TrustRegistry::route_didcomm_envelope)
+    /// or [`TrustRegistry::task_handler`](crate::TrustRegistry::task_handler),
+    /// then sends the returned document back itself.
+    HostDriven,
+}
+
+impl std::fmt::Debug for DidCommSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Managed => write!(f, "Managed"),
+            Self::SharedAtm { profile, .. } => {
+                write!(f, "SharedAtm({})", profile.inner.alias)
+            }
+            Self::HostDriven => write!(f, "HostDriven"),
+        }
+    }
+}
+
 /// TSP routing context attached to a [`Listener`] when built with `--features
 /// tsp`. The dispatcher is shared (`Arc`) so per-frame handlers can be spawned
 /// without cloning the closures; the proof verifier is the same one the DIDComm
@@ -177,30 +227,60 @@ pub(crate) async fn start_one_did_listener(
     dispatcher: crate::capabilities::DispatcherHandle,
     dedup: Arc<dyn crate::dedup::MessageIdStore>,
     verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    source: DidCommSource,
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
-    // Check if DID document is available before building listener
-    check_did_document_availability(
-        &profile_config.did,
-        config.retry_config.max_attempts,
-        config.retry_config.initial_delay_secs,
-        config.retry_config.max_delay_secs,
-    )
-    .await?;
+    let handler = BaseHandler::build_from_arc(
+        repository,
+        config.clone(),
+        verifier.clone(),
+        dispatcher.clone(),
+        dedup.clone(),
+    );
 
-    let listener = Listener::build_listener(
-        profile_config.clone(),
-        &config.mediator_did,
-        BaseHandler::build_from_arc(
-            repository,
-            config.clone(),
-            verifier.clone(),
-            dispatcher.clone(),
-            dedup.clone(),
-        ),
-        shutdown,
-    )
-    .await?;
+    let listener = match source {
+        DidCommSource::Managed => {
+            // We are about to publish this DID as reachable, so refuse to start
+            // until its DID document actually resolves.
+            check_did_document_availability(
+                &profile_config.did,
+                config.retry_config.max_attempts,
+                config.retry_config.initial_delay_secs,
+                config.retry_config.max_delay_secs,
+            )
+            .await?;
+
+            Listener::build_listener(
+                profile_config.clone(),
+                &config.mediator_did,
+                handler,
+                shutdown,
+            )
+            .await?
+        }
+        DidCommSource::SharedAtm { atm, profile } => {
+            // The host already holds the connection, so there is no second
+            // socket to open — the mediator would not allow one anyway (one
+            // websocket per DID). Skipping `check_did_document_availability`
+            // with it: the host resolved this DID to authenticate the
+            // connection it is lending us, so the check is already answered.
+            info!(
+                "[profile = {}] Attaching to a host-provided mediator connection",
+                &profile.inner.alias
+            );
+            Listener::new(atm, profile, Arc::new(handler), shutdown)
+        }
+        DidCommSource::HostDriven => {
+            // Nothing to run: the host drives the receive loop and calls into
+            // the registry itself. Reaching here means the listener was started
+            // for a source that has no listener, which is a wiring bug.
+            warn!(
+                "DIDComm listener asked to start with DidCommSource::HostDriven; \
+                 the host owns the receive loop, so nothing will be started"
+            );
+            return Ok(());
+        }
+    };
 
     info!(
         "[profile = {}] Listener built",
@@ -248,6 +328,7 @@ pub(crate) async fn start_didcomm_listener(
     dispatcher: crate::capabilities::DispatcherHandle,
     dedup: Arc<dyn crate::dedup::MessageIdStore>,
     verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    source: DidCommSource,
     shutdown: CancellationToken,
 ) -> Result<Result<(), DIDCommError>, JoinError> {
     let profile_config = config.profile_config.clone();
@@ -260,6 +341,7 @@ pub(crate) async fn start_didcomm_listener(
         dispatcher,
         dedup,
         verifier,
+        source,
         shutdown,
     ));
 

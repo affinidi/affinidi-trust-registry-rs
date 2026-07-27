@@ -63,6 +63,7 @@ use crate::capabilities::{
 };
 use crate::configs::TrustRegistryConfig;
 use crate::dedup::{MemoryMessageIdStore, MessageIdStore};
+use crate::didcomm::listener::DidCommSource;
 use crate::health::RegistryHealth;
 use crate::http::application_routes;
 use crate::storage::repository::{TrustRecordAdminRepository, TrustRecordRepository};
@@ -85,6 +86,7 @@ pub struct TrustRegistry {
     verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     dedup: Arc<dyn MessageIdStore>,
     health: Arc<RegistryHealth>,
+    didcomm_source: DidCommSource,
     shutdown: CancellationToken,
     service_start_timestamp: DateTime<Utc>,
 }
@@ -99,6 +101,7 @@ impl TrustRegistry {
             capability_store: None,
             dedup: None,
             verifier: None,
+            didcomm_source: None,
             shutdown: None,
         }
     }
@@ -156,6 +159,30 @@ impl TrustRegistry {
             self.verifier.clone(),
         )
         .with_dedup(self.dedup.clone())
+    }
+
+    /// Route a Trust Task that arrived over DIDComm on a socket the **host**
+    /// owns ([`DidCommSource::HostDriven`]).
+    ///
+    /// `body` is the inbound message's body — the
+    /// `trusttasks.org/binding/didcomm/0.1` envelope — and `sender_did` is the
+    /// authcrypt-verified sender. Handles party resolution and the full apply
+    /// path, and returns the document to pack and send back.
+    ///
+    /// `None` means the body was not a usable Trust Task document: there is no
+    /// thread or issuer to address an error to, so drop it rather than reply.
+    pub async fn route_didcomm_envelope(
+        &self,
+        body: serde_json::Value,
+        sender_did: &str,
+    ) -> Option<Result<trust_tasks_rs::TrustTask<serde_json::Value>, trust_tasks_rs::ErrorResponse>>
+    {
+        crate::didcomm::handlers::trust_tasks::route_envelope_body(
+            &self.task_handler(),
+            body,
+            sender_did,
+        )
+        .await
     }
 
     /// A read-only Trust Task handler over the query dispatcher, with no dedup
@@ -237,6 +264,7 @@ impl TrustRegistry {
             verifier: self.verifier,
             dedup: self.dedup,
             health: self.health,
+            didcomm_source: self.didcomm_source,
             shutdown: self.shutdown,
             service_start_timestamp: self.service_start_timestamp,
         }
@@ -252,6 +280,7 @@ pub(crate) struct RegistryParts {
     pub(crate) verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     pub(crate) dedup: Arc<dyn MessageIdStore>,
     pub(crate) health: Arc<RegistryHealth>,
+    pub(crate) didcomm_source: DidCommSource,
     pub(crate) shutdown: CancellationToken,
     pub(crate) service_start_timestamp: DateTime<Utc>,
 }
@@ -281,6 +310,7 @@ pub struct TrustRegistryBuilder {
     capability_store: Option<Box<dyn CapabilityStateStore>>,
     dedup: Option<Arc<dyn MessageIdStore>>,
     verifier: Option<Arc<dyn trust_tasks_rs::DynProofVerifier>>,
+    didcomm_source: Option<DidCommSource>,
     shutdown: Option<CancellationToken>,
 }
 
@@ -338,6 +368,21 @@ impl TrustRegistryBuilder {
     /// cache it already maintains.
     pub fn verifier(mut self, verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>) -> Self {
         self.verifier = Some(verifier);
+        self
+    }
+
+    /// Where the DIDComm connection comes from.
+    ///
+    /// Defaults to [`DidCommSource::Managed`] — the registry opens its own
+    /// mediator connection, as the standalone service does. A host that already
+    /// holds a connection for the registry's DID **must** change this: the
+    /// mediator permits one websocket per DID, so a second one cannot be
+    /// opened. Lend the connection with [`DidCommSource::SharedAtm`], or keep
+    /// the receive loop and use [`DidCommSource::HostDriven`].
+    ///
+    /// Only consulted when `config.didcomm_config.is_enabled`.
+    pub fn didcomm_source(mut self, source: DidCommSource) -> Self {
+        self.didcomm_source = Some(source);
         self
     }
 
@@ -409,6 +454,7 @@ impl TrustRegistryBuilder {
             capabilities,
             verifier,
             dedup,
+            didcomm_source: self.didcomm_source.unwrap_or_default(),
             shutdown: self.shutdown.unwrap_or_default(),
             service_start_timestamp: Utc::now(),
         })
@@ -466,6 +512,55 @@ mod tests {
         // The injected memory store was used, so nothing touched the path the
         // config names.
         assert!(!std::path::Path::new("/tmp/tr-embed-test/capabilities.json").exists());
+    }
+
+    /// Default must stay `Managed`, or a standalone build would silently stop
+    /// opening its own mediator connection.
+    #[tokio::test]
+    async fn didcomm_source_defaults_to_managed() {
+        let registry = registry().await;
+        assert!(matches!(
+            registry.into_parts().didcomm_source,
+            DidCommSource::Managed
+        ));
+    }
+
+    /// `HostDriven` is the escape hatch for a host that already holds the one
+    /// websocket the mediator allows for this DID; it must survive to the
+    /// service layer, which is what decides not to start a listener.
+    #[tokio::test]
+    async fn host_driven_source_reaches_the_service_layer() {
+        let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::new());
+        let registry = TrustRegistry::builder(TrustRegistryConfig::embedded("/tmp/tr-embed-test"))
+            .repository(repository)
+            .capability_store(Box::new(MemoryCapabilityStore::default()))
+            .didcomm_source(DidCommSource::HostDriven)
+            .build()
+            .await
+            .expect("builds");
+
+        assert!(matches!(
+            registry.into_parts().didcomm_source,
+            DidCommSource::HostDriven
+        ));
+    }
+
+    /// A host driving its own socket gets the same envelope contract the
+    /// DIDComm binding uses — including dropping (not replying to) a body that
+    /// is not a Trust Task document at all.
+    #[tokio::test]
+    async fn route_didcomm_envelope_drops_an_unusable_body() {
+        let registry = registry().await;
+        let outcome = registry
+            .route_didcomm_envelope(
+                serde_json::json!({"not": "a trust task"}),
+                "did:example:peer",
+            )
+            .await;
+        assert!(
+            outcome.is_none(),
+            "an undecodable body has no thread or issuer to address an error to"
+        );
     }
 
     #[tokio::test]

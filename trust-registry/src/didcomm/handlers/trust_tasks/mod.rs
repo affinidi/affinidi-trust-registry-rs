@@ -29,9 +29,9 @@ use async_trait::async_trait;
 
 use serde::Serialize;
 use serde_json::Value;
-use tracing::{error, info, warn};
+use tracing::{error, warn};
 use trust_tasks_didcomm::ENVELOPE_TYPE;
-use trust_tasks_rs::{RejectReason, TransportHandler, TrustTask};
+use trust_tasks_rs::{ErrorResponse, RejectReason, TransportHandler, TrustTask};
 use uuid::Uuid;
 
 use trust_tasks_didcomm::DidcommHandler as TtDidcommHandler;
@@ -80,6 +80,51 @@ fn new_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+/// Decode an inbound DIDComm envelope body and route it through `tasks`.
+///
+/// The DIDComm-specific half of handling a Trust Task: parse the body into a
+/// framework document and resolve the framework's parties (§4.8.1) from the
+/// authcrypt-verified sender. Everything after that is the shared handler.
+///
+/// `None` means the body is not a usable Trust Task document: there is no
+/// thread or issuer to address a conformant error response to, so the caller
+/// should log and drop it rather than reply.
+///
+/// Public because a host that owns the mediator socket itself
+/// ([`DidCommSource::HostDriven`](crate::didcomm::listener::DidCommSource::HostDriven))
+/// needs exactly this, and should not have to reimplement the envelope
+/// contract. Reached via
+/// [`TrustRegistry::route_didcomm_envelope`](crate::TrustRegistry::route_didcomm_envelope).
+pub async fn route_envelope_body(
+    tasks: &TaskHandler,
+    body: Value,
+    sender_did: &str,
+) -> Option<Result<TrustTask<Value>, ErrorResponse>> {
+    let doc: TrustTask<Value> = match serde_json::from_value(body) {
+        Ok(doc) => doc,
+        Err(e) => {
+            warn!("Dropping malformed Trust Task envelope from {sender_did}: {e}");
+            return None;
+        }
+    };
+
+    // §4.8.1 party resolution: authcrypt sender -> issuer, us -> recipient.
+    let transport = TtDidcommHandler::new(
+        Some(tasks.my_did().to_string()),
+        Some(sender_did.to_string()),
+    );
+    if let Err(consistency) = transport.resolve_parties(&doc) {
+        // In-band issuer contradicts the transport-authenticated sender.
+        return Some(Err(doc.reject_with_recipient(
+            new_id(),
+            RejectReason::from(consistency),
+            Some(sender_did.to_string()),
+        )));
+    }
+
+    Some(tasks.handle(doc, Some(sender_did)).await)
+}
+
 #[async_trait]
 impl ProtocolHandler for TrustTasksHandler {
     fn get_supported_inbound_message_types(&self) -> Vec<String> {
@@ -92,47 +137,17 @@ impl ProtocolHandler for TrustTasksHandler {
         message: Message,
         _meta: UnpackMetadata,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // 1. Decode the envelope body into a framework document.
-        let doc: TrustTask<Value> = match serde_json::from_value(message.body) {
-            Ok(doc) => doc,
-            Err(e) => {
-                // A malformed envelope has no usable thread/issuer to address a
-                // conformant error response to; log and drop.
-                warn!(
-                    "[profile = {}] Dropping malformed Trust Task envelope from {}: {}",
-                    ctx.profile.inner.alias, ctx.sender_did, e
-                );
-                return Ok(());
-            }
+        // Decode + resolve parties + route. The same function a host driving
+        // its own mediator socket calls, so the two paths cannot diverge on
+        // the envelope contract.
+        let Some(outcome) = route_envelope_body(&self.tasks, message.body, &ctx.sender_did).await
+        else {
+            // A malformed envelope has no usable thread/issuer to address a
+            // conformant error response to; already logged, so just drop it.
+            return Ok(());
         };
 
-        // 2. §4.8.1 party resolution: authcrypt sender -> issuer, us -> recipient.
-        let transport = TtDidcommHandler::new(
-            Some(ctx.profile.inner.did.clone()),
-            Some(ctx.sender_did.clone()),
-        );
-        if let Err(consistency) = transport.resolve_parties(&doc) {
-            // In-band issuer contradicts the transport-authenticated sender.
-            let err = doc.reject_with_recipient(
-                new_id(),
-                RejectReason::from(consistency),
-                Some(ctx.sender_did.clone()),
-            );
-            self.send(ctx, &err).await;
-            return Ok(());
-        }
-
-        info!(
-            "[profile = {}, type = {}, from = {}] Trust Task",
-            ctx.profile.inner.alias,
-            doc.type_uri.slug(),
-            ctx.sender_did
-        );
-
-        // 3. Everything else — freshness, the write ACL, proof verification,
-        // DID rotation and dispatch — is transport-agnostic and lives in the
-        // shared handler.
-        match self.tasks.handle(doc, Some(&ctx.sender_did)).await {
+        match outcome {
             Ok(response) => self.send(ctx, &response).await,
             Err(err) => self.send(ctx, &err).await,
         }

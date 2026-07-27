@@ -188,12 +188,15 @@ async fn start_didcomm_server(
     dispatcher: crate::capabilities::DispatcherHandle,
     dedup: Arc<dyn crate::dedup::MessageIdStore>,
     verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    source: crate::didcomm::listener::DidCommSource,
     shutdown: CancellationToken,
 ) -> Result<(), BoxError> {
     // `start_didcomm_listener` returns the listener task's own result nested
     // inside the join result; the inner listener outcome is discarded here.
-    let _ =
-        start_didcomm_listener(config, repository, dispatcher, dedup, verifier, shutdown).await?;
+    let _ = start_didcomm_listener(
+        config, repository, dispatcher, dedup, verifier, source, shutdown,
+    )
+    .await?;
     Ok(())
 }
 
@@ -249,18 +252,35 @@ pub(crate) async fn serve_registry(
             .map_err(BoxError::from)
     });
 
-    let didcomm_task = if parts.config.didcomm_config.is_enabled {
-        Some(tokio::spawn(start_didcomm_server(
+    use crate::didcomm::listener::DidCommSource;
+
+    let didcomm_task = match (
+        parts.config.didcomm_config.is_enabled,
+        &parts.didcomm_source,
+    ) {
+        (false, _) => {
+            warn!("DIDComm server is disabled.");
+            None
+        }
+        // The host drives the receive loop and calls into the registry itself,
+        // so there is no listener to start — but the write path is up, which is
+        // why health is not degraded here.
+        (true, DidCommSource::HostDriven) => {
+            info!(
+                "DIDComm is host-driven: the host owns the mediator socket and routes \
+                 inbound documents through the registry itself."
+            );
+            None
+        }
+        (true, source) => Some(tokio::spawn(start_didcomm_server(
             parts.config.didcomm_config.clone(),
             parts.repository.clone(),
             parts.capabilities.dispatcher(),
             parts.dedup.clone(),
             parts.verifier.clone(),
+            source.clone(),
             parts.shutdown.clone(),
-        )))
-    } else {
-        warn!("DIDComm server is disabled.");
-        None
+        ))),
     };
 
     Ok(ServerHandle {
