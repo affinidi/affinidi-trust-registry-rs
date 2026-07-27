@@ -556,11 +556,18 @@ should turn them off and add back only what it uses:
 trust-registry = { version = "0.9", default-features = false, features = ["storage-fjall"] }
 ```
 
-That drops the AWS SDKs, Redis, `serde_dynamo`, `dotenvy` and `crossterm` —
-roughly 750 crates down to 680. (`csv` and `clap` still appear, but transitively
-via `affinidi-tdk`, not as the registry's own dependencies.) The example above
-builds with **no features at all**, using the dependency-free in-memory
-`LocalStorage`.
+That drops the AWS SDKs, Redis, `serde_dynamo`, `dotenvy`, `crossterm` and
+`vti-secrets` — roughly 750 crates down to 620. (`csv` and `clap` still appear,
+but transitively via `affinidi-tdk`, not as the registry's own dependencies.)
+The example above builds with **no features at all**, using the
+dependency-free in-memory `LocalStorage`.
+
+`vti-secrets` in particular is worth leaving off when you can: it is a
+workspace member of `verifiable-trust-infrastructure`, so a VTC that enables a
+`secrets-*` feature ends up with both its own path copy and a crates.io copy of
+that crate (and of `vti-common` beneath it). With no `secrets-*` feature the
+registry has no secret store, which is the right shape when the host supplies
+the identity — and every shared crate then resolves to exactly one copy.
 
 ### What the registry never does to its host
 
@@ -589,7 +596,7 @@ above.
 
 | Feature          | Default | Enables                                                                                                                       |
 | ---------------- | :-----: | ----------------------------------------------------------------------------------------------------------------------------- |
-| `secrets-config` |   ✅    | Inline / plaintext-file secret store for the profile bundle (no extra dependencies).                                          |
+| `secrets-config` |   ✅    | Inline / plaintext-file secret store for the profile bundle. Pulls `vti-secrets`; with no `secrets-*` feature the registry has no secret store at all. |
 | `standalone`     |   ✅    | `server::start()` — the process-owning entrypoint (`.env`, global tracing, `process::exit`). Required by the `trust-registry` binary; an embedded registry does not need it. |
 | `storage-csv`    |   ✅    | CSV file storage backend (`TR_STORAGE_BACKEND=csv`, the standalone default).                                                  |
 | `storage-ddb`    |   ✅    | DynamoDB storage backend (`TR_STORAGE_BACKEND=dynamodb`).                                                                     |

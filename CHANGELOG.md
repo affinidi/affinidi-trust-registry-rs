@@ -45,8 +45,19 @@ Missing versions simply reflect internal deployment‑related patches.
   `storage-ddb`, `storage-redis`, `loaders-aws` and `standalone` features join
   the existing `storage-fjall`, so an embedded registry can build with
   `default-features = false` and skip the AWS SDKs, Redis, `serde_dynamo`,
-  `dotenvy` and `crossterm` (~750 crates to ~680). Standalone builds are
-  unchanged.
+  `dotenvy`, `crossterm` and `vti-secrets` (~750 crates to ~620). Standalone
+  builds are unchanged.
+
+- **`vti-secrets` is optional, behind the `secrets-*` features.** It is a
+  workspace member of `verifiable-trust-infrastructure`, so a VTC embedding the
+  registry would otherwise carry both its own path copy and a crates.io copy of
+  it (and of `vti-common` beneath it). `vta` and `dev-tools` now imply
+  `secrets-config`, since both genuinely need a secret store.
+
+- **`didwebvh-rs` 0.1 → 0.6**, matching the rest of the ecosystem and removing
+  the last duplicate `affinidi-did-common` / `affinidi-data-integrity` chain
+  from the graph. `setup_did_web_tr` is now `async`, because 0.6 made
+  `create_log_entry` async.
 
 - **One shared apply path across every transport.** The
   `validate_basic` → write-ACL → proof-verification → dispatch sequence, and

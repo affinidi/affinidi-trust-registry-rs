@@ -39,6 +39,12 @@ The ToIP Service Profile struct is `{uri, profile|definition, integrity?}`,
 multihash. Its own spec text states "An array of structs is not valid" — so one
 service entry per binding, always.
 
+We use `https://trustoverip.org/profiles/trqp/v2` as the profile URI. **The
+spec's own example says `.../profiles/trp/v2`** — a leftover from when the
+protocol was still called TRP. Neither URI resolves (both 404), so nothing
+depends on the choice today; we name the protocol as it is now called. See §7
+for the upstream fix that would remove the divergence.
+
 ## 2. Trust Registry DID document
 
 Advertises what this process actually serves. One entry per transport.
@@ -58,7 +64,7 @@ Advertises what this process actually serves. One entry per transport.
       "type": ["TRQPRest", "TrustRegistry"],
       "serviceEndpoint": {
         "uri": "https://registry.example",
-        "profile": "https://trustoverip.org/profiles/trp/v2"
+        "profile": "https://trustoverip.org/profiles/trqp/v2"
       }
     },
     {
@@ -115,7 +121,7 @@ type, `uri` holds a **DID** instead of an HTTPS URL. Legal — the ToIP schema i
       "type": "TrustRegistry",
       "serviceEndpoint": {
         "uri": "did:webvh:QmRegistryScid:registry.example",
-        "profile": "https://trustoverip.org/profiles/trp/v2"
+        "profile": "https://trustoverip.org/profiles/trqp/v2"
       }
     },
     {
@@ -206,7 +212,7 @@ If they cannot be updated in lockstep, the zero-breakage path is to leave
   "type": "TrustRegistry",
   "serviceEndpoint": {
     "uri": "https://registry.example",
-    "profile": "https://trustoverip.org/profiles/trp/v2"
+    "profile": "https://trustoverip.org/profiles/trqp/v2"
   }
 }
 ```
@@ -221,6 +227,9 @@ endpoints, and the existing first-entry-of-a-type-wins rule handles it.
   type, and that the Service Profile spec it depends on is still Pre-Draft.
 - The ToIP Service Profile example has a JSON syntax error (unterminated
   `"integrity: "`, trailing comma) — worth a PR regardless.
+- Same PR should rename the example's profile URI `.../profiles/trp/v2` →
+  `.../profiles/trqp/v2`. The protocol has been TRQP since v2; `trp` reads as a
+  different, older thing. Until that lands we diverge from the example (§1).
 - Registering `TRQPRest`/`TSPTransport` in w3c/did-extensions is the other
   route, but [issue #125](https://github.com/w3c/did-extensions/issues/125)
   argues that registry should not hold service types at all, so the ToIP path

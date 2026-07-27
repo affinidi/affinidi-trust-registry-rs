@@ -10,20 +10,27 @@ use crate::didcomm::did_document::{TransportFlags, build_did_document, validate_
 use super::{
     Configs,
     loaders::{environment::*, load},
-    secret_store,
 };
 
 /// Load the profile bundle from a configured secret-store backend, if any.
 ///
 /// Returns `Ok(None)` when no backend is configured (deployment uses inline
 /// `PROFILE_CONFIG`) or the backend holds no bundle yet, so the caller falls
-/// back to `PROFILE_CONFIG`.
+/// back to `PROFILE_CONFIG`. Also `Ok(None)` when no `secrets-*` feature is
+/// compiled in, which is the same "fall back to `PROFILE_CONFIG`" outcome.
 async fn load_profile_from_secret_store() -> Result<Option<String>, String> {
-    let cfg = secret_store::secrets_config_from_env();
-    if !secret_store::backend_selected(&cfg) {
-        return Ok(None);
+    #[cfg(feature = "secrets")]
+    {
+        use super::secret_store;
+
+        let cfg = secret_store::secrets_config_from_env();
+        if !secret_store::backend_selected(&cfg) {
+            return Ok(None);
+        }
+        secret_store::read_profile(&cfg, &secret_store::data_dir()).await
     }
-    secret_store::read_profile(&cfg, &secret_store::data_dir()).await
+    #[cfg(not(feature = "secrets"))]
+    Ok(None)
 }
 
 /// Fetch the profile bundle from a configured VTA (feature `vta`); `Ok(None)`
