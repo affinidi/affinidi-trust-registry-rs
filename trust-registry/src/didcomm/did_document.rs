@@ -193,15 +193,36 @@ pub fn validate_public_url(url: &str) -> Result<(), String> {
         return Ok(());
     }
     if let Some(rest) = url.strip_prefix("http://") {
+        // A bracketed IPv6 literal contains ':' itself, so its host is
+        // delimited by the closing bracket rather than by the port separator.
+        // Matching `rest.starts_with("[::1]")` instead — as this did — also
+        // accepted `http://[::1].evil.com`, an entirely different host, which
+        // would have been advertised as a cleartext TRQP endpoint. Same class
+        // of bug as the named-host arm below already avoids.
+        if let Some(after) = rest.strip_prefix('[') {
+            return match after.split_once(']') {
+                Some((host, tail))
+                    if host == "::1" && (tail.is_empty() || tail.starts_with([':', '/', '?'])) =>
+                {
+                    Ok(())
+                }
+                _ => Err(cleartext_rejection(url)),
+            };
+        }
         let host = rest.split(['/', ':', '?']).next().unwrap_or("");
-        if host == "localhost" || host == "127.0.0.1" || rest.starts_with("[::1]") {
+        if host == "localhost" || host == "127.0.0.1" {
             return Ok(());
         }
     }
-    Err(format!(
+    Err(cleartext_rejection(url))
+}
+
+fn cleartext_rejection(url: &str) -> String {
+    format!(
         "TR_PUBLIC_URL must be https:// (got '{url}'); cleartext TRQP is spoofable by an \
-         on-path attacker. http:// is allowed only to loopback for local dev."
-    ))
+         on-path attacker. http:// is allowed only to loopback (localhost, 127.0.0.1, \
+         [::1]) for local dev."
+    )
 }
 
 /// Build the service array for a Trust Registry DID document.
@@ -665,10 +686,49 @@ mod tests {
     }
 
     /// `http://localhost.evil.com` must not pass by prefix match.
+    ///
+    /// The bracketed IPv6 cases are the arm this test did not cover:
+    /// `rest.starts_with("[::1]")` accepted `http://[::1].evil.com`, a wholly
+    /// different host, which would then have been advertised in the DID
+    /// document as a cleartext TRQP endpoint. A bracketed literal ends at its
+    /// closing bracket, and only a port, path or query may follow.
     #[test]
     fn loopback_exception_does_not_leak_to_lookalike_hosts() {
-        assert!(validate_public_url("http://localhost.evil.com").is_err());
-        assert!(validate_public_url("http://127.0.0.1.evil.com").is_err());
+        for url in [
+            "http://localhost.evil.com",
+            "http://localhostevil.com",
+            "http://127.0.0.1.evil.com",
+            "http://[::1].evil.com",
+            "http://[::1]evil.com",
+            "http://[::1]@evil.com",
+            "http://[::2]:3232",
+            // Unterminated bracket: not a host we can vouch for.
+            "http://[::1",
+        ] {
+            assert!(
+                validate_public_url(url).is_err(),
+                "a lookalike host must not inherit the loopback exception: {url}"
+            );
+        }
+    }
+
+    /// The forms the exception exists to permit must keep working.
+    #[test]
+    fn every_loopback_form_stays_accepted() {
+        for url in [
+            "http://localhost",
+            "http://localhost:3232",
+            "http://localhost/trust-tasks",
+            "http://127.0.0.1:3232",
+            "http://[::1]",
+            "http://[::1]:3232",
+            "http://[::1]/trust-tasks",
+        ] {
+            assert!(
+                validate_public_url(url).is_ok(),
+                "local dev must stay usable: {url}"
+            );
+        }
     }
 
     // --- TransportFlags -------------------------------------------------
