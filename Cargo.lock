@@ -103,9 +103,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-data-integrity"
-version = "0.7.7"
+version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ab562d8232a2837c8fd23c06688ac5dc3ed2f8fdf5b503344b50677d3ef2a38"
+checksum = "bf2bf693c0bb26ea6c0a0d04ea1391500d694cda95d98c7918354e29292e566d"
 dependencies = [
  "affinidi-crypto",
  "affinidi-did-common",
@@ -370,7 +370,7 @@ dependencies = [
  "trust-tasks-rs",
  "url",
  "uuid",
- "vta-sdk 0.20.6",
+ "vta-sdk 0.20.7",
 ]
 
 [[package]]
@@ -6328,9 +6328,9 @@ dependencies = [
 
 [[package]]
 name = "schemars"
-version = "1.2.1"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
+checksum = "687274d293b6cdc6e73e0fee520bf2049650090d7164f87672d212a3c530cf4a"
 dependencies = [
  "dyn-clone",
  "ref-cast",
@@ -6562,7 +6562,7 @@ dependencies = [
  "indexmap 1.9.3",
  "indexmap 2.14.0",
  "schemars 0.9.0",
- "schemars 1.2.1",
+ "schemars 1.2.2",
  "serde_core",
  "serde_json",
  "serde_with_macros",
@@ -7596,9 +7596,9 @@ dependencies = [
 
 [[package]]
 name = "toml_parser"
-version = "1.1.2+spec-1.1.0"
+version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
+checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
 ]
@@ -7919,9 +7919,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-rs"
-version = "0.2.39"
+version = "0.2.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7f80508c771f601bcd02b85d0a6d0890bdcee07b305d6afa9dff9d5c1f57f2c"
+checksum = "0922fbd2ff5bf3813d119288e420c94c10a33dbe46e5bd2beb04b24d7cc927d0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -8259,9 +8259,9 @@ dependencies = [
 
 [[package]]
 name = "vta-sdk"
-version = "0.20.6"
+version = "0.20.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7ce960b92415dfe44977c2012033b7f79ae46a840d4bb1cae94edaf261a0caa"
+checksum = "6305d8cb4cc46ec84ad779543f0826ba76c831855fa9510ab30e9aea72270532"
 dependencies = [
  "affinidi-crypto",
  "affinidi-did-resolver-cache-sdk",
@@ -8292,9 +8292,9 @@ dependencies = [
 
 [[package]]
 name = "vti-common"
-version = "0.11.27"
+version = "0.11.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e1b4059bacdbb67d8d4ed5dc962f0184cb52933fddb10c865d99b5eb43617dd"
+checksum = "7a5a870573e95619fe79e14b004b8a99321dc8f8d3961b2f8d8546514160f200"
 dependencies = [
  "affinidi-data-integrity",
  "affinidi-did-resolver-cache-sdk",
@@ -8324,7 +8324,7 @@ dependencies = [
  "trust-tasks-capability-client",
  "trust-tasks-rs",
  "uuid",
- "vta-sdk 0.20.6",
+ "vta-sdk 0.20.7",
 ]
 
 [[package]]

@@ -28,6 +28,7 @@ use sha256::digest;
 use std::str::FromStr;
 use trust_registry::didcomm::did_document::{
     DIDCOMM_SERVICE_FRAGMENT, DIDCOMM_SERVICE_TYPE, REST_SERVICE_FRAGMENT, REST_SERVICE_TYPE,
+    TRQP_PROFILE_URI, TRUST_REGISTRY_SERVICE_FRAGMENT, TRUST_REGISTRY_SERVICE_TYPE,
     TSP_SERVICE_FRAGMENT, TSP_SERVICE_TYPE, TransportFlags, validate_public_url,
 };
 use url::Url;
@@ -427,13 +428,35 @@ pub async fn setup_did_web_tr(
         {
             Some(public_url) => {
                 validate_public_url(&public_url)?;
-                let rest_endpoint = Endpoint::Url(Url::from_str(public_url.trim_end_matches('/'))?);
+                let url = public_url.trim_end_matches('/');
+                let rest_endpoint = Endpoint::Url(Url::from_str(url)?);
                 did_document.service.push(
                     ServiceBuilder::new(REST_SERVICE_TYPE, rest_endpoint)
                         .id_url(Url::parse(
                             &[tr_did.to_string(), REST_SERVICE_FRAGMENT.to_string()].concat(),
                         )?)
                         .build(),
+                );
+
+                // The same surface under the ToIP profile's type. Kept in step
+                // with `build_services` deliberately: two builders emitting
+                // different documents for one registry is the drift
+                // `TransportFlags` exists to prevent, and a consumer that finds
+                // `TrustRegistry` from one and not the other would conclude the
+                // registry's capabilities changed when only its bootstrap did.
+                did_document.service.push(
+                    ServiceBuilder::new(
+                        TRUST_REGISTRY_SERVICE_TYPE,
+                        Endpoint::Map(json!({ "uri": url, "profile": TRQP_PROFILE_URI })),
+                    )
+                    .id_url(Url::parse(
+                        &[
+                            tr_did.to_string(),
+                            TRUST_REGISTRY_SERVICE_FRAGMENT.to_string(),
+                        ]
+                        .concat(),
+                    )?)
+                    .build(),
                 );
             }
             None => println!(
