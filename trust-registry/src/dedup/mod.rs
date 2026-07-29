@@ -339,12 +339,12 @@ mod tests {
     use super::*;
     use trust_tasks_rs::TrustTask;
 
-    const CREATE: &str = "https://trusttasks.org/spec/registry/record/create/0.1";
+    const PUT: &str = "https://trusttasks.org/spec/registry/record/put/0.1";
 
     fn write_doc(id: &str, issuer: Option<&str>) -> TrustTask<Value> {
         let mut doc = TrustTask::new(
             id.to_string(),
-            CREATE.parse().expect("valid type uri"),
+            PUT.parse().expect("valid type uri"),
             serde_json::json!({}),
         );
         doc.issuer = issuer.map(str::to_string);
@@ -548,7 +548,7 @@ mod tests {
         let record = serde_json::to_value(sample_record()).expect("record serialises");
         let mut doc = TrustTask::new(
             id.to_string(),
-            CREATE.parse().expect("valid type uri"),
+            PUT.parse().expect("valid type uri"),
             serde_json::json!({ "record": record }),
         );
         doc.issuer = Some(issuer.to_string());

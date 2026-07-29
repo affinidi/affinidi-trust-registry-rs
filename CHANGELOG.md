@@ -12,6 +12,32 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [0.10.0] – 2026‑07‑29
+
+### Changed
+
+- **The record CRUD collapses to `registry/record/put` + `registry/record/query`**
+  (affinidi/affinidi-trust-registry-rs#120, clean cutover — pre-production, no
+  dual-accept). `put` is create-or-replace at the record's four-part key, with
+  an optional `expectedExisting` assertion recovering strict create-only /
+  update-only semantics (the `vault/upsert` precedent); `query` is an exact
+  fetch when all four key parts are supplied (notFound on a miss) and a
+  filtered, cursor-paginated enumeration otherwise — closing the pagination gap
+  `record/list` conceded. The four superseded Trust Task URIs are **removed**
+  and no longer routed:
+  - `https://trusttasks.org/spec/registry/record/create/0.1`
+  - `https://trusttasks.org/spec/registry/record/update/0.1`
+  - `https://trusttasks.org/spec/registry/record/read/0.1`
+  - `https://trusttasks.org/spec/registry/record/list/0.1`
+
+  `registry/record/delete`, `registry/recognition` and `registry/authorization`
+  are unchanged (the TRQP pair deliberately stays split, mirroring TRQP v2.0's
+  two endpoints).
+
+- **`registry/did/rotate/0.1` now has a published spec** in the Trust Tasks
+  registry (it was previously a code-only wire contract); the local payload
+  types are unchanged and match it.
+
 ## [0.9.0] – 2026‑07‑25
 
 ### Added

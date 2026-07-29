@@ -1,6 +1,6 @@
 //! Data Integrity proof verification for the write-path Trust Tasks.
 //!
-//! The record-mutation tasks (`registry/record/{create,update,delete}`) declare
+//! The record-mutation tasks (`registry/record/{put,delete}`) declare
 //! `IS_PROOF_REQUIRED`. The DIDComm and TSP bindings already reject a write with
 //! no in-band `proof` (presence); this module adds the cryptographic step —
 //! verifying the Data Integrity proof against the issuer's resolved key — so a
@@ -24,8 +24,7 @@ use trust_tasks_rs::{DynProofVerifier, RejectReason, TrustTask, erase_verifier};
 pub fn is_write_slug(slug: &str) -> bool {
     matches!(
         slug,
-        "registry/record/create"
-            | "registry/record/update"
+        "registry/record/put"
             | "registry/record/delete"
             | "registry/did/rotate"
             | "governance/capability/enable"
@@ -113,7 +112,7 @@ mod tests {
         // A did:key verifier rejects a proof whose verificationMethod is not a
         // resolvable did:key with a valid signature.
         let verifier = erase_verifier(Verifier::for_did_key());
-        let doc = doc_with_dummy_proof("https://trusttasks.org/spec/registry/record/create/0.1");
+        let doc = doc_with_dummy_proof("https://trusttasks.org/spec/registry/record/put/0.1");
         assert!(matches!(
             verify_write_proof(&verifier, &doc).await,
             Err(RejectReason::ProofInvalid { .. })

@@ -293,10 +293,7 @@ mod tests {
     }
 
     fn write_doc(proof: bool) -> TrustTask<Value> {
-        doc_with(
-            "https://trusttasks.org/spec/registry/record/create/0.1",
-            proof,
-        )
+        doc_with("https://trusttasks.org/spec/registry/record/put/0.1", proof)
     }
 
     #[test]
