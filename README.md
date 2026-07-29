@@ -633,9 +633,8 @@ message shape regardless of carrier.
 | ----------------------------------------------------- | ----- | ----------------------------- |
 | `registry/recognition/0.1`                            | read  | none (TRQP recognition query) |
 | `registry/authorization/0.1`                          | read  | none (TRQP authorization query)|
-| `registry/record/read/0.1`, `registry/record/list/0.1`| read  | none                          |
-| `registry/record/create/0.1`                          | write | admin DID + proof             |
-| `registry/record/update/0.1`                          | write | admin DID + proof             |
+| `registry/record/query/0.1`                           | read  | none                          |
+| `registry/record/put/0.1`                             | write | admin DID + proof             |
 | `registry/record/delete/0.1`                          | write | admin DID + proof             |
 | `registry/did/rotate/0.1`                             | write | admin DID + proof (`vta` only)|
 
@@ -644,6 +643,13 @@ message shape regardless of carrier.
 verbatim onto the [TRQP v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/)
 recognition/authorization field names, so the plain HTTP TRQP endpoints and the
 Trust Task payloads share a single schema.
+
+`registry/record/put` is create-or-replace at the record's four-part key (the
+optional `expectedExisting` assertion recovers strict create-only / update-only
+semantics); `registry/record/query` is an exact fetch when all four key parts
+are supplied and a filtered, cursor-paginated enumeration otherwise. They
+supersede the retired `registry/record/{create,update}/0.1` and
+`registry/record/{read,list}/0.1` tasks, which this registry no longer accepts.
 
 ### Identity from a VTA (`vta`)
 

@@ -29,21 +29,20 @@ pub use registry::authorization::v0_1::{
 pub use registry::recognition::v0_1::{
     Payload as RecognitionRequest, Response as RecognitionResponse,
 };
-pub use registry::record::create::v0_1::{
-    Payload as RecordCreateRequest, Response as RecordCreateResponse,
-};
 pub use registry::record::delete::v0_1::{
     Payload as RecordDeleteRequest, Response as RecordDeleteResponse,
 };
-pub use registry::record::list::v0_1::{
-    Payload as RecordListRequest, Response as RecordListResponse,
-};
-pub use registry::record::read::v0_1::{
-    Payload as RecordReadRequest, Response as RecordReadResponse,
-};
-pub use registry::record::update::v0_1::{
-    Payload as RecordUpdateRequest, Response as RecordUpdateResponse,
-};
+
+/// The spec-side `TrustRecord` wire shape (verbatim TRQP field names).
+///
+/// Re-used from the generated `record/create` module: `registry/record/create`
+/// is retired in the spec registry (superseded by `registry/record/put`), but
+/// its generated types remain in `trust-tasks-rs` and the `TrustRecord` shape
+/// is identical. Once a `trust-tasks-rs` release carrying the generated
+/// `registry::record::put` / `registry::record::query` modules is picked up,
+/// this alias and the hand-written put/query payloads below should be replaced
+/// by re-exports of the generated types.
+pub use registry::record::create::v0_1::TrustRecord as SpecTrustRecord;
 
 /// Canonical Type URIs for the `registry/*` Trust Task family.
 ///
@@ -58,16 +57,12 @@ pub mod type_uris {
     pub const RECOGNITION: &str = RecognitionRequest::TYPE_URI;
     /// `registry/authorization/0.1` request.
     pub const AUTHORIZATION: &str = AuthorizationRequest::TYPE_URI;
-    /// `registry/record/create/0.1` request.
-    pub const RECORD_CREATE: &str = RecordCreateRequest::TYPE_URI;
-    /// `registry/record/update/0.1` request.
-    pub const RECORD_UPDATE: &str = RecordUpdateRequest::TYPE_URI;
+    /// `registry/record/put/0.1` request — create-or-replace at the record key.
+    pub const RECORD_PUT: &str = RecordPutRequest::TYPE_URI;
+    /// `registry/record/query/0.1` request — exact fetch or paginated enumeration.
+    pub const RECORD_QUERY: &str = RecordQueryRequest::TYPE_URI;
     /// `registry/record/delete/0.1` request.
     pub const RECORD_DELETE: &str = RecordDeleteRequest::TYPE_URI;
-    /// `registry/record/read/0.1` request.
-    pub const RECORD_READ: &str = RecordReadRequest::TYPE_URI;
-    /// `registry/record/list/0.1` request.
-    pub const RECORD_LIST: &str = RecordListRequest::TYPE_URI;
     /// `registry/did/rotate/0.1` request — rotate the registry's own
     /// VTA-managed `did:webvh` keys.
     pub const DID_ROTATE: &str = "https://trusttasks.org/spec/registry/did/rotate/0.1";
@@ -108,6 +103,108 @@ where
 {
     let json = serde_json::to_value(value).map_err(|e| e.to_string())?;
     serde_json::from_value(json).map_err(|e| e.to_string())
+}
+
+// --- registry/record/put + registry/record/query -----------------------------
+//
+// Hand-written against the published `registry/record/put/0.1` and
+// `registry/record/query/0.1` specs, on the same footing as `DidRotateRequest`
+// below: the generated modules for these tasks land in the next
+// `trust-tasks-rs` release, at which point these become re-exports (see the
+// `SpecTrustRecord` alias note above).
+
+/// `registry/record/put/0.1` request — create or replace the trust record at
+/// its four-part key. **Proof required** (administrative, state-changing).
+///
+/// Supersedes `registry/record/create` + `registry/record/update`; the strict
+/// create-only / update-only semantics remain available via `expectedExisting`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordPutRequest {
+    /// The record to store at its entity+authority+action+resource key.
+    pub record: SpecTrustRecord,
+    /// Optional existence assertion: `true` = strict update (reject when the
+    /// key is absent), `false` = strict create (reject when the key exists),
+    /// absent = pure create-or-update.
+    #[serde(
+        rename = "expectedExisting",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expected_existing: Option<bool>,
+}
+
+impl Payload for RecordPutRequest {
+    const TYPE_URI: &'static str = "https://trusttasks.org/spec/registry/record/put/0.1";
+    const IS_PROOF_REQUIRED: bool = true;
+}
+
+/// `registry/record/put/0.1#response` — whether the put created or replaced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordPutResponse {
+    /// Whether the record was stored.
+    pub ok: bool,
+    /// True when the put created a new record, false when it replaced one.
+    pub created: bool,
+    /// Optional human-readable detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl Payload for RecordPutResponse {
+    const TYPE_URI: &'static str = "https://trusttasks.org/spec/registry/record/put/0.1#response";
+    const IS_PROOF_REQUIRED: bool = true;
+}
+
+/// `registry/record/query/0.1` request — exact fetch when all four key parts
+/// are supplied (notFound on a miss), filtered cursor-paginated enumeration
+/// otherwise.
+///
+/// Supersedes `registry/record/read` + `registry/record/list`, adding the
+/// pagination `list` conceded it lacked.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecordQueryRequest {
+    /// Filter to records for this entity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    /// Filter to records asserted by this authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_id: Option<String>,
+    /// Filter to records for this action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Filter to records for this resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    /// Opaque continuation token from a previous page's `nextCursor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Page size; clamped to 1..=200 (default 50).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+impl Payload for RecordQueryRequest {
+    const TYPE_URI: &'static str = "https://trusttasks.org/spec/registry/record/query/0.1";
+}
+
+/// `registry/record/query/0.1#response` — the matching records and, on an
+/// enumeration with more matches remaining, the continuation cursor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordQueryResponse {
+    /// The matching trust records (exactly one on a fully keyed fetch).
+    pub records: Vec<SpecTrustRecord>,
+    /// Continuation token for the next page; absent on the last page and on a
+    /// fully keyed fetch.
+    #[serde(
+        rename = "nextCursor",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub next_cursor: Option<String>,
+}
+
+impl Payload for RecordQueryResponse {
+    const TYPE_URI: &'static str = "https://trusttasks.org/spec/registry/record/query/0.1#response";
 }
 
 /// `registry/did/rotate/0.1` request — rotate the registry's own VTA-managed
@@ -154,11 +251,9 @@ mod tests {
         // exercising each one guards the re-exported specs against a bad slug.
         let _ = RecognitionRequest::type_uri();
         let _ = AuthorizationRequest::type_uri();
-        let _ = RecordCreateRequest::type_uri();
-        let _ = RecordUpdateRequest::type_uri();
+        let _ = RecordPutRequest::type_uri();
+        let _ = RecordQueryRequest::type_uri();
         let _ = RecordDeleteRequest::type_uri();
-        let _ = RecordReadRequest::type_uri();
-        let _ = RecordListRequest::type_uri();
         let _ = DidRotateRequest::type_uri();
         let _ = DidRotateResponse::type_uri();
     }
@@ -170,22 +265,48 @@ mod tests {
             RecognitionRequest::type_uri().slug(),
             "registry/recognition"
         );
+        assert_eq!(RecordPutRequest::type_uri().slug(), "registry/record/put");
         assert_eq!(
-            RecordCreateRequest::type_uri().slug(),
-            "registry/record/create"
+            RecordQueryRequest::type_uri().slug(),
+            "registry/record/query"
         );
     }
 
     #[test]
     fn writes_require_proof_reads_do_not() {
-        assert!(RecordCreateRequest::IS_PROOF_REQUIRED);
-        assert!(RecordUpdateRequest::IS_PROOF_REQUIRED);
+        assert!(RecordPutRequest::IS_PROOF_REQUIRED);
         assert!(RecordDeleteRequest::IS_PROOF_REQUIRED);
         assert!(DidRotateRequest::IS_PROOF_REQUIRED);
-        assert!(!RecordReadRequest::IS_PROOF_REQUIRED);
-        assert!(!RecordListRequest::IS_PROOF_REQUIRED);
+        assert!(!RecordQueryRequest::IS_PROOF_REQUIRED);
         assert!(!RecognitionRequest::IS_PROOF_REQUIRED);
         assert!(!AuthorizationRequest::IS_PROOF_REQUIRED);
+    }
+
+    #[test]
+    fn put_and_query_use_the_spec_wire_field_names() {
+        // `expectedExisting` / `nextCursor` are camelCase on the wire (framework
+        // 0.2 convention); the TRQP key fields stay snake_case.
+        let put: RecordPutRequest = serde_json::from_value(serde_json::json!({
+            "record": {
+                "entity_id": "did:example:entity",
+                "authority_id": "did:example:authority",
+                "action": "issue",
+                "resource": "vc",
+                "record_type": "authorization"
+            },
+            "expectedExisting": false
+        }))
+        .expect("parses");
+        assert_eq!(put.expected_existing, Some(false));
+        let put_json = serde_json::to_value(&put).expect("serialises");
+        assert!(put_json.get("expectedExisting").is_some());
+
+        let response = RecordQueryResponse {
+            records: vec![],
+            next_cursor: Some("50".into()),
+        };
+        let json = serde_json::to_value(&response).expect("serialises");
+        assert_eq!(json["nextCursor"], "50");
     }
 
     #[test]
@@ -217,8 +338,7 @@ mod tests {
             .expect("valid record");
 
         // domain -> spec -> domain must be lossless.
-        let spec: registry::record::create::v0_1::TrustRecord =
-            reserialize(&domain).expect("domain -> spec");
+        let spec: SpecTrustRecord = reserialize(&domain).expect("domain -> spec");
         assert_eq!(spec.entity_id, "did:example:entity");
         assert_eq!(spec.record_type.to_string(), "authorization");
 
