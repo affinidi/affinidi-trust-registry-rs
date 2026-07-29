@@ -57,6 +57,43 @@ pub enum TrqlError {
     #[error("contract violation: {0}")]
     Contract(String),
 
+    /// The reply is correlated to our request but answers a *different* TRQP
+    /// tuple than the one we asked about.
+    ///
+    /// Correlation proves the reply belongs to our exchange; it says nothing
+    /// about what the reply is an answer to. A registry that echoes a
+    /// different `entity_id`/`authority_id`/`action`/`resource` has answered
+    /// someone else's question, and treating it as ours silently substitutes
+    /// the subject of an authorization decision.
+    #[error("registry answered for a different {field}: asked `{asked}`, answered `{answered}`")]
+    AnswerMismatch {
+        /// Which tuple member disagreed.
+        field: &'static str,
+        /// The value we sent on the request.
+        asked: String,
+        /// The value the registry echoed back.
+        answered: String,
+    },
+
+    /// We followed a referral to this registry, and its answer does not claim
+    /// the authority that referred us.
+    ///
+    /// A `TrustRegistry` referral in a VTC's DID document is a
+    /// self-assertion — anyone may publish a document naming any registry.
+    /// Authority flows registry → subject, so a referral is only closed when
+    /// the registry answers *for* the DID we started from. Until then the
+    /// referral has established where to ask and nothing about the answer.
+    #[error(
+        "referral from `{origin}` not closed: registry answered for authority `{answered}`, \
+         which does not confirm the referral"
+    )]
+    ReferralNotClosed {
+        /// The DID whose document referred us here.
+        origin: String,
+        /// The authority the registry actually answered for.
+        answered: String,
+    },
+
     /// The registry advertises no transport this client also speaks.
     ///
     /// Carries both sides' sets so an operator can see what to enable rather
@@ -99,7 +136,15 @@ impl TrqlError {
             Self::Rejected { retryable, .. } => *retryable,
             // A capability mismatch is a deployment fact, not a transient
             // condition: retrying the same pair of DID documents cannot help.
-            Self::Config(_) | Self::Contract(_) | Self::NoMatchingTransport { .. } => false,
+            // Nor can it help a registry that answers the wrong question or a
+            // referral that does not close: both are stable facts about the
+            // deployment, and retrying only re-asks a question already
+            // answered wrongly.
+            Self::Config(_)
+            | Self::Contract(_)
+            | Self::NoMatchingTransport { .. }
+            | Self::AnswerMismatch { .. }
+            | Self::ReferralNotClosed { .. } => false,
         }
     }
 }

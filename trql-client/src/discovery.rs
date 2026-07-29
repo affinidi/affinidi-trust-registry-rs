@@ -259,10 +259,17 @@ impl ServiceCapabilities {
 ///
 /// ```ignore
 /// let mut doc = resolve(start_did).await?;
-/// if let Some(target) = registry_referral(&doc) {
-///     doc = resolve(&target).await?;   // one hop, no loop
+/// let referral = registry_referral(&doc);
+/// if let Some(target) = &referral {
+///     doc = resolve(target).await?;   // one hop, no loop
 /// }
 /// let choice = ServiceCapabilities::from_document(&doc).select(&TransportKind::compiled())?;
+///
+/// // Carry the starting DID through, so the answer has to confirm the hop.
+/// let mut client = TrqlClient::new(transport_for(&choice)?, registry_did);
+/// if referral.is_some() {
+///     client = client.referred_by(start_did);
+/// }
 /// ```
 ///
 /// **Cap at one hop.** TRQP's wording assumes the registry's own document
@@ -274,11 +281,18 @@ impl ServiceCapabilities {
 ///
 /// A referral is a **self-assertion**. Anyone can publish a document naming
 /// any registry, and nothing here checks that the named registry agrees.
-/// Authority flows registry → subject, never the reverse, so a caller that
-/// follows a referral must close the loop: confirm the registry's answer
-/// carries an `authority_id` equal to the DID the referral started from.
-/// Until then the referral has established *where to ask* and nothing about
-/// the answer.
+/// Authority flows registry → subject, never the reverse, so following a
+/// referral must be paired with closing the loop: confirming the registry's
+/// answer carries an `authority_id` equal to the DID the referral started
+/// from. Until then the referral has established *where to ask* and nothing
+/// about the answer.
+///
+/// Hand the starting DID to [`TrqlClient::referred_by`] and the client
+/// enforces that for you, rejecting an answer that leaves the referral
+/// unconfirmed. Discovery cannot do it here: this function sees a document,
+/// never a query result.
+///
+/// [`TrqlClient::referred_by`]: crate::TrqlClient::referred_by
 #[must_use]
 pub fn registry_referral(doc: &Value) -> Option<String> {
     let own_id = doc.get("id").and_then(Value::as_str);

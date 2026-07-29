@@ -167,10 +167,12 @@ client must disambiguate before parsing capabilities.
 5. **Close the loop.** Query the registry and confirm it returns a record whose
    `authority_id` equals the DID we started from.
 
-Step 5 is not optional. A pointer in a VTC's own document is a self-assertion —
-anyone can publish a DID document naming any registry. Authority flows
-registry → subject, never the reverse. Until the registry confirms, the referral
-has told us *where to ask* and nothing about the answer.
+Step 5 is not optional, and is not left to the caller to remember: build the
+client with `TrqlClient::referred_by(start_did)` and an answer that does not
+confirm the referral is refused (§5). A pointer in a VTC's own document is a
+self-assertion — anyone can publish a DID document naming any registry.
+Authority flows registry → subject, never the reverse. Until the registry
+confirms, the referral has told us *where to ask* and nothing about the answer.
 
 The `did:` prefix test in step 2 stays unambiguous because mediator-DID
 endpoints always carry `DIDCommMessaging` or `TSPTransport`, never
@@ -210,13 +212,33 @@ new client code to follow; until it does, `registry_referral` returns `None`
 for every document in the wild and the endpoint path is unchanged. That is why
 this can ship ahead of it.
 
-**Not done — closing the loop (§4 step 5).** `select()` returns a
-`TransportChoice` and knows nothing about query results, so the check can only
-live where the authorization response lands — a layer above `discovery.rs`.
-It is documented as the caller's obligation on `registry_referral`, which is
-weaker than enforcing it. Tracked in #117: a referral implementation whose
-callers skip step 5 is worse than no referral at all, because it looks like
-discovery while being an unverified redirect.
+**Done — closing the loop (§4 step 5), `trql-client/src/client.rs`**
+
+`select()` returns a `TransportChoice` and knows nothing about query results,
+so the check lives a layer above `discovery.rs`, where the response lands.
+`send_query` now enforces two things on every `#response`, for authorization
+and recognition alike:
+
+*Answer the question asked.* The response's TRQP 4-tuple must equal the
+request's. Correlation (`threadId`) proves a reply belongs to our exchange but
+not what it is an answer *about*; TRQP responses echo the tuple precisely so
+the asker can tell, and nothing checked that echo. A mismatch is
+`TrqlError::AnswerMismatch`, never retried. The reference registry already
+echoes the request tuple verbatim (`trust_tasks/router.rs`), so this is a
+no-op against a correct peer and cannot regress one.
+
+*Close the referral.* `TrqlClient::referred_by(origin_did)` records that this
+client reached the registry by following a referral, and rejects any answer
+whose `authority_id` is not `origin_did` as `TrqlError::ReferralNotClosed`.
+Step 5 becomes structural rather than an obligation stated in prose: a caller
+that follows a referral and then asks about some other authority has learned
+nothing about the referral, and now finds that out instead of being told
+`authorized: true`.
+
+An omitted tuple member is left to deserialization — all four are required by
+the response schema — so a malformed payload still reports as the contract
+violation it is rather than as a substituted answer. Either way it fails
+closed.
 
 ## 6. Compatibility: why `#rest` was left alone
 
