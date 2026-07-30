@@ -144,3 +144,104 @@ async fn success_status_with_garbage_body_is_a_contract_error() {
     assert!(matches!(err, TrqlError::Contract(_)), "got: {err}");
     assert!(!err.is_retryable());
 }
+
+/// A 2xx carrying a properly correlated `#response` that grants authorization
+/// for a *different* authority than the one queried. Everything the binding
+/// checked before this — status, document shape, `threadId`, response type —
+/// passes; only the tuple echo catches it.
+#[tokio::test]
+async fn correlated_answer_for_another_authority_is_rejected_over_the_wire() {
+    let router = Router::new().route(
+        "/trust-tasks",
+        post(|Json(doc): Json<TrustTask<Value>>| async move {
+            let payload = serde_json::json!({
+                "entity_id": doc.payload["entity_id"],
+                "authority_id": "did:example:not-who-we-asked-about",
+                "action": doc.payload["action"],
+                "resource": doc.payload["resource"],
+                "authorized": true,
+                "time_evaluated": "2026-07-16T00:00:00Z",
+            });
+            Json(doc.respond_with("urn:uuid:reply".to_string(), payload))
+        }),
+    );
+    let base = serve(router).await;
+
+    let err = client_for(&base)
+        .authorization(TrqpQuery::new(
+            "did:example:signer",
+            "did:example:authority",
+            "git.commit.sign",
+            "openvtc",
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            TrqlError::AnswerMismatch {
+                field: "authority_id",
+                ..
+            }
+        ),
+        "got: {err}"
+    );
+    assert!(!err.is_retryable());
+}
+
+/// The full referral shape over the wire: we followed a referral from a VTC,
+/// the registry answers faithfully for the authority we named, but that
+/// authority is not the one that referred us — so the referral stays
+/// unconfirmed and the answer is refused.
+#[tokio::test]
+async fn unconfirmed_referral_is_rejected_over_the_wire() {
+    let router = Router::new().route(
+        "/trust-tasks",
+        post(|Json(doc): Json<TrustTask<Value>>| async move {
+            let payload = serde_json::json!({
+                "entity_id": doc.payload["entity_id"],
+                "authority_id": doc.payload["authority_id"],
+                "action": doc.payload["action"],
+                "resource": doc.payload["resource"],
+                "authorized": true,
+                "time_evaluated": "2026-07-16T00:00:00Z",
+            });
+            Json(doc.respond_with("urn:uuid:reply".to_string(), payload))
+        }),
+    );
+    let base = serve(router).await;
+    let transport = HttpsTransport::new(HttpsTransportConfig::new(&base)).unwrap();
+    let client = TrqlClient::new(Arc::new(transport), "did:example:registry")
+        .referred_by("did:example:referring-vtc");
+
+    let err = client
+        .authorization(TrqpQuery::new(
+            "did:example:signer",
+            "did:example:authority",
+            "git.commit.sign",
+            "openvtc",
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, TrqlError::ReferralNotClosed { .. }),
+        "got: {err}"
+    );
+
+    // ...and the same registry, asked about the authority that referred us,
+    // closes the loop.
+    let transport = HttpsTransport::new(HttpsTransportConfig::new(&base)).unwrap();
+    let response = TrqlClient::new(Arc::new(transport), "did:example:registry")
+        .referred_by("did:example:referring-vtc")
+        .authorization(TrqpQuery::new(
+            "did:example:signer",
+            "did:example:referring-vtc",
+            "git.commit.sign",
+            "openvtc",
+        ))
+        .await
+        .unwrap();
+    assert!(response.authorized);
+}
