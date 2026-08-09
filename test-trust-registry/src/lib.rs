@@ -180,7 +180,7 @@ impl TestTrustRegistryBuilder {
         let config = Arc::new(TrustRegistryConfig {
             server_config: ServerConfig {
                 listen_address: "127.0.0.1:0".to_string(),
-                cors_allowed_origins: Vec::new(),
+                ..Default::default()
             },
             storage_config: StorageConfig::default(),
             didcomm_config,

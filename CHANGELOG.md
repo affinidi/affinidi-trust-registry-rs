@@ -12,6 +12,44 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [0.11.0] – 2026‑08‑09
+
+### Fixed
+
+- **`trust-registry` 0.10.0 does not build from crates.io with `--features tsp`.**
+  The `tsp` feature turns on `affinidi-messaging-sdk/tsp` through a direct
+  `^0.18` dependency that exists solely to set that flag, while `affinidi-tdk`
+  0.8.5 moved to `affinidi-messaging-sdk` `^0.19`. A Cargo feature unifies only
+  within one semver-compatible copy, so the graph carried two SDKs and the flag
+  landed on the one tdk does *not* re-export — `atm.tsp()` and
+  `send_delivery_request_frames` were missing from the `ATM` the listener
+  actually holds. The direct dependency now tracks `^0.19`, and the requirement
+  that it move in lockstep with tdk's is stated at the declaration.
+
+### Changed
+
+- **Adopts the Trust Tasks framework 0.3 libraries** (`trust-tasks-rs`,
+  `-proof`, `-https`, `-didcomm`, `-tsp` all 0.3.0). Two changes are visible on
+  the wire, both from the binding crates rather than this repo:
+  - error responses are emitted as `trust-task-error/0.3` (carrying the new
+    optional `inResponseTo`), not `0.2`. A consumer asserting the exact Type URI
+    needs updating; per SPEC §5.2 forward-minor compatibility a `0.2` consumer
+    SHOULD accept it. `trql-client` matches on the slug, so it is unaffected.
+  - a DIDComm response now sets `thid` from the request document's `threadId`
+    (falling back to its `id`), so it continues the request's DIDComm thread
+    instead of starting a new one.
+
+- **`registry/did/rotate` uses the VTA's canonical rotate-keys task.**
+  `vta-sdk` 0.21 deprecates `rotate_did_webvh_keys` — it rides the legacy
+  DIDComm protocol message, which has no TSP dispatcher — in favour of
+  `rotate_did_webvh_keys_by_did`, which keys on the DID itself. Rotation no
+  longer reads `TR_VTA_CONTEXT_ID` or derives an SCID; the `did:webvh` check is
+  kept so a wrong DID fails locally rather than as a VTA protocol error.
+  `TR_VTA_CONTEXT_ID` is still required by the `vta` startup path.
+
+- Remaining dependency moves: `vta-sdk` 0.19 → 0.21, `base64` 0.22 → 0.23,
+  `tower-http` 0.6 → 0.7, `serial_test` 3 → 4, plus a full `cargo update`.
+
 ## [0.10.0] – 2026‑07‑29
 
 ### Changed
