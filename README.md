@@ -553,7 +553,7 @@ should turn them off and add back only what it uses:
 
 ```toml
 [dependencies]
-trust-registry = { version = "0.9", default-features = false, features = ["storage-fjall"] }
+trust-registry = { version = "0.11", default-features = false, features = ["storage-fjall"] }
 ```
 
 That drops the AWS SDKs, Redis, `serde_dynamo`, `dotenvy`, `crossterm` and

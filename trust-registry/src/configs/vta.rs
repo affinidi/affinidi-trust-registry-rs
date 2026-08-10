@@ -125,10 +125,13 @@ pub async fn startup_profile_json() -> Result<Option<String>, String> {
 
 /// Rotate the Trust Registry's VTA-managed `did:webvh` keys.
 ///
-/// Builds a [`vta_sdk::client::VtaClient`] on demand from `TR_VTA_CREDENTIAL` /
-/// `TR_VTA_CONTEXT_ID`, extracts the SCID from `did` (which must be a
-/// `did:webvh`), and calls the VTA's rotate-keys op. Returns
+/// Builds a [`vta_sdk::client::VtaClient`] on demand from `TR_VTA_CREDENTIAL`
+/// and calls the VTA's canonical `webvh/dids/rotate-keys/1.0` task, which keys
+/// on the DID itself — no context id or SCID needed. Returns
 /// `(did, new_scid, new_version_id)` on success.
+///
+/// `did` must still be a `did:webvh`; rejecting anything else here keeps the
+/// failure local instead of surfacing as a VTA-side protocol error.
 pub async fn rotate_did(
     did: &str,
     pre_rotation_count: Option<u32>,
@@ -139,11 +142,7 @@ pub async fn rotate_did(
 
     let credential_uri = optional_env("TR_VTA_CREDENTIAL")
         .ok_or_else(|| "VTA is not configured (TR_VTA_CREDENTIAL unset)".to_string())?;
-    let context_id = optional_env("TR_VTA_CONTEXT_ID")
-        .ok_or_else(|| "TR_VTA_CONTEXT_ID is required to rotate the DID".to_string())?;
-
-    let scid = did
-        .strip_prefix("did:webvh:")
+    did.strip_prefix("did:webvh:")
         .and_then(|rest| rest.split(':').next())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("DID {did} is not a did:webvh; cannot rotate its keys"))?;
@@ -162,7 +161,7 @@ pub async fn rotate_did(
         label,
     };
     let result = client
-        .rotate_did_webvh_keys(&context_id, scid, body)
+        .rotate_did_webvh_keys_by_did(did, body)
         .await
         .map_err(|e| format!("VTA did:webvh key rotation failed: {e}"))?;
 
