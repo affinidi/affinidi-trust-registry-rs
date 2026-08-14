@@ -28,14 +28,14 @@ affinidi-tdk = "0.8"
 # unifies within one semver-compatible copy — a mismatched major/minor silently
 # gives two SDKs, and the feature lands on the one tdk does *not* re-export.
 affinidi-messaging-sdk = "0.19"
-trust-tasks-rs = "0.3"
-trust-tasks-proof = "0.3"
+trust-tasks-rs = "0.6"
+trust-tasks-proof = "0.6"
 vti-secrets = { version = "0.1", default-features = false }
 fjall = "3"
-vta-sdk = { version = "0.21", default-features = false }
-trust-tasks-https = { version = "0.3", default-features = false }
-trust-tasks-tsp = "0.3"
-trust-tasks-didcomm = "0.3"
+vta-sdk = { version = "0.23", default-features = false }
+trust-tasks-https = { version = "0.6", default-features = false }
+trust-tasks-tsp = "0.6"
+trust-tasks-didcomm = "0.6"
 anyhow = "1.0"
 async-trait = "0.1.89"
 base64 = "0.23"
