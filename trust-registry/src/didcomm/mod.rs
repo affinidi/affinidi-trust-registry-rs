@@ -16,6 +16,7 @@ pub mod handlers;
 pub mod listener;
 pub mod problem_report;
 pub mod transport;
+pub mod transport_capability;
 
 /// Returns the thread ID for a message, falling back to the message ID if no thread ID is set.
 pub fn get_thread_id(msg: &Message) -> Option<String> {

@@ -12,6 +12,47 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [0.13.0] – 2026‑08‑14
+
+### Added
+
+- **The registry now checks, at startup, whether the DID document it publishes
+  matches what it can actually serve** — and says so, per transport.
+
+  `TransportFlags::validate` already refuses `ENABLE_TSP=true` on a build without
+  the `tsp` feature, but that guards the document this process *builds* and
+  serves at `/.well-known/did.json`. It cannot guard the document peers resolve:
+  a `did:webvh` log is published by the VTA / DID-hosting service at provisioning
+  time and never revisited, so the two can disagree indefinitely — and
+  `ENABLE_TSP` defaults to `false`.
+
+  That gap cost a live deployment days. `#tsp` was published at provisioning,
+  the service ran with `ENABLE_TSP` unset, and every TSP frame was dropped
+  unread. Peers read the document, correctly chose the highest-preference
+  transport it advertised, sent, and waited; the VTC reported
+  `registry_status=degraded` with a 60-second timeout and no way to tell that the
+  registry was answering on a different protocol. Both ends behaved exactly as
+  designed and the deployment was still broken.
+
+  On boot the registry now resolves its own DID over the network — the published
+  view, not the local mirror — and reports each disagreement:
+
+  - advertised but unservable → `ERROR`, naming both remedies (rebuild with the
+    feature and set the flag, or drop the service entry).
+  - servable but unadvertised → `INFO`. Normal mid-rollout.
+
+  It is **advisory and never fails startup**. Unknown is not the same as bad: a
+  resolver blip must not stop a registry from answering DIDComm. `vtc-service`
+  draws the same line — it refuses to boot only on the *local* document it
+  controls, and treats the resolved view as advisory.
+
+  Matching is on the service **`type`**, never the `#id` fragment, which is an
+  arbitrary label (`#tsp` here, `#tsp-transport` upstream, `#vta-didcomm` from an
+  older template). `type` is also read as either a string or an array, because
+  both occur — the reference mediator publishes `["DIDCommMessaging"]` while this
+  registry writes a bare string, and a reader handling only one shape sees no
+  services at all on the other.
+
 ## [0.12.0] – 2026‑08‑14
 
 ### Changed
