@@ -53,6 +53,52 @@ Missing versions simply reflect internal deployment‑related patches.
   registry writes a bare string, and a reader handling only one shape sees no
   services at all on the other.
 
+## [0.12.0] – 2026‑08‑14
+
+### Changed
+
+- **Adopts the Trust Tasks framework 0.6 libraries** (`trust-tasks-rs` 0.6.1,
+  `-proof` / `-https` / `-tsp` / `-didcomm` 0.6.0), up from 0.3. Three breaking
+  releases sit in between and none of them changes this repo's source:
+  - **0.4.0** made digest-carrying payload members the generated
+    `DigestMultibase` newtype rather than `String`.
+  - **0.5.0** added an optional `ceremony` member to the `TrustTask<P>`
+    envelope, recording that a document is one step of a Trust Ceremony. It
+    breaks struct-literal construction and exhaustive destructuring only; this
+    repo builds documents through `TrustTask::for_payload` / `respond_with` and
+    `reject_with_recipient`, so nothing here constructs one by literal.
+  - **0.6.0** narrowed `DigestMultibase` to the two multibase headers W3C
+    Controlled Identifiers 1.0 §2.4 normatively requires — `z` (base58btc) and
+    `u` (base64url-no-pad) — and enforces each alphabet rather than assuming it.
+
+  That last one is **visible to consumers**: a digest a client previously got
+  away with (base32, base16, base64pad, or a `z`-prefixed string that was never
+  valid base58) is now rejected at parse. The wire format is unchanged for
+  conforming values. A registry whose purpose is interoperability should not
+  accept digests a conforming verifier may be unable to read, so this is the
+  intended direction — but it is why this is a minor and not a patch.
+
+- Tracks `affinidi-messaging-sdk` 0.19.7, `affinidi-messaging-mediator` 0.18.17
+  and `affinidi-messaging-test-mediator` 0.2.50. 0.19.7 carries two inbound-stream
+  fixes that matter to this service (affinidi/affinidi-tdk-rs#708): a torn-down
+  profile no longer spins its inbound poll at 2Hz forever, and an inbound TSP
+  frame that cannot be unpacked is now deleted from the mediator instead of
+  being redelivered on every reconnect and restart.
+
+- **Moves `vta-sdk` 0.21 → 0.23**, which is what keeps the graph to one copy of
+  everything. Taking `trust-tasks-rs` 0.6 alone left **two** copies of it — 0.6.1
+  directly, and 0.4.1 behind the published `vti-common` — and taking the newer
+  `vti-common` on its own added a **second `vta-sdk`** (0.21.21 beside 0.23.1)
+  rather than failing, because a caret requirement lets Cargo satisfy both by
+  duplicating.
+  
+  Neither duplicate broke the build here, since no `trust-tasks` or `vta-sdk`
+  type crosses the `vti-common` boundary in this repo — which is exactly what
+  makes the shape dangerous: it is invisible until the first call that does, and
+  then it surfaces as an `E0308` between two identically-named types. Moving the
+  pins together resolves both. The graph now carries one `trust-tasks-rs`
+  (0.6.1) and one `vta-sdk` (0.23.2).
+
 ## [0.11.0] – 2026‑08‑09
 
 ### Fixed
