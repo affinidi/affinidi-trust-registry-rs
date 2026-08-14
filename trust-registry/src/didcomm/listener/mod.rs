@@ -230,6 +230,17 @@ pub(crate) async fn start_one_did_listener(
     source: DidCommSource,
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
+    // Does the document peers actually resolve match what this binary serves?
+    // Checked here, before any source-specific setup, because every source has
+    // the same exposure — the published document is written by the provisioning
+    // VTA, not by us, so no runtime flag validation can catch a stale entry.
+    // Advisory only: it logs, it never refuses to start.
+    crate::didcomm::transport_capability::report_at_startup(
+        &profile_config.did,
+        &config.transport_flags,
+    )
+    .await;
+
     let handler = BaseHandler::build_from_arc(
         repository,
         config.clone(),
