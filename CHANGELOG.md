@@ -12,6 +12,50 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [0.14.0] – 2026‑08‑17
+
+### Changed
+
+- **Trust Tasks 0.6 → 0.9, `vta-sdk` 0.23 → 0.25, and the messaging stack with
+  them** (`affinidi-messaging-sdk` 0.19.8, `-mediator` 0.18.19, `-test-mediator`
+  0.2.51, `vti-common` 0.12.1).
+
+  **No source changed.** Three breaking framework releases sit in the gap and
+  none of them reaches this repo:
+
+  - **0.7.0** made `StandardCode` `#[non_exhaustive]`. Nothing here matches on
+    it. It is also the last time a new framework error code will break a
+    downstream `match`.
+  - **0.8.0** added `StandardCode::Cancelled` and the `trust-task-control/0.1`
+    payloads. Additive in Rust, because of the attribute above.
+  - **0.9.0** gave `consume_inbound` a required `PayloadPolicy` argument
+    (SPEC.md §7.2 item 2) and replaced `ValidatedPayload::SCHEMA_JSON` with
+    `Payload::PAYLOAD_SCHEMA`. This repo calls neither — it has no
+    `consume_inbound` call site and used no `SCHEMA_JSON`.
+
+  The whole `trust-tasks-*` family has to move together: `trust-tasks-rs`'s core
+  types cross the public API of `-https` / `-didcomm` / `-proof` / `-tsp`, so a
+  graph mixing majors does not type-check.
+
+  `vta-sdk` moves two minors in the same change deliberately. It is not
+  cosmetic: `vta-sdk` 0.23.2 is built on `trust-tasks-rs` 0.6, so pinning the
+  framework to 0.9 without moving the SDK would put two copies of
+  `trust-tasks-rs` in the graph — which fails as a handful of `E0308`s naming
+  two identical-looking types, pointing at a call site rather than at the
+  lockfile that caused it.
+
+  Verified with `cargo tree -d -e normal,build` **and** `-e normal,build,dev`:
+  neither lists `trust-tasks-rs`, `trust-tasks-capability-client`, `vta-sdk`,
+  `vti-common` or `affinidi-tdk`.
+
+- **The spec versions this registry speaks are unchanged, and were checked
+  rather than assumed.** Every Trust Task URI here is `registry/*/0.1`
+  (`authorization`, `did/rotate`, `recognition`, `record/put`, `record/query`)
+  plus the `binding/didcomm/0.1` envelope, and `0.1` remains the only published
+  version of each. A library bump does not move which specification version a
+  service speaks — the generated `v0_1` / `v0_2` / `v0_3` modules coexist — so
+  the two are independent decisions and this release makes only the first.
+
 ## [0.13.0] – 2026‑08‑14
 
 ### Added
