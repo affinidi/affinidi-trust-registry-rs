@@ -29,7 +29,7 @@ RUN set -eux; \
 ###############################
 # Runtime stage
 ###############################
-FROM debian:trixie-slim AS runtime
+FROM debian:13.4-slim AS runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
