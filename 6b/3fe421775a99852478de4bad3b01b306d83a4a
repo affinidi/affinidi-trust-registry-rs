@@ -1,0 +1,25 @@
+deny.toml
+  s_cfc6a47bd9bba3::t_4cdbeba08ce543 8
+Cargo.toml
+  s_cfc6a47bd9bba3::t_955d1b2096c6e6 66-72
+.github/workflows/checks.yaml
+  s_cfc6a47bd9bba3::t_1ede31adb96303 15-20
+audit.toml
+  s_cfc6a47bd9bba3::t_00c3a18f9c3268 12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "6b3fe421775a99852478de4bad3b01b306d83a4a",
+  "prompts": {},
+  "sessions": {
+    "s_cfc6a47bd9bba3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9cba24f4-e30a-4c90-88b9-71abef3649de",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": null
+    }
+  }
+}
