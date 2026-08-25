@@ -5,6 +5,7 @@ ignore = [
     { id = "RUSTSEC-2026-0098", reason = "transitive rustls-webpki 0.101.7 via AWS SDK (rustls 0.21); no fix until AWS SDK moves to rustls 0.23" },
     { id = "RUSTSEC-2026-0099", reason = "transitive rustls-webpki 0.101.7 via AWS SDK (rustls 0.21); no fix until AWS SDK moves to rustls 0.23" },
     { id = "RUSTSEC-2026-0104", reason = "transitive rustls-webpki 0.101.7 via AWS SDK (rustls 0.21); no fix until AWS SDK moves to rustls 0.23" },
+    { id = "RUSTSEC-2026-0258", reason = "transitive h2 0.3.27 via vti-secrets' aws-secrets feature (legacy hyper 0.14 client in aws-smithy-http-client); only reachable with --all-features, not in the default build; no fix until vti-secrets restricts its aws-config feature set" },
 ]
 
 [bans]

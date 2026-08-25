@@ -168,7 +168,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
- "sha1",
+ "sha1 0.10.7",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls 0.26.4",
@@ -340,14 +340,14 @@ dependencies = [
  "subtle",
  "tokio",
  "tokio-stream",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.29.0",
  "tokio-util",
  "toml",
  "tower",
  "tower-http 0.6.11",
  "tracing",
  "tracing-subscriber",
- "trust-tasks-rs",
+ "trust-tasks-rs 0.9.0",
  "url",
  "uuid",
 ]
@@ -382,7 +382,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.29.0",
  "tracing",
  "url",
  "uuid",
@@ -404,9 +404,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-messaging-sdk"
-version = "0.19.8"
+version = "0.19.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "954fe9bbc880aa008e9f01eeac117ab45419df00fddc40541c975fc70b3de506"
+checksum = "5996f7bd090aacad06be16e86a4a9774f45adab1e90c6cab2d15ef6b98bea5ea"
 dependencies = [
  "affinidi-crypto",
  "affinidi-did-authentication",
@@ -422,21 +422,20 @@ dependencies = [
  "affinidi-tsp",
  "ahash",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "rand 0.10.2",
  "regex",
  "reqwest",
  "rustls 0.23.43",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "sha256",
  "thiserror 2.0.20",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.30.0",
  "tracing",
- "trust-tasks-rs",
+ "trust-tasks-rs 0.11.8",
  "uuid",
 ]
 
@@ -581,9 +580,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-tdk"
-version = "0.8.5"
+version = "0.8.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8efce5081936f04938a5be1c754065036cd66a510a67b2092e464a3a24612728"
+checksum = "8a0529034e098c99b72804151326124a05dfbda609122f551ef74524cf03f73a"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -877,7 +876,7 @@ dependencies = [
  "fastrand",
  "hex",
  "http 1.5.0",
- "sha1",
+ "sha1 0.10.7",
  "time",
  "tokio",
  "tracing",
@@ -948,9 +947,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-dynamodb"
-version = "1.120.0"
+version = "1.121.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f578638cafe182113da770e9798e7063d6de96cbbfe06f647d0026f197c9b97c"
+checksum = "8de999e21177c7513e70b4adfdc6656f438651b2de2c6690e058073da3a3082c"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -975,9 +974,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-secretsmanager"
-version = "1.111.0"
+version = "1.112.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d77f840fd8a79900661ca05e9af1f4e2b3c74386e9fc1b4a9dd58745faf689f0"
+checksum = "5230ecd791109507f2bec2f907ed605a5c9fbd37033736943f06c9a09ad3914d"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -1001,9 +1000,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-ssm"
-version = "1.118.0"
+version = "1.119.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d5bd0c0ae0fc69f63b9beb68a28beba71617070d504444944e97bbfb0851d8a"
+checksum = "a3a2007c49b4a471fbf2560999b5e2a32a2a8dddf5a6780ee32ad79163cdba12"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -1168,7 +1167,7 @@ dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "h2 0.3.27",
- "h2 0.4.15",
+ "h2 0.4.19",
  "http 0.2.12",
  "http 1.5.0",
  "http-body 0.4.6",
@@ -1366,10 +1365,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
- "sha1",
+ "sha1 0.10.7",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.29.0",
  "tower",
  "tower-layer",
  "tower-service",
@@ -2255,7 +2254,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.3",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -3181,9 +3180,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3245,7 +3244,7 @@ dependencies = [
  "http 1.5.0",
  "httpdate",
  "mime",
- "sha1",
+ "sha1 0.10.7",
 ]
 
 [[package]]
@@ -3440,7 +3439,7 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
- "h2 0.4.15",
+ "h2 0.4.19",
  "http 1.5.0",
  "http-body 1.1.0",
  "httparse",
@@ -5115,7 +5114,7 @@ dependencies = [
  "encoding_rs",
  "futures-core",
  "futures-util",
- "h2 0.4.15",
+ "h2 0.4.19",
  "http 1.5.0",
  "http-body 1.1.0",
  "http-body-util",
@@ -5704,6 +5703,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6026,7 +6036,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -6070,7 +6080,7 @@ dependencies = [
  "tokio-util",
  "trust-registry",
  "trust-tasks-didcomm",
- "trust-tasks-rs",
+ "trust-tasks-rs 0.9.0",
  "trust-tasks-tsp",
  "uuid",
 ]
@@ -6251,7 +6261,23 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.26.4",
- "tungstenite",
+ "tungstenite 0.29.0",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls 0.23.43",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tungstenite 0.30.0",
 ]
 
 [[package]]
@@ -6514,7 +6540,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trust-tasks-didcomm",
- "trust-tasks-rs",
+ "trust-tasks-rs 0.9.0",
  "trust-tasks-tsp",
  "uuid",
 ]
@@ -6565,7 +6591,7 @@ dependencies = [
  "trust-tasks-didcomm",
  "trust-tasks-https",
  "trust-tasks-proof",
- "trust-tasks-rs",
+ "trust-tasks-rs 0.9.0",
  "trust-tasks-tsp",
  "url",
  "urlencoding",
@@ -6584,7 +6610,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
- "trust-tasks-rs",
+ "trust-tasks-rs 0.9.0",
  "uuid",
 ]
 
@@ -6598,7 +6624,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
- "trust-tasks-rs",
+ "trust-tasks-rs 0.9.0",
  "uuid",
 ]
 
@@ -6612,7 +6638,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
- "trust-tasks-rs",
+ "trust-tasks-rs 0.9.0",
  "uuid",
 ]
 
@@ -6630,7 +6656,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
- "trust-tasks-rs",
+ "trust-tasks-rs 0.9.0",
 ]
 
 [[package]]
@@ -6650,6 +6676,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "trust-tasks-rs"
+version = "0.11.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8e238eb20267a2dd2fe51112a3d49f36a94faa376c0fa1cae3fc303d4cdeee2"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "regress",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "trust-tasks-tsp"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6659,7 +6700,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
- "trust-tasks-rs",
+ "trust-tasks-rs 0.9.0",
 ]
 
 [[package]]
@@ -6682,7 +6723,25 @@ dependencies = [
  "rand 0.9.5",
  "rustls 0.23.43",
  "rustls-pki-types",
- "sha1",
+ "sha1 0.10.7",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http 1.5.0",
+ "httparse",
+ "log",
+ "rand 0.10.2",
+ "rustls 0.23.43",
+ "rustls-pki-types",
+ "sha1 0.11.0",
  "thiserror 2.0.20",
 ]
 
@@ -6941,7 +7000,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
- "trust-tasks-rs",
+ "trust-tasks-rs 0.9.0",
  "url",
  "uuid",
 ]
@@ -6978,7 +7037,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trust-tasks-capability-client",
- "trust-tasks-rs",
+ "trust-tasks-rs 0.9.0",
  "uuid",
  "vta-sdk",
  "zeroize",
