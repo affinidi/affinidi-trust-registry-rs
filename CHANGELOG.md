@@ -12,6 +12,49 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [0.15.0] – 2026‑08‑28
+
+### Changed
+
+- **Trust Tasks 0.9 → 0.17, `affinidi-tdk` 0.8 → 0.10, `affinidi-messaging-sdk`
+  0.19 → 0.21, `vta-sdk` 0.25 → 0.31, `vti-secrets` 0.1 → 0.3 and the test
+  mediator 0.2 → 0.4.**
+
+  The test mediator had to move with the rest: 0.2 pinned
+  `affinidi-messaging-sdk` 0.19, so the graph carried two SDK copies and
+  `ATMProfile` resolved to two incompatible types in `test-trust-registry` —
+  the same one-copy-of-everything constraint that governed the 0.14.0 move.
+
+  **Source changed this time.** The generated trust-tasks payload types are
+  `#[non_exhaustive]` from 0.17 on, so every request/response struct literal in
+  `trql-client` and the trust-task router is rebuilt through the generated
+  builders. `message` on the recognition, authorization and record responses is
+  now the constrained `ResponseMessage` newtype (max 1024 chars) rather than a
+  `String`; `fit_message` truncates over-long text instead of dropping it.
+
+  Because the builders are fallible, `try_into` is mapped to a
+  `RejectReason::InternalError` reply at each call site rather than unwrapped —
+  a response that fails to build now answers the peer instead of panicking the
+  handler task.
+
+### Fixed
+
+- **`registry/record/delete` no longer panics on a malformed response build.**
+  The delete handler was the one call site still using `.expect()` on the
+  builder's `try_into`. It now maps the error to `RejectReason::InternalError`
+  like every other handler, so a build failure rejects the task rather than
+  panicking the handler.
+
+- **`option-ext` (MPL-2.0) allowed in `deny.toml`.** `vta-sdk` 0.31 pulls
+  `dirs` 6 → `dirs-sys` → `option-ext`, a licence the allow-list did not
+  cover, which failed the licence check.
+
+- **RUSTSEC-2026-0258 (h2 0.3.27, unbounded empty DATA frames) ignored.**
+  `aws-smithy-http-client` 1.4.0 — the newest release — depends on h2 0.3
+  unconditionally for its legacy hyper 0.14 client, so no dependency update
+  reaches it. Same root cause, and the same holding position, as the
+  rustls 0.21 advisories already ignored here.
+
 ## [0.14.0] – 2026‑08‑17
 
 ### Changed

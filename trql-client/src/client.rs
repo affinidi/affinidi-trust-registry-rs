@@ -150,40 +150,54 @@ impl TrqlClient {
         &self,
         query: TrqpQuery,
     ) -> Result<AuthorizationResponse, TrqlError> {
-        let payload = AuthorizationRequest {
-            entity_id: query.entity_id.clone(),
-            authority_id: query.authority_id.clone(),
-            action: query.action.clone(),
-            resource: query.resource.clone(),
-            context: query
-                .has_context()
-                .then(|| crate::payloads::AuthorizationQueryContext {
-                    time: query.time,
-                    locator: query.locator.clone(),
-                    extra: Default::default(),
-                }),
-            ext: None,
-        };
+        // The generated payload types are `#[non_exhaustive]` from
+        // trust-tasks 0.17 on, so they are built through their builders.
+        let context: Option<crate::payloads::AuthorizationQueryContext> = query
+            .has_context()
+            .then(|| {
+                crate::payloads::AuthorizationQueryContext::builder()
+                    .time(query.time)
+                    .locator(query.locator.clone())
+                    .extra(std::collections::HashMap::new())
+                    .try_into()
+            })
+            .transpose()
+            .map_err(|e| TrqlError::Contract(format!("query context did not build: {e}")))?;
+        let payload: AuthorizationRequest = AuthorizationRequest::builder()
+            .entity_id(query.entity_id.clone())
+            .authority_id(query.authority_id.clone())
+            .action(query.action.clone())
+            .resource(query.resource.clone())
+            .context(context)
+            .try_into()
+            .map_err(|e| TrqlError::Contract(format!("request payload did not build: {e}")))?;
         self.send_query(payload).await
     }
 
     /// Ask whether `entity` is recognized by `authority` for `action` on
     /// `resource` (`registry/recognition/0.1`).
     pub async fn recognition(&self, query: TrqpQuery) -> Result<RecognitionResponse, TrqlError> {
-        let payload = RecognitionRequest {
-            entity_id: query.entity_id.clone(),
-            authority_id: query.authority_id.clone(),
-            action: query.action.clone(),
-            resource: query.resource.clone(),
-            context: query
-                .has_context()
-                .then(|| crate::payloads::RecognitionQueryContext {
-                    time: query.time,
-                    locator: query.locator.clone(),
-                    extra: Default::default(),
-                }),
-            ext: None,
-        };
+        // The generated payload types are `#[non_exhaustive]` from
+        // trust-tasks 0.17 on, so they are built through their builders.
+        let context: Option<crate::payloads::RecognitionQueryContext> = query
+            .has_context()
+            .then(|| {
+                crate::payloads::RecognitionQueryContext::builder()
+                    .time(query.time)
+                    .locator(query.locator.clone())
+                    .extra(std::collections::HashMap::new())
+                    .try_into()
+            })
+            .transpose()
+            .map_err(|e| TrqlError::Contract(format!("query context did not build: {e}")))?;
+        let payload: RecognitionRequest = RecognitionRequest::builder()
+            .entity_id(query.entity_id.clone())
+            .authority_id(query.authority_id.clone())
+            .action(query.action.clone())
+            .resource(query.resource.clone())
+            .context(context)
+            .try_into()
+            .map_err(|e| TrqlError::Contract(format!("request payload did not build: {e}")))?;
         self.send_query(payload).await
     }
 

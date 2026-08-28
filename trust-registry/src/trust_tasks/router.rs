@@ -157,6 +157,14 @@ pub async fn handle_document(
 
 // --- handlers ---------------------------------------------------------------
 
+/// Fit a human-readable message into a spec `message` field, whose generated
+/// newtype caps length at 1024 characters. Over-long text is truncated rather
+/// than dropped, and text that still does not parse is simply omitted.
+fn fit_message<T: std::str::FromStr>(text: &str) -> Option<T> {
+    let capped: String = text.chars().take(1024).collect();
+    capped.parse().ok()
+}
+
 async fn handle_recognition<R>(
     repository: Arc<R>,
     doc: TrustTask<RecognitionRequest>,
@@ -172,25 +180,36 @@ where
     };
     let evaluated_at = Utc::now();
 
-    let message = record.as_ref().map(|tr| {
-        format!(
-            "{} recognized by {}",
-            tr.entity_id().as_str(),
-            tr.authority_id().as_str()
-        )
-    });
-    let response = RecognitionResponse {
-        entity_id: p.entity_id.clone(),
-        authority_id: p.authority_id.clone(),
-        action: p.action.clone(),
-        resource: p.resource.clone(),
-        recognized: record.map(|tr| tr.is_recognized()).unwrap_or(false),
-        time_evaluated: evaluated_at,
-        time_requested: p.context.as_ref().and_then(|c| c.time),
-        context: None,
-        ext: None,
-        message,
-    };
+    let message = record
+        .as_ref()
+        .map(|tr| {
+            format!(
+                "{} recognized by {}",
+                tr.entity_id().as_str(),
+                tr.authority_id().as_str()
+            )
+        })
+        .and_then(|text| fit_message(&text));
+    // The generated response types are `#[non_exhaustive]` from trust-tasks
+    // 0.17 on, so they are built through their builders.
+    let response: RecognitionResponse = RecognitionResponse::builder()
+        .entity_id(p.entity_id.clone())
+        .authority_id(p.authority_id.clone())
+        .action(p.action.clone())
+        .resource(p.resource.clone())
+        .recognized(record.map(|tr| tr.is_recognized()).unwrap_or(false))
+        .time_evaluated(evaluated_at)
+        .time_requested(p.context.as_ref().and_then(|c| c.time))
+        .message(message)
+        .try_into()
+        .map_err(|e| {
+            doc.reject_with(
+                new_id(),
+                RejectReason::InternalError {
+                    reason: format!("response did not build: {e}"),
+                },
+            )
+        })?;
     respond(&doc, response)
 }
 
@@ -209,27 +228,38 @@ where
     };
     let evaluated_at = Utc::now();
 
-    let message = record.as_ref().map(|tr| {
-        format!(
-            "{} authorized to {}+{} by {}",
-            tr.entity_id().as_str(),
-            tr.action().as_str(),
-            tr.resource().as_str(),
-            tr.authority_id().as_str()
-        )
-    });
-    let response = AuthorizationResponse {
-        entity_id: p.entity_id.clone(),
-        authority_id: p.authority_id.clone(),
-        action: p.action.clone(),
-        resource: p.resource.clone(),
-        authorized: record.map(|tr| tr.is_authorized()).unwrap_or(false),
-        time_evaluated: evaluated_at,
-        time_requested: p.context.as_ref().and_then(|c| c.time),
-        context: None,
-        ext: None,
-        message,
-    };
+    let message = record
+        .as_ref()
+        .map(|tr| {
+            format!(
+                "{} authorized to {}+{} by {}",
+                tr.entity_id().as_str(),
+                tr.action().as_str(),
+                tr.resource().as_str(),
+                tr.authority_id().as_str()
+            )
+        })
+        .and_then(|text| fit_message(&text));
+    // The generated response types are `#[non_exhaustive]` from trust-tasks
+    // 0.17 on, so they are built through their builders.
+    let response: AuthorizationResponse = AuthorizationResponse::builder()
+        .entity_id(p.entity_id.clone())
+        .authority_id(p.authority_id.clone())
+        .action(p.action.clone())
+        .resource(p.resource.clone())
+        .authorized(record.map(|tr| tr.is_authorized()).unwrap_or(false))
+        .time_evaluated(evaluated_at)
+        .time_requested(p.context.as_ref().and_then(|c| c.time))
+        .message(message)
+        .try_into()
+        .map_err(|e| {
+            doc.reject_with(
+                new_id(),
+                RejectReason::InternalError {
+                    reason: format!("response did not build: {e}"),
+                },
+            )
+        })?;
     respond(&doc, response)
 }
 
@@ -289,14 +319,22 @@ where
     let p = &doc.payload;
     let query = query_of(&p.entity_id, &p.authority_id, &p.action, &p.resource);
     match repository.delete(query).await {
-        Ok(()) => respond(
-            &doc,
-            RecordDeleteResponse {
-                ok: true,
-                message: None,
-                ext: None,
-            },
-        ),
+        Ok(()) => {
+            // The generated response types are `#[non_exhaustive]` from
+            // trust-tasks 0.17 on, so they are built through their builders.
+            let response: RecordDeleteResponse = RecordDeleteResponse::builder()
+                .ok(true)
+                .try_into()
+                .map_err(|e| {
+                    doc.reject_with(
+                        new_id(),
+                        RejectReason::InternalError {
+                            reason: format!("response did not build: {e}"),
+                        },
+                    )
+                })?;
+            respond(&doc, response)
+        }
         Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
     }
 }
@@ -507,14 +545,14 @@ mod tests {
         });
         let dispatcher = build_dispatcher(repo);
 
-        let doc = value_doc(RecognitionRequest {
-            entity_id: "did:example:entity".into(),
-            authority_id: "did:example:authority".into(),
-            action: "issue".into(),
-            resource: "vc".into(),
-            context: None,
-            ext: None,
-        });
+        let payload: RecognitionRequest = RecognitionRequest::builder()
+            .entity_id("did:example:entity")
+            .authority_id("did:example:authority")
+            .action("issue")
+            .resource("vc")
+            .try_into()
+            .expect("valid recognition request");
+        let doc = value_doc(payload);
 
         let out = handle_document(&dispatcher, doc)
             .await
@@ -531,14 +569,14 @@ mod tests {
     async fn recognition_absent_record_is_not_recognized() {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_dispatcher(repo);
-        let doc = value_doc(RecognitionRequest {
-            entity_id: "x".into(),
-            authority_id: "y".into(),
-            action: "a".into(),
-            resource: "r".into(),
-            context: None,
-            ext: None,
-        });
+        let payload: RecognitionRequest = RecognitionRequest::builder()
+            .entity_id("x")
+            .authority_id("y")
+            .action("a")
+            .resource("r")
+            .try_into()
+            .expect("valid recognition request");
+        let doc = value_doc(payload);
         let out = handle_document(&dispatcher, doc).await.expect("ok");
         let resp: RecognitionResponse = serde_json::from_value(out.payload).expect("parses");
         assert!(!resp.recognized);
@@ -735,14 +773,14 @@ mod tests {
             ..Default::default()
         });
         let dispatcher = build_dispatcher(repo);
-        let doc = value_doc(RecognitionRequest {
-            entity_id: "x".into(),
-            authority_id: "y".into(),
-            action: "a".into(),
-            resource: "r".into(),
-            context: None,
-            ext: None,
-        });
+        let payload: RecognitionRequest = RecognitionRequest::builder()
+            .entity_id("x")
+            .authority_id("y")
+            .action("a")
+            .resource("r")
+            .try_into()
+            .expect("valid recognition request");
+        let doc = value_doc(payload);
         let out = handle_document(&dispatcher, doc).await;
         assert!(out.is_err(), "repository failure should reject");
     }
@@ -787,14 +825,14 @@ mod tests {
             ..Default::default()
         });
         let dispatcher = build_query_dispatcher(repo);
-        let doc = value_doc(RecognitionRequest {
-            entity_id: "did:example:entity".into(),
-            authority_id: "did:example:authority".into(),
-            action: "issue".into(),
-            resource: "vc".into(),
-            context: None,
-            ext: None,
-        });
+        let payload: RecognitionRequest = RecognitionRequest::builder()
+            .entity_id("did:example:entity")
+            .authority_id("did:example:authority")
+            .action("issue")
+            .resource("vc")
+            .try_into()
+            .expect("valid recognition request");
+        let doc = value_doc(payload);
         let out = handle_document(&dispatcher, doc).await.expect("ok");
         let resp: RecognitionResponse = serde_json::from_value(out.payload).expect("parses");
         assert!(resp.recognized);
