@@ -22,20 +22,20 @@ homepage = "https://affinidi.com/"
 
 [workspace.dependencies]
 
-affinidi-tdk = "0.8"
+affinidi-tdk = "0.10"
 # Must track the affinidi-messaging-sdk that affinidi-tdk itself pulls in. This
 # dep exists only to switch on the SDK's `tsp` feature, and a feature only
 # unifies within one semver-compatible copy — a mismatched major/minor silently
 # gives two SDKs, and the feature lands on the one tdk does *not* re-export.
-affinidi-messaging-sdk = "0.19"
-trust-tasks-rs = "0.9"
-trust-tasks-proof = "0.9"
-vti-secrets = { version = "0.1", default-features = false }
+affinidi-messaging-sdk = "0.21"
+trust-tasks-rs = "0.17"
+trust-tasks-proof = "0.17"
+vti-secrets = { version = "0.3", default-features = false }
 fjall = "3"
-vta-sdk = { version = "0.25", default-features = false }
-trust-tasks-https = { version = "0.9", default-features = false }
-trust-tasks-tsp = "0.9"
-trust-tasks-didcomm = "0.9"
+vta-sdk = { version = "0.31", default-features = false }
+trust-tasks-https = { version = "0.17", default-features = false }
+trust-tasks-tsp = "0.17"
+trust-tasks-didcomm = "0.17"
 anyhow = "1.0"
 async-trait = "0.1.89"
 base64 = "0.23"
