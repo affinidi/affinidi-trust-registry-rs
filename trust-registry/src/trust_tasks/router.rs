@@ -320,10 +320,19 @@ where
     let query = query_of(&p.entity_id, &p.authority_id, &p.action, &p.resource);
     match repository.delete(query).await {
         Ok(()) => {
+            // The generated response types are `#[non_exhaustive]` from
+            // trust-tasks 0.17 on, so they are built through their builders.
             let response: RecordDeleteResponse = RecordDeleteResponse::builder()
                 .ok(true)
                 .try_into()
-                .expect("delete response has no fallible fields");
+                .map_err(|e| {
+                    doc.reject_with(
+                        new_id(),
+                        RejectReason::InternalError {
+                            reason: format!("response did not build: {e}"),
+                        },
+                    )
+                })?;
             respond(&doc, response)
         }
         Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),

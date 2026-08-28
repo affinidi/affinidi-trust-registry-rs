@@ -18,7 +18,7 @@ mediator = ["dep:affinidi-messaging-test-mediator", "dep:affinidi-tdk"]
 tsp = ["mediator", "trust-registry/tsp", "affinidi-messaging-test-mediator/tsp"]
 
 [dependencies]
-trust-registry = { path = "../trust-registry", version = "0.14" }
+trust-registry = { path = "../trust-registry", version = "0.15" }
 
 tokio.workspace = true
 tokio-util.workspace = true
