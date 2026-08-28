@@ -32,7 +32,12 @@ trust-tasks-rs = "0.17"
 trust-tasks-proof = "0.17"
 vti-secrets = { version = "0.3", default-features = false }
 fjall = "3"
-vta-sdk = { version = "0.31", default-features = false }
+# 0.31.1 is a floor, not a preference: every DIDComm and TSP client built by
+# 0.31.0 carried no `ClientIdentity`, so its Trust-Task documents went out with
+# no in-band `recipient` and a conforming VTA refused them as
+# `malformedRequest` — which fails `startup_profile_json` and, with an empty
+# offline cache, the whole boot.
+vta-sdk = { version = "0.31.1", default-features = false }
 trust-tasks-https = { version = "0.17", default-features = false }
 trust-tasks-tsp = "0.17"
 trust-tasks-didcomm = "0.17"
