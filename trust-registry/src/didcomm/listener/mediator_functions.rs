@@ -139,33 +139,38 @@ impl<H: MessageHandler> Listener<H> {
         });
     }
 
+    /// An idle registry polls the mediator every 30s and almost always finds
+    /// nothing, so an empty batch is logged at debug and only a batch with work
+    /// in it reaches info.
+    fn log_offline_batch(&self, count: usize) {
+        if count == 0 {
+            debug!(
+                "[profile = {}] Offline sync: mediator queue is empty.",
+                self.profile.inner.alias
+            );
+        } else {
+            info!(
+                "[profile = {}] Messages received offline. messages_count = {}",
+                self.profile.inner.alias, count
+            );
+        }
+    }
+
     pub(crate) async fn sync_and_process_offline_messages(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // FIXME: too long, split that...
         let wait_for_response = true;
-        let wait_duration = None;
         let messages_limit = 100;
         let protocols = Protocols::new();
-        // get count of messages in mediator
-        let status_reply = protocols
-            .message_pickup
-            .send_status_request(&self.atm, &self.profile, wait_for_response, wait_duration)
-            .await?;
 
-        debug!(
-            "[profile = {}] status_reply = {:?}",
-            self.profile.inner.alias, status_reply
-        );
-        let messages_count = status_reply.map(|m| m.message_count).unwrap_or(0);
-        info!(
-            "[profile = {}] Messages received offline. messages_count = {}",
-            self.profile.inner.alias, messages_count
-        );
-
-        if messages_count == 0 {
-            return Ok(());
-        }
+        // Ask the mediator for the queued messages directly rather than first
+        // asking for a queue-depth status. An empty queue answers with an empty
+        // delivery for the same single round trip, while a status reply that
+        // goes astray — it is answered on the same socket the live-delivery
+        // loop is draining, so an unclaimed one gets picked up there instead —
+        // is indistinguishable from a genuine zero, and reading it as zero
+        // would skip this drain cycle while reporting the queue as empty.
 
         // Retrieve + dispatch the queued backlog. With `--features tsp` we fetch
         // it as classified frames so a queued TSP message is routed to the TSP
@@ -185,6 +190,7 @@ impl<H: MessageHandler> Listener<H> {
                 .await?;
 
             let ack_ids: Vec<String> = frames.iter().map(|(_, id)| id.clone()).collect();
+            self.log_offline_batch(ack_ids.len());
             for (frame, _id) in frames {
                 match frame {
                     Some(InboundFrame::DidComm(message, meta)) => {
@@ -220,12 +226,19 @@ impl<H: MessageHandler> Listener<H> {
                 .map(|(m, _)| m.id.clone())
                 .collect();
 
+            self.log_offline_batch(ids.len());
+
             offline_arrived_messages
                 .into_iter()
                 .for_each(|(message, meta)| self.spawn_handler(message, meta));
 
             ids
         };
+
+        // Nothing was queued: no ack to send, and nothing worth a log line.
+        if messages_to_delete.is_empty() {
+            return Ok(());
+        }
 
         // delete these from mediator queue
         let delete_messages_reply = protocols
