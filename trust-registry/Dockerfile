@@ -41,6 +41,13 @@ WORKDIR /app
 COPY --from=builder /app/dist/trust-registry /usr/local/bin/trust-registry
 COPY --from=builder /app/sample-data/data.csv /usr/local/bin/sample-data/data.csv
 
+# Run as an unprivileged user rather than root (defense-in-depth: a container
+# escape or RCE lands as a non-root uid). Port 3232 is >1024, so no root bind.
+RUN groupadd --system app \
+    && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \
+    && chown -R app:app /app
+USER app
+
 ENV RUST_LOG=info
 
 EXPOSE 3232
