@@ -21,18 +21,18 @@ jobs:
       MEDIATOR_DID: ${{ vars.MEDIATOR_DID }}
       MEDIATOR_URL: ${{ vars.MEDIATOR_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           ref: ${{ github.head_ref }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           rustflags: ''
           toolchain: '1.96.0'
           override: true
       - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: 'rust-cache'
       - name: generate configs
@@ -60,7 +60,7 @@ jobs:
             exit 1
           )
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@ea647c55f74bb153499600c054578c0d83fa19d5 # cargo-llvm-cov
       - name: Generate code coverage
         run: |
           tail -n +1 -f server.log &
