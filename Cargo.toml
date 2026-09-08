@@ -9,7 +9,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = '0.14.0'
+version = '0.15.0'
 edition = "2024"
 publish = true
 rust-version = "1.95.0"
@@ -22,37 +22,37 @@ homepage = "https://affinidi.com/"
 
 [workspace.dependencies]
 
-affinidi-tdk = "0.8"
+affinidi-tdk = "0.12"
 # Must track the affinidi-messaging-sdk that affinidi-tdk itself pulls in. This
 # dep exists only to switch on the SDK's `tsp` feature, and a feature only
 # unifies within one semver-compatible copy — a mismatched major/minor silently
 # gives two SDKs, and the feature lands on the one tdk does *not* re-export.
-affinidi-messaging-sdk = "0.19"
-trust-tasks-rs = "0.9"
-trust-tasks-proof = "0.9"
-vti-secrets = { version = "0.1", default-features = false }
+affinidi-messaging-sdk = "0.22"
+trust-tasks-rs = "0.18"
+trust-tasks-proof = "0.18"
+vti-secrets = { version = "0.3", default-features = false }
 fjall = "3"
-vta-sdk = { version = "0.25", default-features = false }
-trust-tasks-https = { version = "0.9", default-features = false }
-trust-tasks-tsp = "0.9"
-trust-tasks-didcomm = "0.9"
+vta-sdk = { version = "0.34", default-features = false }
+trust-tasks-https = { version = "0.18", default-features = false }
+trust-tasks-tsp = "0.18"
+trust-tasks-didcomm = "0.18"
 anyhow = "1.0"
-async-trait = "0.1.89"
+async-trait = "0.1.92"
 base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 csv = "1.4.0"
 dotenvy = "0.15.7"
-axum = "0.8.7"
+axum = "0.8.9"
 futures = "0.3"
-tokio = { version = "1.48", features = ["full"] }
+tokio = { version = "1.53", features = ["full"] }
 tokio-util = "0.7"
 tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = [
   "fmt",
   "env-filter",
 ] }
-tempfile = "3.23"
-serde = "1.0.228"
+tempfile = "3.27"
+serde = "1.0.229"
 thiserror = "2.0"
 serde_derive = { version = "1.0" }
 serde_json = { version = "1.0" }
@@ -60,14 +60,14 @@ sha256 = "1.6"
 once_cell = "1.21"
 axum-server = { version = "0.8", default-features = true }
 tower-http = { version = "0.7", features = ["cors", "trace", "limit"] }
-uuid = { version = "1.19", features = ["v4"] }
-aws-types = { version = "1.3" }
-aws-config = { version = "1.8" }
-aws-sdk-dynamodb = { version = "1.104" }
-aws-sdk-ssm = { version = "1.103" }
-aws-sdk-secretsmanager = { version = "1.99" }
+uuid = { version = "1.26", features = ["v4"] }
+aws-types = { version = "1.6" }
+aws-config = { version = "1.12" }
+aws-sdk-dynamodb = { version = "1.124" }
+aws-sdk-ssm = { version = "1.122" }
+aws-sdk-secretsmanager = { version = "1.115" }
 serde_dynamo = { version = "4.3", features = ["aws-sdk-dynamodb+1"] }
-redis = { version = "1.0.3", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "1.7", features = ["tokio-comp", "connection-manager"] }
 
 # Test dependencies
 reqwest = { version = "0.13", features = ["json"] }

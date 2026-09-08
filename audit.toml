@@ -9,6 +9,10 @@ ignore = [
 	"RUSTSEC-2026-0098",
 	"RUSTSEC-2026-0099",
 	"RUSTSEC-2026-0104",
+	# transitive h2 0.3.27 via aws-smithy-http-client's hyper 0.14 path: a
+	# server-side DoS in an h2 we only ever drive as a client, and no fix until
+	# the AWS SDK moves off hyper 0.14.
+	"RUSTSEC-2026-0258",
 ]
 
 # Warn instead of error for these severity levels

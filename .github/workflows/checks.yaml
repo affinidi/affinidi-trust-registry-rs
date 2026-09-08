@@ -12,7 +12,7 @@ jobs:
     with:
       toolchain: '1.96.0'
       rustflags: '-D warnings --cfg tracing_unstable'
-      auditIgnore: 'RUSTSEC-2022-0040,RUSTSEC-2023-0071,RUSTSEC-2024-0373,RUSTSEC-2026-0098,RUSTSEC-2026-0099,RUSTSEC-2026-0104'
+      auditIgnore: 'RUSTSEC-2022-0040,RUSTSEC-2023-0071,RUSTSEC-2024-0373,RUSTSEC-2026-0098,RUSTSEC-2026-0099,RUSTSEC-2026-0104,RUSTSEC-2026-0258'
   test:
     name: Test Suite
     runs-on: ubuntu-24.04

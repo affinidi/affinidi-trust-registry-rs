@@ -25,9 +25,11 @@ use crate::storage::repository::TrustRecordQuery;
 
 pub use registry::authorization::v0_1::{
     Payload as AuthorizationRequest, Response as AuthorizationResponse,
+    ResponseMessage as AuthorizationResponseMessage,
 };
 pub use registry::recognition::v0_1::{
     Payload as RecognitionRequest, Response as RecognitionResponse,
+    ResponseMessage as RecognitionResponseMessage,
 };
 pub use registry::record::delete::v0_1::{
     Payload as RecordDeleteRequest, Response as RecordDeleteResponse,

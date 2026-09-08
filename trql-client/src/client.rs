@@ -19,6 +19,17 @@ use crate::transport::TrqlTransport;
 /// Slug of the framework's reserved error document type.
 const ERROR_SLUG: &str = "trust-task-error";
 
+/// Map a generated-payload builder failure onto [`TrqlError::Config`].
+///
+/// The generated request types are `#[non_exhaustive]`, so they are assembled
+/// through their builders, which validate at `try_into()`. Every field this
+/// client sets is a required one it always supplies, so a failure here means
+/// the client and the spec crate disagree about the payload shape — a build-
+/// time contract problem, not anything the peer did.
+fn payload_build_error(err: impl std::fmt::Display) -> TrqlError {
+    TrqlError::Config(format!("could not build query payload: {err}"))
+}
+
 /// The TRQP 4-tuple members, named identically on requests and responses.
 ///
 /// Both `registry/authorization/0.1` and `registry/recognition/0.1` require all
@@ -150,40 +161,50 @@ impl TrqlClient {
         &self,
         query: TrqpQuery,
     ) -> Result<AuthorizationResponse, TrqlError> {
-        let payload = AuthorizationRequest {
-            entity_id: query.entity_id.clone(),
-            authority_id: query.authority_id.clone(),
-            action: query.action.clone(),
-            resource: query.resource.clone(),
-            context: query
-                .has_context()
-                .then(|| crate::payloads::AuthorizationQueryContext {
-                    time: query.time,
-                    locator: query.locator.clone(),
-                    extra: Default::default(),
-                }),
-            ext: None,
-        };
+        let context: Option<crate::payloads::AuthorizationQueryContext> = query
+            .has_context()
+            .then(|| {
+                crate::payloads::AuthorizationQueryContext::builder()
+                    .time(query.time)
+                    .locator(query.locator.clone())
+                    .extra(std::collections::HashMap::new())
+                    .try_into()
+            })
+            .transpose()
+            .map_err(payload_build_error)?;
+        let payload: AuthorizationRequest = AuthorizationRequest::builder()
+            .entity_id(query.entity_id.clone())
+            .authority_id(query.authority_id.clone())
+            .action(query.action.clone())
+            .resource(query.resource.clone())
+            .context(context)
+            .try_into()
+            .map_err(payload_build_error)?;
         self.send_query(payload).await
     }
 
     /// Ask whether `entity` is recognized by `authority` for `action` on
     /// `resource` (`registry/recognition/0.1`).
     pub async fn recognition(&self, query: TrqpQuery) -> Result<RecognitionResponse, TrqlError> {
-        let payload = RecognitionRequest {
-            entity_id: query.entity_id.clone(),
-            authority_id: query.authority_id.clone(),
-            action: query.action.clone(),
-            resource: query.resource.clone(),
-            context: query
-                .has_context()
-                .then(|| crate::payloads::RecognitionQueryContext {
-                    time: query.time,
-                    locator: query.locator.clone(),
-                    extra: Default::default(),
-                }),
-            ext: None,
-        };
+        let context: Option<crate::payloads::RecognitionQueryContext> = query
+            .has_context()
+            .then(|| {
+                crate::payloads::RecognitionQueryContext::builder()
+                    .time(query.time)
+                    .locator(query.locator.clone())
+                    .extra(std::collections::HashMap::new())
+                    .try_into()
+            })
+            .transpose()
+            .map_err(payload_build_error)?;
+        let payload: RecognitionRequest = RecognitionRequest::builder()
+            .entity_id(query.entity_id.clone())
+            .authority_id(query.authority_id.clone())
+            .action(query.action.clone())
+            .resource(query.resource.clone())
+            .context(context)
+            .try_into()
+            .map_err(payload_build_error)?;
         self.send_query(payload).await
     }
 

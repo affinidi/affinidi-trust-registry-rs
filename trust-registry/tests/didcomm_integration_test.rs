@@ -4,10 +4,6 @@ use affinidi_tdk::{
         ATM,
         messages::{DeleteMessageRequest, FetchDeletePolicy, fetch::FetchOptions},
         profiles::ATMProfile,
-        protocols::{
-            Protocols,
-            mediator::acls::{AccessListModeType, MediatorACLSet},
-        },
     },
     secrets_resolver::secrets::Secret,
 };
@@ -28,6 +24,9 @@ use trust_registry::didcomm::{
         trqp::{QUERY_RECOGNITION_MESSAGE_TYPE, QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE},
     },
     prepare_atm_and_profile,
+};
+use trust_tasks_rs::specs::messaging::account::update::v0_1::{
+    MediatorAcl, MediatorAclAccessListMode,
 };
 use uuid::Uuid;
 
@@ -57,7 +56,6 @@ pub struct TestConfig {
 pub struct AtmTestContext {
     pub atm: Arc<ATM>,
     pub profile: Arc<ATMProfile>,
-    pub protocols: Arc<Protocols>,
 }
 
 async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
@@ -77,7 +75,7 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
         MESSAGE_WAIT_DURATION_SECS
     };
 
-    let (atm, profile, protocols) = setup_test_environment(
+    let (atm, profile) = setup_test_environment(
         &client_did,
         &client_secrets,
         &mediator_did,
@@ -90,11 +88,7 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
         client_did, mediator_did, trust_registry_did, in_pipeline, message_wait_duration_secs
     );
     (
-        AtmTestContext {
-            atm,
-            profile,
-            protocols,
-        },
+        AtmTestContext { atm, profile },
         TEST_CONTEXT
             .get_or_init(|| async {
                 Arc::new(TestConfig {
@@ -114,7 +108,6 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
 async fn create_records(
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
-    protocols: Arc<Protocols>,
     trust_registry_did: &str,
     mediator_did: &str,
     messages: Vec<Value>,
@@ -126,7 +119,6 @@ async fn create_records(
                     atm,
                     profile.clone(),
                     trust_registry_did,
-                    &protocols,
                     mediator_did,
                     &msg,
                     CREATE_RECORD_MESSAGE_TYPE,
@@ -280,8 +272,7 @@ async fn setup_test_environment(
     secrets: &str,
     mediator_did: &str,
     trust_registry_did: &str,
-) -> (Arc<ATM>, Arc<ATMProfile>, Arc<Protocols>) {
-    let protocols = Arc::new(Protocols::new());
+) -> (Arc<ATM>, Arc<ATMProfile>) {
     let secrets: Vec<Secret> = serde_json::from_str(secrets).unwrap();
     let (atm, profile) =
         prepare_atm_and_profile("test-client", client_did, mediator_did, secrets, true)
@@ -289,39 +280,35 @@ async fn setup_test_environment(
             .unwrap();
 
     println!("mediator did: {}", mediator_did);
-    let ping_result = protocols
-        .trust_ping
-        .send_ping(&atm, &profile, mediator_did, true, true, true)
+    let ping_result = atm
+        .trust_ping()
+        .send_ping(&profile, mediator_did, true, true, true)
         .await
         .unwrap();
 
     println!("ping_result: {:?}", ping_result.response);
 
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let acl_mode = AccessListModeType::ExplicitDeny;
 
-    let account_get_result = protocols
-        .mediator
-        .account_get(&atm, &profile, None)
-        .await
-        .unwrap();
-
-    let account_info = account_get_result
-        .ok_or(format!(
-            "[profile = {}] Failed to get account info",
-            &profile.inner.alias
-        ))
-        .unwrap();
-
-    let mut acls = MediatorACLSet::from_u64(account_info.acls);
-
+    // Put the client account on a denylist (empty = allow everyone) so the
+    // registry's replies reach it. `messaging/account/update` carries a partial
+    // ACL, so this names the one flag it changes and leaves the rest alone.
+    let acl_mode = MediatorAclAccessListMode::ExplicitDeny;
     println!("ACL_MODE: Configured to {:?}", acl_mode);
 
-    acls.set_access_list_mode(acl_mode, true, false).unwrap();
+    let acl: MediatorAcl = MediatorAcl::builder()
+        .access_list_mode(Some(acl_mode))
+        .try_into()
+        .expect("valid acl update");
 
-    protocols
-        .mediator
-        .acls_set(&atm, &profile, &digest(&profile.inner.did), &acls)
+    atm.trust_tasks()
+        .account_update(
+            &profile,
+            Some(digest(&profile.inner.did)),
+            None,
+            Some(acl),
+            None,
+        )
         .await
         .unwrap();
 
@@ -330,14 +317,13 @@ async fn setup_test_environment(
     create_records(
         &atm,
         &profile,
-        protocols.clone(),
         trust_registry_did,
         mediator_did,
         create_messages,
     )
     .await;
 
-    (atm, profile, protocols)
+    (atm, profile)
 }
 
 #[tokio::test]
@@ -358,7 +344,6 @@ async fn test_admin_read() {
         &atm_test_context.atm,
         atm_test_context.profile.clone(),
         &config.trust_registry_did,
-        &atm_test_context.protocols,
         &config.mediator_did,
         &read_body,
         READ_RECORD_MESSAGE_TYPE,
@@ -408,7 +393,6 @@ async fn test_admin_update() {
         &atm_test_context.atm,
         atm_test_context.profile.clone(),
         &config.trust_registry_did,
-        &atm_test_context.protocols,
         &config.mediator_did,
         &update_body,
         UPDATE_RECORD_MESSAGE_TYPE,
@@ -454,7 +438,6 @@ async fn test_admin_list() {
         &atm_test_context.atm,
         atm_test_context.profile.clone(),
         &config.trust_registry_did,
-        &atm_test_context.protocols,
         &config.mediator_did,
         &list_body,
         LIST_RECORDS_MESSAGE_TYPE,
@@ -514,7 +497,6 @@ async fn test_admin_delete() {
         &atm_test_context.atm,
         atm_test_context.profile.clone(),
         &config.trust_registry_did,
-        &atm_test_context.protocols,
         &config.mediator_did,
         &delete_body,
         DELETE_RECORD_MESSAGE_TYPE,
@@ -560,7 +542,6 @@ async fn test_trqp_handler() {
         &atm_test_context.atm,
         atm_test_context.profile.clone(),
         &config.trust_registry_did,
-        &atm_test_context.protocols,
         &config.mediator_did,
         &recognition_body,
         QUERY_RECOGNITION_MESSAGE_TYPE,
@@ -614,7 +595,6 @@ async fn send_message(
     atm: &Arc<ATM>,
     profile: Arc<ATMProfile>,
     trust_registry_did: &str,
-    _protocols: &Arc<Protocols>,
     _mediator_did: &str,
     body: &Value,
     message_type: &str,
