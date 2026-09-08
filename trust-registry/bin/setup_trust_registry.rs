@@ -29,7 +29,7 @@ use std::str::FromStr;
 use trust_registry::didcomm::did_document::{
     DIDCOMM_SERVICE_FRAGMENT, DIDCOMM_SERVICE_TYPE, REST_SERVICE_FRAGMENT, REST_SERVICE_TYPE,
     TRQP_PROFILE_URI, TRUST_REGISTRY_SERVICE_FRAGMENT, TRUST_REGISTRY_SERVICE_TYPE,
-    TSP_SERVICE_FRAGMENT, TSP_SERVICE_TYPE, TransportFlags, validate_public_url,
+    TSP_SERVICE_FRAGMENT, TSP_SERVICE_TYPE, validate_public_url,
 };
 use url::Url;
 // use base64;
@@ -691,9 +691,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // If the user has provided mediator details, proceed with DID setup
     if enable_didcomm {
-        // Initialise profile configuration
-        let mut profile_config: Option<ProfileConfig> = None;
-
         println!("Trust Registry DIDComm Configuration");
         println!("Mediator DID: {}", mediator_did);
         println!();
@@ -709,7 +706,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let tr_secrets: Vec<Secret> = serde_json::from_str(&existing_tr_did_secret)
                 .map_err(|e| format!("Failed to parse existing_tr_did_secret as JSON: {}", e))?;
 
-            profile_config = Some(ProfileConfig {
+            let profile_config = Some(ProfileConfig {
                 alias: "Trust Registry".to_string(),
                 did: existing_tr_did.clone(),
                 secrets: tr_secrets.clone(),
@@ -750,7 +747,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("✓ Profile configuration configured.");
             println!();
 
-            profile_config = Some(ProfileConfig {
+            let profile_config = Some(ProfileConfig {
                 alias: "Trust Registry".to_string(),
                 did: tr_did.clone(),
                 secrets: tr_secrets.clone(),

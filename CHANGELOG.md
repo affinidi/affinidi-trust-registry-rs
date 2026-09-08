@@ -12,6 +12,61 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [0.16.0] – 2026‑09‑08
+
+### Changed
+
+- **Dropped the AWS SDK's legacy hyper-0.14 client from the dependency graph,
+  and with it every advisory this repo was suppressing.** `audit.toml`,
+  `deny.toml` and the `auditIgnore` inputs in both workflows now carry no
+  ignores at all.
+
+  The AWS clients were taken with default features, whose `rustls` feature
+  pulls the legacy stack in:
+
+  ```
+  aws-sdk-*/rustls -> aws-smithy-runtime/tls-rustls
+                   -> aws-smithy-runtime/connector-hyper-0-14-x
+                   -> aws-smithy-http-client/hyper-014
+                   -> hyper 0.14 + h2 0.3.x + rustls 0.21 + rustls-webpki 0.101.7
+  ```
+
+  `h2-0-3` is an *optional* dependency of `aws-smithy-http-client` gated behind
+  `hyper-014`, so declining that feature removes the vulnerable crates from the
+  graph rather than suppressing findings against them. `aws-sdk-dynamodb`,
+  `aws-sdk-ssm` and `aws-sdk-secretsmanager` are now declared
+  `default-features = false` with `default-https-client` and `rt-tokio` — their
+  default set is `["rustls", "default-https-client", "rt-tokio"]`, so this drops
+  the legacy connector and nothing else.
+
+  `aws-config` is deliberately left on its defaults. They are
+  `["default-https-client", "rt-tokio", "credentials-process", "sso"]` with no
+  `rustls`, so it never contributed to the problem — and turning them off would
+  have quietly removed AWS SSO and `credential_process` credential resolution.
+
+  This became possible only once `vti-secrets` 0.3.3 arrived (in 0.15.0), which
+  declares its own `aws-config` / `aws-sdk-secretsmanager` the same way. Before
+  that it re-enabled `rustls` transitively no matter what this workspace asked
+  for, which is why the equivalent change was abandoned earlier.
+
+  The graph now holds exactly one copy of each: `hyper` 1.11.1, `h2` 0.4.19,
+  `rustls` 0.23.44, `rustls-webpki` 0.103.15. `cargo audit` and `cargo deny
+  check advisories` are both clean with **no** ignore list — verified by
+  emptying it rather than by reasoning about it.
+
+  Removed as stale in the same pass: `RUSTSEC-2022-0040` (`owning_ref`) and
+  `RUSTSEC-2023-0071` (`rsa`), neither of which is in the graph at all, and
+  `RUSTSEC-2024-0373` (`quinn-proto`), which is fixed in the 0.11.17 we resolve.
+
+### Fixed
+
+- Two dead-code findings in `trust-registry/bin/setup_trust_registry.rs` that
+  made `cargo check --all-targets` fail under the pipeline's `-D warnings`: an
+  unused `TransportFlags` import (referenced only in prose comments) and the
+  outer `profile_config` binding, whose `None` was never read because each
+  branch that reads it assigns it first. The binding now lives in the two
+  branches that use it.
+
 ## [0.15.0] – 2026‑09‑08
 
 ### Changed
