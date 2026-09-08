@@ -12,6 +12,66 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [0.15.0] – 2026‑09‑08
+
+### Changed
+
+- **Trust Tasks 0.9 → 0.18.6, `affinidi-tdk` 0.8 → 0.12, `vta-sdk` 0.25 → 0.34,
+  and the rest of the stack with them** (`affinidi-messaging-sdk` 0.22.0,
+  `-mediator` 0.22.3, `-test-mediator` 0.2.51 → 0.5.2, `vti-secrets` 0.1 →
+  0.3.3, `vti-common` 0.18.0), plus every other dependency to its latest
+  published line.
+
+  This catches the repo up with the rest of the ecosystem: the
+  `verifiable-trust-infrastructure` workspace — where `vtc-service`, our main
+  consumer, lives — is already on `trust-tasks-rs` 0.18.6 and `affinidi-tdk`
+  0.12.
+
+  The whole family has to move together. `affinidi-tdk` 0.12 requires
+  `affinidi-messaging-sdk` ^0.22, and `vti-secrets` 0.3.3 is built on `vta-sdk`
+  0.28+; leaving either behind puts two copies of `trust-tasks-rs` (and of
+  `vta-sdk`) in the graph. `cargo tree -d` lists none of `trust-tasks-rs`,
+  `trust-tasks-capability-client`, `vta-sdk`, `vti-common` or `affinidi-tdk` in
+  either the shipped or the dev graph.
+
+  **The wire contract is unchanged.** Every Type URI here is still
+  `registry/*/0.1`, the `registry/*` payload field sets are identical between
+  0.9 and 0.18 (checked field by field, not assumed), and the emitted
+  `trust-task-error` is still 0.5. One schema detail did tighten inside 0.1:
+  the advisory `message` on the recognition / authorization / record responses
+  now carries `maxLength: 1024`.
+
+### Fixed
+
+- **Response payloads are built through the spec builders.** `trust-tasks-rs`
+  0.18 made the generated `registry/*` requests and responses
+  `#[non_exhaustive]` and gave the advisory `message` its own validated
+  `ResponseMessage` type. `trust_tasks::router` and `trql-client` now assemble
+  those payloads with `Payload::builder()` / `Response::builder()`, and a
+  message that would exceed the new 1024-character ceiling is dropped rather
+  than failing the query — it is human-readable detail, and nothing decides on
+  it.
+
+- **The DIDComm integration test is off the deprecated `Protocols` handle.**
+  `affinidi-messaging-sdk` 0.22 deprecated `Protocols` in favour of the ATM
+  accessors, and moved mediator account administration onto Trust Tasks. The
+  test now calls `atm.trust_ping()` and sets its access-list mode with one
+  `atm.trust_tasks().account_update()` instead of the
+  `account_get` → `MediatorACLSet` → `acls_set` round trip.
+
+### Security
+
+- **`RUSTSEC-2026-0258` (h2 unbounded empty DATA frames) is ignored, with a
+  reason.** The vulnerable `h2` 0.3.27 arrives transitively through
+  `aws-smithy-http-client`'s `hyper` 0.14 path; the advisory is a server-side
+  DoS in an `h2` this service only ever drives as a client, and there is no fix
+  available until the AWS SDK moves off `hyper` 0.14. Recorded in `deny.toml`,
+  `audit.toml` and the pipeline's `auditIgnore` list alongside the existing
+  AWS-SDK `rustls-webpki` entries. It is not introduced by this change — `h2`
+  0.3.27 is in `main`'s lockfile too.
+
+---
+
 ## [0.14.0] – 2026‑08‑17
 
 ### Changed
