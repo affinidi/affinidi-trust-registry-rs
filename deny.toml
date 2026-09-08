@@ -1,11 +1,8 @@
 [advisories]
 version = 2
-ignore = [
-    { id = "RUSTSEC-2026-0098", reason = "transitive rustls-webpki 0.101.7 via AWS SDK (rustls 0.21); no fix until AWS SDK moves to rustls 0.23" },
-    { id = "RUSTSEC-2026-0099", reason = "transitive rustls-webpki 0.101.7 via AWS SDK (rustls 0.21); no fix until AWS SDK moves to rustls 0.23" },
-    { id = "RUSTSEC-2026-0104", reason = "transitive rustls-webpki 0.101.7 via AWS SDK (rustls 0.21); no fix until AWS SDK moves to rustls 0.23" },
-    { id = "RUSTSEC-2026-0258", reason = "transitive h2 0.3.27 via aws-smithy-http-client's hyper 0.14 path; a server-side DoS in an h2 we only ever drive as a client, and no fix until the AWS SDK moves off hyper 0.14" },
-]
+# Empty by design: see audit.toml. The legacy hyper-0.14 client that used
+# to bring these in is no longer in the graph.
+ignore = []
 
 [bans]
 multiple-versions = "allow"

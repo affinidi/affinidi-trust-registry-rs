@@ -1,19 +1,9 @@
 [advisories]
-# Ignore advisories for specific vulnerabilities
-# TODO: align pipeline in order to keep ignored vulnerabilities only there.
-# Add RUSTSEC IDs here as needed:
-ignore = [
-	"RUSTSEC-2022-0040",
-	"RUSTSEC-2023-0071",
-	"RUSTSEC-2024-0373",
-	"RUSTSEC-2026-0098",
-	"RUSTSEC-2026-0099",
-	"RUSTSEC-2026-0104",
-	# transitive h2 0.3.27 via aws-smithy-http-client's hyper 0.14 path: a
-	# server-side DoS in an h2 we only ever drive as a client, and no fix until
-	# the AWS SDK moves off hyper 0.14.
-	"RUSTSEC-2026-0258",
-]
+# Empty, and worth keeping that way. Every entry that used to live here was a
+# transitive advisory reached through the AWS SDK's legacy hyper-0.14 client;
+# declining that connector in the workspace Cargo.toml removed the vulnerable
+# crates from the graph outright, so there is nothing left to suppress.
+ignore = []
 
 # Warn instead of error for these severity levels
 # Options: "none", "low", "medium", "high", "critical"
