@@ -54,6 +54,9 @@ exceptions = [
     { allow = ["OpenSSL"], crate = "aws-lc-sys" },
     { allow = ["MPL-2.0"], crate = "bitmaps" },
     { allow = ["MPL-2.0"], crate = "im" },
+    # dirs 6 -> dirs-sys -> option-ext, reached through vta-sdk. MPL-2.0 is
+    # file-level copyleft and we link it unmodified, same as the entries above.
+    { allow = ["MPL-2.0"], crate = "option-ext" },
     { allow = ["MPL-2.0", "CDLA-Permissive-2.0"], crate = "webpki-roots" },
     { allow = ["CC-BY-SA-3.0", "MPL-2.0"], crate = "sized-chunks" },
     # TODO: align
