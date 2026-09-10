@@ -12,6 +12,46 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [0.17.0] – 2026‑09‑10
+
+### Changed
+
+- **Trust Tasks 0.18.6 → 0.19.4, `affinidi-tdk` 0.12 → 0.13, `vta-sdk` 0.34 →
+  0.35, and the rest of the stack with them** (`affinidi-messaging-sdk` 0.22 →
+  0.23, `-mediator` 0.22.3 → 0.23.0, `-test-mediator` 0.5.2 → 0.6.0,
+  `vti-secrets` 0.3.3 → 0.3.4, `vti-common` 0.18.0 → 0.18.2), plus every other
+  dependency to its latest published patch.
+
+  **This is the ecosystem head, not the crates.io head.** `affinidi-tdk` 0.14,
+  `affinidi-messaging-sdk` 0.24, `-test-mediator` 0.7 and Trust Tasks 0.20.1 are
+  all published, and are *deliberately* not taken: `vta-sdk` 0.35 — the newest
+  there is, and the one `vti-secrets` 0.3.4 requires — pins `affinidi-tdk ^0.13`
+  and `trust-tasks-rs ^0.19.4`. The `verifiable-trust-infrastructure` workspace,
+  where `vtc-service` (our main consumer) lives, is on the same line; its most
+  recent commit is *"follow vta-sdk to 0.35, which is what blocks the release"*.
+  Reaching past it would put `affinidi-messaging-sdk` 0.23 **and** 0.24 in the
+  graph, and a feature only unifies within one semver-compatible copy — the
+  `tsp` feature would land on the SDK copy `affinidi-tdk` does not re-export.
+  This repo moves to tdk 0.14 when `vta-sdk` does.
+
+  `cargo tree -d --all-features` lists none of `trust-tasks-rs`,
+  `trust-tasks-capability-client`, `vta-sdk`, `vti-common`, `affinidi-tdk` or
+  `affinidi-messaging-sdk` in either the shipped or the dev graph.
+
+  **The wire contract is unchanged, checked rather than assumed.**
+  `src/specs/registry/` is byte-identical between `trust-tasks-rs` 0.18.6 and
+  0.19.4, as is every core module the registry sits on (`payload`, `document`,
+  `canonical`, `proof`, `replay`, `transport`, `type_uri`, `validate`,
+  `consume`, `dispatcher`, `error`, `freshness`, `guards/`, `handlers/`). 0.19
+  is purely additive elsewhere in the spec set — `rooms/*`, `persona/facet`,
+  `process-attestation`. No Type URI, payload field set or optionality moved, so
+  R3.4/R3.6 have nothing to reconcile on the `vtc-service` side.
+
+  No source changes were needed in this workspace. `cargo deny --all-features
+  check` is clean with the ignore lists still empty, and `clippy --lib` reports
+  the same 8 pre-existing `result_large_err` warnings as `main` — verified
+  against a `main` worktree rather than assumed.
+
 ## [0.16.0] – 2026‑09‑08
 
 ### Changed
