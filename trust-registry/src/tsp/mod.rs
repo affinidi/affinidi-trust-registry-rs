@@ -255,6 +255,41 @@ pub async fn process_tsp_frame(
     }
 }
 
+/// Dispatch one **already-unpacked** inbound TSP application frame delivered by
+/// the delivery layer ([`crate::messaging::service`]), and seal the reply back
+/// to the sender over the shared mediator socket.
+///
+/// This is the delivery-layer counterpart to [`process_tsp_frame`]: with the
+/// `MessagingService` receive path the frame is unpacked — and the relationship
+/// recorded — inside `DidCommTransport` before it reaches here, so there is no
+/// `unpack`/retry (that whole machinery moves into the transport). Only the
+/// envelope parse, the shared-spine dispatch, and the reply remain, identical to
+/// [`process_tsp_frame`]'s tail.
+pub async fn dispatch_tsp_application(
+    atm: &Arc<ATM>,
+    profile: &Arc<ATMProfile>,
+    tasks: &TaskHandler,
+    payload: &[u8],
+    sender_did: &str,
+) {
+    let alias = &profile.inner.alias;
+    let doc = match parse_envelope(payload) {
+        Ok(doc) => doc,
+        Err(e) => {
+            warn!("[profile = {alias}] Dropping TSP message from {sender_did}: {e}");
+            return;
+        }
+    };
+    info!(
+        "[profile = {alias}, type = {}, from = {sender_did}] Trust Task (TSP)",
+        doc.type_uri.slug()
+    );
+    let reply = handle_inbound(tasks, sender_did, doc).await;
+    if let Err(e) = atm.tsp().send(profile, sender_did, &reply).await {
+        error!("[profile = {alias}] Failed to send TSP response to {sender_did}: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

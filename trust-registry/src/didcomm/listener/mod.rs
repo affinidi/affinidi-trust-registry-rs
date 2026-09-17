@@ -261,6 +261,31 @@ pub(crate) async fn start_one_did_listener(
             )
             .await?;
 
+            // A TSP-enabled registry drives the mediator socket through the D1
+            // delivery layer instead of the hand-rolled pickup loop: that path
+            // records inbound TSP relationship-control frames and persists the
+            // relationship state across a restart (Rev 3 §7.2.2), which the
+            // pickup loop's `atm.tsp().unpack()` cannot do. The DIDComm arm is
+            // handled identically (the same `handler` rehydrates each message).
+            #[cfg(feature = "tsp")]
+            if config.transport_flags.tsp {
+                let tasks = crate::trust_tasks::TaskHandler::new(
+                    dispatcher.clone(),
+                    profile_config.did.clone(),
+                    config.admin_config.admin_dids.clone(),
+                    verifier.clone(),
+                )
+                .with_dedup(dedup.clone());
+                return crate::messaging::service::start_managed_delivery(
+                    profile_config,
+                    config,
+                    Arc::new(handler),
+                    tasks,
+                    shutdown,
+                )
+                .await;
+            }
+
             Listener::build_listener(
                 profile_config.clone(),
                 &config.mediator_did,

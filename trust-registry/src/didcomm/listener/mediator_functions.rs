@@ -44,35 +44,42 @@ impl<H: MessageHandler> Listener<H> {
         &self,
         acl_mode: AccessListModeType,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let protocols = Protocols::new();
-
-        let account_get_result = protocols
-            .mediator
-            .account_get(&self.atm, &self.profile, None)
-            .await;
-
-        let account_info = account_get_result?.ok_or(format!(
-            "[profile = {}] Failed to get account info",
-            self.profile.inner.alias
-        ))?;
-
-        let mut acls = MediatorACLSet::from_u64(account_info.acls);
-
-        info!("ACL_MODE: Configured to {:?}", acl_mode);
-
-        acls.set_access_list_mode(acl_mode, true, false)?;
-
-        protocols
-            .mediator
-            .acls_set(
-                &self.atm,
-                &self.profile,
-                &digest(&self.profile.inner.did),
-                &acls,
-            )
-            .await?;
-        Ok(())
+        set_mediator_acl_mode(&self.atm, &self.profile, acl_mode).await
     }
+}
+
+/// Set the mediator's access-list mode for `profile` — the same operation
+/// [`Listener::set_acls_mode`] performs, factored out so the delivery-layer
+/// receive path ([`crate::messaging::service`]), which builds no [`Listener`],
+/// can apply the identical ACL mode before it starts receiving.
+pub(crate) async fn set_mediator_acl_mode(
+    atm: &std::sync::Arc<affinidi_tdk::messaging::ATM>,
+    profile: &std::sync::Arc<affinidi_tdk::messaging::profiles::ATMProfile>,
+    acl_mode: AccessListModeType,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let protocols = Protocols::new();
+
+    let account_get_result = protocols.mediator.account_get(atm, profile, None).await;
+
+    let account_info = account_get_result?.ok_or(format!(
+        "[profile = {}] Failed to get account info",
+        profile.inner.alias
+    ))?;
+
+    let mut acls = MediatorACLSet::from_u64(account_info.acls);
+
+    info!("ACL_MODE: Configured to {:?}", acl_mode);
+
+    acls.set_access_list_mode(acl_mode, true, false)?;
+
+    protocols
+        .mediator
+        .acls_set(atm, profile, &digest(&profile.inner.did), &acls)
+        .await?;
+    Ok(())
+}
+
+impl<H: MessageHandler> Listener<H> {
     /// Spawns a new asynchronous task with tokio
     /// to handle message with handler asyncroniously
     fn spawn_handler(&self, message: Message, meta: UnpackMetadata) {
