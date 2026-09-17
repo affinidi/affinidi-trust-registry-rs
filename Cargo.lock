@@ -6261,7 +6261,7 @@ dependencies = [
 
 [[package]]
 name = "test-client"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "affinidi-tdk",
  "anyhow",
@@ -6285,7 +6285,7 @@ dependencies = [
 
 [[package]]
 name = "test-trust-registry"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "affinidi-messaging-sdk",
  "affinidi-messaging-test-mediator",
@@ -6721,7 +6721,7 @@ dependencies = [
 
 [[package]]
 name = "trql-client"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "affinidi-messaging-sdk",
  "affinidi-tdk",
@@ -6742,11 +6742,11 @@ dependencies = [
 
 [[package]]
 name = "trqp"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "trust-registry"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "affinidi-messaging-core",
  "affinidi-messaging-delivery",

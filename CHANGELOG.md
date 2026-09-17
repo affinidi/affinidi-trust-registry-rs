@@ -12,6 +12,39 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [0.18.0] – 2026‑09‑17
+
+### Added
+
+- **TSP Rev 3 relationship management (§7.2.2 silent-drop fix).** A TSP-enabled
+  registry now drives inbound off the delivery layer
+  (`MessagingService::subscribe` over the SDK's `DidCommTransport`) instead of a
+  hand-rolled `atm.tsp().unpack()` loop. The old path never called
+  `record_incoming_control`, so no relationship was ever recorded: after a
+  restart or a peer re-handshake, Rev 3 §7.2.2 silently dropped every
+  application message from that peer, and control frames (invite/accept/cancel)
+  were misrouted into the Trust-Task dispatcher. The registry now persists
+  relationship state in a dedicated fjall store (injected via
+  `ATMConfig::with_relationship_store`, so it survives a restart), answers
+  inbound relationship-forming invites (`accept_relationship`, with
+  authorization left to the Trust-Task layer), and maintains the store with a
+  boot enumerate + 6h idle-eviction sweep. The messaging store is independent of
+  the trust-record storage backend, so it works even when records live in
+  DynamoDB or Redis. The whole path is gated behind the `tsp` feature and the
+  runtime `ENABLE_TSP` flag — a DIDComm-only registry keeps its existing pickup
+  loop untouched.
+
+### Changed
+
+- **Onto the TSP Revision 3 stack:** `affinidi-messaging-sdk` 0.23 → 0.26.7,
+  `affinidi-tdk` 0.13 → 0.16, `vta-sdk` 0.35 → 0.41.1, `trust-tasks-*` 0.19.4 →
+  0.21.3, `affinidi-tsp` arriving at 0.2.1, plus the delivery layer
+  (`affinidi-messaging-delivery` 0.1, `affinidi-messaging-core` 0.1) and
+  `vti-secrets` 0.3.11. The registry speaks TSP over Rev 3 as both a Trust-Task
+  transport and, now, a relationship responder.
+
+---
+
 ## [0.17.0] – 2026‑09‑10
 
 ### Changed
