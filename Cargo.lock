@@ -430,9 +430,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-messaging-sdk"
-version = "0.26.4"
+version = "0.26.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "962802b3900a4ba365e7470c1393d82342646f5d6ce3352c599fb61d0408e0b5"
+checksum = "4f378765b74ff8132687c67ebc2e7315e17dfe489390258195e86155485cd423"
 dependencies = [
  "affinidi-crypto",
  "affinidi-did-authentication",
@@ -674,9 +674,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-tsp"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32049a0b3373d56d281438370530812d494b4d35d457e8872a979b9dedc0c915"
+checksum = "7fdae229d6b5b9494afa1263d9b43dd905edf5b2460523802e24b5f3ecac1200"
 dependencies = [
  "affinidi-cesr",
  "affinidi-did-common",
@@ -5702,7 +5702,7 @@ checksum = "7bd22781911de0ca6debda95f073c8f18bec65d1a94f1fa9573f3102e514cea4"
 dependencies = [
  "ahash",
  "annotate-snippets",
- "base64 0.22.1",
+ "base64 0.21.7",
  "encoding_rs_io",
  "getrandom 0.3.4",
  "granit-parser",
@@ -6748,6 +6748,8 @@ version = "0.17.0"
 name = "trust-registry"
 version = "0.17.0"
 dependencies = [
+ "affinidi-messaging-core",
+ "affinidi-messaging-delivery",
  "affinidi-messaging-sdk",
  "affinidi-tdk",
  "anyhow",
@@ -6858,9 +6860,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-rs"
-version = "0.21.2"
+version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5b41e7486bc6844f92525df0411967471fd6e61c7ff861f0db054644d10edb5"
+checksum = "1ead41903b477d45a840a0b5020750af47a285b709603c483eabfe257291d379"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6874,9 +6876,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-tsp"
-version = "0.21.2"
+version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d8cd27607bd3f52577b1efdaa0b8cc56cb81c24a1ab5efb41e84cac35bcca8d"
+checksum = "b3a78f85158afe032126efc0a86c72e944489aeecce7c4ace518be4af41d8994"
 dependencies = [
  "affinidi-tsp",
  "chrono",

@@ -28,6 +28,13 @@ affinidi-tdk = "0.16"
 # unifies within one semver-compatible copy — a mismatched major/minor silently
 # gives two SDKs, and the feature lands on the one tdk does *not* re-export.
 affinidi-messaging-sdk = "0.26"
+# The D1 delivery layer + its neutral transport types. Used by the messaging
+# module to drive inbound off `MessagingService::subscribe` (which surfaces the
+# TSP relationship-control distinction the registry needs for Rev 3 §7.2.2) and
+# to back a durable outbox. Same major/minor line the VTA and mediator ship, so
+# the SDK's `DidCommTransport` (which implements `MessageTransport`) unifies.
+affinidi-messaging-delivery = "0.1"
+affinidi-messaging-core = "0.1"
 trust-tasks-rs = "0.21.2"
 trust-tasks-proof = "0.21.2"
 vti-secrets = { version = "0.3", default-features = false }

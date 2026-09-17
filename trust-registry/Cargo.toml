@@ -57,6 +57,13 @@ trust-tasks-tsp = { workspace = true, optional = true }
 # Direct optional dep solely to enable the SDK's `tsp` feature (atm.tsp()) on the
 # shared affinidi-messaging-sdk instance; affinidi-tdk/tsp only pulls affinidi-tsp.
 affinidi-messaging-sdk = { workspace = true, optional = true }
+# The D1 delivery layer + neutral transport types. Pulled in by the `tsp`
+# feature: a TSP-enabled registry drives inbound off `MessagingService::subscribe`
+# (over the SDK's `DidCommTransport`), which records TSP relationship-control
+# frames and surfaces the traffic-vs-control distinction — the Rev 3 §7.2.2 fix.
+# A DIDComm-only registry keeps its own pickup loop and never compiles these.
+affinidi-messaging-delivery = { workspace = true, optional = true }
+affinidi-messaging-core = { workspace = true, optional = true }
 # Pluggable secret-store backends for the TR identity (profile bundle). Backends
 # are enabled via the `secrets-*` features below, mirroring vti-secrets.
 #
@@ -119,6 +126,12 @@ tsp = [
     "dep:affinidi-messaging-sdk",
     "affinidi-tdk/tsp",
     "affinidi-messaging-sdk/tsp",
+    # The delivery-layer receive path + durable relationship/outbox stores that
+    # make TSP work over Rev 3 (§7.2.2). `fjall` backs both stores independently
+    # of the trust-record storage backend, so a TSP registry always has it.
+    "dep:affinidi-messaging-delivery",
+    "dep:affinidi-messaging-core",
+    "dep:fjall",
 ]
 
 # Secret-store backends for the Trust Registry identity, forwarded to vti-secrets.

@@ -18,6 +18,8 @@ pub mod trust_tasks;
 pub use embed::{TrustRegistry, TrustRegistryBuilder};
 
 #[cfg(feature = "tsp")]
+pub mod messaging;
+#[cfg(feature = "tsp")]
 pub mod tsp;
 
 pub struct SharedData<R>
