@@ -380,11 +380,12 @@ dependencies = [
 
 [[package]]
 name = "affinidi-messaging-mediator-common"
-version = "0.16.0"
+version = "0.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4084d9a324a52536be23a431eb10582bf41128db9dd9649b0da147d2d0fc8d4c"
+checksum = "09b3efcaa8f9731ea29af36c5c3e70cb55090427fad7924950ea07c2203e1a85"
 dependencies = [
  "aes-gcm",
+ "affinidi-net-guard",
  "ahash",
  "argon2",
  "async-trait",
@@ -430,9 +431,9 @@ dependencies = [
 
 [[package]]
 name = "affinidi-messaging-sdk"
-version = "0.26.7"
+version = "0.26.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f378765b74ff8132687c67ebc2e7315e17dfe489390258195e86155485cd423"
+checksum = "bcc1af738568095a5d2fa99d8d3b6bac4b3a2016b63174df33c9ea945e55050b"
 dependencies = [
  "affinidi-crypto",
  "affinidi-did-authentication",
@@ -7164,9 +7165,9 @@ checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
 name = "vta-sdk"
-version = "0.41.1"
+version = "0.43.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4970627d530a44640b244669226de96aae3549eb927670885673e9964eb72aed"
+checksum = "282a0a1a70923ffa5f4973656e834d430057cdd098246d2acb301d7a3909317d"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -7203,9 +7204,9 @@ dependencies = [
 
 [[package]]
 name = "vti-common"
-version = "0.18.9"
+version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8ef2b8795b570e29a2d2df7f69e9cb24ead1a0a369bc06ecb6991d5cacf144b"
+checksum = "1a16391ef4a64e39feacff79b6a08211f74ae454e9bfe39a628b8ce0d6340aaa"
 dependencies = [
  "affinidi-data-integrity",
  "affinidi-did-resolver-cache-sdk",
@@ -7242,9 +7243,9 @@ dependencies = [
 
 [[package]]
 name = "vti-secrets"
-version = "0.3.11"
+version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a16ed68edc2f0878e96681488caac00f568257c679c33856f2038f8b7871b0a8"
+checksum = "5b0aa8f9cde15e40b59a56acc56d5a06051226d628f2b1f0c3f8fa148b1632fb"
 dependencies = [
  "aws-config",
  "aws-sdk-secretsmanager",
