@@ -9,9 +9,8 @@ use std::time::Duration;
 use affinidi_tdk::didcomm::Message;
 use affinidi_tdk::messaging::messages::compat::UnpackMetadata;
 use affinidi_tdk::messaging::protocols::Protocols;
-use affinidi_tdk::messaging::protocols::mediator::acls::{AccessListModeType, MediatorACLSet};
+use affinidi_tdk::messaging::protocols::mediator::acls::AccessListModeType;
 use affinidi_tdk::messaging::protocols::message_pickup::InboundFrame;
-use sha256::digest;
 use tracing::{debug, error, info, warn};
 
 use crate::didcomm::listener::*;
@@ -57,26 +56,12 @@ pub(crate) async fn set_mediator_acl_mode(
     profile: &std::sync::Arc<affinidi_tdk::messaging::profiles::ATMProfile>,
     acl_mode: AccessListModeType,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let protocols = Protocols::new();
-
-    let account_get_result = protocols.mediator.account_get(atm, profile, None).await;
-
-    let account_info = account_get_result?.ok_or(format!(
-        "[profile = {}] Failed to get account info",
-        profile.inner.alias
-    ))?;
-
-    let mut acls = MediatorACLSet::from_u64(account_info.acls);
-
     info!("ACL_MODE: Configured to {:?}", acl_mode);
-
-    acls.set_access_list_mode(acl_mode, true, false)?;
-
-    protocols
-        .mediator
-        .acls_set(atm, profile, &digest(&profile.inner.did), &acls)
-        .await?;
-    Ok(())
+    let mode = match acl_mode {
+        AccessListModeType::ExplicitAllow => crate::mediator_acl::AccessListMode::ExplicitAllow,
+        AccessListModeType::ExplicitDeny => crate::mediator_acl::AccessListMode::ExplicitDeny,
+    };
+    crate::mediator_acl::set_access_list_mode(atm, profile, mode).await
 }
 
 impl<H: MessageHandler> Listener<H> {

@@ -11,6 +11,7 @@ pub mod domain;
 pub mod embed;
 pub mod health;
 pub mod http;
+pub mod mediator_acl;
 pub mod server;
 pub mod storage;
 pub mod trust_tasks;

@@ -6281,6 +6281,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
+ "trust-tasks-rs",
  "uuid",
 ]
 

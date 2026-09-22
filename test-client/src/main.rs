@@ -9,19 +9,11 @@ use std::sync::Arc;
 use affinidi_tdk::{
     TDK,
     common::{config::TDKConfig, profiles::TDKProfile},
-    messaging::{
-        ATM,
-        profiles::ATMProfile,
-        protocols::{
-            Protocols,
-            mediator::acls::{AccessListModeType, MediatorACLSet},
-        },
-    },
+    messaging::{ATM, profiles::ATMProfile, protocols::Protocols},
 };
 use dotenvy::dotenv;
 
 use serde_json::json;
-use sha256::digest;
 
 use crate::{
     admin_operations::{
@@ -38,20 +30,17 @@ pub mod sender;
 pub mod service_configs;
 
 async fn set_public_acls_mode(atm: Arc<ATM>, profile: Arc<ATMProfile>) -> Result<()> {
-    let protocols = Protocols::new();
-
-    let account_get_result = protocols.mediator.account_get(&atm, &profile, None).await;
-
-    let account_info = account_get_result?.ok_or(anyhow::anyhow!(
-        "[profile = {}] Failed to get account info",
-        &profile.inner.alias
-    ))?;
-    let mut acls = MediatorACLSet::from_u64(account_info.acls);
-    acls.set_access_list_mode(AccessListModeType::ExplicitDeny, true, false)?;
-
-    protocols
-        .mediator
-        .acls_set(&atm, &profile, &digest(&profile.inner.did), &acls)
+    use trust_tasks_rs::specs::messaging::account::update::v0_1::{
+        MediatorAcl, MediatorAclAccessListMode,
+    };
+    // Public: anyone not on the deny list may send. `account/update` is a
+    // partial update, so only the access-list mode changes.
+    let acl: MediatorAcl = MediatorAcl::builder()
+        .access_list_mode(Some(MediatorAclAccessListMode::ExplicitDeny))
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    atm.trust_tasks()
+        .account_update(&profile, None, None, Some(acl), None)
         .await?;
     Ok(())
 }

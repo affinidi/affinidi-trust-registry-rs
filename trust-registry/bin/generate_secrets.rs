@@ -1,7 +1,4 @@
 #![cfg(feature = "dev-tools")]
-// `Protocols` is deprecated in affinidi-messaging-sdk 0.18 in favour of ATM
-// accessor methods; migrating this dev-only tool is a separate cleanup.
-#![allow(deprecated)]
 use affinidi_tdk::{
     TDK,
     common::{config::TDKConfig, profiles::TDKProfile},
@@ -9,17 +6,10 @@ use affinidi_tdk::{
         DID as DIDCommon, PeerCreateKey, PeerKeyPurpose, PeerService, PeerServiceEndpoint,
         PeerServiceEndpointLong, one_or_many::OneOrMany,
     },
-    messaging::{
-        profiles::ATMProfile,
-        protocols::{
-            Protocols,
-            mediator::acls::{AccessListModeType, MediatorACLSet},
-        },
-    },
+    messaging::profiles::ATMProfile,
     secrets_resolver::secrets::Secret,
 };
 use serde_json::json;
-use sha256::digest;
 use std::{
     collections::HashMap,
     error::Error,
@@ -112,32 +102,12 @@ pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Se
             return;
         }
     };
-    let protocols = Protocols::new();
-    let account_get_result = protocols.mediator.account_get(&atm, &profile, None).await;
-
-    if account_get_result.is_err() {
-        println!(
-            "Error in getting account info: {:#?}",
-            account_get_result.err()
-        );
-        println!("Current mediator does not support account_get");
+    // Open the registry to senders (explicit-deny) if its mediator account is
+    // private, through the mediator's Trust Tasks.
+    if let Err(e) = trust_registry::mediator_acl::open_if_private(&atm, &profile).await {
+        println!("Error setting the mediator access-list mode: {e}");
+        println!("The mediator must serve the messaging/account Trust Tasks");
         return;
-    }
-
-    let account_info = account_get_result.unwrap();
-
-    if let Some(info) = account_info {
-        let mut acls = MediatorACLSet::from_u64(info.acls);
-        if acls.get_access_list_mode().0 == AccessListModeType::ExplicitAllow {
-            acls.set_access_list_mode(AccessListModeType::ExplicitDeny, true, false)
-                .unwrap();
-
-            protocols
-                .mediator
-                .acls_set(&atm, &profile, &digest(&profile.inner.did), &acls)
-                .await
-                .unwrap();
-        }
     }
 }
 
