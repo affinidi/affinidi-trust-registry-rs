@@ -12,6 +12,21 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **Mediator access-list mode set through Trust Tasks.** The registry sets
+  its own access-list mode at its mediator (public / private) with the
+  mediator's `messaging/account/get` and `messaging/account/update` Trust
+  Tasks, through the new `trust_registry::mediator_acl` module. This replaces
+  the legacy DIDComm `mediator/1.0/account-management` and `acl-management`
+  protocols, which mediators now warn about and can switch off
+  (`security.legacy_admin_protocols`, affinidi-messaging-mediator 0.28.29).
+  The listener, `setup-trust-registry`, `generate-secrets` and the test
+  client all use it. `account/update` is a partial update, so only the mode
+  changes, exactly as before.
+
 ## [0.18.0] – 2026‑09‑17
 
 ### Added
