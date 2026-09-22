@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
+use trust_tasks_rs::specs::messaging::account::get::v0_1::MediatorAclAccessListMode as ReportedMode;
 use trust_tasks_rs::specs::messaging::account::update::v0_1::{
     MediatorAcl, MediatorAclAccessListMode,
 };
@@ -47,20 +48,30 @@ pub async fn set_access_list_mode(
     Ok(())
 }
 
-/// `profile`'s current access-list mode at its mediator, when it reports one.
+/// `profile`'s current access-list mode at its mediator, or `None` when the
+/// mediator reports none. A mode this registry does not recognise is an error,
+/// never read as public: the access-list mode decides who may reach the
+/// registry, so an unknown state must not be mistaken for an open one.
 pub async fn access_list_mode(
     atm: &ATM,
     profile: &Arc<ATMProfile>,
 ) -> Result<Option<AccessListMode>, Box<dyn std::error::Error + Send + Sync>> {
     let account = atm.trust_tasks().account_get(profile, None).await?;
-    let mode = serde_json::to_value(&account.acl)?
-        .get("accessListMode")
-        .and_then(|m| m.as_str())
-        .map(|m| match m {
-            "explicitAllow" => AccessListMode::ExplicitAllow,
-            _ => AccessListMode::ExplicitDeny,
-        });
-    Ok(mode)
+    Ok(from_reported(account.acl.access_list_mode)?)
+}
+
+/// Map the mediator's reported mode, exactly. Only the two known modes map;
+/// anything else (a mode added to the spec later) is refused.
+fn from_reported(reported: Option<ReportedMode>) -> Result<Option<AccessListMode>, String> {
+    match reported {
+        None => Ok(None),
+        Some(ReportedMode::ExplicitAllow) => Ok(Some(AccessListMode::ExplicitAllow)),
+        Some(ReportedMode::ExplicitDeny) => Ok(Some(AccessListMode::ExplicitDeny)),
+        Some(other) => Err(format!(
+            "the mediator reported an access-list mode this registry does not know ({other}); \
+             refusing to guess whether the registry is public"
+        )),
+    }
 }
 
 /// Make the registry public (explicit-deny) if it is currently private.
@@ -72,4 +83,22 @@ pub async fn open_if_private(
         set_access_list_mode(atm, profile, AccessListMode::ExplicitDeny).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_known_modes_map_and_none_stays_unknown() {
+        assert_eq!(
+            from_reported(Some(ReportedMode::ExplicitAllow)).unwrap(),
+            Some(AccessListMode::ExplicitAllow)
+        );
+        assert_eq!(
+            from_reported(Some(ReportedMode::ExplicitDeny)).unwrap(),
+            Some(AccessListMode::ExplicitDeny)
+        );
+        assert_eq!(from_reported(None).unwrap(), None);
+    }
 }
