@@ -14,8 +14,28 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ## [Unreleased]
 
+## [0.19.0] – 2026‑09‑23
+
 ### Changed
 
+- **Latest TSP fixes in the messaging stack:** `affinidi-messaging-sdk`
+  0.26.10 → 0.26.27, `vta-sdk` 0.43.1 → 0.50.0, `vti-secrets` 0.3.13 → 0.4.2
+  (`vti-common` 0.19.3 → 0.23.1), `trust-tasks-*` 0.21.2/0.21.3 → 0.21.21,
+  `affinidi-messaging-delivery` 0.1.15 → 0.1.18, `affinidi-messaging-core`
+  0.1.8 → 0.1.10, and the `affinidi-messaging-test-mediator` dev-dependency
+  0.9.1 → 0.9.17 (mediator 0.26.2 → 0.28.36). `affinidi-tdk` stays at 0.16.0
+  and `affinidi-tsp` at 0.2.1. This brings in: two endpoints re-establishing
+  a TSP relationship at the same time no longer fail with `invalid
+  transition: SendInvite in state InviteReceived` (0.26.12); a request's
+  reply is registered before it is sent, so a fast reply is no longer handed
+  to a concurrent live-stream reader (0.26.19); a TSP send re-posts the same
+  bytes when a pooled connection is closed under it (0.26.26); and routed TSP
+  across two mediators (0.26.27). No source changes.
+- The 0.27 SDK line (`affinidi-tdk` 0.17, `trust-tasks-*` 0.22) is not taken
+  yet: the newest `vta-sdk` (0.50) and `vti-common` (0.23) still require
+  `affinidi-tdk` 0.16, SDK 0.26 and `trust-tasks-rs` 0.21, so moving now would
+  put two copies of the stack in the graph. SDK 0.27.1's mutual-cancellation
+  answer (the SDK sends the §7.3 answer itself) comes with that move.
 - **Mediator access-list mode set through Trust Tasks.** The registry sets
   its own access-list mode at its mediator (public / private) with the
   mediator's `messaging/account/get` and `messaging/account/update` Trust

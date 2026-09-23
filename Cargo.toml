@@ -9,7 +9,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = '0.18.0'
+version = '0.19.0'
 edition = "2024"
 publish = true
 rust-version = "1.95.0"
@@ -27,22 +27,22 @@ affinidi-tdk = "0.16"
 # dep exists only to switch on the SDK's `tsp` feature, and a feature only
 # unifies within one semver-compatible copy — a mismatched major/minor silently
 # gives two SDKs, and the feature lands on the one tdk does *not* re-export.
-affinidi-messaging-sdk = "0.26"
+affinidi-messaging-sdk = "0.26.27"
 # The D1 delivery layer + its neutral transport types. Used by the messaging
 # module to drive inbound off `MessagingService::subscribe` (which surfaces the
 # TSP relationship-control distinction the registry needs for Rev 3 §7.2.2) and
 # to back a durable outbox. Same major/minor line the VTA and mediator ship, so
 # the SDK's `DidCommTransport` (which implements `MessageTransport`) unifies.
-affinidi-messaging-delivery = "0.1"
-affinidi-messaging-core = "0.1"
-trust-tasks-rs = "0.21.2"
-trust-tasks-proof = "0.21.2"
-vti-secrets = { version = "0.3", default-features = false }
+affinidi-messaging-delivery = "0.1.18"
+affinidi-messaging-core = "0.1.10"
+trust-tasks-rs = "0.21.21"
+trust-tasks-proof = "0.21.21"
+vti-secrets = { version = "0.4.2", default-features = false }
 fjall = "3"
-vta-sdk = { version = "0.43", default-features = false }
-trust-tasks-https = { version = "0.21.2", default-features = false }
-trust-tasks-tsp = "0.21.2"
-trust-tasks-didcomm = "0.21.2"
+vta-sdk = { version = "0.50", default-features = false }
+trust-tasks-https = { version = "0.21.21", default-features = false }
+trust-tasks-tsp = "0.21.21"
+trust-tasks-didcomm = "0.21.21"
 anyhow = "1.0"
 async-trait = "0.1.92"
 base64 = "0.23"
