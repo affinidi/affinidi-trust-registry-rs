@@ -457,14 +457,17 @@ async fn handle_tsp_control(
                 ),
             }
         }
+        // The SDK answers a mutual cancellation itself; `reply_expected` is
+        // only still set when that send failed, and the relationship is
+        // already gone, so this re-sends the answer without the state machine.
         ControlDecision::Cancel(why) => {
             match atm
                 .tsp()
-                .cancel_relationship(profile, sender_vid, thread_digest)
+                .answer_cancellation(profile, sender_vid, thread_digest)
                 .await
             {
-                Ok(state) => info!(
-                    sender = %sender_vid, ?request, ?state, reason = %why,
+                Ok(_) => info!(
+                    sender = %sender_vid, ?request, reason = %why,
                     "answered an inbound TSP relationship request with a cancellation",
                 ),
                 Err(e) => warn!(

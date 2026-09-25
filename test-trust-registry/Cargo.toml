@@ -23,7 +23,7 @@ trust-registry = { path = "../trust-registry", version = "0.19" }
 tokio.workspace = true
 tokio-util.workspace = true
 
-affinidi-messaging-test-mediator = { version = "0.9.17", optional = true }
+affinidi-messaging-test-mediator = { version = "0.10.1", optional = true }
 affinidi-tdk = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -35,6 +35,7 @@ affinidi-messaging-sdk.workspace = true
 trust-tasks-rs.workspace = true
 trust-tasks-didcomm.workspace = true
 trust-tasks-tsp.workspace = true
+trust-tasks-proof.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 
