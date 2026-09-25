@@ -11,6 +11,8 @@ publish = false
 [dependencies]
 affinidi-tdk.workspace = true
 trust-tasks-rs.workspace = true
+trust-tasks-proof.workspace = true
+trust-tasks-didcomm.workspace = true
 
 async-trait.workspace = true
 axum.workspace = true

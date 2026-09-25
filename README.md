@@ -634,12 +634,25 @@ message shape regardless of carrier.
 | `registry/recognition/0.1`                            | read  | none (TRQP recognition query) |
 | `registry/authorization/0.1`                          | read  | none (TRQP authorization query)|
 | `registry/record/query/0.1`                           | read  | none                          |
-| `registry/record/put/0.1`                             | write | admin DID + proof             |
-| `registry/record/delete/0.1`                          | write | admin DID + proof             |
+| `registry/record/put/0.1`                             | write | admin DID + proof + authority |
+| `registry/record/delete/0.1`                          | write | admin DID + proof + authority |
 | `registry/did/rotate/0.1`                             | write | admin DID + proof (`vta` only)|
 
-**Writes** (record mutations and DID rotation) require the sender DID to be in
-`ADMIN_DIDS` **and** the Trust Task to carry a Data-Integrity proof. The reads map
+**Writes** (record mutations and DID rotation) require:
+
+- an in-band `issuer` that is the sender the transport authenticated;
+- a Data-Integrity proof with `proofPurpose` `assertionMethod`, made with a
+  verification method of the issuer's own DID, that verifies;
+- the issuer to be in `ADMIN_DIDS`.
+
+Record mutations are further bound to the authority they write under: the
+record's `authority_id` must be the issuer's DID, or an authority listed for
+that issuer in `ADMIN_AUTHORITIES`. The authenticated sender on its own
+authorises nothing.
+
+The legacy `tr-admin/1.0` DIDComm protocol is no longer served; see
+[DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#removed-tr-admin10) for the
+mapping onto these tasks. The reads map
 verbatim onto the [TRQP v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/)
 recognition/authorization field names, so the plain HTTP TRQP endpoints and the
 Trust Task payloads share a single schema.
@@ -809,6 +822,7 @@ See the list of environment variables and their usage.
 | `AUDIT_LOG_FORMAT`      | Output format for audit logs. Options: `text`, `json`.                                                                                                                                    | Yes                                          |
 | `MEDIATOR_DID`          | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records.                                                                              | Required when DIDComm is enabled             |
 | `ADMIN_DIDS`            | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry.                                                                                                    | Required when DIDComm is enabled             |
+| `ADMIN_AUTHORITIES`     | JSON object mapping an admin DID to the authority DIDs it may write records under **in addition to its own DID**, e.g. `{"did:web:ops.example": ["did:web:a.example", "did:web:b.example"]}`. Every key must be in `ADMIN_DIDS`; a malformed value stops startup. Unset ⇒ each admin writes only under its own DID. | No                                           |
 | `PROFILE_CONFIG`        | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. **_Sensitive information, do not share._** | Required when DIDComm is enabled             |
 | `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enabled. ExplicitDeny - public mode, ExplicitAllow - private mode                                                                                                          | default: `ExplicitDeny`                             |
 | `TR_PUBLIC_URL`         | Externally reachable base URL of the REST/TRQP surface (e.g. `https://registry.example.org`). When set, the generated DID document advertises a `TRQPRest` service entry so peers can discover the REST endpoint by resolving the registry's DID. Must be `https://` (loopback `http://` allowed for local dev). Unset ⇒ REST is still served, but not advertised. | No                                           |

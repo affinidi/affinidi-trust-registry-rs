@@ -146,18 +146,22 @@ impl TrustRegistry {
     /// verification and message-id dedup.
     ///
     /// This is the entrypoint for a host that owns its own transport. The host
-    /// is responsible for authenticating the sender and resolving the
-    /// framework's parties before calling
-    /// [`handle`](crate::trust_tasks::TaskHandler::handle) — only it knows how
-    /// its transport establishes them. Pass `None` for `sender_did` on an
-    /// unauthenticated caller; writes are then denied.
+    /// is responsible for authenticating the sender — only it knows how its
+    /// transport does that — and passes it to
+    /// [`handle`](crate::trust_tasks::TaskHandler::handle), which resolves the
+    /// framework's parties against it exactly as the built-in bindings do. Pass
+    /// `None` for `sender_did` on an unauthenticated caller; writes are then
+    /// denied. An authenticated sender alone never authorises a write: the
+    /// document must also carry a valid proof by the same DID.
     pub fn task_handler(&self) -> TaskHandler {
+        let admin_config = &self.config.didcomm_config.admin_config;
         TaskHandler::new(
             self.capabilities.dispatcher(),
             self.config.didcomm_config.profile_config.did.clone(),
-            self.config.didcomm_config.admin_config.admin_dids.clone(),
+            admin_config.admin_dids.clone(),
             self.verifier.clone(),
         )
+        .with_admin_authorities(admin_config.admin_authorities.clone())
         .with_dedup(self.dedup.clone())
     }
 
@@ -180,7 +184,7 @@ impl TrustRegistry {
         crate::didcomm::handlers::trust_tasks::route_envelope_body(
             &self.task_handler(),
             body,
-            sender_did,
+            Some(sender_did),
         )
         .await
     }

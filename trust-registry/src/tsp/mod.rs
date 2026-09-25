@@ -32,15 +32,10 @@ use std::time::Duration;
 use affinidi_tdk::messaging::{ATM, errors::ATMError, profiles::ATMProfile};
 use serde_json::Value;
 use tracing::{error, info, warn};
-use trust_tasks_rs::{RejectReason, TransportHandler, TrustTask};
-use trust_tasks_tsp::{ENVELOPE_TYPE, TspHandler};
-use uuid::Uuid;
+use trust_tasks_rs::TrustTask;
+use trust_tasks_tsp::ENVELOPE_TYPE;
 
 use crate::trust_tasks::TaskHandler;
-
-fn new_id() -> String {
-    Uuid::new_v4().to_string()
-}
 
 /// Attempts (including the first) for an unpack whose failure looks transient.
 const UNPACK_MAX_ATTEMPTS: u32 = 3;
@@ -150,24 +145,11 @@ fn build_envelope<T: serde::Serialize>(doc: &T) -> Vec<u8> {
 /// Route one decrypted inbound document (already authenticated by the TSP layer)
 /// and produce the response envelope bytes to return to `sender_did`.
 ///
-/// `sender_did` is the TSP-authenticated peer VID. Only party resolution and
-/// envelope packing are TSP's business; everything else is the shared
+/// `sender_did` is the TSP-authenticated peer VID. Only envelope packing is
+/// TSP's business; everything else, party resolution included, is the shared
 /// [`TaskHandler`], which is what keeps this transport's write ACL, proof
 /// verification and dedup identical to DIDComm's.
 async fn handle_inbound(tasks: &TaskHandler, sender_did: &str, doc: TrustTask<Value>) -> Vec<u8> {
-    // §4.8.1 party resolution: TSP-authenticated sender -> issuer, us -> recipient.
-    let transport = TspHandler::new(
-        Some(tasks.my_did().to_string()),
-        Some(sender_did.to_string()),
-    );
-    if let Err(consistency) = transport.resolve_parties(&doc) {
-        let err = doc.reject_with_recipient(
-            new_id(),
-            RejectReason::from(consistency),
-            Some(sender_did.to_string()),
-        );
-        return build_envelope(&err);
-    }
     match tasks.handle(doc, Some(sender_did)).await {
         Ok(response) => build_envelope(&response),
         Err(err) => build_envelope(&err),
@@ -296,7 +278,7 @@ mod tests {
 
     fn doc_with(type_uri: &str, proof: bool) -> TrustTask<Value> {
         let mut doc = TrustTask::new(
-            new_id(),
+            uuid::Uuid::new_v4().to_string(),
             type_uri.parse().expect("valid type uri"),
             serde_json::json!({}),
         );

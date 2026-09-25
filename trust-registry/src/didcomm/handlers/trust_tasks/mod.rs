@@ -2,24 +2,24 @@
 //!
 //! Inbound DIDComm messages of type [`ENVELOPE_TYPE`] carry a `TrustTask` JSON
 //! document in their body (the `trusttasks.org/binding/didcomm/0.1` binding).
-//! The ATM has already authcrypt-verified the sender, so this handler:
+//! This handler:
 //!
 //! 1. parses the envelope body into a `TrustTask<Value>`;
-//! 2. resolves the framework's parties via [`DidcommHandler`] (SPEC §4.8.1) —
-//!    the authcrypt sender is the `issuer`, our profile DID the `recipient`;
-//! 3. hands the document to the shared
-//!    [`TaskHandler`](crate::trust_tasks::TaskHandler), which applies the
-//!    freshness checks, the write ACL and proof verification, and dispatches;
-//!    and
-//! 4. packs the resulting success or error document back into an [`ENVELOPE_TYPE`]
+//! 2. hands the document, with the authcrypt sender (if any) as the transport
+//!    identity, to the shared [`TaskHandler`](crate::trust_tasks::TaskHandler),
+//!    which resolves the parties (SPEC §4.8.1), applies the freshness checks,
+//!    the write ACL, proof verification and the authority binding, and
+//!    dispatches; and
+//! 3. packs the resulting success or error document back into an [`ENVELOPE_TYPE`]
 //!    message and returns it to the sender through the mediator.
 //!
-//! Steps 1, 2 and 4 are the only parts specific to DIDComm. Step 3 is shared
+//! Steps 1 and 3 are the only parts specific to DIDComm. Step 2 is shared
 //! with the TSP and HTTP bindings — and with any host driving an embedded
 //! registry — so the transports cannot drift apart on authorisation.
 //!
-//! The legacy `trqp/1.0` and `tr-admin/1.0` handlers remain registered for
-//! backward compatibility.
+//! The legacy read-only `trqp/1.0` handler remains registered for backward
+//! compatibility. The legacy `tr-admin/1.0` record-management protocol is no
+//! longer served; record changes go through `registry/record/*`.
 
 use std::sync::Arc;
 
@@ -31,10 +31,8 @@ use serde::Serialize;
 use serde_json::Value;
 use tracing::{error, warn};
 use trust_tasks_didcomm::ENVELOPE_TYPE;
-use trust_tasks_rs::{ErrorResponse, RejectReason, TransportHandler, TrustTask};
+use trust_tasks_rs::{ErrorResponse, TrustTask};
 use uuid::Uuid;
-
-use trust_tasks_didcomm::DidcommHandler as TtDidcommHandler;
 
 use crate::capabilities::DispatcherHandle;
 use crate::configs::AdminConfig;
@@ -45,10 +43,9 @@ use crate::trust_tasks::TaskHandler;
 
 /// DIDComm binding handler for the `registry/*` Trust Task family.
 ///
-/// Owns only what is specific to this transport: decoding the envelope,
-/// resolving the framework's parties from the authcrypt sender, and packing the
-/// reply. Everything from the freshness checks through dispatch lives in the
-/// shared [`TaskHandler`].
+/// Owns only what is specific to this transport: decoding the envelope and
+/// packing the reply. Everything from party resolution through dispatch lives
+/// in the shared [`TaskHandler`].
 pub struct TrustTasksHandler {
     tasks: TaskHandler,
 }
@@ -71,6 +68,7 @@ impl TrustTasksHandler {
     ) -> Self {
         Self {
             tasks: TaskHandler::new(dispatcher, my_did, admin_config.admin_dids, verifier)
+                .with_admin_authorities(admin_config.admin_authorities)
                 .with_dedup(dedup),
         }
     }
@@ -83,8 +81,12 @@ fn new_id() -> String {
 /// Decode an inbound DIDComm envelope body and route it through `tasks`.
 ///
 /// The DIDComm-specific half of handling a Trust Task: parse the body into a
-/// framework document and resolve the framework's parties (§4.8.1) from the
-/// authcrypt-verified sender. Everything after that is the shared handler.
+/// framework document. Everything after that, party resolution included, is
+/// the shared handler.
+///
+/// `sender_did` is the sender the unpack authenticated, or `None` for an
+/// anoncrypt or plaintext envelope; an unauthenticated sender can read but
+/// never write.
 ///
 /// `None` means the body is not a usable Trust Task document: there is no
 /// thread or issuer to address a conformant error response to, so the caller
@@ -98,31 +100,20 @@ fn new_id() -> String {
 pub async fn route_envelope_body(
     tasks: &TaskHandler,
     body: Value,
-    sender_did: &str,
+    sender_did: Option<&str>,
 ) -> Option<Result<TrustTask<Value>, ErrorResponse>> {
     let doc: TrustTask<Value> = match serde_json::from_value(body) {
         Ok(doc) => doc,
         Err(e) => {
-            warn!("Dropping malformed Trust Task envelope from {sender_did}: {e}");
+            warn!(
+                "Dropping malformed Trust Task envelope from {}: {e}",
+                sender_did.unwrap_or("an unauthenticated sender")
+            );
             return None;
         }
     };
 
-    // §4.8.1 party resolution: authcrypt sender -> issuer, us -> recipient.
-    let transport = TtDidcommHandler::new(
-        Some(tasks.my_did().to_string()),
-        Some(sender_did.to_string()),
-    );
-    if let Err(consistency) = transport.resolve_parties(&doc) {
-        // In-band issuer contradicts the transport-authenticated sender.
-        return Some(Err(doc.reject_with_recipient(
-            new_id(),
-            RejectReason::from(consistency),
-            Some(sender_did.to_string()),
-        )));
-    }
-
-    Some(tasks.handle(doc, Some(sender_did)).await)
+    Some(tasks.handle(doc, sender_did).await)
 }
 
 #[async_trait]
@@ -140,7 +131,12 @@ impl ProtocolHandler for TrustTasksHandler {
         // Decode + resolve parties + route. The same function a host driving
         // its own mediator socket calls, so the two paths cannot diverge on
         // the envelope contract.
-        let Some(outcome) = route_envelope_body(&self.tasks, message.body, &ctx.sender_did).await
+        let Some(outcome) = route_envelope_body(
+            &self.tasks,
+            message.body,
+            ctx.authenticated_sender.as_deref(),
+        )
+        .await
         else {
             // A malformed envelope has no usable thread/issuer to address a
             // conformant error response to; already logged, so just drop it.

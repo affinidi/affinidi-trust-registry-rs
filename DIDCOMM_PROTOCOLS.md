@@ -8,19 +8,14 @@ DIDComm offers a flexible messaging service that enables you to define higher-le
 ## Table of Contents
 
 - [Trust Registry Administration](#trust-registry-administration)
+  - [Removed: `tr-admin/1.0`](#removed-tr-admin10)
+- [Trust Registry Queries](#trust-registry-queries)
   - [Summary](#summary)
   - [Motivation](#motivation)
   - [Roles](#roles)
   - [Requirements](#requirements)
   - [Workflow](#workflow)
   - [Messages](#messages)
-- [Trust Registry Queries](#trust-registry-queries)
-  - [Summary](#summary-1)
-  - [Motivation](#motivation-1)
-  - [Roles](#roles-1)
-  - [Requirements](#requirements-1)
-  - [Workflow](#workflow-1)
-  - [Messages](#messages-1)
 - [Problem Reporting](#problem-reporting)
 - [Security Considerations](#security-considerations)
 - [Implementation](#implementation)
@@ -28,422 +23,40 @@ DIDComm offers a flexible messaging service that enables you to define higher-le
 
 ## Trust Registry Administration
 
-### Summary
-
-A protocol to manage trust records in the Trust Registry.
-
-### Motivation
-
-To provide a secure and private communication between Administrator and Trust Registry to manage the trust records.
-
-### Roles
-
-There are two roles defined in managing trust records:
-
-- **Admin:** The DID that sends a request to create, update, delete, or list trust records.
-- **Trust Registry:** The DID that processes the request to manage the trust records.
-
-### Requirements
-
-- DIDComm v2.1 protocol.
-- Admin DID **MUST** be authorised by the Trust Registry to receive messages.
-
-### Workflow
-
-When managing the trust records, the admin initiates the request by sending a message to the Trust Registry's DID through the DIDComm mediator.
-
-*Sample create record flow.*
-
-```mermaid
-sequenceDiagram
-    participant Admin as TR Administrator
-    participant DM as DIDComm Mediator
-    participant TR as Trust Registry
-
-
-    Admin->>DM: Admin sends a message containing the message type and payload. <br />Create record request [didcomm/protocols/tr-admin/1.0/create-record]
-    Note over Admin, DM: Admin client starts listening to the response
-    TR->>DM: Trust Registry fetches the messages
-    TR->>TR: Processes the message.
-    TR->>DM: Sends a response containing the result of the request <br /> Create record response [didcomm/protocols/tr-admin/1.0/create-record/response]
-    Admin->>DM: Fetches the response from the Trust Registry
-    Note over Admin, DM: Admin client terminates the listener
-
-```
-
-### Messages
-
-
-#### create-record
-
-Request to create a trust record into the Trust Registry.
-
-**Message Type URI:**
-
-Action | Message Type |
--------|--------------|
-Request | `https://affinidi.com/didcomm/protocols/tr-admin/1.0/create-record` |
-Response | `https://affinidi.com/didcomm/protocols/tr-admin/1.0/create-record/response` |
-
-**Message Fields:**
-
-- **`authority_id` REQUIRED** - The DID of the authority who authorised the entity and publishes the governance framework.
-- **`entity_id` REQUIRED** - The DID of the entity authorised and recognised by the authority.
-- **`authorized` REQUIRED** - Whether the defined authority authorises the entity.
-- **`recognized` REQUIRED** - Whether the defined authority recognises the entity.
-- **`action` REQUIRED** - A published vocabulary of common actions that the entity is authorised or recognised to perform.
-- **`resource` REQUIRED** - The resource identifier where the entity can perform the stated action.
-- **`context` OPTIONAL** - A JSON object that contains optional parameters that provides the governance framework or trust domain under which the authorisation is valid. 
-    
-    For example, *"Is Clinic X authorised by Health Department Y to issue credentials under Healthcare Governance Framework?"* and the requester can use the context to ensure that the authorisation is valid within a specific governance framework.
-
-
-**Example:**
-
-Request:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff1",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/tr-admin/1.0/create-record",
-    "body": {
-      "action": "action_xyz",
-      "authority_id": "did:example:authority456",
-      "authorized": true,
-      "context": {
-        "id": "https://governance.example.org/healthcare-framework",
-        "type": "GovernanceFramework",
-        "name": "Healthcare Trust Framework",
-        "version": "1.0"
-      },
-      "entity_id": "did:example:entity123",
-      "recognized": true,
-      "resource": "resource_abc"
-    },
-    "from": "<ADMINISTRATOR_DID>",
-    "to": [
-        "<TRUST_REGISTRY_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
-
-Response:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff2",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/tr-admin/1.0/create-record/response",
-    "body": {
-      "action": "action_xyz",
-      "authority_id": "did:example:authority456",
-      "entity_id": "did:example:entity123",
-      "resource": "resource_abc"
-    },
-    "from": "<TRUST_REGISTRY_DID>",
-    "to": [
-        "<ADMINISTRATOR_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
-
-
-#### update-record
-
-Request to update existing trust record in the Trust Registry.
-
-**Message Type URI:**
-
-Action | Message Type |
--------|--------------|
-Request | `https://affinidi.com/didcomm/protocols/tr-admin/1.0/update-record` |
-Response | `https://affinidi.com/didcomm/protocols/tr-admin/1.0/update-record/response` |
-
-**Message Fields:**
-
-- **`authority_id` REQUIRED** - The DID of the authority who authorised the entity and publishes the governance framework.
-- **`entity_id` REQUIRED** - The DID of the entity authorised and recognised by the authority.
-- **`authorized` REQUIRED** - Whether the defined authority authorises the entity.
-- **`recognized` REQUIRED** - Whether the defined authority recognises the entity.
-- **`action` REQUIRED** - A published vocabulary of common actions that the entity is authorised or recognised to perform.
-- **`resource` REQUIRED** - The resource identifier where the entity can perform the stated action.
-- **`context` OPTIONAL** - A JSON object that contains optional parameters that provides the governance framework or trust domain under which the authorisation is valid. 
-    
-    For example, *"Is Clinic X authorised by Health Department Y to issue credentials under Healthcare Governance Framework?"* and the requester can use the context to ensure that the authorisation is valid within a specific governance framework.
-
-**Example:**
-
-Request:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff1",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/tr-admin/1.0/update-record",
-    "body": {
-      "action": "action_xyz",
-      "authority_id": "did:example:authority456",
-      "authorized": false,
-      "context": {
-        "id": "https://governance.example.org/healthcare-framework",
-        "type": "GovernanceFramework",
-        "name": "Healthcare Trust Framework",
-        "version": "2.0"
-      },
-      "entity_id": "did:example:entity123",
-      "recognized": false,
-      "resource": "resource_abc"
-    },
-    "from": "<ADMINISTRATOR_DID>",
-    "to": [
-        "<TRUST_REGISTRY_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
-
-Response:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff2",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/tr-admin/1.0/update-record/response",
-    "body": {
-      "action": "action_xyz",
-      "authority_id": "did:example:authority456",
-      "entity_id": "did:example:entity123",
-      "resource": "resource_abc"
-    },
-    "from": "<TRUST_REGISTRY_DID>",
-    "to": [
-        "<ADMINISTRATOR_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
-
-#### delete-record
-
-Request to delete a trust record from the Trust Registry.
-
-**Message Type URI:**
-
-Action | Message Type |
--------|--------------|
-Request | `https://affinidi.com/didcomm/protocols/tr-admin/1.0/delete-record` |
-Response | `https://affinidi.com/didcomm/protocols/tr-admin/1.0/delete-record/response` |
-
-**Message Fields:**
-
-- **`authority_id` REQUIRED** - The DID of the authority who authorised the entity and publishes the governance framework.
-- **`entity_id` REQUIRED** - The DID of the entity authorised and recognised by the authority.
-- **`action` REQUIRED** - A published vocabulary of common actions that the entity is authorised or recognised to perform.
-- **`resource` REQUIRED** - The resource identifier where the entity can perform the stated action.
-
-**Example:**
-
-Request:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff1",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/tr-admin/1.0/delete-record",
-    "body": {
-      "action": "action_xyz",
-      "authority_id": "did:example:authority456",
-      "entity_id": "did:example:entity123",
-      "resource": "resource_abc"
-    },
-    "from": "<ADMINISTRATOR_DID>",
-    "to": [
-        "<TRUST_REGISTRY_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
-
-Response:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff2",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/tr-admin/1.0/delete-record/response",
-    "body": {
-      "action": "action_xyz",
-      "authority_id": "did:example:authority456",
-      "entity_id": "did:example:entity123",
-      "resource": "resource_abc"
-    },
-    "from": "<TRUST_REGISTRY_DID>",
-    "to": [
-        "<ADMINISTRATOR_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
-   
-#### read-record
-
-Retrieves a trust record from the Trust Registry.
-
-**Message Type URI:**
-
-Action | Message Type |
--------|--------------|
-Request | `https://affinidi.com/didcomm/protocols/tr-admin/1.0/read-record` |
-Response | `https://affinidi.com/didcomm/protocols/tr-admin/1.0/read-record/response` |
-
-**Message Fields:**
-
-- **`authority_id` REQUIRED** - The DID of the authority who authorised the entity and publishes the governance framework.
-- **`entity_id` REQUIRED** - The DID of the entity authorised and recognised by the authority.
-- **`action` REQUIRED** - A published vocabulary of common actions that the entity is authorised or recognised to perform.
-- **`resource` REQUIRED** - The resource identifier where the entity can perform the stated action.
-
-**Example:**
-
-Request:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff1",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/tr-admin/1.0/read-record",
-    "body": {
-      "action": "action_xyz",
-      "authority_id": "did:example:authority456",
-      "entity_id": "did:example:entity123",
-      "resource": "resource_abc"
-    },
-    "from": "<ADMINISTRATOR_DID>",
-    "to": [
-        "<TRUST_REGISTRY_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
-
-Response:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff2",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/tr-admin/1.0/read-record/response",
-    "body": {
-      "action": "action_xyz",
-      "authority_id": "did:example:authority456",
-      "authorized": false,
-      "context": {
-        "id": "https://governance.example.org/healthcare-framework",
-        "type": "GovernanceFramework",
-        "name": "Healthcare Trust Framework",
-        "version": "2.0"
-      },
-      "entity_id": "did:example:entity123",
-      "recognized": false,
-      "resource": "resource_abc"
-    },
-    "from": "<TRUST_REGISTRY_DID>",
-    "to": [
-        "<ADMINISTRATOR_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
-
-#### list-records
-
-List all trust records from the Trust Registry.
-
-**Message Type URI:**
-
-Action | Message Type |
--------|--------------|
-Request | `https://affinidi.com/didcomm/protocols/tr-admin/1.0/list-records` |
-Response | `https://affinidi.com/didcomm/protocols/tr-admin/1.0/list-records/response` |
-
-**Message Fields:**
-
-No message body.
-
-**Example:**
-
-Request:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff1",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/tr-admin/1.0/list-records",
-    "body": {},
-    "from": "<ADMINISTRATOR_DID>",
-    "to": [
-        "<TRUST_REGISTRY_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
-
-Response:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff2",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/tr-admin/1.0/list-records/response",
-    "body": {
-        "count": 3,
-        "records": [
-            {
-                "action": "action3",
-                "authority_id": "did:example:authority3",
-                "authorized": true,
-                "context": {},
-                "entity_id": "did:example:entity3",
-                "recognized": true,
-                "resource": "resource3"
-            },
-            {
-                "action": "action1",
-                "authority_id": "did:example:authority1",
-                "authorized": true,
-                "context": {
-                    "additional": "context"
-                },
-                "entity_id": "did:example:entity1",
-                "recognized": true,
-                "resource": "resource1"
-            },
-            {
-                "action": "action_xyz",
-                "authority_id": "did:example:authority456",
-                "authorized": false,
-                "context": {
-                  "id": "https://governance.example.org/healthcare-framework",
-                  "type": "GovernanceFramework",
-                  "name": "Healthcare Trust Framework",
-                  "version": "2.0"
-                },
-                "entity_id": "did:example:entity123",
-                "recognized": false,
-                "resource": "resource_abc"
-            }
-        ]
-    },
-    "from": "<TRUST_REGISTRY_DID>",
-    "to": [
-        "<ADMINISTRATOR_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
+Trust records are managed with the `registry/record/*` Trust Tasks
+(`registry/record/put/0.1`, `registry/record/delete/0.1` and
+`registry/record/query/0.1`), carried in the DIDComm Trust Task envelope
+(`https://trusttasks.org/binding/didcomm/0.1/envelope`) or over TSP. See
+[Trust Task protocol surface](README.md#trust-task-protocol-surface).
+
+A record write is accepted only when all of the following hold:
+
+- the document carries an in-band `issuer`, and that issuer is the sender the
+  transport authenticated;
+- the document carries a Data Integrity proof with `proofPurpose`
+  `assertionMethod`, made with a verification method of the issuer's own DID,
+  and the proof verifies;
+- the issuer is listed in `ADMIN_DIDS`;
+- the record's `authority_id` is the issuer's DID, or an authority listed for
+  that issuer in `ADMIN_AUTHORITIES`.
+
+### Removed: `tr-admin/1.0`
+
+The legacy `https://affinidi.com/didcomm/protocols/tr-admin/1.0` protocol
+(`create-record`, `update-record`, `delete-record`, `read-record`,
+`list-records`) is no longer served. Messages of those types are not
+answered and change nothing. To migrate:
+
+| `tr-admin/1.0` message | Trust Task |
+| ---------------------- | ---------- |
+| `create-record` | `registry/record/put/0.1` with `"expectedExisting": false` |
+| `update-record` | `registry/record/put/0.1` with `"expectedExisting": true` |
+| `delete-record` | `registry/record/delete/0.1` |
+| `read-record` | `registry/record/query/0.1` naming all four key parts |
+| `list-records` | `registry/record/query/0.1` with a filter (paginated) |
+
+Each write must be signed and must name an authority the issuer may write
+under, as above. The `test-client` crate shows the full flow.
 
 ## Trust Registry Queries
 
@@ -683,7 +296,9 @@ The protocol requires that all message exchanges between the Administrator and t
 
 - The Trust Registry **MUST** assign an appropriate ACL to the Administrator's DID.
 
-- The Trust Registry **MUST** ensure only the authorised DID can send a message to the Trust Registry to perform actions.
+- The Trust Registry **MUST NOT** treat the authenticated DIDComm sender as sufficient to change a record. A change is authorised by the Data Integrity proof on the Trust Task, bound to the in-band `issuer`, which must also be the authenticated sender.
+
+- An administrator **MUST** only be able to write records under an authority it is allowed to act for: its own DID, or one the operator lists for it in `ADMIN_AUTHORITIES`.
 
 ## Implementation
 

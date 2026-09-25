@@ -10,7 +10,6 @@ use tracing::{debug, info, warn};
 
 use crate::didcomm::{get_parent_thread_id, get_thread_id, listener::MessageHandler};
 
-pub mod admin;
 pub mod build;
 pub mod problem_report;
 pub mod trqp;
@@ -19,7 +18,14 @@ pub mod trust_tasks;
 pub struct HandlerContext {
     pub atm: Arc<ATM>,
     pub profile: Arc<ATMProfile>,
+    /// Where replies go: the message's `from`, or `"anon"` when it has none.
+    /// Not proof of who sent the message; never authorise on it.
     pub sender_did: String,
+    /// The sender as the unpack reported it for an authcrypt envelope, `None`
+    /// for anoncrypt or plaintext. Handlers pass this on as the transport
+    /// identity, but it is not sufficient to authorise a change: registry
+    /// writes additionally need a Data Integrity proof by the same DID.
+    pub authenticated_sender: Option<String>,
     pub thid: Option<String>,
     pub pthid: Option<String>,
 }
@@ -51,9 +57,11 @@ impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for BaseHandler
         message: Message,
         meta: UnpackMetadata,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // TODO: validate UnpackMetadata, so in config the admin of TR can define would they allow unsign / anon / etc messages
         let message_type = &message.typ;
         let from = message.from.clone().unwrap_or("anon".into());
+        let authenticated_sender = (meta.authenticated && !meta.anonymous_sender)
+            .then(|| message.from.clone())
+            .flatten();
         let thid = get_thread_id(&message).or_else(|| Some(message.id.clone()));
         let pthid = get_parent_thread_id(&message);
 
@@ -61,6 +69,7 @@ impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for BaseHandler
             atm: atm.clone(),
             profile: profile.clone(),
             sender_did: from.clone(),
+            authenticated_sender,
             thid,
             pthid,
         });

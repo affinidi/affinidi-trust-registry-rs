@@ -14,6 +14,52 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ## [Unreleased]
 
+### Removed (breaking)
+
+- **The `tr-admin/1.0` DIDComm protocol is no longer served.** `create-record`,
+  `update-record`, `delete-record`, `read-record` and `list-records` messages
+  are not answered and change nothing, and the
+  `trust_registry::didcomm::handlers::admin` module is gone. Use the
+  `registry/record/{put,delete,query}` Trust Tasks instead; the mapping is in
+  [DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#removed-tr-admin10).
+
+### Changed (breaking)
+
+- **Record writes are bound to the writer's authority.** `registry/record/put`
+  and `registry/record/delete` are refused (`permissionDenied`) unless the
+  record's `authority_id` is the issuer's own DID, or an authority listed for
+  that issuer in the new optional `ADMIN_AUTHORITIES` setting (a JSON object
+  of admin DID to authority DIDs; `AdminConfig::admin_authorities`,
+  `TaskHandler::with_admin_authorities`). A put or delete naming no
+  `authority_id` is `malformedRequest`.
+- **A write must name its issuer, and the issuer, the authenticated sender and
+  the proof's signer must be the same DID.** A write with no in-band `issuer`
+  is `malformedRequest`; an issuer other than the authenticated sender is
+  `identityMismatch`; a proof whose verification method is not under the
+  issuer's DID, or whose `proofPurpose` is not `assertionMethod`, is
+  `proofInvalid`. `verify_write_proof` now refuses a write with no proof or no
+  issuer on its own rather than passing it through.
+- **Party resolution runs inside `TaskHandler::handle`.** Every caller,
+  including a host driving an embedded registry through
+  `TrustRegistry::task_handler`, gets the in-band-issuer check against the
+  sender it passes, for reads as well as writes. The DIDComm and TSP bindings
+  no longer do it separately.
+- **`route_envelope_body` takes `Option<&str>` for the sender**, and the
+  DIDComm handler passes the sender only when the envelope was authcrypted
+  (`HandlerContext::authenticated_sender`). An anoncrypt or plaintext message
+  can still read, but cannot write. `TrustRegistry::route_didcomm_envelope`
+  keeps its signature.
+- **The Affinidi stack moves to the 0.27 SDK line:** `affinidi-tdk` 0.16 →
+  0.17, `affinidi-messaging-sdk` 0.26.27 → 0.27.1, `trust-tasks-*` 0.21.21 →
+  0.22.7, `vta-sdk` 0.50 → 0.52, `vti-secrets` 0.4.2 → 0.4.4 (`vti-common`
+  0.23.1 → 0.25.0), and the `affinidi-messaging-test-mediator`
+  dev-dependency 0.9.17 → 0.10.1 (mediator 0.29). The graph keeps one copy of
+  each. With SDK 0.27.1 the SDK answers a mutual TSP cancellation itself; the
+  registry now only re-sends that answer (`answer_cancellation`) when the
+  SDK's own send failed.
+- `test-client` manages records with signed `registry/record/*` Trust Tasks
+  under the admin's own DID.
+
 ## [0.19.0] – 2026‑09‑23
 
 ### Changed

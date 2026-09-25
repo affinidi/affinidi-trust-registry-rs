@@ -1,10 +1,11 @@
 //! Data Integrity proof verification for the write-path Trust Tasks.
 //!
 //! The record-mutation tasks (`registry/record/{put,delete}`) declare
-//! `IS_PROOF_REQUIRED`. The DIDComm and TSP bindings already reject a write with
-//! no in-band `proof` (presence); this module adds the cryptographic step —
+//! `IS_PROOF_REQUIRED`. This module performs the cryptographic step —
 //! verifying the Data Integrity proof against the issuer's resolved key — so a
-//! forged or tampered write is rejected, not merely a proofless one.
+//! forged or tampered write is rejected, not merely a proofless one. A write
+//! with no proof, or with no in-band `issuer` for the proof to be bound to, is
+//! refused outright rather than left to the verifier.
 //!
 //! Verification is backed by [`trust_tasks_proof`]'s Affinidi verifier over the
 //! shared DID-resolver cache; `did:key` issuers verify offline, `did:web` /
@@ -57,16 +58,26 @@ pub async fn build_verifier() -> Arc<dyn DynProofVerifier> {
 
 /// Cryptographically verify the Data Integrity proof on a **write** document.
 ///
-/// Reads pass through unchanged. A proofless write also passes here — presence
-/// is enforced separately by the binding's `authorize_write` before this call —
-/// so this step only rejects a write whose *present* proof fails verification
-/// ([`RejectReason::ProofInvalid`]).
+/// Reads pass through unchanged. A write must carry a proof
+/// ([`RejectReason::ProofRequired`]) and an in-band `issuer` the proof is bound
+/// to ([`RejectReason::MalformedRequest`]); both are refused here as well as by
+/// [`TaskHandler::authorize_write`](crate::trust_tasks::TaskHandler::authorize_write),
+/// so this check is safe to call on its own. A present proof that fails
+/// verification is [`RejectReason::ProofInvalid`].
 pub async fn verify_write_proof(
     verifier: &Arc<dyn DynProofVerifier>,
     doc: &TrustTask<Value>,
 ) -> Result<(), RejectReason> {
-    if !is_write_slug(doc.type_uri.slug()) || doc.proof.is_none() {
+    if !is_write_slug(doc.type_uri.slug()) {
         return Ok(());
+    }
+    if doc.proof.is_none() {
+        return Err(RejectReason::ProofRequired);
+    }
+    if doc.issuer.is_none() {
+        return Err(RejectReason::MalformedRequest {
+            reason: "a write must name its issuer".to_string(),
+        });
     }
     verifier
         .verify_json(doc)
@@ -86,6 +97,7 @@ mod tests {
             type_uri.parse().expect("valid type uri"),
             serde_json::json!({}),
         );
+        doc.issuer = Some("did:example:admin".to_string());
         doc.proof = Some(
             serde_json::from_value(serde_json::json!({
                 "type": "DataIntegrityProof",
@@ -116,6 +128,30 @@ mod tests {
         assert!(matches!(
             verify_write_proof(&verifier, &doc).await,
             Err(RejectReason::ProofInvalid { .. })
+        ));
+    }
+
+    const RECORD_PUT: &str = "https://trusttasks.org/spec/registry/record/put/0.1";
+
+    #[tokio::test]
+    async fn write_without_proof_is_refused() {
+        let verifier = erase_verifier(Verifier::for_did_key());
+        let mut doc = doc_with_dummy_proof(RECORD_PUT);
+        doc.proof = None;
+        assert!(matches!(
+            verify_write_proof(&verifier, &doc).await,
+            Err(RejectReason::ProofRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn write_without_issuer_is_refused() {
+        let verifier = erase_verifier(Verifier::for_did_key());
+        let mut doc = doc_with_dummy_proof(RECORD_PUT);
+        doc.issuer = None;
+        assert!(matches!(
+            verify_write_proof(&verifier, &doc).await,
+            Err(RejectReason::MalformedRequest { .. })
         ));
     }
 }

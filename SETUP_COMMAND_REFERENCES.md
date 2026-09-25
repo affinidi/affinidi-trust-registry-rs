@@ -283,6 +283,7 @@ The setup command generates a `.env` file with the following variables:
 | `AUDIT_LOG_FORMAT` | Audit log output format. |
 | `MEDIATOR_DID` | DIDComm mediator DID when DIDComm enabled. |
 | `ADMIN_DIDS` | Authorized admin DIDs when DIDComm enabled. |
+| `ADMIN_AUTHORITIES` | Optional JSON object: admin DID → extra authority DIDs it may write records under (default: its own DID only). |
 | `PROFILE_CONFIG` | Trust Registry profile configuration when DIDComm enabled. |
 | `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enabled. ExplicitDeny - public mode, ExplicitAllow - private mode |
 

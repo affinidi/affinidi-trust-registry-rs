@@ -275,6 +275,7 @@ pub(crate) async fn start_one_did_listener(
                     config.admin_config.admin_dids.clone(),
                     verifier.clone(),
                 )
+                .with_admin_authorities(config.admin_config.admin_authorities.clone())
                 .with_dedup(dedup.clone());
                 return crate::messaging::service::start_managed_delivery(
                     profile_config,
@@ -341,6 +342,7 @@ pub(crate) async fn start_one_did_listener(
                 config.admin_config.admin_dids.clone(),
                 verifier.clone(),
             )
+            .with_admin_authorities(config.admin_config.admin_authorities.clone())
             .with_dedup(dedup.clone()),
         )
     } else {
