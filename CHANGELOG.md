@@ -114,13 +114,16 @@ Missing versions simply reflect internal deployment‑related patches.
   can still read, but cannot write. `TrustRegistry::route_didcomm_envelope`
   keeps its signature.
 - **The Affinidi stack moves to the 0.27 SDK line:** `affinidi-tdk` 0.16 →
-  0.17, `affinidi-messaging-sdk` 0.26.27 → 0.27.1, `trust-tasks-*` 0.21.21 →
+  0.17, `affinidi-messaging-sdk` 0.26.27 → 0.27.2, `trust-tasks-*` 0.21.21 →
   0.22.7, `vta-sdk` 0.50 → 0.52, `vti-secrets` 0.4.2 → 0.4.4 (`vti-common`
   0.23.1 → 0.25.0), and the `affinidi-messaging-test-mediator`
-  dev-dependency 0.9.17 → 0.10.1 (mediator 0.29). The graph keeps one copy of
-  each. With SDK 0.27.1 the SDK answers a mutual TSP cancellation itself; the
-  registry now only re-sends that answer (`answer_cancellation`) when the
-  SDK's own send failed.
+  dev-dependency 0.9.17 → 0.10.2 (mediator 0.29.5). The graph keeps one copy
+  of each. With SDK 0.27.1 the SDK answers a mutual TSP cancellation itself;
+  the registry now only re-sends that answer (`answer_cancellation`) when the
+  SDK's own send failed. SDK 0.27.2 with `affinidi-messaging-didcomm` 0.15.9
+  reports an authcrypt sender only when it is the key the message was
+  encrypted with, so `HandlerContext::authenticated_sender` names that key's
+  DID.
 - `test-client` manages records with signed `registry/record/*` Trust Tasks
   under the admin's own DID.
 
