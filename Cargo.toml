@@ -27,7 +27,7 @@ affinidi-tdk = "0.17"
 # dep exists only to switch on the SDK's `tsp` feature, and a feature only
 # unifies within one semver-compatible copy — a mismatched major/minor silently
 # gives two SDKs, and the feature lands on the one tdk does *not* re-export.
-affinidi-messaging-sdk = "0.27.1"
+affinidi-messaging-sdk = "0.27.2"
 # The D1 delivery layer + its neutral transport types. Used by the messaging
 # module to drive inbound off `MessagingService::subscribe` (which surfaces the
 # TSP relationship-control distinction the registry needs for Rev 3 §7.2.2) and
