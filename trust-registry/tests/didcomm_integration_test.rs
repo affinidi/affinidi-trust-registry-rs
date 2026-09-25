@@ -278,7 +278,7 @@ async fn query(
         config,
         type_uris::RECORD_QUERY,
         record_key(test_name, authority),
-        false,
+        true,
     )
     .await;
     round_trip(context, config, &doc).await
@@ -391,8 +391,9 @@ async fn test_put_under_another_authority_is_refused() {
     let reply = put(&context, &config, "foreign", OTHER_AUTHORITY, true).await;
     assert_eq!(error_code(&reply), Some("permissionDenied"));
 
+    // Records under another authority cannot be read back either.
     let reply = query(&context, &config, "foreign", OTHER_AUTHORITY).await;
-    assert!(!reply.type_uri.is_response(), "nothing was stored");
+    assert_eq!(error_code(&reply), Some("permissionDenied"));
 }
 
 #[tokio::test]
@@ -409,6 +410,30 @@ async fn test_delete_under_another_authority_is_refused() {
     .await;
     let reply = round_trip(&context, &config, &delete).await;
     assert_eq!(error_code(&reply), Some("permissionDenied"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_unsigned_record_query_is_refused() {
+    let (context, config) = get_test_context().await;
+
+    put(
+        &context,
+        &config,
+        "unsigned-query",
+        &config.client_did,
+        true,
+    )
+    .await;
+    let doc = trust_task(
+        &config,
+        type_uris::RECORD_QUERY,
+        record_key("unsigned-query", &config.client_did),
+        false,
+    )
+    .await;
+    let reply = round_trip(&context, &config, &doc).await;
+    assert_eq!(error_code(&reply), Some("proofRequired"));
 }
 
 #[tokio::test]

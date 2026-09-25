@@ -40,6 +40,9 @@ where
     /// but it holds it so the surface stays correct if authenticated HTTP
     /// writes are ever wired up.
     pub verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    /// The registry's audit logger, shared with the DIDComm and TSP bindings,
+    /// which records the write refusals this surface issues.
+    pub audit: Arc<dyn audit::model::AuditLogger>,
 }
 
 impl<R: TrustRecordRepository> fmt::Debug for SharedData<R> {
@@ -62,6 +65,7 @@ where
             repository: Arc::clone(&self.repository),
             query_dispatcher: self.query_dispatcher.clone(),
             verifier: self.verifier.clone(),
+            audit: self.audit.clone(),
         }
     }
 }

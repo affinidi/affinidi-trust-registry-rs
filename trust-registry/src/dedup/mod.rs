@@ -58,7 +58,7 @@
 //! rejections — malformed, expired, proof invalid, permission denied — are
 //! properties of the document itself and replay correctly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -91,6 +91,10 @@ pub const DEFAULT_IN_FLIGHT_TTL: Duration = Duration::from_secs(5 * 60);
 pub enum DedupError {
     #[error("dedup store unavailable: {0}")]
     Unavailable(String),
+    /// The store is at its bound and refuses new claims rather than forget
+    /// accepted ones.
+    #[error("dedup store at capacity: {0}")]
+    CapacityReached(String),
 }
 
 /// Storage key for a document: `MID#<issuer>#<id>`.
@@ -181,16 +185,92 @@ enum Entry {
     },
 }
 
+/// Most documents one issuer may have in the in-memory record at once.
+pub const DEFAULT_MAX_ENTRIES_PER_ISSUER: usize = 10_000;
+
+/// Most documents the in-memory record holds at once, across all issuers.
+pub const DEFAULT_MAX_ENTRIES: usize = 100_000;
+
+/// The issuer part of a [`message_key`].
+fn key_issuer(key: &str) -> &str {
+    key.strip_prefix("MID#")
+        .and_then(|rest| rest.split_once('#'))
+        .map_or("", |(issuer, _)| issuer)
+}
+
+#[derive(Default)]
+struct Inner {
+    entries: HashMap<String, Entry>,
+    /// Claims in the order they were made, which is the order their in-flight
+    /// window closes in. An item whose entry has since completed, been
+    /// released or been re-claimed is stale and skipped.
+    in_flight_order: VecDeque<(DateTime<Utc>, String)>,
+    /// Completions in the order they were made, which is expiry order.
+    done_order: VecDeque<(DateTime<Utc>, String)>,
+    per_issuer: HashMap<String, usize>,
+}
+
+impl Inner {
+    fn remove(&mut self, key: &str) {
+        if self.entries.remove(key).is_some() {
+            let issuer = key_issuer(key);
+            if let Some(count) = self.per_issuer.get_mut(issuer) {
+                *count -= 1;
+                if *count == 0 {
+                    self.per_issuer.remove(issuer);
+                }
+            }
+        }
+    }
+
+    /// Drop what has expired, oldest first. Each queue item is looked at once,
+    /// so the cost is amortised over the claims that created them.
+    fn evict_expired(&mut self, now: DateTime<Utc>, in_flight: chrono::Duration) {
+        while let Some((claimed_at, key)) = self.in_flight_order.front().cloned() {
+            if now.signed_duration_since(claimed_at) < in_flight {
+                break;
+            }
+            self.in_flight_order.pop_front();
+            if matches!(
+                self.entries.get(&key),
+                Some(Entry::InFlight { claimed_at: held, .. }) if *held == claimed_at
+            ) {
+                self.remove(&key);
+            }
+        }
+        while let Some((expires_at, key)) = self.done_order.front().cloned() {
+            if expires_at > now {
+                break;
+            }
+            self.done_order.pop_front();
+            if matches!(
+                self.entries.get(&key),
+                Some(Entry::Done { expires_at: held, .. }) if *held == expires_at
+            ) {
+                self.remove(&key);
+            }
+        }
+    }
+}
+
 /// In-memory store: correct dedup semantics, no durability.
 ///
 /// Used with the CSV backend, whose writes rewrite the whole records file and
 /// so cannot absorb per-message inserts. Dedup state is lost on restart, which
 /// is acceptable for the local-development posture CSV serves — the server warns
-/// at startup so this is never a silent property of a deployment.
+/// at startup so this is never a silent property of a deployment. It is also
+/// local to one process: replicas of a registry do not share it.
+///
+/// Bounded: at [`DEFAULT_MAX_ENTRIES`] in total, or
+/// [`DEFAULT_MAX_ENTRIES_PER_ISSUER`] for one issuer, a new claim is refused
+/// rather than evicting an entry, since forgetting an accepted document would
+/// let it be replayed.
 pub struct MemoryMessageIdStore {
     ttl: Duration,
     in_flight_ttl: Duration,
-    entries: Mutex<HashMap<String, Entry>>,
+    max_entries: usize,
+    max_entries_per_issuer: usize,
+    inner: Mutex<Inner>,
 }
 
 impl MemoryMessageIdStore {
@@ -198,25 +278,25 @@ impl MemoryMessageIdStore {
         Self {
             ttl,
             in_flight_ttl,
-            entries: Mutex::new(HashMap::new()),
+            max_entries: DEFAULT_MAX_ENTRIES,
+            max_entries_per_issuer: DEFAULT_MAX_ENTRIES_PER_ISSUER,
+            inner: Mutex::new(Inner::default()),
         }
     }
 
-    /// Drop entries past their expiry. Called on every claim: the map is only
-    /// ever touched on the write path, so there is no separate sweeper task to
-    /// shut down, and a registry that stops receiving writes stops accruing.
-    fn evict_expired(
-        entries: &mut HashMap<String, Entry>,
-        now: DateTime<Utc>,
-        in_flight: Duration,
-    ) {
-        let in_flight = chrono::Duration::from_std(in_flight).unwrap_or(chrono::Duration::zero());
-        entries.retain(|_, entry| match entry {
-            Entry::Done { expires_at, .. } => *expires_at > now,
-            Entry::InFlight { claimed_at, .. } => {
-                now.signed_duration_since(*claimed_at) < in_flight
-            }
-        });
+    /// Set the total and per-issuer bounds.
+    pub fn with_limits(mut self, max_entries: usize, max_entries_per_issuer: usize) -> Self {
+        self.max_entries = max_entries;
+        self.max_entries_per_issuer = max_entries_per_issuer;
+        self
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        // Poison-tolerant: a panic while holding this lock must not wedge every
+        // subsequent write, mirroring `MemoryCapabilityStore`.
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -230,44 +310,50 @@ impl Default for MemoryMessageIdStore {
 impl MessageIdStore for MemoryMessageIdStore {
     async fn claim(&self, key: &str, digest: &str) -> Result<Claim, DedupError> {
         let now = Utc::now();
-        // Poison-tolerant: a panic while holding this lock must not wedge every
-        // subsequent write, mirroring `MemoryCapabilityStore`.
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let in_flight =
+            chrono::Duration::from_std(self.in_flight_ttl).unwrap_or(chrono::Duration::zero());
+        let mut inner = self.lock();
+        inner.evict_expired(now, in_flight);
 
-        Self::evict_expired(&mut entries, now, self.in_flight_ttl);
-
-        match entries.get(key) {
+        match inner.entries.get(key) {
             Some(Entry::Done { digest: held, .. } | Entry::InFlight { digest: held, .. })
                 if held != digest =>
             {
-                Ok(Claim::Conflict)
+                return Ok(Claim::Conflict);
             }
-            Some(Entry::Done { outcome, .. }) => Ok(Claim::Replay(outcome.clone())),
-            Some(Entry::InFlight { .. }) => Ok(Claim::InFlight),
-            None => {
-                entries.insert(
-                    key.to_string(),
-                    Entry::InFlight {
-                        digest: digest.to_string(),
-                        claimed_at: now,
-                    },
-                );
-                Ok(Claim::Acquired)
-            }
+            Some(Entry::Done { outcome, .. }) => return Ok(Claim::Replay(outcome.clone())),
+            Some(Entry::InFlight { .. }) => return Ok(Claim::InFlight),
+            None => {}
         }
+
+        let issuer = key_issuer(key).to_string();
+        if inner.entries.len() >= self.max_entries {
+            return Err(DedupError::CapacityReached(
+                "the record of accepted documents is full".to_string(),
+            ));
+        }
+        if inner.per_issuer.get(&issuer).copied().unwrap_or(0) >= self.max_entries_per_issuer {
+            return Err(DedupError::CapacityReached(format!(
+                "{issuer} has too many documents in the record of accepted documents"
+            )));
+        }
+        inner.entries.insert(
+            key.to_string(),
+            Entry::InFlight {
+                digest: digest.to_string(),
+                claimed_at: now,
+            },
+        );
+        *inner.per_issuer.entry(issuer).or_insert(0) += 1;
+        inner.in_flight_order.push_back((now, key.to_string()));
+        Ok(Claim::Acquired)
     }
 
     async fn complete(&self, key: &str, outcome: &StoredOutcome) -> Result<(), DedupError> {
         let expires_at =
             Utc::now() + chrono::Duration::from_std(self.ttl).unwrap_or(chrono::Duration::zero());
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let digest = match entries.get(key) {
+        let mut inner = self.lock();
+        let digest = match inner.entries.get(key) {
             Some(Entry::InFlight { digest, .. } | Entry::Done { digest, .. }) => digest.clone(),
             None => {
                 return Err(DedupError::Unavailable(format!(
@@ -275,7 +361,7 @@ impl MessageIdStore for MemoryMessageIdStore {
                 )));
             }
         };
-        entries.insert(
+        inner.entries.insert(
             key.to_string(),
             Entry::Done {
                 digest,
@@ -283,15 +369,12 @@ impl MessageIdStore for MemoryMessageIdStore {
                 expires_at,
             },
         );
+        inner.done_order.push_back((expires_at, key.to_string()));
         Ok(())
     }
 
     async fn release(&self, key: &str) -> Result<(), DedupError> {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        entries.remove(key);
+        self.lock().remove(key);
         Ok(())
     }
 }
@@ -800,5 +883,60 @@ mod tests {
         let json = serde_json::to_string(&stored).expect("serializes");
         let back: StoredOutcome = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back.into_outcome().unwrap().id, doc.id);
+    }
+
+    #[tokio::test]
+    async fn a_full_store_refuses_new_claims_and_keeps_old_ones() {
+        let store = MemoryMessageIdStore::default().with_limits(2, 10);
+        store.claim("MID#a#1", "d").await.unwrap();
+        store.claim("MID#b#1", "d").await.unwrap();
+
+        assert!(matches!(
+            store.claim("MID#c#1", "d").await,
+            Err(DedupError::CapacityReached(_))
+        ));
+        assert!(
+            matches!(store.claim("MID#a#1", "d").await.unwrap(), Claim::InFlight),
+            "nothing was evicted to make room"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_issuer_cannot_fill_the_store() {
+        let store = MemoryMessageIdStore::default().with_limits(100, 2);
+        store.claim("MID#a#1", "d").await.unwrap();
+        store.claim("MID#a#2", "d").await.unwrap();
+
+        assert!(matches!(
+            store.claim("MID#a#3", "d").await,
+            Err(DedupError::CapacityReached(_))
+        ));
+        assert!(matches!(
+            store.claim("MID#b#1", "d").await.unwrap(),
+            Claim::Acquired
+        ));
+    }
+
+    #[tokio::test]
+    async fn expiry_frees_capacity() {
+        let store = MemoryMessageIdStore::new(Duration::from_millis(1), Duration::from_millis(1))
+            .with_limits(1, 1);
+        store.claim("MID#a#1", "d").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(matches!(
+            store.claim("MID#a#2", "d").await.unwrap(),
+            Claim::Acquired
+        ));
+    }
+
+    #[tokio::test]
+    async fn released_claims_free_their_issuer_slot() {
+        let store = MemoryMessageIdStore::default().with_limits(10, 1);
+        store.claim("MID#a#1", "d").await.unwrap();
+        store.release("MID#a#1").await.unwrap();
+        assert!(matches!(
+            store.claim("MID#a#2", "d").await.unwrap(),
+            Claim::Acquired
+        ));
     }
 }

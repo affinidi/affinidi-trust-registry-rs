@@ -45,11 +45,11 @@ use trust_tasks_rs::{
 use uuid::Uuid;
 
 use crate::audit::model::{AuditLogBuilder, AuditLogger, AuditOperation, AuditResource};
-use crate::capabilities::{CapabilitySet, DispatcherHandle};
+use crate::capabilities::{CONFIG_AUTHORITY, CapabilitySet, DispatcherHandle};
 use crate::dedup::{MessageIdStore, execute_once};
 use crate::domain::{Action, AuthorityId, EntityId, Resource};
-use crate::trust_tasks::handle_document;
-use crate::trust_tasks::proof::{WRITE_PROOF_PURPOSE, is_write_slug, verify_write_proof};
+use crate::trust_tasks::proof::{WRITE_PROOF_PURPOSE, requires_proof, verify_write_proof};
+use crate::trust_tasks::{RegistryDispatcher, handle_document};
 
 /// How old a write's time of issue may be (VTI-OPS-024). The replay record's
 /// retention ([`crate::dedup::DEFAULT_TTL`]) is longer, so every document
@@ -76,10 +76,19 @@ fn required_authority(value: Option<&Value>, what: &str) -> Result<Option<String
         })
 }
 
+/// A capability that writes records found enabled with no authority, which
+/// enabling now refuses: it must not be usable by every admin.
+fn unbound_capability(capability: &str) -> RejectReason {
+    RejectReason::PermissionDenied {
+        reason: format!("{capability} is enabled without an authority, so no write can be bound"),
+    }
+}
+
 fn audit_operation(slug: &str) -> AuditOperation {
     match slug {
         "registry/record/put" => AuditOperation::Put,
         "registry/record/delete" => AuditOperation::Delete,
+        "registry/record/query" => AuditOperation::Read,
         "git-trust/grant" => AuditOperation::Grant,
         "git-trust/revoke" => AuditOperation::Revoke,
         "governance/capability/enable" => AuditOperation::Enable,
@@ -106,7 +115,7 @@ fn audit_resource(doc: &TrustTask<Value>, authority: Option<&str>) -> AuditResou
             text(payload, "/record/action"),
             text(payload, "/record/resource"),
         ),
-        "registry/record/delete" => (
+        "registry/record/delete" | "registry/record/query" => (
             text(payload, "/entity_id"),
             text(payload, "/action"),
             text(payload, "/resource"),
@@ -295,7 +304,7 @@ impl TaskHandler {
         doc: &TrustTask<Value>,
         sender_did: Option<&str>,
     ) -> Result<(), RejectReason> {
-        if !is_write_slug(doc.type_uri.slug()) {
+        if !requires_proof(doc.type_uri.slug()) {
             return Ok(());
         }
         let Some(proof) = doc.proof.as_ref() else {
@@ -345,49 +354,90 @@ impl TaskHandler {
     }
 
     /// The authority a write acts under, or `None` for one that acts under no
-    /// authority (`registry/did/rotate`, or enabling a capability whose config
-    /// names none).
+    /// authority (`registry/did/rotate`, or enabling a capability that writes
+    /// no records).
     ///
-    /// Record mutations name it in the payload. A capability task acts under
-    /// the authority its capability was enabled with, and enabling or
-    /// disabling a capability acts under the authority its config names.
+    /// Record tasks name it in the payload. A capability task acts under the
+    /// authority its capability was enabled with, and enabling or disabling a
+    /// capability acts under the authority its config names.
     pub async fn target_authority(
         &self,
         doc: &TrustTask<Value>,
     ) -> Result<Option<String>, RejectReason> {
+        self.resolve_authority(doc)
+            .await
+            .map(|(authority, _)| authority)
+    }
+
+    /// [`target_authority`](Self::target_authority), plus — for a task served
+    /// by a capability — the dispatcher read in the same snapshot as the
+    /// authority, which is the one the task must be dispatched through.
+    async fn resolve_authority(
+        &self,
+        doc: &TrustTask<Value>,
+    ) -> Result<(Option<String>, Option<Arc<RegistryDispatcher>>), RejectReason> {
         let payload = &doc.payload;
+        let named_capability = || {
+            payload
+                .get("capability")
+                .and_then(Value::as_str)
+                .ok_or_else(|| RejectReason::MalformedRequest {
+                    reason: "a capability change must name its capability".to_string(),
+                })
+        };
         match doc.type_uri.slug() {
-            "registry/record/put" => {
-                required_authority(payload.pointer("/record/authority_id"), "a record mutation")
-            }
-            "registry/record/delete" => {
-                required_authority(payload.get("authority_id"), "a record mutation")
-            }
+            "registry/record/put" => Ok((
+                required_authority(payload.pointer("/record/authority_id"), "a record mutation")?,
+                None,
+            )),
+            "registry/record/delete" => Ok((
+                required_authority(payload.get("authority_id"), "a record mutation")?,
+                None,
+            )),
+            "registry/record/query" => Ok((
+                required_authority(payload.get("authority_id"), "a record query")?,
+                None,
+            )),
             "governance/capability/enable" => {
-                match payload.pointer(&format!(
-                    "/config/{}",
-                    crate::capabilities::CONFIG_AUTHORITY
-                )) {
-                    None => Ok(None),
-                    Some(Value::String(authority)) => Ok(Some(authority.clone())),
-                    Some(_) => Err(RejectReason::MalformedRequest {
-                        reason: "a capability's authority must be a DID string".to_string(),
-                    }),
+                let capability = named_capability()?;
+                let authority = match payload.pointer(&format!("/config/{CONFIG_AUTHORITY}")) {
+                    None => None,
+                    Some(Value::String(authority)) => Some(authority.clone()),
+                    Some(_) => {
+                        return Err(RejectReason::MalformedRequest {
+                            reason: "a capability's authority must be a DID string".to_string(),
+                        });
+                    }
+                };
+                if authority.is_none() && self.capabilities()?.requires_authority(capability) {
+                    return Err(RejectReason::MalformedRequest {
+                        reason: format!(
+                            "{capability} writes records and must be enabled with an `{CONFIG_AUTHORITY}`"
+                        ),
+                    });
                 }
+                Ok((authority, None))
             }
             "governance/capability/disable" => {
-                let capability = payload
-                    .get("capability")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| RejectReason::MalformedRequest {
-                        reason: "a capability change must name its capability".to_string(),
-                    })?;
-                Ok(self.capabilities()?.configured_authority(capability).await)
+                let capability = named_capability()?;
+                let capabilities = self.capabilities()?;
+                let snapshot = capabilities.snapshot(capability).await;
+                if snapshot.enabled
+                    && snapshot.authority.is_none()
+                    && capabilities.requires_authority(capability)
+                {
+                    return Err(unbound_capability(capability));
+                }
+                Ok((snapshot.authority, Some(snapshot.dispatcher)))
             }
             "git-trust/grant" | "git-trust/revoke" => {
-                Ok(self.capabilities()?.configured_authority(GIT_TRUST).await)
+                let snapshot = self.capabilities()?.snapshot(GIT_TRUST).await;
+                if snapshot.enabled && snapshot.authority.is_none() {
+                    return Err(unbound_capability(GIT_TRUST));
+                }
+                Ok((snapshot.authority, Some(snapshot.dispatcher)))
             }
-            _ => Ok(None),
+            _ => Ok((None, None)),
         }
     }
 
@@ -451,7 +501,7 @@ impl TaskHandler {
         doc: TrustTask<Value>,
         sender_did: Option<&str>,
     ) -> Result<TrustTask<Value>, ErrorResponse> {
-        if !is_write_slug(doc.type_uri.slug()) {
+        if !requires_proof(doc.type_uri.slug()) {
             return self.handle_read(doc, sender_did).await;
         }
 
@@ -559,8 +609,8 @@ impl TaskHandler {
         }
         progress.proven_issuer = doc.issuer.clone();
 
-        let authority = match self.target_authority(&doc).await {
-            Ok(authority) => authority,
+        let (authority, snapshot_dispatcher) = match self.resolve_authority(&doc).await {
+            Ok(resolved) => resolved,
             Err(reason) => return Err(doc.reject_with(new_id(), reason)),
         };
         progress.authority = authority.clone();
@@ -582,7 +632,10 @@ impl TaskHandler {
             .await;
         }
 
-        let dispatcher = self.dispatcher.read().await.clone();
+        let dispatcher = match snapshot_dispatcher {
+            Some(dispatcher) => dispatcher,
+            None => self.dispatcher.read().await.clone(),
+        };
         execute_once(dedup.as_ref(), doc, |doc| handle_document(&dispatcher, doc)).await
     }
 
@@ -1167,6 +1220,179 @@ mod tests {
         let doc = signed(unsigned(GRANT, Some(&did), grant_payload()), &key).await;
 
         let err = unbound.handle(doc, Some(&did)).await.expect_err("refused");
+
+        assert_eq!(code(&err), "permissionDenied");
+    }
+
+    /// A git-trust enabled with no authority (state written before enabling
+    /// required one) is not usable by any admin.
+    #[tokio::test]
+    async fn a_capability_enabled_without_an_authority_is_unusable() {
+        use crate::capabilities::{CapabilityState, CapabilityStateStore};
+        let (key, did) = did_key(26);
+        let repo = Arc::new(LocalStorage::new());
+        let store = MemoryCapabilityStore::default();
+        store
+            .save(&std::collections::BTreeMap::from([(
+                "git-trust".to_string(),
+                CapabilityState {
+                    version: "0.1".to_string(),
+                    enabled: true,
+                    config: None,
+                    enabled_at: Utc::now(),
+                    delegate: None,
+                },
+            )]))
+            .expect("seed state");
+        let base_repo = repo.clone();
+        let query_repo = repo.clone();
+        let capabilities = CapabilitySet::new(
+            vec![git_trust::definition(repo.clone()).expect("git-trust definition")],
+            Box::new(store),
+            Box::new(move || build_dispatcher(base_repo.clone())),
+            Box::new(move || build_query_dispatcher(query_repo.clone())),
+        )
+        .expect("capability set");
+        let handler = TaskHandler::new(
+            capabilities.dispatcher(),
+            ME,
+            vec![did.clone()],
+            trust_tasks_rs::erase_verifier(trust_tasks_proof::affinidi::Verifier::for_did_key()),
+        )
+        .with_dedup(Arc::new(MemoryMessageIdStore::default()))
+        .with_capabilities(capabilities);
+        let doc = signed(unsigned(GRANT, Some(&did), grant_payload()), &key).await;
+
+        let err = handler.handle(doc, Some(&did)).await.expect_err("refused");
+
+        assert_eq!(code(&err), "permissionDenied");
+    }
+
+    #[tokio::test]
+    async fn enabling_a_record_writing_capability_without_an_authority_is_refused() {
+        let (key, did) = did_key(27);
+        let f = fixture(vec![did.clone()]);
+        let doc = signed(
+            unsigned(
+                ENABLE,
+                Some(&did),
+                json!({ "capability": "git-trust", "version": "0.1" }),
+            ),
+            &key,
+        )
+        .await;
+
+        let err = f
+            .handler
+            .handle(doc, Some(&did))
+            .await
+            .expect_err("refused");
+
+        assert_eq!(code(&err), "malformedRequest");
+        assert!(!f.capabilities.snapshot("git-trust").await.enabled);
+    }
+
+    // --- record/query is not public ------------------------------------------
+
+    const RECORD_QUERY: &str = "https://trusttasks.org/spec/registry/record/query/0.1";
+
+    #[tokio::test]
+    async fn an_unsigned_record_query_is_refused() {
+        let (_, did) = did_key(40);
+        let f = fixture(vec![did.clone()]);
+        let doc: TrustTask<Value> = serde_json::from_value(unsigned(
+            RECORD_QUERY,
+            Some(&did),
+            json!({ "authority_id": did }),
+        ))
+        .expect("parses");
+
+        let err = f
+            .handler
+            .handle(doc, Some(&did))
+            .await
+            .expect_err("refused");
+
+        assert_eq!(code(&err), "proofRequired");
+    }
+
+    #[tokio::test]
+    async fn a_signed_record_query_under_the_issuers_authority_answers() {
+        let (key, did) = did_key(41);
+        let f = fixture(vec![did.clone()]);
+        let put = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        f.handler
+            .handle(put, Some(&did))
+            .await
+            .expect("put accepted");
+        let query = signed(
+            unsigned(RECORD_QUERY, Some(&did), json!({ "authority_id": did })),
+            &key,
+        )
+        .await;
+
+        let response = f.handler.handle(query, Some(&did)).await.expect("answered");
+
+        assert_eq!(
+            response.payload["records"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert!(matches!(last_audit(&f).operation, AuditOperation::Read));
+    }
+
+    #[tokio::test]
+    async fn a_record_query_under_another_authority_is_refused() {
+        let (key, did) = did_key(42);
+        let f = fixture(vec![did.clone()]);
+        let query = signed(
+            unsigned(
+                RECORD_QUERY,
+                Some(&did),
+                json!({ "authority_id": OTHER_AUTHORITY }),
+            ),
+            &key,
+        )
+        .await;
+
+        let err = f
+            .handler
+            .handle(query, Some(&did))
+            .await
+            .expect_err("refused");
+
+        assert_eq!(code(&err), "permissionDenied");
+    }
+
+    #[tokio::test]
+    async fn a_record_query_naming_no_authority_is_refused() {
+        let (key, did) = did_key(43);
+        let f = fixture(vec![did.clone()]);
+        let query = signed(unsigned(RECORD_QUERY, Some(&did), json!({})), &key).await;
+
+        let err = f
+            .handler
+            .handle(query, Some(&did))
+            .await
+            .expect_err("refused");
+
+        assert_eq!(code(&err), "malformedRequest");
+    }
+
+    #[tokio::test]
+    async fn a_record_query_from_a_non_admin_is_refused() {
+        let (key, did) = did_key(44);
+        let f = fixture(vec!["did:example:admin".to_string()]);
+        let query = signed(
+            unsigned(RECORD_QUERY, Some(&did), json!({ "authority_id": did })),
+            &key,
+        )
+        .await;
+
+        let err = f
+            .handler
+            .handle(query, Some(&did))
+            .await
+            .expect_err("refused");
 
         assert_eq!(code(&err), "permissionDenied");
     }

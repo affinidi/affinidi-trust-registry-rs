@@ -68,6 +68,29 @@ Missing versions simply reflect internal deployment‑related patches.
   id, thread and time. `AuditLog` gains `task`, `document_id` and
   `claimed_actor`, and `AuditOperation` gains `Put`, `Grant`, `Revoke`,
   `Enable`, `Disable` and `Rotate`.
+- **`registry/record/query` is for admins only.** It returns whole records,
+  `context` included, so it is held to the write rules (signed with the
+  `authentication` purpose, issuer = sender, admin, operation-document checks,
+  replay record) and must name an `authority_id` the issuer may act under.
+  The public surface is the TRQP recognition and authorization queries.
+- **Audit entries cannot be forged through their values.** Every value is
+  escaped and capped at 256 characters, the text format quotes each value, and
+  `AUDIT_LOG_FORMAT` now defaults to `json`. The reason is no longer labelled
+  twice (`audit.reason=audit.reason=…`). Refusals of documents whose issuer
+  was never proven are recorded individually up to 60 a minute and counted
+  beyond that (`audit::bounded::BoundedAuditLogger`); the HTTP binding's
+  refusals are audited through the same logger (`SharedData::audit`).
+- **Capabilities that write records need an authority.**
+  `CapabilityDefinition::requires_authority`; enabling such a capability
+  without an `authority` is refused, and one found enabled without one is not
+  usable. A capability task is dispatched through the dispatcher read in the
+  same snapshot as the authority it was checked against
+  (`CapabilitySet::snapshot`).
+- **The in-memory record of accepted documents is bounded.** At 100,000
+  entries, or 10,000 for one issuer, a new claim is refused (retryable
+  `unavailable`) rather than evicting one; expiry is amortised rather than a
+  scan per claim. `DedupError::CapacityReached`,
+  `MemoryMessageIdStore::with_limits`.
 - **One shared `TaskHandler`.** The DIDComm and TSP bindings now take the
   registry's handler (`TrustRegistry::task_handler`) instead of building their
   own: `BaseHandler::build_from_arc(repository, tasks)` and

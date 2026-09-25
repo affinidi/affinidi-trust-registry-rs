@@ -633,7 +633,7 @@ message shape regardless of carrier.
 | ----------------------------------------------------- | ----- | ----------------------------- |
 | `registry/recognition/0.1`                            | read  | none (TRQP recognition query) |
 | `registry/authorization/0.1`                          | read  | none (TRQP authorization query)|
-| `registry/record/query/0.1`                           | read  | none                          |
+| `registry/record/query/0.1`                           | read  | admin DID + proof + authority |
 | `registry/record/put/0.1`                             | write | admin DID + proof + authority |
 | `registry/record/delete/0.1`                          | write | admin DID + proof + authority |
 | `registry/did/rotate/0.1`                             | write | admin DID + proof (`vta` only)|
@@ -656,11 +656,20 @@ record's `authority_id`, the authority git-trust was enabled with (for
 (for `governance/capability/enable` and `disable`). The authenticated sender on
 its own authorises nothing.
 
-Every write, accepted or refused, is recorded in the audit log
-(`AUDIT_LOG_FORMAT`): the operation and task type, the proven issuer (or, for
-a write refused before its proof was checked, the DID it claimed), the
-authority and record key or capability, the result and reason, the document
-`id`, the thread and the time. Record contents and proofs are not logged.
+`registry/record/query` returns whole records, `context` included, so it is
+held to the same rules and answered only for an admin, under an
+`authority_id` the query names. The public surface is the TRQP recognition and
+authorization queries.
+
+Every write and record query, accepted or refused, is recorded in the audit log
+(`AUDIT_LOG_FORMAT`, JSON by default): the operation and task type, the proven
+issuer (or, for one refused before its proof was checked, the DID it claimed),
+the authority and record key or capability, the result and reason, the
+document `id`, the thread and the time. Record contents and proofs are not
+logged. Every value is escaped and capped at 256 characters, so an entry is
+always one line. Refusals of documents whose issuer was never proven are
+recorded individually up to 60 a minute; beyond that they are counted, and the
+count is recorded as one entry when the next minute starts.
 
 The record of accepted document identifiers is shared by the DIDComm and TSP
 bindings within one process. It is held in memory, so replicas of one registry
@@ -835,7 +844,7 @@ See the list of environment variables and their usage.
 | `DDB_TABLE_NAME`        | DynamoDB table name for storing trust records when using DDB as the storage backend.                                                                                                      | Required when `TR_STORAGE_BACKEND` = `ddb`   |
 | `REDIS_URL`             | Redis connection URL when using Redis as the storage backend. Format: `redis://host:port` or `redis://username:password@host:port/db`.                                                    | Required when `TR_STORAGE_BACKEND` = `redis` |
 | `CORS_ALLOWED_ORIGINS`  | Comma-separated list of allowed URLs for CORS.                                                                                                                                            | Yes                                          |
-| `AUDIT_LOG_FORMAT`      | Output format for audit logs. Options: `text`, `json`.                                                                                                                                    | Yes                                          |
+| `AUDIT_LOG_FORMAT`      | Output format for audit logs. Options: `json` (default), `text` (`audit.<key>="<escaped value>"` pairs).                                                                                  | default: `json`                              |
 | `MEDIATOR_DID`          | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records.                                                                              | Required when DIDComm is enabled             |
 | `ADMIN_DIDS`            | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry.                                                                                                    | Required when DIDComm is enabled             |
 | `ADMIN_AUTHORITIES`     | JSON object mapping an admin DID to the authority DIDs it may write records under **in addition to its own DID**, e.g. `{"did:web:ops.example": ["did:web:a.example", "did:web:b.example"]}`. Every key must be in `ADMIN_DIDS`; a malformed value stops startup. Unset ⇒ each admin writes only under its own DID. | No                                           |

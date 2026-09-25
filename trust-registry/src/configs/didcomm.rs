@@ -50,8 +50,9 @@ async fn load_profile_from_vta() -> Result<Option<String>, String> {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuditLogFormat {
-    #[default]
     Text,
+    /// The default: values are escaped by construction.
+    #[default]
     Json,
 }
 
@@ -262,9 +263,9 @@ impl Configs for DidcommConfig {
             .map(|e| e.trim().to_string())
             .collect();
 
-        let log_format = env_or("AUDIT_LOG_FORMAT", "text")
+        let log_format = env_or("AUDIT_LOG_FORMAT", "json")
             .parse::<AuditLogFormat>()
-            .unwrap_or(AuditLogFormat::Text);
+            .unwrap_or(AuditLogFormat::Json);
 
         let admin_authorities =
             parse_admin_authorities(optional_env("ADMIN_AUTHORITIES").as_deref(), &admin_dids)?;

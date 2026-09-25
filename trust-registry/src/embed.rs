@@ -57,6 +57,9 @@ use chrono::{DateTime, Utc};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use crate::audit::audit_logger::BaseAuditLogger;
+use crate::audit::bounded::BoundedAuditLogger;
+use crate::audit::model::AuditLogger;
 use crate::capabilities::{
     CapabilityDefinition, CapabilitySet, CapabilityStateStore, DispatcherHandle,
     FileCapabilityStore,
@@ -85,6 +88,7 @@ pub struct TrustRegistry {
     capabilities: Arc<CapabilitySet>,
     verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     dedup: Arc<dyn MessageIdStore>,
+    audit: Arc<dyn AuditLogger>,
     health: Arc<RegistryHealth>,
     didcomm_source: DidCommSource,
     shutdown: CancellationToken,
@@ -159,6 +163,7 @@ impl TrustRegistry {
             &self.capabilities,
             &self.verifier,
             &self.dedup,
+            &self.audit,
         )
     }
 
@@ -188,7 +193,8 @@ impl TrustRegistry {
 
     /// A read-only Trust Task handler over the query dispatcher, with no dedup
     /// store — the shape the HTTP surface uses. For a host exposing queries to
-    /// callers it does not authenticate.
+    /// callers it does not authenticate. Writes offered to it are refused and
+    /// audited.
     pub fn query_task_handler(&self) -> TaskHandler {
         TaskHandler::new(
             self.capabilities.query_dispatcher(),
@@ -196,6 +202,7 @@ impl TrustRegistry {
             Vec::new(),
             self.verifier.clone(),
         )
+        .with_audit(self.audit.clone())
     }
 
     /// The live admin dispatcher handle.
@@ -241,6 +248,7 @@ impl TrustRegistry {
             repository: self.repository.clone() as Arc<dyn TrustRecordRepository>,
             query_dispatcher: self.capabilities.query_dispatcher(),
             verifier: self.verifier.clone(),
+            audit: self.audit.clone(),
         }
     }
 
@@ -264,6 +272,7 @@ impl TrustRegistry {
             capabilities: self.capabilities,
             verifier: self.verifier,
             dedup: self.dedup,
+            audit: self.audit,
             health: self.health,
             didcomm_source: self.didcomm_source,
             shutdown: self.shutdown,
@@ -280,6 +289,7 @@ pub(crate) struct RegistryParts {
     pub(crate) capabilities: Arc<CapabilitySet>,
     pub(crate) verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     pub(crate) dedup: Arc<dyn MessageIdStore>,
+    pub(crate) audit: Arc<dyn AuditLogger>,
     pub(crate) health: Arc<RegistryHealth>,
     pub(crate) didcomm_source: DidCommSource,
     pub(crate) shutdown: CancellationToken,
@@ -295,6 +305,7 @@ fn write_task_handler(
     capabilities: &Arc<CapabilitySet>,
     verifier: &Arc<dyn trust_tasks_rs::DynProofVerifier>,
     dedup: &Arc<dyn MessageIdStore>,
+    audit: &Arc<dyn AuditLogger>,
 ) -> TaskHandler {
     let admin_config = &config.didcomm_config.admin_config;
     TaskHandler::new(
@@ -306,9 +317,7 @@ fn write_task_handler(
     .with_admin_authorities(admin_config.admin_authorities.clone())
     .with_dedup(dedup.clone())
     .with_capabilities(capabilities.clone())
-    .with_audit(Arc::new(crate::audit::audit_logger::BaseAuditLogger::new(
-        admin_config.audit_config.clone(),
-    )))
+    .with_audit(audit.clone())
 }
 
 impl RegistryParts {
@@ -320,6 +329,7 @@ impl RegistryParts {
             &self.capabilities,
             &self.verifier,
             &self.dedup,
+            &self.audit,
         )
     }
 
@@ -331,6 +341,7 @@ impl RegistryParts {
             repository: self.repository.clone() as Arc<dyn TrustRecordRepository>,
             query_dispatcher: self.capabilities.query_dispatcher(),
             verifier: self.verifier.clone(),
+            audit: self.audit.clone(),
         }
     }
 }
@@ -484,7 +495,14 @@ impl TrustRegistryBuilder {
             Arc::new(MemoryMessageIdStore::default())
         });
 
+        // One logger for every surface, so the bound on unproven refusals
+        // applies to the registry as a whole rather than per binding.
+        let audit: Arc<dyn AuditLogger> = Arc::new(BoundedAuditLogger::new(Arc::new(
+            BaseAuditLogger::new(self.config.didcomm_config.admin_config.audit_config.clone()),
+        )));
+
         Ok(TrustRegistry {
+            audit,
             health: Arc::new(RegistryHealth::new(self.config.didcomm_config.is_enabled)),
             config: self.config,
             repository,

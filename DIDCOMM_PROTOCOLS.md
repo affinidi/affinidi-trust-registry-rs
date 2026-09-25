@@ -29,7 +29,8 @@ Trust records are managed with the `registry/record/*` Trust Tasks
 (`https://trusttasks.org/binding/didcomm/0.1/envelope`) or over TSP. See
 [Trust Task protocol surface](README.md#trust-task-protocol-surface).
 
-A write is accepted only when all of the following hold:
+A write — and a `registry/record/query`, which returns whole records including
+their `context` — is accepted only when all of the following hold:
 
 - the document carries an in-band `issuer`, and that issuer is the sender the
   transport authenticated;
@@ -44,7 +45,8 @@ A write is accepted only when all of the following hold:
 - the write acts under an authority the issuer may act for: its own DID, or
   one listed for it in `ADMIN_AUTHORITIES`.
 
-For a record put or delete the authority is the record's `authority_id`. For
+For a record put, delete or query the authority is the `authority_id` it names
+(a query must name one). For
 `git-trust/grant` and `git-trust/revoke` it is the authority git-trust was
 enabled with, and for `governance/capability/enable` and `disable` it is the
 authority the capability's config names. Every write, accepted or refused, is
@@ -62,11 +64,12 @@ answered and change nothing. To migrate:
 | `create-record` | `registry/record/put/0.1` with `"expectedExisting": false` |
 | `update-record` | `registry/record/put/0.1` with `"expectedExisting": true` |
 | `delete-record` | `registry/record/delete/0.1` |
-| `read-record` | `registry/record/query/0.1` naming all four key parts |
-| `list-records` | `registry/record/query/0.1` with a filter (paginated) |
+| `read-record` | `registry/record/query/0.1` naming all four key parts, signed |
+| `list-records` | `registry/record/query/0.1` naming an `authority_id` (plus any other filter; paginated), signed |
 
-Each write must be signed and must name an authority the issuer may write
-under, as above. The `test-client` crate shows the full flow.
+Each of these must be signed and must name an authority the issuer may act
+under, as above: `registry/record/query` is for admins, not the public. The
+public surface is the TRQP recognition and authorization queries below. The `test-client` crate shows the full flow.
 
 ## Trust Registry Queries
 

@@ -68,7 +68,7 @@ pub async fn create_record(
         "record": input.record(recognized, authorized, context),
         "expectedExisting": false,
     });
-    send_trust_task(&input, RECORD_PUT, payload, true).await
+    send_trust_task(&input, RECORD_PUT, payload).await
 }
 
 /// Replace a record; refused if its key does not exist.
@@ -82,30 +82,30 @@ pub async fn update_record(
         "record": input.record(recognized, authorized, context),
         "expectedExisting": true,
     });
-    send_trust_task(&input, RECORD_PUT, payload, true).await
+    send_trust_task(&input, RECORD_PUT, payload).await
 }
 
 pub async fn delete_record(input: CommonCrudInput) -> Result<(), Box<dyn std::error::Error>> {
-    send_trust_task(&input, RECORD_DELETE, input.key(), true).await
+    send_trust_task(&input, RECORD_DELETE, input.key()).await
 }
 
 pub async fn read_record(input: CommonCrudInput) -> Result<(), Box<dyn std::error::Error>> {
-    send_trust_task(&input, RECORD_QUERY, input.key(), false).await
+    send_trust_task(&input, RECORD_QUERY, input.key()).await
 }
 
 /// List the records held under the input's authority.
 pub async fn list_records(input: CommonCrudInput) -> Result<(), Box<dyn std::error::Error>> {
     let payload = json!({ "authority_id": input.authority_id });
-    send_trust_task(&input, RECORD_QUERY, payload, false).await
+    send_trust_task(&input, RECORD_QUERY, payload).await
 }
 
-/// Build the Trust Task, sign it when `sign` is set, and send it to the
-/// registry in the DIDComm Trust Task envelope.
+/// Build the Trust Task, sign it, and send it to the registry in the DIDComm
+/// Trust Task envelope. Reads are signed too: `registry/record/query` is only
+/// answered for an admin, under the same rules as a write.
 async fn send_trust_task(
     input: &CommonCrudInput,
     type_uri: &str,
     payload: Value,
-    sign: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let did = input.profile.inner.did.clone();
     let mut doc = TrustTask::new(
@@ -117,29 +117,26 @@ async fn send_trust_task(
     doc.recipient = Some(input.trust_registry_did.clone());
     doc.issued_at = Some(chrono::Utc::now());
 
-    let mut body = serde_json::to_value(&doc)?;
-    if sign {
-        let key = input
-            .secrets
-            .iter()
-            .find(|secret| {
-                secret.id.starts_with(&did)
-                    && matches!(secret.get_key_type(), KeyType::Ed25519 | KeyType::P256)
-            })
-            .ok_or("the admin has no Ed25519 or P-256 verification key to sign with")?;
-        let cryptosuite = match key.get_key_type() {
-            KeyType::Ed25519 => CryptoSuite::EddsaJcs2022,
-            _ => CryptoSuite::EcdsaJcs2019,
-        };
-        body = sign_trust_task(
-            &body,
-            key,
-            SignOptions::new()
-                .with_cryptosuite(cryptosuite)
-                .with_proof_purpose("authentication"),
-        )
-        .await?;
-    }
+    let key = input
+        .secrets
+        .iter()
+        .find(|secret| {
+            secret.id.starts_with(&did)
+                && matches!(secret.get_key_type(), KeyType::Ed25519 | KeyType::P256)
+        })
+        .ok_or("the admin has no Ed25519 or P-256 verification key to sign with")?;
+    let cryptosuite = match key.get_key_type() {
+        KeyType::Ed25519 => CryptoSuite::EddsaJcs2022,
+        _ => CryptoSuite::EcdsaJcs2019,
+    };
+    let body = sign_trust_task(
+        &serde_json::to_value(&doc)?,
+        key,
+        SignOptions::new()
+            .with_cryptosuite(cryptosuite)
+            .with_proof_purpose("authentication"),
+    )
+    .await?;
 
     println!(
         "\nSending Trust Task: {}",

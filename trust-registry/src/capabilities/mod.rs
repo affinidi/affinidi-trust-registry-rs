@@ -56,6 +56,19 @@ pub struct CapabilityDefinition {
     /// Validates a per-community `config` document. `None` = no config
     /// accepted beyond an empty object.
     pub validate_config: Option<ConfigValidator>,
+    /// Whether the capability writes records, and so must be enabled with an
+    /// `authority` its writes are bound to. Enabling one without an authority
+    /// is refused, so no such capability can run unbound.
+    pub requires_authority: bool,
+}
+
+/// A consistent view of one capability: whether it is enabled, the authority
+/// it acts under, and the dispatcher that serves it, all read together, so a
+/// check against the authority holds for the dispatcher it is used with.
+pub struct CapabilitySnapshot {
+    pub enabled: bool,
+    pub authority: Option<String>,
+    pub dispatcher: Arc<RegistryDispatcher>,
 }
 
 /// Persisted per-capability enablement state.
@@ -221,6 +234,16 @@ impl CapabilitySet {
             let empty = Value::Object(serde_json::Map::new());
             validate(config.as_ref().unwrap_or(&empty)).map_err(CapabilityError::ConfigInvalid)?;
         }
+        if definition.requires_authority
+            && !config
+                .as_ref()
+                .and_then(|c| c.get(CONFIG_AUTHORITY))
+                .is_some_and(Value::is_string)
+        {
+            return Err(CapabilityError::ConfigInvalid(format!(
+                "{capability} writes records and must be enabled with an `{CONFIG_AUTHORITY}`"
+            )));
+        }
         let mut state = self.state.write().await;
         if state.get(capability).is_some_and(|s| s.enabled) {
             return Err(CapabilityError::AlreadyEnabled);
@@ -285,6 +308,31 @@ impl CapabilitySet {
             .and_then(|config| config.get(CONFIG_AUTHORITY))
             .and_then(Value::as_str)
             .map(str::to_string)
+    }
+
+    /// Whether and under what authority `capability` is enabled, with the
+    /// admin dispatcher that goes with that state. Enable and disable swap the
+    /// dispatcher while holding the state lock, so reading both under it
+    /// cannot pair one state with another's dispatcher.
+    pub async fn snapshot(&self, capability: &str) -> CapabilitySnapshot {
+        let state = self.state.read().await;
+        let entry = state.get(capability).filter(|s| s.enabled);
+        CapabilitySnapshot {
+            enabled: entry.is_some(),
+            authority: entry
+                .and_then(|s| s.config.as_ref())
+                .and_then(|c| c.get(CONFIG_AUTHORITY))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            dispatcher: self.dispatcher.read().await.clone(),
+        }
+    }
+
+    /// Whether `capability` writes records and so needs an authority.
+    pub fn requires_authority(&self, capability: &str) -> bool {
+        self.available
+            .get(capability)
+            .is_some_and(|d| d.requires_authority)
     }
 
     async fn rebuild(&self, state: &BTreeMap<String, CapabilityState>) {
@@ -528,6 +576,7 @@ mod tests {
                     Ok(())
                 }
             })),
+            requires_authority: false,
         }
     }
 
@@ -543,6 +592,35 @@ mod tests {
             empty_base(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_record_writing_capability_needs_an_authority() {
+        let mut definition = test_capability("writer");
+        definition.requires_authority = true;
+        let set = CapabilitySet::new(
+            vec![definition],
+            Box::new(MemoryCapabilityStore::default()),
+            empty_base(),
+            empty_base(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            set.enable("writer", "0.1", None, None).await,
+            Err(CapabilityError::ConfigInvalid(_))
+        ));
+        set.enable(
+            "writer",
+            "0.1",
+            Some(serde_json::json!({ "authority": "did:example:a" })),
+            None,
+        )
+        .await
+        .unwrap();
+        let snapshot = set.snapshot("writer").await;
+        assert!(snapshot.enabled);
+        assert_eq!(snapshot.authority.as_deref(), Some("did:example:a"));
     }
 
     fn recognition_doc() -> TrustTask<Value> {

@@ -98,6 +98,14 @@ pub fn is_write_slug(slug: &str) -> bool {
     )
 }
 
+/// Slugs a caller may only use with a proof bound to its sender, under the
+/// same rules as a write: the writes, plus `registry/record/query`, whose
+/// answers carry whole records (context included) rather than the yes/no of
+/// the public TRQP queries.
+pub fn requires_proof(slug: &str) -> bool {
+    is_write_slug(slug) || slug == "registry/record/query"
+}
+
 /// Build a Data Integrity proof verifier backed by the Affinidi DID-resolver
 /// cache, accepting only keys the signer lists under `authentication`. Falls
 /// back to a `did:key`-only verifier (no network) if the resolver cache cannot
@@ -133,7 +141,7 @@ pub async fn verify_write_proof(
     verifier: &Arc<dyn DynProofVerifier>,
     doc: &TrustTask<Value>,
 ) -> Result<(), RejectReason> {
-    if !is_write_slug(doc.type_uri.slug()) {
+    if !requires_proof(doc.type_uri.slug()) {
         return Ok(());
     }
     if doc.proof.is_none() {
