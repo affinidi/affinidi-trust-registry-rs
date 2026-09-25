@@ -1,20 +1,84 @@
 //! Data Integrity proof verification for the write-path Trust Tasks.
 //!
 //! The record-mutation tasks (`registry/record/{put,delete}`) declare
-//! `IS_PROOF_REQUIRED`. The DIDComm and TSP bindings already reject a write with
-//! no in-band `proof` (presence); this module adds the cryptographic step —
+//! `IS_PROOF_REQUIRED`. This module performs the cryptographic step —
 //! verifying the Data Integrity proof against the issuer's resolved key — so a
-//! forged or tampered write is rejected, not merely a proofless one.
+//! forged or tampered write is rejected, not merely a proofless one. A write
+//! with no proof, or with no in-band `issuer` for the proof to be bound to, is
+//! refused outright rather than left to the verifier.
 //!
 //! Verification is backed by [`trust_tasks_proof`]'s Affinidi verifier over the
 //! shared DID-resolver cache; `did:key` issuers verify offline, `did:web` /
 //! `did:webvh` issuers resolve through the cache.
+//!
+//! A registry write is an operational message (VTI-KEY-084, VTI-KEY-106): it
+//! is signed with the writer's `operational` key, carries the proof purpose
+//! `authentication`, and the key must be listed under `authentication` in the
+//! writer's DID document. [`AuthenticationKeyResolver`] enforces the last part,
+//! so a key the writer lists only under `assertionMethod` cannot sign a write.
 
 use std::sync::Arc;
 
+use affinidi_tdk::data_integrity::{DataIntegrityError, ResolvedKey, VerificationMethodResolver};
+use affinidi_tdk::did_common::Document;
+use affinidi_tdk::did_common::verification_method::VerificationRelationship;
+use affinidi_tdk::did_resolver::DIDCacheClient;
+use async_trait::async_trait;
 use serde_json::Value;
 use trust_tasks_proof::affinidi::{CachedDidResolver, Verifier};
 use trust_tasks_rs::{DynProofVerifier, RejectReason, TrustTask, erase_verifier};
+
+/// The only `proofPurpose` a registry write may carry (VTI-KEY-106).
+pub const WRITE_PROOF_PURPOSE: &str = "authentication";
+
+/// Is `vm` one of the methods `doc` lists under `authentication`, by absolute
+/// DID URL or relative fragment, referenced or embedded?
+pub fn is_authentication_method(doc: &Document, vm: &str) -> bool {
+    let fragment = vm.find('#').map(|i| &vm[i..]);
+    let refers = |id: &str| id == vm || fragment.is_some_and(|f| id == f);
+    doc.authentication
+        .iter()
+        .any(|relationship| match relationship {
+            VerificationRelationship::Reference(id) => refers(id),
+            VerificationRelationship::VerificationMethod(method) => refers(method.id.as_str()),
+            _ => false,
+        })
+}
+
+/// Resolves a proof's verification method only when the controlling DID
+/// document lists it under `authentication`, then hands it to
+/// [`CachedDidResolver`] for the key material.
+pub struct AuthenticationKeyResolver {
+    client: Arc<DIDCacheClient>,
+    keys: CachedDidResolver,
+}
+
+impl AuthenticationKeyResolver {
+    pub fn new(client: Arc<DIDCacheClient>) -> Self {
+        Self {
+            keys: CachedDidResolver::new(client.clone()),
+            client,
+        }
+    }
+}
+
+#[async_trait]
+impl VerificationMethodResolver for AuthenticationKeyResolver {
+    async fn resolve_vm(&self, vm: &str) -> Result<ResolvedKey, DataIntegrityError> {
+        let did = vm.split('#').next().unwrap_or(vm);
+        let resolved = self
+            .client
+            .resolve(did)
+            .await
+            .map_err(|e| DataIntegrityError::Resolver(format!("resolve {did}: {e}")))?;
+        if !is_authentication_method(&resolved.doc, vm) {
+            return Err(DataIntegrityError::Resolver(format!(
+                "verificationMethod {vm} is not an authentication key of {did}"
+            )));
+        }
+        self.keys.resolve_vm(vm).await
+    }
+}
 
 /// Slugs whose operations mutate the registry and therefore carry a required,
 /// verifiable proof plus the admin ACL. The single source of truth — the
@@ -34,16 +98,26 @@ pub fn is_write_slug(slug: &str) -> bool {
     )
 }
 
+/// Slugs a caller may only use with a proof bound to its sender, under the
+/// same rules as a write: the writes, plus `registry/record/query`, whose
+/// answers carry whole records (context included) rather than the yes/no of
+/// the public TRQP queries.
+pub fn requires_proof(slug: &str) -> bool {
+    is_write_slug(slug) || slug == "registry/record/query"
+}
+
 /// Build a Data Integrity proof verifier backed by the Affinidi DID-resolver
-/// cache. Falls back to a `did:key`-only verifier (no network) if the resolver
-/// cache cannot be constructed, so proof verification degrades gracefully rather
-/// than failing startup.
+/// cache, accepting only keys the signer lists under `authentication`. Falls
+/// back to a `did:key`-only verifier (no network) if the resolver cache cannot
+/// be constructed, so proof verification degrades gracefully rather than
+/// failing startup; a `did:key`'s only key is by construction its
+/// authentication key.
 pub async fn build_verifier() -> Arc<dyn DynProofVerifier> {
     use affinidi_tdk::did_resolver::{DIDCacheClient, config::DIDCacheConfigBuilder};
 
     match DIDCacheClient::new(DIDCacheConfigBuilder::default().build()).await {
         Ok(client) => {
-            let resolver = Arc::new(CachedDidResolver::new(Arc::new(client)));
+            let resolver = Arc::new(AuthenticationKeyResolver::new(Arc::new(client)));
             erase_verifier(Verifier::with_resolver(resolver))
         }
         Err(e) => {
@@ -57,16 +131,26 @@ pub async fn build_verifier() -> Arc<dyn DynProofVerifier> {
 
 /// Cryptographically verify the Data Integrity proof on a **write** document.
 ///
-/// Reads pass through unchanged. A proofless write also passes here — presence
-/// is enforced separately by the binding's `authorize_write` before this call —
-/// so this step only rejects a write whose *present* proof fails verification
-/// ([`RejectReason::ProofInvalid`]).
+/// Reads pass through unchanged. A write must carry a proof
+/// ([`RejectReason::ProofRequired`]) and an in-band `issuer` the proof is bound
+/// to ([`RejectReason::MalformedRequest`]); both are refused here as well as by
+/// [`TaskHandler::authorize_write`](crate::trust_tasks::TaskHandler::authorize_write),
+/// so this check is safe to call on its own. A present proof that fails
+/// verification is [`RejectReason::ProofInvalid`].
 pub async fn verify_write_proof(
     verifier: &Arc<dyn DynProofVerifier>,
     doc: &TrustTask<Value>,
 ) -> Result<(), RejectReason> {
-    if !is_write_slug(doc.type_uri.slug()) || doc.proof.is_none() {
+    if !requires_proof(doc.type_uri.slug()) {
         return Ok(());
+    }
+    if doc.proof.is_none() {
+        return Err(RejectReason::ProofRequired);
+    }
+    if doc.issuer.is_none() {
+        return Err(RejectReason::MalformedRequest {
+            reason: "a write must name its issuer".to_string(),
+        });
     }
     verifier
         .verify_json(doc)
@@ -86,6 +170,7 @@ mod tests {
             type_uri.parse().expect("valid type uri"),
             serde_json::json!({}),
         );
+        doc.issuer = Some("did:example:admin".to_string());
         doc.proof = Some(
             serde_json::from_value(serde_json::json!({
                 "type": "DataIntegrityProof",
@@ -117,5 +202,56 @@ mod tests {
             verify_write_proof(&verifier, &doc).await,
             Err(RejectReason::ProofInvalid { .. })
         ));
+    }
+
+    const RECORD_PUT: &str = "https://trusttasks.org/spec/registry/record/put/0.1";
+
+    #[tokio::test]
+    async fn write_without_proof_is_refused() {
+        let verifier = erase_verifier(Verifier::for_did_key());
+        let mut doc = doc_with_dummy_proof(RECORD_PUT);
+        doc.proof = None;
+        assert!(matches!(
+            verify_write_proof(&verifier, &doc).await,
+            Err(RejectReason::ProofRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn write_without_issuer_is_refused() {
+        let verifier = erase_verifier(Verifier::for_did_key());
+        let mut doc = doc_with_dummy_proof(RECORD_PUT);
+        doc.issuer = None;
+        assert!(matches!(
+            verify_write_proof(&verifier, &doc).await,
+            Err(RejectReason::MalformedRequest { .. })
+        ));
+    }
+
+    fn document(authentication: Value) -> Document {
+        serde_json::from_value(serde_json::json!({
+            "id": "did:example:writer",
+            "verificationMethod": [{
+                "id": "did:example:writer#key-1",
+                "type": "Multikey",
+                "controller": "did:example:writer",
+                "publicKeyMultibase": "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+            }],
+            "authentication": authentication,
+            "assertionMethod": ["did:example:writer#key-1"]
+        }))
+        .expect("valid DID document")
+    }
+
+    #[test]
+    fn a_key_listed_under_authentication_is_accepted() {
+        let doc = document(serde_json::json!(["#key-1"]));
+        assert!(is_authentication_method(&doc, "did:example:writer#key-1"));
+    }
+
+    #[test]
+    fn a_key_listed_only_under_assertion_method_is_refused() {
+        let doc = document(serde_json::json!([]));
+        assert!(!is_authentication_method(&doc, "did:example:writer#key-1"));
     }
 }

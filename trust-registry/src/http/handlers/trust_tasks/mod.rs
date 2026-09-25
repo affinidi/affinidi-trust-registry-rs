@@ -82,7 +82,8 @@ where
         my_vid,
         Vec::new(),
         state.verifier.clone(),
-    );
+    )
+    .with_audit(state.audit.clone());
     match tasks.handle(doc, None).await {
         Ok(response) => {
             let body = serde_json::to_value(&response).unwrap_or_else(|_| serde_json::json!({}));

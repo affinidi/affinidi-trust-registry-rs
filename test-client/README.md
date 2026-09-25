@@ -1,6 +1,6 @@
 # Running the Test Client
 
-The test client demonstrates how to interact with the Trust Registry using DIDComm for administrative operations (create, read, update, delete, list trust records).
+The test client demonstrates how to interact with the Trust Registry using DIDComm for administrative operations (create, read, update, delete, list trust records). Each operation is a `registry/record/*` Trust Task; writes are signed with the admin's authentication key (`proofPurpose` `authentication`) and are made under the admin's own DID as `authority_id`.
 
 When the test-client is executed, it performs the following steps:
 
@@ -65,6 +65,6 @@ This approach is useful for:
 
 ## Troubleshooting
 
-- **Authorization errors**: Ensure the DID from `conf/user_config.json` is configured as an authorised admin in the Trust Registry's `ADMIN_DIDS` environment variable.
+- **Authorization errors**: Ensure the DID from `conf/user_config.json` is configured as an authorised admin in the Trust Registry's `ADMIN_DIDS` environment variable. A write under an `authority_id` other than the admin's own DID is refused unless the registry's `ADMIN_AUTHORITIES` lists that authority for the admin.
 - **"TRUST_REGISTRY_DID environment variable is not set"**: Either set it at runtime or ensure `PROFILE_CONFIG` exists in your `.env` file.
 - **"Unable to find 'SampleTRAdmin' from the user_config.json"**: Check that `conf/user_config.json` contains a user with the alias "SampleTRAdmin".

@@ -14,6 +14,17 @@ pub struct AuditLog {
     pub resource: AuditResource,
     pub extra: Option<String>,
     pub thread_id: Option<String>,
+    /// The Trust Task type slug the entry is about, e.g. `registry/record/put`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// The operation document's `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
+    /// Who the document claimed to come from, when it was refused before its
+    /// issuer was proven. `actor` is then empty: it only ever names a DID whose
+    /// proof verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_actor: Option<String>,
     pub timestamp: chrono::DateTime<Utc>,
 }
 
@@ -50,6 +61,9 @@ impl AuditLogBuilder {
                 resource: AuditResource::empty(),
                 extra: None,
                 thread_id: None,
+                task: None,
+                document_id: None,
+                claimed_actor: None,
                 timestamp: Utc::now(),
             },
         }
@@ -72,6 +86,21 @@ impl AuditLogBuilder {
 
     pub fn thread_id(mut self, thread_id: Option<String>) -> Self {
         self.audit_log.thread_id = thread_id;
+        self
+    }
+
+    pub fn task(mut self, task: impl Into<String>) -> Self {
+        self.audit_log.task = Some(task.into());
+        self
+    }
+
+    pub fn document_id(mut self, document_id: impl Into<String>) -> Self {
+        self.audit_log.document_id = Some(document_id.into());
+        self
+    }
+
+    pub fn claimed_actor(mut self, claimed_actor: Option<String>) -> Self {
+        self.audit_log.claimed_actor = claimed_actor;
         self
     }
 
@@ -115,6 +144,12 @@ pub enum AuditOperation {
     Delete,
     Read,
     List,
+    Put,
+    Grant,
+    Revoke,
+    Enable,
+    Disable,
+    Rotate,
 }
 
 impl fmt::Display for AuditOperation {
@@ -125,6 +160,12 @@ impl fmt::Display for AuditOperation {
             Self::Delete => write!(f, "DELETE"),
             Self::Read => write!(f, "READ"),
             Self::List => write!(f, "LIST"),
+            Self::Put => write!(f, "PUT"),
+            Self::Grant => write!(f, "GRANT"),
+            Self::Revoke => write!(f, "REVOKE"),
+            Self::Enable => write!(f, "ENABLE"),
+            Self::Disable => write!(f, "DISABLE"),
+            Self::Rotate => write!(f, "ROTATE"),
         }
     }
 }

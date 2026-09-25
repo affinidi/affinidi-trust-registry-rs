@@ -2,6 +2,7 @@ use affinidi_tdk::{
     messaging::protocols::mediator::acls::AccessListModeType, secrets_resolver::secrets::Secret,
 };
 use serde_derive::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use tracing::warn;
 
@@ -49,8 +50,9 @@ async fn load_profile_from_vta() -> Result<Option<String>, String> {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuditLogFormat {
-    #[default]
     Text,
+    /// The default: values are escaped by construction.
+    #[default]
     Json,
 }
 
@@ -89,8 +91,41 @@ pub struct ProfileConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct AdminConfig {
+    /// DIDs that may send record-mutating Trust Tasks.
     pub admin_dids: Vec<String>,
+    /// Authorities, beyond its own DID, each admin DID may write records under.
+    /// An admin not listed here may only write under its own DID.
+    pub admin_authorities: HashMap<String, Vec<String>>,
     pub audit_config: AuditConfig,
+}
+
+/// Parse `ADMIN_AUTHORITIES`: a JSON object mapping an admin DID to the
+/// authority DIDs it may write records under in addition to its own.
+///
+/// An empty or absent value means no admin writes beyond its own DID. A
+/// malformed value is an error rather than being read as empty, so a typo
+/// cannot silently change who may write what.
+pub fn parse_admin_authorities(
+    raw: Option<&str>,
+    admin_dids: &[String],
+) -> Result<HashMap<String, Vec<String>>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(HashMap::new());
+    };
+    let admin_authorities: HashMap<String, Vec<String>> = serde_json::from_str(raw).map_err(|e| {
+        format!(
+            "ADMIN_AUTHORITIES must be a JSON object mapping an admin DID to a list of authority DIDs: {e}"
+        )
+    })?;
+    if let Some(unknown) = admin_authorities
+        .keys()
+        .find(|admin| !admin_dids.contains(admin))
+    {
+        return Err(format!(
+            "ADMIN_AUTHORITIES names {unknown}, which is not in ADMIN_DIDS"
+        ));
+    }
+    Ok(admin_authorities)
 }
 
 #[derive(Debug, Clone)]
@@ -228,12 +263,16 @@ impl Configs for DidcommConfig {
             .map(|e| e.trim().to_string())
             .collect();
 
-        let log_format = env_or("AUDIT_LOG_FORMAT", "text")
+        let log_format = env_or("AUDIT_LOG_FORMAT", "json")
             .parse::<AuditLogFormat>()
-            .unwrap_or(AuditLogFormat::Text);
+            .unwrap_or(AuditLogFormat::Json);
+
+        let admin_authorities =
+            parse_admin_authorities(optional_env("ADMIN_AUTHORITIES").as_deref(), &admin_dids)?;
 
         let admin_config = AdminConfig {
             admin_dids,
+            admin_authorities,
             audit_config: AuditConfig { log_format },
         };
 
@@ -303,5 +342,54 @@ impl Configs for DidcommConfig {
             admin_config,
             retry_config,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_admin_authorities;
+
+    const ADMIN: &str = "did:example:admin";
+
+    fn admins() -> Vec<String> {
+        vec![ADMIN.to_string()]
+    }
+
+    #[test]
+    fn absent_or_empty_admin_authorities_grant_nothing_extra() {
+        assert!(parse_admin_authorities(None, &admins()).unwrap().is_empty());
+        assert!(
+            parse_admin_authorities(Some("  "), &admins())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn admin_authorities_map_an_admin_to_its_extra_authorities() {
+        let parsed = parse_admin_authorities(
+            Some(r#"{"did:example:admin": ["did:example:a", "did:example:b"]}"#),
+            &admins(),
+        )
+        .unwrap();
+        assert_eq!(parsed[ADMIN], vec!["did:example:a", "did:example:b"]);
+    }
+
+    #[test]
+    fn malformed_admin_authorities_are_an_error() {
+        assert!(
+            parse_admin_authorities(Some("did:example:admin=did:example:a"), &admins()).is_err()
+        );
+    }
+
+    #[test]
+    fn admin_authorities_for_a_non_admin_are_an_error() {
+        assert!(
+            parse_admin_authorities(
+                Some(r#"{"did:example:stranger": ["did:example:a"]}"#),
+                &admins()
+            )
+            .is_err()
+        );
     }
 }

@@ -187,6 +187,178 @@ async fn recognition_round_trips_over_didcomm() {
     env.shutdown().await.ok();
 }
 
+// --- Signed record writes over DIDComm ---------------------------------------
+
+use affinidi_messaging_test_mediator::TestUser;
+use trust_registry::storage::repository::{TrustRecordAdminRepository, TrustRecordQuery};
+use trust_tasks_proof::affinidi::{SignOptions, sign_trust_task};
+
+/// The member record a community writes under `authority`.
+fn put_payload(authority: &str) -> Value {
+    json!({
+        "record": {
+            "entity_id": "did:example:member",
+            "authority_id": authority,
+            "action": "git.commit.sign",
+            "resource": "repo",
+            "recognized": true,
+            "authorized": true,
+            "record_type": "authorization"
+        }
+    })
+}
+
+fn member_query(authority: &str) -> TrustRecordQuery {
+    TrustRecordQuery::new(
+        EntityId::new("did:example:member"),
+        AuthorityId::new(authority),
+        Action::new("git.commit.sign"),
+        Resource::new("repo"),
+    )
+}
+
+/// A `registry/record/put` issued by `client` and signed with its
+/// verification key, as a VTC sends it.
+async fn signed_put(client: &TestUser, recipient: &str, authority: &str) -> TrustTask<Value> {
+    let mut doc = TrustTask::new(
+        format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+        type_uris::RECORD_PUT.parse().expect("valid put type uri"),
+        put_payload(authority),
+    );
+    doc.issuer = Some(client.did.clone());
+    doc.recipient = Some(recipient.to_string());
+    doc.issued_at = Some(chrono::Utc::now());
+    let signer = client
+        .secrets
+        .iter()
+        .find(|secret| secret.id.ends_with("#key-1"))
+        .expect("the client has a verification key");
+    let signed = sign_trust_task(
+        &serde_json::to_value(&doc).expect("serialise task"),
+        signer,
+        SignOptions::new().with_proof_purpose("authentication"),
+    )
+    .await
+    .expect("sign the put");
+    serde_json::from_value(signed).expect("signed task parses")
+}
+
+/// Authcrypt `request` from `client` to the registry and wait for the reply
+/// on the same thread.
+async fn round_trip(
+    env: &TestEnvironment,
+    client: &TestUser,
+    tr_did: &str,
+    request: &TrustTask<Value>,
+) -> TrustTask<Value> {
+    let body = serde_json::to_value(request).expect("serialise task");
+    let message = Message::new(ENVELOPE_TYPE, body)
+        .from(client.did.clone())
+        .to(vec![tr_did.to_string()])
+        .thid(request.id.clone());
+    let (packed, _) = env
+        .atm
+        .pack_encrypted(&message, tr_did, Some(&client.did), None)
+        .await
+        .expect("pack_encrypted");
+    env.atm
+        .forward_and_send_message(
+            &client.profile,
+            false,
+            &packed,
+            None,
+            env.mediator.did(),
+            tr_did,
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("forward to trust registry");
+
+    for _ in 0..40 {
+        let fetched = env
+            .atm
+            .fetch_messages(&client.profile, &FetchOptions::default())
+            .await
+            .expect("fetch messages");
+        for item in fetched.success {
+            let Some(packed) = item.msg else { continue };
+            let Ok((message, _)) = env.atm.unpack(&packed).await else {
+                continue;
+            };
+            if message.typ != ENVELOPE_TYPE {
+                continue;
+            }
+            let reply: TrustTask<Value> =
+                serde_json::from_value(message.body).expect("parse reply task");
+            if reply.thread_id.as_deref() == Some(request.id.as_str()) {
+                return reply;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("no reply to {} within the timeout", request.id);
+}
+
+/// The VTC write path: an admin community signs a put under its own DID and
+/// sends it authcrypted from that DID. The record lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "routed round-trip through the mediator; run with --ignored"]
+async fn signed_put_under_own_authority_is_stored_over_didcomm() {
+    let env = TestEnvironment::spawn().await.expect("spawn test mediator");
+    let client = env.add_user("community").await.expect("add client");
+    let tr = TestTrustRegistry::builder()
+        .admin_dids(vec![client.did.clone()])
+        .spawn_with_mediator(&env.mediator)
+        .await
+        .expect("spawn trust registry");
+    let tr_did = tr.did().expect("tr did").to_string();
+
+    let request = signed_put(&client, &tr_did, &client.did).await;
+    let reply = round_trip(&env, &client, &tr_did, &request).await;
+
+    assert!(reply.type_uri.is_response(), "put refused: {reply:?}");
+    tr.repository()
+        .read(member_query(&client.did))
+        .await
+        .expect("the record was stored under the community's authority");
+
+    tr.shutdown().await;
+    env.shutdown().await.ok();
+}
+
+/// The same admin, signing correctly, cannot write under someone else's
+/// authority.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "routed round-trip through the mediator; run with --ignored"]
+async fn signed_put_under_another_authority_is_refused_over_didcomm() {
+    let env = TestEnvironment::spawn().await.expect("spawn test mediator");
+    let client = env.add_user("community").await.expect("add client");
+    let tr = TestTrustRegistry::builder()
+        .admin_dids(vec![client.did.clone()])
+        .spawn_with_mediator(&env.mediator)
+        .await
+        .expect("spawn trust registry");
+    let tr_did = tr.did().expect("tr did").to_string();
+    let other_authority = "did:example:another-community";
+
+    let request = signed_put(&client, &tr_did, other_authority).await;
+    let reply = round_trip(&env, &client, &tr_did, &request).await;
+
+    assert!(!reply.type_uri.is_response(), "put accepted: {reply:?}");
+    assert_eq!(reply.payload["code"], json!("permissionDenied"));
+    assert!(
+        tr.repository()
+            .read(member_query(other_authority))
+            .await
+            .is_err()
+    );
+
+    tr.shutdown().await;
+    env.shutdown().await.ok();
+}
+
 /// Under `--features tsp`, `serve()` additionally starts the TSP receive loop
 /// (raw-TSP websocket to the mediator). This asserts that build wires up and
 /// still serves; a full routed TSP Trust Task round-trip — which needs the

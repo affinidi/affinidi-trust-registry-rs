@@ -20,11 +20,27 @@
 //! store *claims* an id atomically before dispatch and resolves the claim after:
 //!
 //! ```text
-//!   claim(key) ->  Acquired  -> dispatch -> complete(key, outcome)
-//!              ->  Replay(o) -> return the original response, do not dispatch
-//!              ->  InFlight  -> reject as retryable; the sender re-sends and
-//!                               finds Replay once the first copy resolves
+//!   claim(key, digest) ->  Acquired  -> dispatch -> complete(key, outcome)
+//!                      ->  Replay(o) -> return the original response, do not dispatch
+//!                      ->  InFlight  -> reject as retryable; the sender re-sends and
+//!                                       finds Replay once the first copy resolves
+//!                      ->  Conflict  -> the id was accepted for a different
+//!                                       document: reject as `idConflict`
 //! ```
+//!
+//! ## The record of accepted identifiers (VTI-OPS-025..027)
+//!
+//! This store is the registry's record of accepted document identifiers. One
+//! store is shared by every binding that carries writes (DIDComm, TSP and a
+//! host driving the registry), so a document accepted on one binding is not
+//! executed again on another. Its retention ([`DEFAULT_TTL`]) must be at least
+//! the write acceptance window
+//! ([`WRITE_ACCEPTANCE_WINDOW`](crate::trust_tasks::handler::WRITE_ACCEPTANCE_WINDOW)):
+//! a document older than the window is refused on its time of issue, so it
+//! never needs to be remembered for longer.
+//!
+//! A write is refused rather than executed when the store cannot be
+//! consulted: without the record there is no replay protection.
 //!
 //! A duplicate that arrives after completion replays the **stored response**
 //! rather than being silently dropped. At-least-once exists because responses
@@ -42,7 +58,7 @@
 //! rejections — malformed, expired, proof invalid, permission denied — are
 //! properties of the document itself and replay correctly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -50,17 +66,27 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use trust_tasks_rs::{ErrorResponse, RejectReason, TrustTask};
+use trust_tasks_rs::{ErrorResponse, RejectReason, TrustTask, document_digest};
 use uuid::Uuid;
 
 use crate::trust_tasks::{RegistryDispatcher, TaskOutcome, handle_document, proof::is_write_slug};
 
-/// How long a completed outcome stays replayable.
+/// How long a completed outcome stays replayable: the write acceptance window
+/// (five minutes of age, one of future skew) plus a minute of margin.
 ///
-/// Must comfortably exceed the mediator's redelivery window: once the entry
-/// expires, a redelivery is indistinguishable from a fresh document and would
-/// be applied a second time.
-pub const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// It only has to cover that window. A document older than it is refused on
+/// its time of issue before the record is consulted, so a redelivery that
+/// arrives after its entry has expired is refused as `expired`, never applied
+/// again. Keeping entries longer would only hold capacity that bounds new
+/// writes.
+pub const DEFAULT_TTL: Duration = Duration::from_secs(7 * 60);
+
+/// Bounds of the record kept for `registry/record/query` documents, which is
+/// separate from the one for writes so that queries cannot use up the
+/// capacity writes need.
+pub const DEFAULT_QUERY_MAX_ENTRIES: usize = 10_000;
+/// Per-issuer bound of the query record.
+pub const DEFAULT_QUERY_MAX_ENTRIES_PER_ISSUER: usize = 1_000;
 
 /// How long an unresolved claim is honoured before another copy may take it.
 ///
@@ -75,6 +101,10 @@ pub const DEFAULT_IN_FLIGHT_TTL: Duration = Duration::from_secs(5 * 60);
 pub enum DedupError {
     #[error("dedup store unavailable: {0}")]
     Unavailable(String),
+    /// The store is at its bound and refuses new claims rather than forget
+    /// accepted ones.
+    #[error("dedup store at capacity: {0}")]
+    CapacityReached(String),
 }
 
 /// Storage key for a document: `MID#<issuer>#<id>`.
@@ -126,17 +156,23 @@ pub enum Claim {
     Replay(Box<StoredOutcome>),
     /// Another copy holds the claim right now.
     InFlight,
+    /// The id was already claimed for a document with different content.
+    Conflict,
 }
 
 /// Durable claim/replay store for message ids.
 #[async_trait]
 pub trait MessageIdStore: Send + Sync {
-    /// Atomically claim `key`, or report why it could not be claimed.
+    /// Atomically claim `key` for the document whose content identity is
+    /// `digest`, or report why it could not be claimed.
+    ///
+    /// A key already held for a different `digest` MUST yield
+    /// [`Claim::Conflict`], never a replay of the other document's outcome.
     ///
     /// Implementations MUST make this atomic against concurrent callers —
     /// `SET NX` for Redis, a conditional put for DynamoDB. The check-then-set
     /// pattern the record backends use for `create` is **not** sufficient here.
-    async fn claim(&self, key: &str) -> Result<Claim, DedupError>;
+    async fn claim(&self, key: &str, digest: &str) -> Result<Claim, DedupError>;
 
     /// Resolve a claim with the outcome to replay for later duplicates.
     async fn complete(&self, key: &str, outcome: &StoredOutcome) -> Result<(), DedupError>;
@@ -147,9 +183,11 @@ pub trait MessageIdStore: Send + Sync {
 
 enum Entry {
     InFlight {
+        digest: String,
         claimed_at: DateTime<Utc>,
     },
     Done {
+        digest: String,
         // Boxed: a stored outcome is a full Trust Task document, dwarfing the
         // timestamp in the `InFlight` variant.
         outcome: Box<StoredOutcome>,
@@ -157,16 +195,92 @@ enum Entry {
     },
 }
 
+/// Most documents one issuer may have in the in-memory record at once.
+pub const DEFAULT_MAX_ENTRIES_PER_ISSUER: usize = 10_000;
+
+/// Most documents the in-memory record holds at once, across all issuers.
+pub const DEFAULT_MAX_ENTRIES: usize = 100_000;
+
+/// The issuer part of a [`message_key`].
+fn key_issuer(key: &str) -> &str {
+    key.strip_prefix("MID#")
+        .and_then(|rest| rest.split_once('#'))
+        .map_or("", |(issuer, _)| issuer)
+}
+
+#[derive(Default)]
+struct Inner {
+    entries: HashMap<String, Entry>,
+    /// Claims in the order they were made, which is the order their in-flight
+    /// window closes in. An item whose entry has since completed, been
+    /// released or been re-claimed is stale and skipped.
+    in_flight_order: VecDeque<(DateTime<Utc>, String)>,
+    /// Completions in the order they were made, which is expiry order.
+    done_order: VecDeque<(DateTime<Utc>, String)>,
+    per_issuer: HashMap<String, usize>,
+}
+
+impl Inner {
+    fn remove(&mut self, key: &str) {
+        if self.entries.remove(key).is_some() {
+            let issuer = key_issuer(key);
+            if let Some(count) = self.per_issuer.get_mut(issuer) {
+                *count -= 1;
+                if *count == 0 {
+                    self.per_issuer.remove(issuer);
+                }
+            }
+        }
+    }
+
+    /// Drop what has expired, oldest first. Each queue item is looked at once,
+    /// so the cost is amortised over the claims that created them.
+    fn evict_expired(&mut self, now: DateTime<Utc>, in_flight: chrono::Duration) {
+        while let Some((claimed_at, key)) = self.in_flight_order.front().cloned() {
+            if now.signed_duration_since(claimed_at) < in_flight {
+                break;
+            }
+            self.in_flight_order.pop_front();
+            if matches!(
+                self.entries.get(&key),
+                Some(Entry::InFlight { claimed_at: held, .. }) if *held == claimed_at
+            ) {
+                self.remove(&key);
+            }
+        }
+        while let Some((expires_at, key)) = self.done_order.front().cloned() {
+            if expires_at > now {
+                break;
+            }
+            self.done_order.pop_front();
+            if matches!(
+                self.entries.get(&key),
+                Some(Entry::Done { expires_at: held, .. }) if *held == expires_at
+            ) {
+                self.remove(&key);
+            }
+        }
+    }
+}
+
 /// In-memory store: correct dedup semantics, no durability.
 ///
 /// Used with the CSV backend, whose writes rewrite the whole records file and
 /// so cannot absorb per-message inserts. Dedup state is lost on restart, which
 /// is acceptable for the local-development posture CSV serves — the server warns
-/// at startup so this is never a silent property of a deployment.
+/// at startup so this is never a silent property of a deployment. It is also
+/// local to one process: replicas of a registry do not share it.
+///
+/// Bounded: at [`DEFAULT_MAX_ENTRIES`] in total, or
+/// [`DEFAULT_MAX_ENTRIES_PER_ISSUER`] for one issuer, a new claim is refused
+/// rather than evicting an entry, since forgetting an accepted document would
+/// let it be replayed.
 pub struct MemoryMessageIdStore {
     ttl: Duration,
     in_flight_ttl: Duration,
-    entries: Mutex<HashMap<String, Entry>>,
+    max_entries: usize,
+    max_entries_per_issuer: usize,
+    inner: Mutex<Inner>,
 }
 
 impl MemoryMessageIdStore {
@@ -174,23 +288,25 @@ impl MemoryMessageIdStore {
         Self {
             ttl,
             in_flight_ttl,
-            entries: Mutex::new(HashMap::new()),
+            max_entries: DEFAULT_MAX_ENTRIES,
+            max_entries_per_issuer: DEFAULT_MAX_ENTRIES_PER_ISSUER,
+            inner: Mutex::new(Inner::default()),
         }
     }
 
-    /// Drop entries past their expiry. Called on every claim: the map is only
-    /// ever touched on the write path, so there is no separate sweeper task to
-    /// shut down, and a registry that stops receiving writes stops accruing.
-    fn evict_expired(
-        entries: &mut HashMap<String, Entry>,
-        now: DateTime<Utc>,
-        in_flight: Duration,
-    ) {
-        let in_flight = chrono::Duration::from_std(in_flight).unwrap_or(chrono::Duration::zero());
-        entries.retain(|_, entry| match entry {
-            Entry::Done { expires_at, .. } => *expires_at > now,
-            Entry::InFlight { claimed_at } => now.signed_duration_since(*claimed_at) < in_flight,
-        });
+    /// Set the total and per-issuer bounds.
+    pub fn with_limits(mut self, max_entries: usize, max_entries_per_issuer: usize) -> Self {
+        self.max_entries = max_entries;
+        self.max_entries_per_issuer = max_entries_per_issuer;
+        self
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        // Poison-tolerant: a panic while holding this lock must not wedge every
+        // subsequent write, mirroring `MemoryCapabilityStore`.
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -202,50 +318,73 @@ impl Default for MemoryMessageIdStore {
 
 #[async_trait]
 impl MessageIdStore for MemoryMessageIdStore {
-    async fn claim(&self, key: &str) -> Result<Claim, DedupError> {
+    async fn claim(&self, key: &str, digest: &str) -> Result<Claim, DedupError> {
         let now = Utc::now();
-        // Poison-tolerant: a panic while holding this lock must not wedge every
-        // subsequent write, mirroring `MemoryCapabilityStore`.
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let in_flight =
+            chrono::Duration::from_std(self.in_flight_ttl).unwrap_or(chrono::Duration::zero());
+        let mut inner = self.lock();
+        inner.evict_expired(now, in_flight);
 
-        Self::evict_expired(&mut entries, now, self.in_flight_ttl);
-
-        match entries.get(key) {
-            Some(Entry::Done { outcome, .. }) => Ok(Claim::Replay(outcome.clone())),
-            Some(Entry::InFlight { .. }) => Ok(Claim::InFlight),
-            None => {
-                entries.insert(key.to_string(), Entry::InFlight { claimed_at: now });
-                Ok(Claim::Acquired)
+        match inner.entries.get(key) {
+            Some(Entry::Done { digest: held, .. } | Entry::InFlight { digest: held, .. })
+                if held != digest =>
+            {
+                return Ok(Claim::Conflict);
             }
+            Some(Entry::Done { outcome, .. }) => return Ok(Claim::Replay(outcome.clone())),
+            Some(Entry::InFlight { .. }) => return Ok(Claim::InFlight),
+            None => {}
         }
+
+        let issuer = key_issuer(key).to_string();
+        if inner.entries.len() >= self.max_entries {
+            return Err(DedupError::CapacityReached(
+                "the record of accepted documents is full".to_string(),
+            ));
+        }
+        if inner.per_issuer.get(&issuer).copied().unwrap_or(0) >= self.max_entries_per_issuer {
+            return Err(DedupError::CapacityReached(format!(
+                "{issuer} has too many documents in the record of accepted documents"
+            )));
+        }
+        inner.entries.insert(
+            key.to_string(),
+            Entry::InFlight {
+                digest: digest.to_string(),
+                claimed_at: now,
+            },
+        );
+        *inner.per_issuer.entry(issuer).or_insert(0) += 1;
+        inner.in_flight_order.push_back((now, key.to_string()));
+        Ok(Claim::Acquired)
     }
 
     async fn complete(&self, key: &str, outcome: &StoredOutcome) -> Result<(), DedupError> {
         let expires_at =
             Utc::now() + chrono::Duration::from_std(self.ttl).unwrap_or(chrono::Duration::zero());
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        entries.insert(
+        let mut inner = self.lock();
+        let digest = match inner.entries.get(key) {
+            Some(Entry::InFlight { digest, .. } | Entry::Done { digest, .. }) => digest.clone(),
+            None => {
+                return Err(DedupError::Unavailable(format!(
+                    "no claim is held for {key}"
+                )));
+            }
+        };
+        inner.entries.insert(
             key.to_string(),
             Entry::Done {
+                digest,
                 outcome: Box::new(outcome.clone()),
                 expires_at,
             },
         );
+        inner.done_order.push_back((expires_at, key.to_string()));
         Ok(())
     }
 
     async fn release(&self, key: &str) -> Result<(), DedupError> {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        entries.remove(key);
+        self.lock().remove(key);
         Ok(())
     }
 }
@@ -272,7 +411,9 @@ fn is_cacheable(outcome: &TaskOutcome) -> bool {
 ///
 /// Reads bypass the store entirely. Writes claim their message id first, so a
 /// redelivery either replays the original response or is told to retry, but
-/// never mutates the registry twice.
+/// never mutates the registry twice. A different document reusing an accepted
+/// id is refused as `idConflict`, and a write is refused as `unavailable`
+/// when the store cannot be consulted.
 pub async fn dispatch_idempotent(
     dispatcher: &RegistryDispatcher,
     store: &dyn MessageIdStore,
@@ -281,10 +422,36 @@ pub async fn dispatch_idempotent(
     if !is_write_slug(doc.type_uri.slug()) {
         return handle_document(dispatcher, doc).await;
     }
+    execute_once(store, doc, |doc| handle_document(dispatcher, doc)).await
+}
 
+/// Run `execute` on `doc` at most once per accepted document identifier.
+///
+/// The claim/replay protocol of [`dispatch_idempotent`], for a write that is
+/// not executed by the dispatcher (`registry/did/rotate`).
+pub async fn execute_once<F, Fut>(
+    store: &dyn MessageIdStore,
+    doc: TrustTask<Value>,
+    execute: F,
+) -> TaskOutcome
+where
+    F: FnOnce(TrustTask<Value>) -> Fut,
+    Fut: std::future::Future<Output = TaskOutcome>,
+{
     let key = message_key(&doc);
+    let digest = match document_digest(&doc) {
+        Ok(digest) => digest,
+        Err(e) => {
+            return Err(doc.reject_with(
+                Uuid::new_v4().to_string(),
+                RejectReason::MalformedRequest {
+                    reason: format!("the document cannot be canonicalised: {e}"),
+                },
+            ));
+        }
+    };
 
-    match store.claim(&key).await {
+    match store.claim(&key, digest.as_str()).await {
         Ok(Claim::Replay(stored)) => {
             tracing::info!("Replaying stored outcome for duplicate write {key}");
             return stored.into_outcome();
@@ -304,18 +471,23 @@ pub async fn dispatch_idempotent(
             rejection.payload = rejection.payload.with_retryable(true);
             return Err(rejection);
         }
+        Ok(Claim::Conflict) => {
+            tracing::warn!("Write {key} reuses an accepted id for a different document");
+            return Err(doc.reject_with(Uuid::new_v4().to_string(), RejectReason::IdConflict));
+        }
         Ok(Claim::Acquired) => {}
         Err(e) => {
-            // Fail open: a dedup store outage must not stop the registry
-            // accepting writes. The exposure is a possible duplicate, which is
-            // strictly better than refusing every mutation while the store is
-            // down.
-            tracing::error!("Dedup store unavailable, dispatching without dedup: {e}");
-            return handle_document(dispatcher, doc).await;
+            // Fail closed: without the record of accepted identifiers a
+            // replayed write cannot be told from a fresh one.
+            tracing::error!("Dedup store unavailable, refusing write {key}: {e}");
+            return Err(doc.reject_with(
+                Uuid::new_v4().to_string(),
+                RejectReason::Unavailable { retry_after: None },
+            ));
         }
     }
 
-    let outcome = handle_document(dispatcher, doc).await;
+    let outcome = execute(doc).await;
 
     let resolution = if is_cacheable(&outcome) {
         store
@@ -376,11 +548,11 @@ mod tests {
     async fn first_claim_is_acquired_second_is_in_flight() {
         let store = store();
         assert!(matches!(
-            store.claim("MID#a#1").await.unwrap(),
+            store.claim("MID#a#1", "digest").await.unwrap(),
             Claim::Acquired
         ));
         assert!(matches!(
-            store.claim("MID#a#1").await.unwrap(),
+            store.claim("MID#a#1", "digest").await.unwrap(),
             Claim::InFlight
         ));
     }
@@ -391,13 +563,13 @@ mod tests {
         let doc = write_doc("1", Some("did:example:alice"));
         let key = message_key(&doc);
 
-        store.claim(&key).await.unwrap();
+        store.claim(&key, "digest").await.unwrap();
         store
             .complete(&key, &StoredOutcome::from_outcome(&ok_outcome(&doc)))
             .await
             .unwrap();
 
-        match store.claim(&key).await.unwrap() {
+        match store.claim(&key, "digest").await.unwrap() {
             Claim::Replay(stored) => {
                 let replayed = stored.into_outcome().expect("stored a success");
                 assert_eq!(replayed.id, doc.id);
@@ -409,10 +581,13 @@ mod tests {
     #[tokio::test]
     async fn released_claim_can_be_retaken() {
         let store = store();
-        store.claim("MID#a#1").await.unwrap();
+        store.claim("MID#a#1", "digest").await.unwrap();
         store.release("MID#a#1").await.unwrap();
         assert!(
-            matches!(store.claim("MID#a#1").await.unwrap(), Claim::Acquired),
+            matches!(
+                store.claim("MID#a#1", "digest").await.unwrap(),
+                Claim::Acquired
+            ),
             "a released claim must be retryable, not permanently blocked"
         );
     }
@@ -422,10 +597,10 @@ mod tests {
     #[tokio::test]
     async fn stale_in_flight_claims_are_reclaimable() {
         let store = MemoryMessageIdStore::new(DEFAULT_TTL, Duration::from_millis(1));
-        store.claim("MID#a#1").await.unwrap();
+        store.claim("MID#a#1", "digest").await.unwrap();
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert!(matches!(
-            store.claim("MID#a#1").await.unwrap(),
+            store.claim("MID#a#1", "digest").await.unwrap(),
             Claim::Acquired
         ));
     }
@@ -435,14 +610,17 @@ mod tests {
         let store = MemoryMessageIdStore::new(Duration::from_millis(1), DEFAULT_IN_FLIGHT_TTL);
         let doc = write_doc("1", None);
         let key = message_key(&doc);
-        store.claim(&key).await.unwrap();
+        store.claim(&key, "digest").await.unwrap();
         store
             .complete(&key, &StoredOutcome::from_outcome(&ok_outcome(&doc)))
             .await
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(5)).await;
-        assert!(matches!(store.claim(&key).await.unwrap(), Claim::Acquired));
+        assert!(matches!(
+            store.claim(&key, "digest").await.unwrap(),
+            Claim::Acquired
+        ));
     }
 
     /// The rule that stops a momentary database outage becoming this message's
@@ -579,6 +757,69 @@ mod tests {
         );
     }
 
+    /// A different document reusing an accepted id is neither applied nor
+    /// answered with the first document's response.
+    #[tokio::test]
+    async fn a_different_document_reusing_an_accepted_id_is_a_conflict() {
+        let repo = Arc::new(CountingRepo::default());
+        let dispatcher = build_dispatcher(repo.clone());
+        let store = store();
+        let first = create_doc("msg-1", "did:example:admin");
+        let mut second = first.clone();
+        second.payload["record"]["entity_id"] = serde_json::json!("did:example:other");
+
+        dispatch_idempotent(&dispatcher, &store, first)
+            .await
+            .expect("first write");
+        let err = dispatch_idempotent(&dispatcher, &store, second)
+            .await
+            .expect_err("the reused id is refused");
+
+        assert_eq!(
+            serde_json::to_value(&err.payload.code).unwrap(),
+            "idConflict"
+        );
+        assert_eq!(repo.created.lock().unwrap().len(), 1);
+    }
+
+    struct UnavailableStore;
+
+    #[async_trait]
+    impl MessageIdStore for UnavailableStore {
+        async fn claim(&self, _key: &str, _digest: &str) -> Result<Claim, DedupError> {
+            Err(DedupError::Unavailable("down".to_string()))
+        }
+        async fn complete(&self, _key: &str, _outcome: &StoredOutcome) -> Result<(), DedupError> {
+            Err(DedupError::Unavailable("down".to_string()))
+        }
+        async fn release(&self, _key: &str) -> Result<(), DedupError> {
+            Err(DedupError::Unavailable("down".to_string()))
+        }
+    }
+
+    /// Without the record of accepted identifiers a replay cannot be told from
+    /// a fresh write, so the write is refused rather than applied.
+    #[tokio::test]
+    async fn a_write_is_refused_when_the_store_is_unavailable() {
+        let repo = Arc::new(CountingRepo::default());
+        let dispatcher = build_dispatcher(repo.clone());
+
+        let err = dispatch_idempotent(
+            &dispatcher,
+            &UnavailableStore,
+            create_doc("msg-1", "did:example:admin"),
+        )
+        .await
+        .expect_err("refused");
+
+        assert_eq!(
+            serde_json::to_value(&err.payload.code).unwrap(),
+            "unavailable"
+        );
+        assert!(err.payload.retryable);
+        assert!(repo.created.lock().unwrap().is_empty());
+    }
+
     /// Distinct documents from the same issuer must both apply — dedup must not
     /// over-match and swallow legitimate writes.
     #[tokio::test]
@@ -639,7 +880,7 @@ mod tests {
 
         // Nothing was claimed, so the same id is still free.
         assert!(matches!(
-            store.claim(&message_key(&read)).await.unwrap(),
+            store.claim(&message_key(&read), "digest").await.unwrap(),
             Claim::Acquired
         ));
     }
@@ -652,5 +893,60 @@ mod tests {
         let json = serde_json::to_string(&stored).expect("serializes");
         let back: StoredOutcome = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back.into_outcome().unwrap().id, doc.id);
+    }
+
+    #[tokio::test]
+    async fn a_full_store_refuses_new_claims_and_keeps_old_ones() {
+        let store = MemoryMessageIdStore::default().with_limits(2, 10);
+        store.claim("MID#a#1", "d").await.unwrap();
+        store.claim("MID#b#1", "d").await.unwrap();
+
+        assert!(matches!(
+            store.claim("MID#c#1", "d").await,
+            Err(DedupError::CapacityReached(_))
+        ));
+        assert!(
+            matches!(store.claim("MID#a#1", "d").await.unwrap(), Claim::InFlight),
+            "nothing was evicted to make room"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_issuer_cannot_fill_the_store() {
+        let store = MemoryMessageIdStore::default().with_limits(100, 2);
+        store.claim("MID#a#1", "d").await.unwrap();
+        store.claim("MID#a#2", "d").await.unwrap();
+
+        assert!(matches!(
+            store.claim("MID#a#3", "d").await,
+            Err(DedupError::CapacityReached(_))
+        ));
+        assert!(matches!(
+            store.claim("MID#b#1", "d").await.unwrap(),
+            Claim::Acquired
+        ));
+    }
+
+    #[tokio::test]
+    async fn expiry_frees_capacity() {
+        let store = MemoryMessageIdStore::new(Duration::from_millis(1), Duration::from_millis(1))
+            .with_limits(1, 1);
+        store.claim("MID#a#1", "d").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(matches!(
+            store.claim("MID#a#2", "d").await.unwrap(),
+            Claim::Acquired
+        ));
+    }
+
+    #[tokio::test]
+    async fn released_claims_free_their_issuer_slot() {
+        let store = MemoryMessageIdStore::default().with_limits(10, 1);
+        store.claim("MID#a#1", "d").await.unwrap();
+        store.release("MID#a#1").await.unwrap();
+        assert!(matches!(
+            store.claim("MID#a#2", "d").await.unwrap(),
+            Claim::Acquired
+        ));
     }
 }

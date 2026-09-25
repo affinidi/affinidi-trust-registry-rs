@@ -633,13 +633,56 @@ message shape regardless of carrier.
 | ----------------------------------------------------- | ----- | ----------------------------- |
 | `registry/recognition/0.1`                            | read  | none (TRQP recognition query) |
 | `registry/authorization/0.1`                          | read  | none (TRQP authorization query)|
-| `registry/record/query/0.1`                           | read  | none                          |
-| `registry/record/put/0.1`                             | write | admin DID + proof             |
-| `registry/record/delete/0.1`                          | write | admin DID + proof             |
+| `registry/record/query/0.1`                           | read  | admin DID + proof + authority |
+| `registry/record/put/0.1`                             | write | admin DID + proof + authority |
+| `registry/record/delete/0.1`                          | write | admin DID + proof + authority |
 | `registry/did/rotate/0.1`                             | write | admin DID + proof (`vta` only)|
+| `git-trust/{grant,revoke}/0.1`                        | write | admin DID + proof + authority |
+| `governance/capability/{enable,disable}/0.1`          | write | admin DID + proof + authority |
 
-**Writes** (record mutations and DID rotation) require the sender DID to be in
-`ADMIN_DIDS` **and** the Trust Task to carry a Data-Integrity proof. The reads map
+**Writes** are operational messages. Each one requires:
+
+- an in-band `issuer` that is the sender the transport authenticated;
+- the registry's DID as `recipient`, an `issuedAt` inside the five-minute
+  acceptance window, and an `id` not already accepted on any binding;
+- a Data-Integrity proof with `proofPurpose` `authentication`, made with a key
+  the issuer's DID document lists under `authentication`, that verifies;
+- the issuer to be in `ADMIN_DIDS`.
+
+Writes are further bound to the authority they act under, which must be the
+issuer's DID or an authority listed for that issuer in `ADMIN_AUTHORITIES`: a
+record's `authority_id`, the authority git-trust was enabled with (for
+`git-trust/grant` and `revoke`), or the authority a capability's config names
+(for `governance/capability/enable` and `disable`). The authenticated sender on
+its own authorises nothing.
+
+`registry/record/query` returns whole records, `context` included, so it is
+held to the same rules and answered only for an admin, under an
+`authority_id` the query names. The public surface is the TRQP recognition and
+authorization queries.
+
+Every write and record query, accepted or refused, is recorded in the audit log
+(`AUDIT_LOG_FORMAT`, JSON by default): the operation and task type, the proven
+issuer (or, for one refused before its proof was checked, the DID it claimed),
+the authority and record key or capability, the result and reason, the
+document `id`, the thread and the time. Record contents and proofs are not
+logged. Every value is capped at 256 characters, and control characters, the
+line and paragraph separators and Unicode format characters (bidi overrides,
+zero-width characters) are escaped, in both formats, so an entry is always one
+line that reads as written. Refusals of documents whose issuer was never proven
+are recorded individually up to 60 a minute; beyond that they are counted, and
+the count is recorded as one entry every minute and at shutdown.
+
+The record of accepted document identifiers is shared by the DIDComm and TSP
+bindings within one process. It keeps an identifier for seven minutes (the
+acceptance window, the skew and a minute of margin); an older document is
+refused on its time of issue. Record queries have a separate, smaller record,
+so queries cannot use up the capacity writes need. Both are held in memory, so
+replicas of one registry do not share them.
+
+The legacy `tr-admin/1.0` DIDComm protocol is no longer served; see
+[DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#removed-tr-admin10) for the
+mapping onto these tasks. The reads map
 verbatim onto the [TRQP v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/)
 recognition/authorization field names, so the plain HTTP TRQP endpoints and the
 Trust Task payloads share a single schema.
@@ -806,9 +849,10 @@ See the list of environment variables and their usage.
 | `DDB_TABLE_NAME`        | DynamoDB table name for storing trust records when using DDB as the storage backend.                                                                                                      | Required when `TR_STORAGE_BACKEND` = `ddb`   |
 | `REDIS_URL`             | Redis connection URL when using Redis as the storage backend. Format: `redis://host:port` or `redis://username:password@host:port/db`.                                                    | Required when `TR_STORAGE_BACKEND` = `redis` |
 | `CORS_ALLOWED_ORIGINS`  | Comma-separated list of allowed URLs for CORS.                                                                                                                                            | Yes                                          |
-| `AUDIT_LOG_FORMAT`      | Output format for audit logs. Options: `text`, `json`.                                                                                                                                    | Yes                                          |
+| `AUDIT_LOG_FORMAT`      | Output format for audit logs. Options: `json` (default), `text` (`audit.<key>="<escaped value>"` pairs).                                                                                  | default: `json`                              |
 | `MEDIATOR_DID`          | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records.                                                                              | Required when DIDComm is enabled             |
 | `ADMIN_DIDS`            | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry.                                                                                                    | Required when DIDComm is enabled             |
+| `ADMIN_AUTHORITIES`     | JSON object mapping an admin DID to the authority DIDs it may write records under **in addition to its own DID**, e.g. `{"did:web:ops.example": ["did:web:a.example", "did:web:b.example"]}`. Every key must be in `ADMIN_DIDS`; a malformed value stops startup. Unset ⇒ each admin writes only under its own DID. | No                                           |
 | `PROFILE_CONFIG`        | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. **_Sensitive information, do not share._** | Required when DIDComm is enabled             |
 | `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enabled. ExplicitDeny - public mode, ExplicitAllow - private mode                                                                                                          | default: `ExplicitDeny`                             |
 | `TR_PUBLIC_URL`         | Externally reachable base URL of the REST/TRQP surface (e.g. `https://registry.example.org`). When set, the generated DID document advertises a `TRQPRest` service entry so peers can discover the REST endpoint by resolving the registry's DID. Must be `https://` (loopback `http://` allowed for local dev). Unset ⇒ REST is still served, but not advertised. | No                                           |

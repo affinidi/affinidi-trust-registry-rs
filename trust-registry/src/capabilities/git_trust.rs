@@ -80,6 +80,7 @@ pub fn definition(
                 "git-trust config requires `authority` (the community's authority DID)".to_string(),
             ),
         })),
+        requires_authority: true,
     })
 }
 

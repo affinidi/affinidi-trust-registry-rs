@@ -1,3 +1,13 @@
+//! Renders [`AuditLog`] entries as one log line each.
+//!
+//! Most of what an entry carries comes from the document being audited — its
+//! id, thread, claimed issuer, record key and the refusal reason that echoes
+//! them — and a refused document can come from anyone. So every value is
+//! capped at [`MAX_FIELD_CHARS`] and rendered escaped: in the text format each
+//! value is quoted with its control characters escaped, and the JSON format
+//! (the default) escapes them by construction. An entry is therefore always
+//! exactly one line, and no value can end it early or forge another.
+
 use crate::{
     audit::model::{AuditLog, AuditLogger, AuditOperation, AuditResource},
     configs::AuditConfig,
@@ -11,6 +21,10 @@ pub use crate::audit::model::{AuditLogBuilder, AuditStatus};
 pub const AUDIT_ROLE_ADMIN: &str = "ADMIN";
 pub const NA: &str = "N/A";
 
+/// The longest value an audit entry records for any one field, in characters.
+/// Longer values are cut and marked with `…`.
+pub const MAX_FIELD_CHARS: usize = 256;
+
 pub struct EmitInput {
     pub target: String,
     pub operation: AuditOperation,
@@ -19,8 +33,147 @@ pub struct EmitInput {
     pub resource: AuditResource,
     pub extra: Option<String>,
     pub thread_id: Option<String>,
+    pub task: Option<String>,
+    pub document_id: Option<String>,
+    pub claimed_actor: Option<String>,
     pub timestamp: chrono::DateTime<Utc>,
 }
+
+/// Characters that can end a line or change how the rest of it reads: the
+/// control characters, the line and paragraph separators (U+2028, U+2029),
+/// and the Unicode format characters (category Cf), which include the bidi
+/// overrides and zero-width characters.
+fn is_disruptive(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0001}'
+                | '\u{E0020}'..='\u{E007F}'
+        )
+}
+
+/// Cap `value` at [`MAX_FIELD_CHARS`] and replace every disruptive character
+/// with its `\u{…}` escape, for both formats alike.
+fn capped(value: &str) -> String {
+    let mut out = String::new();
+    for (index, c) in value.chars().enumerate() {
+        if index == MAX_FIELD_CHARS {
+            out.push('…');
+            break;
+        }
+        if is_disruptive(c) {
+            out.push_str(&c.escape_unicode().to_string());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Cap `value` and quote it with every control character escaped, so it
+/// cannot break the line it is written on.
+fn quoted(value: &str) -> String {
+    format!("{:?}", capped(value))
+}
+
+impl EmitInput {
+    /// The entry's `(key, value)` pairs in a fixed order, `None` meaning the
+    /// value is absent. The reason's `audit.error=` / `audit.reason=` label is
+    /// the key, not part of the value.
+    fn fields(&self) -> Vec<(&'static str, Option<String>)> {
+        let resource = |value: Option<String>| value.or_else(|| Some(NA.to_string()));
+        let (reason_key, reason) = match self.extra.as_deref().map(|e| e.split_once('=')) {
+            Some(Some(("audit.error", value))) => ("error", Some(value.to_string())),
+            Some(Some((_, value))) => ("reason", Some(value.to_string())),
+            Some(None) => ("reason", self.extra.clone()),
+            None => ("reason", None),
+        };
+        vec![
+            ("role", Some(AUDIT_ROLE_ADMIN.to_string())),
+            ("actor", Some(self.actor.clone())),
+            ("claimed_actor", self.claimed_actor.clone()),
+            ("operation", Some(self.operation.to_string())),
+            ("task", self.task.clone()),
+            ("status", Some(self.status.clone())),
+            (
+                "resource.entity_id",
+                resource(self.resource.entity_id.as_ref().map(|v| v.to_string())),
+            ),
+            (
+                "resource.authority_id",
+                resource(self.resource.authority_id.as_ref().map(|v| v.to_string())),
+            ),
+            (
+                "resource.action",
+                resource(self.resource.action.as_ref().map(|v| v.to_string())),
+            ),
+            (
+                "resource.resource",
+                resource(self.resource.resource.as_ref().map(|v| v.to_string())),
+            ),
+            ("document_id", self.document_id.clone()),
+            (
+                "thread_id",
+                Some(self.thread_id.clone().unwrap_or_else(|| NA.to_string())),
+            ),
+            ("timestamp", Some(self.timestamp.to_rfc3339())),
+            (reason_key, reason),
+        ]
+    }
+}
+
+/// One JSON object on one line.
+pub fn render_json(input: &EmitInput) -> String {
+    let mut map = serde_json::Map::new();
+    for (key, value) in input.fields() {
+        let Some(value) = value else { continue };
+        let value = json!(capped(&value));
+        match key.split_once('.') {
+            Some((outer, inner)) => {
+                let nested = map
+                    .entry(outer.to_string())
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                if let Value::Object(nested) = nested {
+                    nested.insert(inner.to_string(), value);
+                }
+            }
+            None => {
+                map.insert(key.to_string(), value);
+            }
+        }
+    }
+    Value::Object(map).to_string()
+}
+
+/// `audit.<key>="<value>"` pairs on one line, every value quoted and escaped.
+pub fn render_text(input: &EmitInput) -> String {
+    input
+        .fields()
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| format!("audit.{key}={}", quoted(&value))))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[derive(Clone)]
 pub struct BaseAuditLogger {
     config: AuditConfig,
@@ -29,122 +182,6 @@ pub struct BaseAuditLogger {
 impl BaseAuditLogger {
     pub fn new(config: AuditConfig) -> Self {
         Self { config }
-    }
-
-    fn thread_id_or_na(&self, thread_id: Option<String>) -> String {
-        thread_id.unwrap_or_else(|| NA.to_string())
-    }
-
-    fn opt_to_string<T: ToString>(&self, opt: &Option<T>) -> String {
-        opt.as_ref()
-            .map_or_else(|| NA.to_string(), |v| v.to_string())
-    }
-
-    fn resource_json_value(&self, resource: &AuditResource) -> Value {
-        json!({
-            "entity_id": self.opt_to_string(&resource.entity_id),
-            "authority_id": self.opt_to_string(&resource.authority_id),
-            "action": self.opt_to_string(&resource.action),
-            "resource": self.opt_to_string(&resource.resource),
-        })
-    }
-
-    fn resource_text_fields(&self, resource: &AuditResource) -> (String, String, String, String) {
-        (
-            self.opt_to_string(&resource.entity_id),
-            self.opt_to_string(&resource.authority_id),
-            self.opt_to_string(&resource.action),
-            self.opt_to_string(&resource.resource),
-        )
-    }
-
-    fn emit_json(&self, input: &EmitInput) {
-        let mut map = serde_json::Map::new();
-        let op_value = serde_json::to_value(input.operation)
-            .unwrap_or(json!(format!("{:?}", input.operation)));
-        map.insert("role".to_string(), json!(AUDIT_ROLE_ADMIN));
-        map.insert("actor".to_string(), json!(input.actor));
-        map.insert("operation".to_string(), op_value);
-        map.insert("status".to_string(), json!(input.status));
-        map.insert(
-            "resource".to_string(),
-            self.resource_json_value(&input.resource),
-        );
-        if let Some(extra_field) = input.extra.clone() {
-            let ex = extra_field.split("=").collect::<Vec<&str>>()[..2]
-                .iter()
-                .map(|f| f.to_string())
-                .collect::<Vec<String>>();
-            map.insert(ex[0].to_string(), json!(ex[1]));
-        }
-        map.insert("timestamp".to_string(), json!(input.timestamp.to_rfc3339()));
-        map.insert(
-            "thread_id".to_string(),
-            json!(self.thread_id_or_na(input.thread_id.clone())),
-        );
-        let value = Value::Object(map);
-        info!(target = ?input.target, "{}", value);
-    }
-
-    fn emit_text(&self, input: &EmitInput) {
-        let (entity_id, authority_id, action, resource_id) =
-            self.resource_text_fields(&input.resource);
-        let thread_id_str = self.thread_id_or_na(input.thread_id.clone());
-        let (_status, text, extra) = match (input.status.as_str(), input.extra.clone()) {
-            ("SUCCESS", None) => (
-                "SUCCESS",
-                format!(
-                    "{}: {} operation by {} - SUCCESS",
-                    AUDIT_ROLE_ADMIN, input.operation, input.actor,
-                ),
-                None,
-            ),
-            ("FAILURE", Some(err)) => (
-                "FAILURE",
-                format!(
-                    "{}: {} operation by {} - FAILURE: {}",
-                    AUDIT_ROLE_ADMIN, input.operation, input.actor, err,
-                ),
-                Some(("audit.error", err)),
-            ),
-            ("UNAUTHORIZED", Some(reason)) => (
-                "UNAUTHORIZED",
-                format!(
-                    "{}: {} operation by {} - UNAUTHORIZED: {}",
-                    AUDIT_ROLE_ADMIN, input.operation, input.actor, reason
-                ),
-                Some(("audit.reason", reason)),
-            ),
-            _ => (
-                input.status.as_str(),
-                format!(
-                    "{}: {} operation by {} - {}",
-                    AUDIT_ROLE_ADMIN, input.operation, input.actor, input.status
-                ),
-                None,
-            ),
-        };
-
-        let mut log_parts = vec![
-            format!("audit.role={}", AUDIT_ROLE_ADMIN),
-            format!("audit.actor={}", input.actor),
-            format!("audit.operation={}", input.operation.to_string()),
-            format!("audit.status={}", input.status),
-            format!("audit.resource.entity_id={}", entity_id),
-            format!("audit.resource.authority_id={}", authority_id),
-            format!("audit.resource.action={}", action),
-            format!("audit.resource.resource={}", resource_id),
-            format!("audit.timestamp={}", input.timestamp.to_rfc3339()),
-            format!("audit.thread_id={}", thread_id_str),
-        ];
-
-        if let Some((key, val)) = extra {
-            log_parts.push(format!("{key}={val}"));
-        }
-
-        let structured_log = log_parts.join(" ");
-
-        info!("{} | {}", text, structured_log);
     }
 }
 
@@ -159,12 +196,19 @@ impl AuditLogger for BaseAuditLogger {
             resource: audit_log.resource,
             extra: audit_log.extra,
             thread_id: audit_log.thread_id,
+            task: audit_log.task,
+            document_id: audit_log.document_id,
+            claimed_actor: audit_log.claimed_actor,
             timestamp: audit_log.timestamp,
         };
 
         match self.config.log_format {
-            crate::configs::AuditLogFormat::Json => self.emit_json(&emit_input),
-            crate::configs::AuditLogFormat::Text => self.emit_text(&emit_input),
+            crate::configs::AuditLogFormat::Json => {
+                info!(target: "audit", "{}", render_json(&emit_input))
+            }
+            crate::configs::AuditLogFormat::Text => {
+                info!(target: "audit", "{}", render_text(&emit_input))
+            }
         }
     }
 }
@@ -305,5 +349,75 @@ mod tests {
                     .build_unauthorized("Not in admin list"),
             )
             .await;
+    }
+
+    fn hostile_input() -> EmitInput {
+        EmitInput {
+            target: AUDIT_ROLE_ADMIN.to_string(),
+            operation: AuditOperation::Put,
+            actor: String::new(),
+            status: "UNAUTHORIZED".to_string(),
+            resource: AuditResource::new(
+                Some(EntityId::new(
+                    "did:x\nADMIN: PUT operation by did:admin - SUCCESS",
+                )),
+                None,
+                None,
+                None,
+            ),
+            extra: Some("audit.reason=bad\r\naudit.status=SUCCESS".to_string()),
+            thread_id: Some("t\u{1b}[2J".to_string()),
+            task: Some("registry/record/put".to_string()),
+            document_id: Some("x".repeat(10_000)),
+            claimed_actor: Some("did:example:anyone\n".to_string()),
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_hostile_text_entry_stays_on_one_line() {
+        let line = render_text(&hostile_input());
+        assert!(!line.contains('\n') && !line.contains('\r') && !line.contains('\u{1b}'));
+        assert!(line.contains(r#"audit.resource.entity_id="did:x\\u{a}ADMIN"#));
+        assert_eq!(line.matches("audit.reason=").count(), 1);
+        assert!(line.contains(r#"audit.reason="bad\\u{d}\\u{a}audit.status=SUCCESS""#));
+    }
+
+    #[test]
+    fn a_hostile_json_entry_stays_on_one_line() {
+        let line = render_json(&hostile_input());
+        assert!(!line.contains('\n') && !line.contains('\r') && !line.contains('\u{1b}'));
+        let parsed: Value = serde_json::from_str(&line).expect("one JSON object");
+        assert_eq!(parsed["status"], "UNAUTHORIZED");
+        assert_eq!(parsed["reason"], r"bad\u{d}\u{a}audit.status=SUCCESS");
+    }
+
+    #[test]
+    fn long_values_are_capped() {
+        let parsed: Value = serde_json::from_str(&render_json(&hostile_input())).expect("json");
+        let id = parsed["document_id"].as_str().expect("document id");
+        assert_eq!(id.chars().count(), MAX_FIELD_CHARS + 1);
+        assert!(id.ends_with('…'));
+    }
+
+    #[test]
+    fn an_error_is_labelled_once() {
+        let mut input = hostile_input();
+        input.extra = Some("audit.error=Record not found".to_string());
+        let line = render_text(&input);
+        assert!(line.contains(r#"audit.error="Record not found""#));
+        assert!(!line.contains("audit.error=\"audit.error"));
+    }
+
+    #[test]
+    fn separators_and_format_characters_are_escaped_in_both_formats() {
+        let mut input = hostile_input();
+        input.claimed_actor = Some("did:a\u{2028}b\u{2029}c\u{202E}d\u{200B}e".to_string());
+        for line in [render_json(&input), render_text(&input)] {
+            for c in ['\u{2028}', '\u{2029}', '\u{202E}', '\u{200B}'] {
+                assert!(!line.contains(c), "{c:?} survived in {line}");
+            }
+            assert!(line.contains("u{2028}") && line.contains("u{202e}"));
+        }
     }
 }

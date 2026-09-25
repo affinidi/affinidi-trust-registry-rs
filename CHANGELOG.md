@@ -14,6 +14,116 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ## [Unreleased]
 
+### Removed (breaking)
+
+- **The `tr-admin/1.0` DIDComm protocol is no longer served.** `create-record`,
+  `update-record`, `delete-record`, `read-record` and `list-records` messages
+  are not answered and change nothing, and the
+  `trust_registry::didcomm::handlers::admin` module is gone. Use the
+  `registry/record/{put,delete,query}` Trust Tasks instead; the mapping is in
+  [DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#removed-tr-admin10).
+
+### Changed (breaking)
+
+- **Record writes are bound to the writer's authority.** `registry/record/put`
+  and `registry/record/delete` are refused (`permissionDenied`) unless the
+  record's `authority_id` is the issuer's own DID, or an authority listed for
+  that issuer in the new optional `ADMIN_AUTHORITIES` setting (a JSON object
+  of admin DID to authority DIDs; `AdminConfig::admin_authorities`,
+  `TaskHandler::with_admin_authorities`). A put or delete naming no
+  `authority_id` is `malformedRequest`.
+- **A write must name its issuer, and the issuer, the authenticated sender and
+  the proof's signer must be the same DID.** A write with no in-band `issuer`
+  is `malformedRequest`; an issuer other than the authenticated sender is
+  `identityMismatch`; a proof whose verification method is not under the
+  issuer's DID is `proofInvalid`. `verify_write_proof` now refuses a write
+  with no proof or no issuer on its own rather than passing it through.
+- **Writes are operational messages (VTI-KEY-084, VTI-KEY-106).** The proof
+  must carry `proofPurpose` `authentication` (`assertionMethod` is refused as
+  `proofInvalid`), and `build_verifier` accepts only a key the signer's DID
+  document lists under `authentication` (`AuthenticationKeyResolver`).
+- **Operation-document checks on writes (VTI-KEY-107).** A write must name
+  this registry as `recipient` (`malformedRequest` / `wrongRecipient`), carry
+  an `issuedAt` inside a five-minute window with a minute of skew
+  (`malformedRequest` / `expired`; `WRITE_ACCEPTANCE_WINDOW`), and an `id`
+  not already accepted. The record of accepted identifiers is the dedup
+  store, shared by every binding: an identical redelivery is answered from
+  the record without running again, a different document reusing an id is
+  `idConflict`, and a write is refused as `unavailable` when there is no
+  record or it cannot be reached (it used to be applied without dedup).
+  `MessageIdStore::claim` takes the document digest and can return
+  `Claim::Conflict`.
+- **The authority binding covers `git-trust/grant|revoke` and
+  `governance/capability/enable|disable`.** git-trust tasks act under the
+  authority git-trust was enabled with, enable under the authority its config
+  names, and disable under the authority the capability is enabled with; each
+  must be an authority the issuer may act for, so a capability's config cannot
+  widen what an admin may do. `CapabilitySet::configured_authority` and
+  `TaskHandler::{with_capabilities, target_authority}` are new, and
+  `authorize_authority` now takes the authority.
+- **Every write is audited**, refusals included, through the audit logger
+  that previously only the removed `tr-admin/1.0` handlers used: operation,
+  task, proven issuer (or claimed issuer when refused before the proof was
+  checked), authority, record key or capability, result and reason, document
+  id, thread and time. `AuditLog` gains `task`, `document_id` and
+  `claimed_actor`, and `AuditOperation` gains `Put`, `Grant`, `Revoke`,
+  `Enable`, `Disable` and `Rotate`.
+- **`registry/record/query` is for admins only.** It returns whole records,
+  `context` included, so it is held to the write rules (signed with the
+  `authentication` purpose, issuer = sender, admin, operation-document checks,
+  replay record) and must name an `authority_id` the issuer may act under.
+  The public surface is the TRQP recognition and authorization queries.
+- **Audit entries cannot be forged through their values.** Every value is
+  capped at 256 characters, and control characters, U+2028/U+2029 and Unicode
+  format characters (bidi overrides, zero-width) are escaped in both formats;
+  the text format also quotes each value, and
+  `AUDIT_LOG_FORMAT` now defaults to `json`. The reason is no longer labelled
+  twice (`audit.reason=audit.reason=…`). Refusals of documents whose issuer
+  was never proven are recorded individually up to 60 a minute and counted
+  beyond that (`audit::bounded::BoundedAuditLogger`), and the count is
+  recorded every minute and at shutdown; the HTTP binding's
+  refusals are audited through the same logger (`SharedData::audit`).
+- **Capabilities that write records need an authority.**
+  `CapabilityDefinition::requires_authority`; enabling such a capability
+  without an `authority` is refused, and one found enabled without one is not
+  usable. A capability task is dispatched through the dispatcher read in the
+  same snapshot as the authority it was checked against
+  (`CapabilitySet::snapshot`).
+- **The record of accepted documents covers only the acceptance window.**
+  `dedup::DEFAULT_TTL` drops from 24 hours to 7 minutes (five minutes of age,
+  one of skew, one of margin); an older document is refused on its time of
+  issue. Record queries have their own smaller record (10,000 entries, 1,000
+  per issuer), so they cannot use up the capacity writes need.
+- **The in-memory record of accepted documents is bounded.** At 100,000
+  entries, or 10,000 for one issuer, a new claim is refused (retryable
+  `unavailable`) rather than evicting one; expiry is amortised rather than a
+  scan per claim. `DedupError::CapacityReached`,
+  `MemoryMessageIdStore::with_limits`.
+- **One shared `TaskHandler`.** The DIDComm and TSP bindings now take the
+  registry's handler (`TrustRegistry::task_handler`) instead of building their
+  own: `BaseHandler::build_from_arc(repository, tasks)` and
+  `TrustTasksHandler::new(tasks)`.
+- **Party resolution runs inside `TaskHandler::handle`.** Every caller,
+  including a host driving an embedded registry through
+  `TrustRegistry::task_handler`, gets the in-band-issuer check against the
+  sender it passes, for reads as well as writes. The DIDComm and TSP bindings
+  no longer do it separately.
+- **`route_envelope_body` takes `Option<&str>` for the sender**, and the
+  DIDComm handler passes the sender only when the envelope was authcrypted
+  (`HandlerContext::authenticated_sender`). An anoncrypt or plaintext message
+  can still read, but cannot write. `TrustRegistry::route_didcomm_envelope`
+  keeps its signature.
+- **The Affinidi stack moves to the 0.27 SDK line:** `affinidi-tdk` 0.16 →
+  0.17, `affinidi-messaging-sdk` 0.26.27 → 0.27.1, `trust-tasks-*` 0.21.21 →
+  0.22.7, `vta-sdk` 0.50 → 0.52, `vti-secrets` 0.4.2 → 0.4.4 (`vti-common`
+  0.23.1 → 0.25.0), and the `affinidi-messaging-test-mediator`
+  dev-dependency 0.9.17 → 0.10.1 (mediator 0.29). The graph keeps one copy of
+  each. With SDK 0.27.1 the SDK answers a mutual TSP cancellation itself; the
+  registry now only re-sends that answer (`answer_cancellation`) when the
+  SDK's own send failed.
+- `test-client` manages records with signed `registry/record/*` Trust Tasks
+  under the admin's own DID.
+
 ## [0.19.0] – 2026‑09‑23
 
 ### Changed

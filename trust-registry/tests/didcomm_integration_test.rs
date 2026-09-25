@@ -5,26 +5,23 @@ use affinidi_tdk::{
         messages::{DeleteMessageRequest, FetchDeletePolicy, fetch::FetchOptions},
         profiles::ATMProfile,
     },
-    secrets_resolver::secrets::Secret,
+    secrets_resolver::secrets::{KeyType, Secret},
 };
 use serde_json::{Value, json};
 use serial_test::serial;
 use sha256::digest;
-use std::{env, sync::Arc, time::Duration, vec};
+use std::{env, sync::Arc, time::Duration};
 use tokio::sync::OnceCell;
-use trust_registry::didcomm::{
-    handlers::{
-        admin::{
-            CREATE_RECORD_MESSAGE_TYPE, CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
-            DELETE_RECORD_MESSAGE_TYPE, DELETE_RECORD_RESPONSE_MESSAGE_TYPE,
-            LIST_RECORDS_MESSAGE_TYPE, LIST_RECORDS_RESPONSE_MESSAGE_TYPE,
-            READ_RECORD_MESSAGE_TYPE, READ_RECORD_RESPONSE_MESSAGE_TYPE,
-            UPDATE_RECORD_MESSAGE_TYPE, UPDATE_RECORD_RESPONSE_MESSAGE_TYPE,
-        },
-        trqp::{QUERY_RECOGNITION_MESSAGE_TYPE, QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE},
+use trust_registry::{
+    didcomm::{
+        handlers::trqp::{QUERY_RECOGNITION_MESSAGE_TYPE, QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE},
+        prepare_atm_and_profile,
     },
-    prepare_atm_and_profile,
+    trust_tasks::type_uris,
 };
+use trust_tasks_didcomm::ENVELOPE_TYPE;
+use trust_tasks_proof::affinidi::{CryptoSuite, SignOptions, sign_trust_task};
+use trust_tasks_rs::TrustTask;
 use trust_tasks_rs::specs::messaging::account::update::v0_1::{
     MediatorAcl, MediatorAclAccessListMode,
 };
@@ -32,24 +29,24 @@ use uuid::Uuid;
 
 static TEST_CONTEXT: OnceCell<Arc<TestConfig>> = OnceCell::const_new();
 static CLEAR_MESSAGES: OnceCell<()> = OnceCell::const_new();
-static CREATE_RECORDS: OnceCell<()> = OnceCell::const_new();
 
 pub const ENTITY_ID: &str = "did:example:entityYW";
-pub const AUTHORITY_ID: &str = "did:example:authorityWY";
 pub const ACTION: &str = "action";
 pub const RESOURCE: &str = "resource";
-pub const PROBLEM_REPORT_TYPE: &str = "https://didcomm.org/report-problem/2.0/problem-report";
+pub const OTHER_AUTHORITY: &str = "did:example:another-community";
+
+const TR_ADMIN_CREATE_RECORD: &str =
+    "https://affinidi.com/didcomm/protocols/tr-admin/1.0/create-record";
 
 const INITIAL_FETCH_LIMIT: usize = 100;
+const REPLY_ATTEMPTS: u64 = 6;
 const MESSAGE_WAIT_DURATION_SECS: u64 = 2;
 const PIPELINE_MESSAGE_WAIT_DURATION_SECS: u64 = 5;
 
 pub struct TestConfig {
     pub client_did: String,
     pub client_secrets: String,
-    pub mediator_did: String,
     pub trust_registry_did: String,
-    pub in_pipeline: bool,
     pub message_wait_duration_secs: u64,
 }
 
@@ -75,28 +72,16 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
         MESSAGE_WAIT_DURATION_SECS
     };
 
-    let (atm, profile) = setup_test_environment(
-        &client_did,
-        &client_secrets,
-        &mediator_did,
-        &trust_registry_did,
-    )
-    .await;
+    let (atm, profile) = setup_test_environment(&client_did, &client_secrets, &mediator_did).await;
 
-    println!(
-        "Test context setup complete. Client DID: {}, Mediator DID: {}, Trust Registry DID: {}, In Pipeline: {}, Message Wait Duration: {} seconds",
-        client_did, mediator_did, trust_registry_did, in_pipeline, message_wait_duration_secs
-    );
     (
         AtmTestContext { atm, profile },
         TEST_CONTEXT
             .get_or_init(|| async {
                 Arc::new(TestConfig {
-                    client_did: client_did.to_string(),
-                    client_secrets: client_secrets.to_string(),
-                    mediator_did: env::var("MEDIATOR_DID").expect("MEDIATOR_DID not set in .env"),
+                    client_did,
+                    client_secrets,
                     trust_registry_did,
-                    in_pipeline,
                     message_wait_duration_secs,
                 })
             })
@@ -105,29 +90,46 @@ async fn get_test_context() -> (AtmTestContext, Arc<TestConfig>) {
     )
 }
 
-async fn create_records(
-    atm: &Arc<ATM>,
-    profile: &Arc<ATMProfile>,
-    trust_registry_did: &str,
+async fn setup_test_environment(
+    client_did: &str,
+    secrets: &str,
     mediator_did: &str,
-    messages: Vec<Value>,
-) {
-    CREATE_RECORDS
-        .get_or_init(|| async {
-            for msg in messages {
-                send_message(
-                    atm,
-                    profile.clone(),
-                    trust_registry_did,
-                    mediator_did,
-                    &msg,
-                    CREATE_RECORD_MESSAGE_TYPE,
-                )
-                .await
-                .unwrap();
-            }
-        })
-        .await;
+) -> (Arc<ATM>, Arc<ATMProfile>) {
+    let secrets: Vec<Secret> = serde_json::from_str(secrets).unwrap();
+    let (atm, profile) =
+        prepare_atm_and_profile("test-client", client_did, mediator_did, secrets, true)
+            .await
+            .unwrap();
+
+    atm.trust_ping()
+        .send_ping(&profile, mediator_did, true, true, true)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Put the client account on a denylist (empty = allow everyone) so the
+    // registry's replies reach it. `messaging/account/update` carries a partial
+    // ACL, so this names the one flag it changes and leaves the rest alone.
+    let acl: MediatorAcl = MediatorAcl::builder()
+        .access_list_mode(Some(MediatorAclAccessListMode::ExplicitDeny))
+        .try_into()
+        .expect("valid acl update");
+
+    atm.trust_tasks()
+        .account_update(
+            &profile,
+            Some(digest(&profile.inner.did)),
+            None,
+            Some(acl),
+            None,
+        )
+        .await
+        .unwrap();
+
+    clear_messages(&atm, &profile).await;
+
+    (atm, profile)
 }
 
 async fn clear_messages(atm: &Arc<ATM>, profile: &Arc<ATMProfile>) {
@@ -147,426 +149,368 @@ async fn clear_messages(atm: &Arc<ATM>, profile: &Arc<ATMProfile>) {
         .await;
 }
 
-fn create_fetch_options(limit: usize) -> FetchOptions {
-    FetchOptions {
-        limit,
-        start_id: None,
-        delete_policy: FetchDeletePolicy::DoNotDelete,
-    }
+/// The client's verification key: the one a registry write is signed with.
+fn signing_key(config: &TestConfig) -> Secret {
+    let secrets: Vec<Secret> = serde_json::from_str(&config.client_secrets).unwrap();
+    secrets
+        .into_iter()
+        .find(|secret| secret.id.ends_with("#key-1"))
+        .expect("the client has a verification key")
 }
 
-fn create_test_record_body(test_name: &str) -> Value {
+fn record_key(test_name: &str, authority: &str) -> Value {
     json!({
-        "entity_id": format!("{}_{}", ENTITY_ID, test_name),
-        "authority_id": format!("{}_{}", AUTHORITY_ID, test_name),
-        "action": format!("{}_{}", ACTION, test_name),
-        "resource": format!("{}_{}", RESOURCE, test_name),
-        "record_type": "authorization"
+        "entity_id": format!("{ENTITY_ID}_{test_name}"),
+        "authority_id": authority,
+        "action": format!("{ACTION}_{test_name}"),
+        "resource": format!("{RESOURCE}_{test_name}"),
     })
 }
 
-async fn delete_message(atm: &Arc<ATM>, profile: &Arc<ATMProfile>, msg_ids: Vec<String>) {
-    let _ = atm
-        .delete_messages_direct(
-            profile,
-            &DeleteMessageRequest {
-                message_ids: msg_ids,
-            },
-        )
-        .await;
-}
-
-async fn fetch_and_verify_response_with_retry(
-    atm: &Arc<ATM>,
-    profile: &Arc<ATMProfile>,
-    expected_message_type: &str,
-) -> Result<Value, Box<dyn std::error::Error>> {
-    let problem_report_type = "https://didcomm.org/report-problem/2.0/problem-report";
-    let retries = 3;
-    let mut i = 0;
-
-    while i < retries {
-        tokio::time::sleep(Duration::from_secs(i * 2)).await;
-        let fetched_messages = atm
-            .fetch_messages(profile, &create_fetch_options(INITIAL_FETCH_LIMIT))
-            .await?;
-
-        println!("Fetched {} messages", fetched_messages.success.len());
-
-        if fetched_messages.success.is_empty() {
-            i += 1;
-            if i >= retries {
-                return Err("No response received".into());
-            }
-            continue;
-        }
-
-        let mut unpacked_messages = Vec::new();
-        for msg_elem in &fetched_messages.success {
-            if let Some(message) = &msg_elem.msg {
-                let unpacked = atm.unpack(message).await?;
-                unpacked_messages.push(unpacked);
-            }
-        }
-
-        let problem_report_hashes: Vec<String> = unpacked_messages
-            .iter()
-            .filter(|(msg, _)| msg.typ == problem_report_type)
-            .map(|(msg, meta)| {
-                if let Ok(json) = serde_json::to_string_pretty(&msg.body) {
-                    println!("Received problem report: {}", json);
-                }
-                meta.sha256_hash.clone()
-            })
-            .collect();
-        if !problem_report_hashes.is_empty() {
-            delete_message(atm, profile, problem_report_hashes).await;
-        }
-
-        if let Some((msg, meta)) = unpacked_messages.into_iter().find(|(msg, _)| {
-            println!("Checking message type: {}", msg.typ);
-            msg.typ == expected_message_type
-        }) {
-            let hash = meta.sha256_hash.clone();
-            let atm = atm.clone();
-            let profile = profile.clone();
-            tokio::spawn(async move {
-                delete_message(&atm, &profile, vec![hash]).await;
-            });
-            return Ok(msg.body);
-        }
-
-        i += 1;
-        if i < retries {
-            println!(
-                "Retry {}/{}: Expected message type not found: {}",
-                i, retries, expected_message_type
-            );
-        }
-    }
-
-    Err(format!("Expected message type not found: {}", expected_message_type).into())
-}
-
-fn create_message_with_defaults(test_name: &str) -> Value {
-    let mut body = create_test_record_body(test_name);
-    body["recognized"] = serde_json::Value::Bool(true);
-    body["authorized"] = serde_json::Value::Bool(true);
-    body["context"] = json!({
+fn record(test_name: &str, authority: &str, granted: bool) -> Value {
+    let mut record = record_key(test_name, authority);
+    record["recognized"] = json!(granted);
+    record["authorized"] = json!(granted);
+    record["record_type"] = json!("authorization");
+    record["context"] = json!({
         "description": "Test credential type",
         "version": "1.0",
         "tags": ["test", "demo"]
     });
-    body
+    record
 }
 
-fn get_create_record_messages() -> Vec<Value> {
-    ["read", "update", "list", "delete", "trqp"]
-        .iter()
-        .map(|name| create_message_with_defaults(name))
-        .collect()
+/// A Trust Task from the client to the registry, signed with the client's
+/// verification key when `sign` is set.
+async fn trust_task(
+    config: &TestConfig,
+    type_uri: &str,
+    payload: Value,
+    sign: bool,
+) -> TrustTask<Value> {
+    let mut doc = TrustTask::new(
+        format!("urn:uuid:{}", Uuid::new_v4()),
+        type_uri.parse().expect("valid type uri"),
+        payload,
+    );
+    doc.issuer = Some(config.client_did.clone());
+    doc.recipient = Some(config.trust_registry_did.clone());
+    doc.issued_at = Some(chrono::Utc::now());
+    if !sign {
+        return doc;
+    }
+
+    let key = signing_key(config);
+    let cryptosuite = match key.get_key_type() {
+        KeyType::Ed25519 => CryptoSuite::EddsaJcs2022,
+        _ => CryptoSuite::EcdsaJcs2019,
+    };
+    let signed = sign_trust_task(
+        &serde_json::to_value(&doc).unwrap(),
+        &key,
+        SignOptions::new()
+            .with_cryptosuite(cryptosuite)
+            .with_proof_purpose("authentication"),
+    )
+    .await
+    .expect("sign the Trust Task");
+    serde_json::from_value(signed).unwrap()
 }
 
-async fn setup_test_environment(
-    client_did: &str,
-    secrets: &str,
-    mediator_did: &str,
-    trust_registry_did: &str,
-) -> (Arc<ATM>, Arc<ATMProfile>) {
-    let secrets: Vec<Secret> = serde_json::from_str(secrets).unwrap();
-    let (atm, profile) =
-        prepare_atm_and_profile("test-client", client_did, mediator_did, secrets, true)
+/// Send `doc` to the registry and wait for the reply on its thread.
+async fn round_trip(
+    context: &AtmTestContext,
+    config: &TestConfig,
+    doc: &TrustTask<Value>,
+) -> TrustTask<Value> {
+    send_message(
+        &context.atm,
+        context.profile.clone(),
+        &config.trust_registry_did,
+        &serde_json::to_value(doc).unwrap(),
+        ENVELOPE_TYPE,
+        Some(&doc.id),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
+
+    let reply = fetch_reply(&context.atm, &context.profile, |message| {
+        message.typ == ENVELOPE_TYPE
+            && message.body.get("threadId").and_then(Value::as_str) == Some(doc.id.as_str())
+    })
+    .await
+    .unwrap_or_else(|| panic!("no reply to {}", doc.id));
+    serde_json::from_value(reply).unwrap()
+}
+
+fn error_code(reply: &TrustTask<Value>) -> Option<&str> {
+    if reply.type_uri.is_response() {
+        return None;
+    }
+    reply.payload.get("code").and_then(Value::as_str)
+}
+
+async fn put(
+    context: &AtmTestContext,
+    config: &TestConfig,
+    test_name: &str,
+    authority: &str,
+    granted: bool,
+) -> TrustTask<Value> {
+    let doc = trust_task(
+        config,
+        type_uris::RECORD_PUT,
+        json!({ "record": record(test_name, authority, granted) }),
+        true,
+    )
+    .await;
+    round_trip(context, config, &doc).await
+}
+
+async fn query(
+    context: &AtmTestContext,
+    config: &TestConfig,
+    test_name: &str,
+    authority: &str,
+) -> TrustTask<Value> {
+    let doc = trust_task(
+        config,
+        type_uris::RECORD_QUERY,
+        record_key(test_name, authority),
+        true,
+    )
+    .await;
+    round_trip(context, config, &doc).await
+}
+
+async fn delete_messages(atm: &Arc<ATM>, profile: &Arc<ATMProfile>, message_ids: Vec<String>) {
+    let _ = atm
+        .delete_messages_direct(profile, &DeleteMessageRequest { message_ids })
+        .await;
+}
+
+/// Poll the client's inbox for a message `wanted` accepts and return its body,
+/// deleting it. `None` if none arrives within the retry budget.
+async fn fetch_reply(
+    atm: &Arc<ATM>,
+    profile: &Arc<ATMProfile>,
+    wanted: impl Fn(&Message) -> bool,
+) -> Option<Value> {
+    for attempt in 0..REPLY_ATTEMPTS {
+        tokio::time::sleep(Duration::from_secs(attempt)).await;
+        let fetched = atm
+            .fetch_messages(
+                profile,
+                &FetchOptions {
+                    limit: INITIAL_FETCH_LIMIT,
+                    start_id: None,
+                    delete_policy: FetchDeletePolicy::DoNotDelete,
+                },
+            )
             .await
-            .unwrap();
+            .ok()?;
 
-    println!("mediator did: {}", mediator_did);
-    let ping_result = atm
-        .trust_ping()
-        .send_ping(&profile, mediator_did, true, true, true)
-        .await
-        .unwrap();
+        for element in &fetched.success {
+            let Some(packed) = &element.msg else { continue };
+            let Ok((message, meta)) = atm.unpack(packed).await else {
+                continue;
+            };
+            if wanted(&message) {
+                delete_messages(atm, profile, vec![meta.sha256_hash.clone()]).await;
+                return Some(message.body);
+            }
+        }
+    }
+    None
+}
 
-    println!("ping_result: {:?}", ping_result.response);
+/// The VTC write path: a signed put under the client's own DID, then an
+/// exact fetch of what was stored.
+#[tokio::test]
+#[serial]
+async fn test_signed_put_under_own_authority_is_stored() {
+    let (context, config) = get_test_context().await;
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    let reply = put(&context, &config, "put", &config.client_did, true).await;
+    assert!(reply.type_uri.is_response(), "put refused: {reply:?}");
+    assert_eq!(reply.payload["ok"], true);
 
-    // Put the client account on a denylist (empty = allow everyone) so the
-    // registry's replies reach it. `messaging/account/update` carries a partial
-    // ACL, so this names the one flag it changes and leaves the rest alone.
-    let acl_mode = MediatorAclAccessListMode::ExplicitDeny;
-    println!("ACL_MODE: Configured to {:?}", acl_mode);
-
-    let acl: MediatorAcl = MediatorAcl::builder()
-        .access_list_mode(Some(acl_mode))
-        .try_into()
-        .expect("valid acl update");
-
-    atm.trust_tasks()
-        .account_update(
-            &profile,
-            Some(digest(&profile.inner.did)),
-            None,
-            Some(acl),
-            None,
-        )
-        .await
-        .unwrap();
-
-    clear_messages(&atm, &profile).await;
-    let create_messages = get_create_record_messages();
-    create_records(
-        &atm,
-        &profile,
-        trust_registry_did,
-        mediator_did,
-        create_messages,
-    )
-    .await;
-
-    (atm, profile)
+    let reply = query(&context, &config, "put", &config.client_did).await;
+    assert!(reply.type_uri.is_response(), "query refused: {reply:?}");
+    let stored = &reply.payload["records"][0];
+    assert_eq!(stored["entity_id"], format!("{ENTITY_ID}_put"));
+    assert_eq!(stored["authority_id"], config.client_did);
+    assert_eq!(stored["recognized"], true);
+    assert_eq!(stored["authorized"], true);
 }
 
 #[tokio::test]
 #[serial]
-async fn test_admin_read() {
-    let (atm_test_context, config) = get_test_context().await;
+async fn test_signed_put_replaces_an_existing_record() {
+    let (context, config) = get_test_context().await;
 
-    let _ = fetch_and_verify_response_with_retry(
-        &atm_test_context.atm,
-        &atm_test_context.profile,
-        CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
+    put(&context, &config, "update", &config.client_did, true).await;
+    let reply = put(&context, &config, "update", &config.client_did, false).await;
+    assert!(reply.type_uri.is_response(), "put refused: {reply:?}");
+    assert_eq!(reply.payload["created"], false);
+
+    let reply = query(&context, &config, "update", &config.client_did).await;
+    assert_eq!(reply.payload["records"][0]["recognized"], false);
+    assert_eq!(reply.payload["records"][0]["authorized"], false);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_signed_delete_removes_the_record() {
+    let (context, config) = get_test_context().await;
+
+    put(&context, &config, "delete", &config.client_did, true).await;
+    let delete = trust_task(
+        &config,
+        type_uris::RECORD_DELETE,
+        record_key("delete", &config.client_did),
+        true,
     )
     .await;
+    let reply = round_trip(&context, &config, &delete).await;
+    assert!(reply.type_uri.is_response(), "delete refused: {reply:?}");
 
-    let read_body = create_test_record_body("read");
+    let reply = query(&context, &config, "delete", &config.client_did).await;
+    assert!(
+        !reply.type_uri.is_response(),
+        "the record should be gone: {reply:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_put_under_another_authority_is_refused() {
+    let (context, config) = get_test_context().await;
+
+    let reply = put(&context, &config, "foreign", OTHER_AUTHORITY, true).await;
+    assert_eq!(error_code(&reply), Some("permissionDenied"));
+
+    // Records under another authority cannot be read back either.
+    let reply = query(&context, &config, "foreign", OTHER_AUTHORITY).await;
+    assert_eq!(error_code(&reply), Some("permissionDenied"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_delete_under_another_authority_is_refused() {
+    let (context, config) = get_test_context().await;
+
+    let delete = trust_task(
+        &config,
+        type_uris::RECORD_DELETE,
+        record_key("foreign-delete", OTHER_AUTHORITY),
+        true,
+    )
+    .await;
+    let reply = round_trip(&context, &config, &delete).await;
+    assert_eq!(error_code(&reply), Some("permissionDenied"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_unsigned_record_query_is_refused() {
+    let (context, config) = get_test_context().await;
+
+    put(
+        &context,
+        &config,
+        "unsigned-query",
+        &config.client_did,
+        true,
+    )
+    .await;
+    let doc = trust_task(
+        &config,
+        type_uris::RECORD_QUERY,
+        record_key("unsigned-query", &config.client_did),
+        false,
+    )
+    .await;
+    let reply = round_trip(&context, &config, &doc).await;
+    assert_eq!(error_code(&reply), Some("proofRequired"));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_unsigned_put_is_refused() {
+    let (context, config) = get_test_context().await;
+
+    let doc = trust_task(
+        &config,
+        type_uris::RECORD_PUT,
+        json!({ "record": record("unsigned", &config.client_did, true) }),
+        false,
+    )
+    .await;
+    let reply = round_trip(&context, &config, &doc).await;
+    assert_eq!(error_code(&reply), Some("proofRequired"));
+}
+
+/// The legacy `tr-admin/1.0` record protocol is no longer served: a
+/// create-record from an admin gets no answer and stores nothing.
+#[tokio::test]
+#[serial]
+async fn test_tr_admin_create_record_is_not_served() {
+    let (context, config) = get_test_context().await;
 
     send_message(
-        &atm_test_context.atm,
-        atm_test_context.profile.clone(),
+        &context.atm,
+        context.profile.clone(),
         &config.trust_registry_did,
-        &config.mediator_did,
-        &read_body,
-        READ_RECORD_MESSAGE_TYPE,
+        &record("tr-admin", &config.client_did, true),
+        TR_ADMIN_CREATE_RECORD,
+        None,
     )
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
-    let response_body = fetch_and_verify_response_with_retry(
-        &atm_test_context.atm,
-        &atm_test_context.profile,
-        READ_RECORD_RESPONSE_MESSAGE_TYPE,
-    )
-    .await
-    .unwrap();
-
-    let expected_entity_id = format!("{}_{}", ENTITY_ID, "read");
-    let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "read");
-    let expected_action = format!("{}_{}", ACTION, "read");
-    let expected_resource = format!("{}_{}", RESOURCE, "read");
-
-    assert_eq!(response_body["entity_id"], expected_entity_id);
-    assert_eq!(response_body["authority_id"], expected_authority_id);
-    assert_eq!(response_body["action"], expected_action);
-    assert_eq!(response_body["resource"], expected_resource);
-    assert_eq!(response_body["recognized"], true);
-    assert_eq!(response_body["authorized"], true);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_admin_update() {
-    let (atm_test_context, config) = get_test_context().await;
-
-    let _ = fetch_and_verify_response_with_retry(
-        &atm_test_context.atm,
-        &atm_test_context.profile,
-        CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
-    )
+    let answered = fetch_reply(&context.atm, &context.profile, |message| {
+        message.typ.starts_with(TR_ADMIN_CREATE_RECORD)
+    })
     .await;
+    assert!(answered.is_none(), "tr-admin/1.0 answered: {answered:?}");
 
-    let mut update_body = create_test_record_body("update");
-    update_body["recognized"] = serde_json::Value::Bool(false);
-    update_body["authorized"] = serde_json::Value::Bool(false);
-
-    send_message(
-        &atm_test_context.atm,
-        atm_test_context.profile.clone(),
-        &config.trust_registry_did,
-        &config.mediator_did,
-        &update_body,
-        UPDATE_RECORD_MESSAGE_TYPE,
-    )
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
-
-    let response_body = fetch_and_verify_response_with_retry(
-        &atm_test_context.atm,
-        &atm_test_context.profile,
-        UPDATE_RECORD_RESPONSE_MESSAGE_TYPE,
-    )
-    .await
-    .unwrap();
-
-    let expected_entity_id = format!("{}_{}", ENTITY_ID, "update");
-    let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "update");
-    let expected_action = format!("{}_{}", ACTION, "update");
-    let expected_resource = format!("{}_{}", RESOURCE, "update");
-
-    assert_eq!(response_body["entity_id"], expected_entity_id);
-    assert_eq!(response_body["authority_id"], expected_authority_id);
-    assert_eq!(response_body["action"], expected_action);
-    assert_eq!(response_body["resource"], expected_resource);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_admin_list() {
-    let (atm_test_context, config) = get_test_context().await;
-
-    let _ = fetch_and_verify_response_with_retry(
-        &atm_test_context.atm,
-        &atm_test_context.profile,
-        CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
-    )
-    .await;
-
-    let list_body = json!({});
-
-    send_message(
-        &atm_test_context.atm,
-        atm_test_context.profile.clone(),
-        &config.trust_registry_did,
-        &config.mediator_did,
-        &list_body,
-        LIST_RECORDS_MESSAGE_TYPE,
-    )
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
-
-    let response_body = fetch_and_verify_response_with_retry(
-        &atm_test_context.atm,
-        &atm_test_context.profile,
-        LIST_RECORDS_RESPONSE_MESSAGE_TYPE,
-    )
-    .await
-    .unwrap();
-
-    let count = response_body["count"].as_u64().unwrap_or(0);
-    let records = response_body["records"]
-        .as_array()
-        .unwrap_or(&Vec::new())
-        .clone();
-
-    assert!(count >= 1);
-
-    let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "list");
-    let expected_action = format!("{}_{}", ACTION, "list");
-    let expected_resource = format!("{}_{}", RESOURCE, "list");
-
-    let our_record = records
-        .iter()
-        .find(|record| {
-            record["authority_id"] == expected_authority_id
-                && record["action"] == expected_action
-                && record["resource"] == expected_resource
-        })
-        .expect("Our test record not found in list");
-    assert_eq!(our_record["authority_id"], expected_authority_id);
-    assert_eq!(our_record["action"], expected_action);
-    assert_eq!(our_record["resource"], expected_resource);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_admin_delete() {
-    let (atm_test_context, config) = get_test_context().await;
-
-    let _ = fetch_and_verify_response_with_retry(
-        &atm_test_context.atm,
-        &atm_test_context.profile,
-        CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
-    )
-    .await;
-
-    let delete_body = create_test_record_body("delete");
-
-    send_message(
-        &atm_test_context.atm,
-        atm_test_context.profile.clone(),
-        &config.trust_registry_did,
-        &config.mediator_did,
-        &delete_body,
-        DELETE_RECORD_MESSAGE_TYPE,
-    )
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
-
-    let response_body = fetch_and_verify_response_with_retry(
-        &atm_test_context.atm,
-        &atm_test_context.profile,
-        DELETE_RECORD_RESPONSE_MESSAGE_TYPE,
-    )
-    .await
-    .unwrap();
-
-    let expected_entity_id = format!("{}_{}", ENTITY_ID, "delete");
-    let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "delete");
-    let expected_action = format!("{}_{}", ACTION, "delete");
-    let expected_resource = format!("{}_{}", RESOURCE, "delete");
-
-    assert_eq!(response_body["authority_id"], expected_authority_id);
-    assert_eq!(response_body["action"], expected_action);
-    assert_eq!(response_body["resource"], expected_resource);
-    assert_eq!(response_body["entity_id"], expected_entity_id);
+    let reply = query(&context, &config, "tr-admin", &config.client_did).await;
+    assert!(!reply.type_uri.is_response(), "nothing was stored");
 }
 
 #[tokio::test]
 #[serial]
 async fn test_trqp_handler() {
-    let (atm_test_context, config) = get_test_context().await;
+    let (context, config) = get_test_context().await;
 
-    let _ = fetch_and_verify_response_with_retry(
-        &atm_test_context.atm,
-        &atm_test_context.profile,
-        CREATE_RECORD_RESPONSE_MESSAGE_TYPE,
-    )
-    .await;
-
-    let recognition_body = create_test_record_body("trqp");
+    put(&context, &config, "trqp", &config.client_did, true).await;
 
     send_message(
-        &atm_test_context.atm,
-        atm_test_context.profile.clone(),
+        &context.atm,
+        context.profile.clone(),
         &config.trust_registry_did,
-        &config.mediator_did,
-        &recognition_body,
+        &record_key("trqp", &config.client_did),
         QUERY_RECOGNITION_MESSAGE_TYPE,
+        None,
     )
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
-    let response_body = fetch_and_verify_response_with_retry(
-        &atm_test_context.atm,
-        &atm_test_context.profile,
-        QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE,
-    )
+    let response_body = fetch_reply(&context.atm, &context.profile, |message| {
+        message.typ == QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE
+    })
     .await
-    .unwrap();
+    .expect("recognition response");
 
-    let expected_entity_id = format!("{}_{}", ENTITY_ID, "trqp");
-    let expected_authority_id = format!("{}_{}", AUTHORITY_ID, "trqp");
-    let expected_action = format!("{}_{}", ACTION, "trqp");
-    let expected_resource = format!("{}_{}", RESOURCE, "trqp");
-
+    let expected_entity_id = format!("{ENTITY_ID}_trqp");
     assert_eq!(response_body["entity_id"], expected_entity_id);
-    assert_eq!(response_body["authority_id"], expected_authority_id);
-    assert_eq!(response_body["action"], expected_action);
-    assert_eq!(response_body["resource"], expected_resource);
+    assert_eq!(response_body["authority_id"], config.client_did);
+    assert_eq!(response_body["action"], format!("{ACTION}_trqp"));
+    assert_eq!(response_body["resource"], format!("{RESOURCE}_trqp"));
     assert_eq!(response_body["recognized"].as_bool(), Some(true));
     // Per TRQP spec, recognition queries should not include the 'authorized' field
     assert_eq!(response_body["authorized"].as_bool(), None);
@@ -580,13 +524,11 @@ async fn test_trqp_handler() {
         response_body["time_evaluated"].as_str().is_some(),
         "time_evaluated should be present"
     );
+    let message = response_body["message"]
+        .as_str()
+        .expect("message should be present");
     assert!(
-        response_body["message"].as_str().is_some(),
-        "message should be present"
-    );
-    let message = response_body["message"].as_str().unwrap();
-    assert!(
-        message.contains(&expected_entity_id) && message.contains(&expected_authority_id),
+        message.contains(&expected_entity_id) && message.contains(&config.client_did),
         "message should contain entity_id and authority_id"
     );
 }
@@ -595,15 +537,18 @@ async fn send_message(
     atm: &Arc<ATM>,
     profile: Arc<ATMProfile>,
     trust_registry_did: &str,
-    _mediator_did: &str,
     body: &Value,
     message_type: &str,
+    thid: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let message_id = Uuid::new_v4().to_string();
-    let message = Message::build(message_id.clone(), message_type.to_string(), body.clone())
+    let mut builder = Message::build(message_id.clone(), message_type.to_string(), body.clone())
         .from(profile.inner.did.clone())
-        .to(trust_registry_did.to_string())
-        .finalize();
+        .to(trust_registry_did.to_string());
+    if let Some(thid) = thid {
+        builder = builder.thid(thid.to_string());
+    }
+    let message = builder.finalize();
 
     let packed_msg = atm
         .pack_encrypted(
@@ -633,18 +578,7 @@ async fn send_message(
             .await;
 
         match sending_result {
-            Ok(_) => {
-                if attempt > 0 {
-                    println!(
-                        "Message sent successfully on attempt {}/{}",
-                        attempt + 1,
-                        retries
-                    );
-                } else {
-                    println!("Message sent successfully");
-                }
-                return Ok(());
-            }
+            Ok(_) => return Ok(()),
             Err(err) => {
                 println!(
                     "Failed to send message (attempt {}/{}): {:?}",

@@ -57,6 +57,9 @@ use chrono::{DateTime, Utc};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use crate::audit::audit_logger::BaseAuditLogger;
+use crate::audit::bounded::BoundedAuditLogger;
+use crate::audit::model::AuditLogger;
 use crate::capabilities::{
     CapabilityDefinition, CapabilitySet, CapabilityStateStore, DispatcherHandle,
     FileCapabilityStore,
@@ -85,6 +88,7 @@ pub struct TrustRegistry {
     capabilities: Arc<CapabilitySet>,
     verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     dedup: Arc<dyn MessageIdStore>,
+    audit: Arc<BoundedAuditLogger>,
     health: Arc<RegistryHealth>,
     didcomm_source: DidCommSource,
     shutdown: CancellationToken,
@@ -146,19 +150,21 @@ impl TrustRegistry {
     /// verification and message-id dedup.
     ///
     /// This is the entrypoint for a host that owns its own transport. The host
-    /// is responsible for authenticating the sender and resolving the
-    /// framework's parties before calling
-    /// [`handle`](crate::trust_tasks::TaskHandler::handle) — only it knows how
-    /// its transport establishes them. Pass `None` for `sender_did` on an
-    /// unauthenticated caller; writes are then denied.
+    /// is responsible for authenticating the sender — only it knows how its
+    /// transport does that — and passes it to
+    /// [`handle`](crate::trust_tasks::TaskHandler::handle), which resolves the
+    /// framework's parties against it exactly as the built-in bindings do. Pass
+    /// `None` for `sender_did` on an unauthenticated caller; writes are then
+    /// denied. An authenticated sender alone never authorises a write: the
+    /// document must also carry a valid proof by the same DID.
     pub fn task_handler(&self) -> TaskHandler {
-        TaskHandler::new(
-            self.capabilities.dispatcher(),
-            self.config.didcomm_config.profile_config.did.clone(),
-            self.config.didcomm_config.admin_config.admin_dids.clone(),
-            self.verifier.clone(),
+        write_task_handler(
+            &self.config,
+            &self.capabilities,
+            &self.verifier,
+            &self.dedup,
+            &self.audit,
         )
-        .with_dedup(self.dedup.clone())
     }
 
     /// Route a Trust Task that arrived over DIDComm on a socket the **host**
@@ -180,14 +186,15 @@ impl TrustRegistry {
         crate::didcomm::handlers::trust_tasks::route_envelope_body(
             &self.task_handler(),
             body,
-            sender_did,
+            Some(sender_did),
         )
         .await
     }
 
     /// A read-only Trust Task handler over the query dispatcher, with no dedup
     /// store — the shape the HTTP surface uses. For a host exposing queries to
-    /// callers it does not authenticate.
+    /// callers it does not authenticate. Writes offered to it are refused and
+    /// audited.
     pub fn query_task_handler(&self) -> TaskHandler {
         TaskHandler::new(
             self.capabilities.query_dispatcher(),
@@ -195,6 +202,7 @@ impl TrustRegistry {
             Vec::new(),
             self.verifier.clone(),
         )
+        .with_audit(self.audit.clone() as Arc<dyn AuditLogger>)
     }
 
     /// The live admin dispatcher handle.
@@ -240,6 +248,7 @@ impl TrustRegistry {
             repository: self.repository.clone() as Arc<dyn TrustRecordRepository>,
             query_dispatcher: self.capabilities.query_dispatcher(),
             verifier: self.verifier.clone(),
+            audit: self.audit.clone(),
         }
     }
 
@@ -263,6 +272,7 @@ impl TrustRegistry {
             capabilities: self.capabilities,
             verifier: self.verifier,
             dedup: self.dedup,
+            audit: self.audit,
             health: self.health,
             didcomm_source: self.didcomm_source,
             shutdown: self.shutdown,
@@ -279,13 +289,50 @@ pub(crate) struct RegistryParts {
     pub(crate) capabilities: Arc<CapabilitySet>,
     pub(crate) verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     pub(crate) dedup: Arc<dyn MessageIdStore>,
+    pub(crate) audit: Arc<BoundedAuditLogger>,
     pub(crate) health: Arc<RegistryHealth>,
     pub(crate) didcomm_source: DidCommSource,
     pub(crate) shutdown: CancellationToken,
     pub(crate) service_start_timestamp: DateTime<Utc>,
 }
 
+/// The Trust Task handler every write-carrying binding shares: the admin
+/// dispatcher, the admin ACL and authority map, proof verification, the one
+/// record of accepted document identifiers, the capability set and the audit
+/// logger.
+fn write_task_handler(
+    config: &TrustRegistryConfig,
+    capabilities: &Arc<CapabilitySet>,
+    verifier: &Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    dedup: &Arc<dyn MessageIdStore>,
+    audit: &Arc<BoundedAuditLogger>,
+) -> TaskHandler {
+    let admin_config = &config.didcomm_config.admin_config;
+    TaskHandler::new(
+        capabilities.dispatcher(),
+        config.didcomm_config.profile_config.did.clone(),
+        admin_config.admin_dids.clone(),
+        verifier.clone(),
+    )
+    .with_admin_authorities(admin_config.admin_authorities.clone())
+    .with_dedup(dedup.clone())
+    .with_capabilities(capabilities.clone())
+    .with_audit(audit.clone() as Arc<dyn AuditLogger>)
+}
+
 impl RegistryParts {
+    /// The shared write-carrying Trust Task handler, as
+    /// [`TrustRegistry::task_handler`] builds it.
+    pub(crate) fn task_handler(&self) -> TaskHandler {
+        write_task_handler(
+            &self.config,
+            &self.capabilities,
+            &self.verifier,
+            &self.dedup,
+            &self.audit,
+        )
+    }
+
     /// Rebuild the axum state after `crate::server` has taken the pieces apart.
     pub(crate) fn shared_data(&self) -> SharedData<dyn TrustRecordRepository> {
         SharedData {
@@ -294,6 +341,7 @@ impl RegistryParts {
             repository: self.repository.clone() as Arc<dyn TrustRecordRepository>,
             query_dispatcher: self.capabilities.query_dispatcher(),
             verifier: self.verifier.clone(),
+            audit: self.audit.clone(),
         }
     }
 }
@@ -447,7 +495,18 @@ impl TrustRegistryBuilder {
             Arc::new(MemoryMessageIdStore::default())
         });
 
+        // One logger for every surface, so the bound on unproven refusals
+        // applies to the registry as a whole rather than per binding. Its
+        // count of suppressed entries is flushed every window and at shutdown.
+        let audit = Arc::new(BoundedAuditLogger::new(Arc::new(BaseAuditLogger::new(
+            self.config.didcomm_config.admin_config.audit_config.clone(),
+        ))));
+        let shutdown = self.shutdown.unwrap_or_default();
+        audit.spawn_flusher(shutdown.clone());
+
         Ok(TrustRegistry {
+            audit,
+            shutdown,
             health: Arc::new(RegistryHealth::new(self.config.didcomm_config.is_enabled)),
             config: self.config,
             repository,
@@ -455,7 +514,6 @@ impl TrustRegistryBuilder {
             verifier,
             dedup,
             didcomm_source: self.didcomm_source.unwrap_or_default(),
-            shutdown: self.shutdown.unwrap_or_default(),
             service_start_timestamp: Utc::now(),
         })
     }
