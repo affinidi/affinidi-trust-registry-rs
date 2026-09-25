@@ -42,6 +42,7 @@ pub struct ServerHandle {
     http_task: JoinHandle<Result<(), BoxError>>,
     didcomm_task: Option<JoinHandle<Result<(), BoxError>>>,
     health: Arc<RegistryHealth>,
+    audit: Arc<crate::audit::bounded::BoundedAuditLogger>,
 }
 
 impl ServerHandle {
@@ -80,6 +81,13 @@ impl ServerHandle {
     /// Returns when the **HTTP** task ends. A DIDComm listener failure does not
     /// end this: it degrades health and leaves the read path serving.
     pub async fn join(self) {
+        let audit = self.audit.clone();
+        self.join_tasks().await;
+        // Whatever ended the tasks, record the refusals still only counted.
+        audit.flush().await;
+    }
+
+    async fn join_tasks(self) {
         let Self {
             mut http_task,
             didcomm_task,
@@ -280,6 +288,7 @@ pub(crate) async fn serve_registry(
         shutdown: parts.shutdown,
         http_task,
         didcomm_task,
+        audit: parts.audit.clone(),
         health: parts.health,
     })
 }

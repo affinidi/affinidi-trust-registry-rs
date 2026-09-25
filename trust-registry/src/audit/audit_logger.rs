@@ -39,14 +39,54 @@ pub struct EmitInput {
     pub timestamp: chrono::DateTime<Utc>,
 }
 
-/// Cap `value` at [`MAX_FIELD_CHARS`].
+/// Characters that can end a line or change how the rest of it reads: the
+/// control characters, the line and paragraph separators (U+2028, U+2029),
+/// and the Unicode format characters (category Cf), which include the bidi
+/// overrides and zero-width characters.
+fn is_disruptive(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0001}'
+                | '\u{E0020}'..='\u{E007F}'
+        )
+}
+
+/// Cap `value` at [`MAX_FIELD_CHARS`] and replace every disruptive character
+/// with its `\u{…}` escape, for both formats alike.
 fn capped(value: &str) -> String {
-    if value.chars().count() <= MAX_FIELD_CHARS {
-        return value.to_string();
+    let mut out = String::new();
+    for (index, c) in value.chars().enumerate() {
+        if index == MAX_FIELD_CHARS {
+            out.push('…');
+            break;
+        }
+        if is_disruptive(c) {
+            out.push_str(&c.escape_unicode().to_string());
+        } else {
+            out.push(c);
+        }
     }
-    let mut cut: String = value.chars().take(MAX_FIELD_CHARS).collect();
-    cut.push('…');
-    cut
+    out
 }
 
 /// Cap `value` and quote it with every control character escaped, so it
@@ -338,9 +378,9 @@ mod tests {
     fn a_hostile_text_entry_stays_on_one_line() {
         let line = render_text(&hostile_input());
         assert!(!line.contains('\n') && !line.contains('\r') && !line.contains('\u{1b}'));
-        assert!(line.contains(r#"audit.resource.entity_id="did:x\nADMIN"#));
+        assert!(line.contains(r#"audit.resource.entity_id="did:x\\u{a}ADMIN"#));
         assert_eq!(line.matches("audit.reason=").count(), 1);
-        assert!(line.contains(r#"audit.reason="bad\r\naudit.status=SUCCESS""#));
+        assert!(line.contains(r#"audit.reason="bad\\u{d}\\u{a}audit.status=SUCCESS""#));
     }
 
     #[test]
@@ -349,7 +389,7 @@ mod tests {
         assert!(!line.contains('\n') && !line.contains('\r') && !line.contains('\u{1b}'));
         let parsed: Value = serde_json::from_str(&line).expect("one JSON object");
         assert_eq!(parsed["status"], "UNAUTHORIZED");
-        assert_eq!(parsed["reason"], "bad\r\naudit.status=SUCCESS");
+        assert_eq!(parsed["reason"], r"bad\u{d}\u{a}audit.status=SUCCESS");
     }
 
     #[test]
@@ -367,5 +407,17 @@ mod tests {
         let line = render_text(&input);
         assert!(line.contains(r#"audit.error="Record not found""#));
         assert!(!line.contains("audit.error=\"audit.error"));
+    }
+
+    #[test]
+    fn separators_and_format_characters_are_escaped_in_both_formats() {
+        let mut input = hostile_input();
+        input.claimed_actor = Some("did:a\u{2028}b\u{2029}c\u{202E}d\u{200B}e".to_string());
+        for line in [render_json(&input), render_text(&input)] {
+            for c in ['\u{2028}', '\u{2029}', '\u{202E}', '\u{200B}'] {
+                assert!(!line.contains(c), "{c:?} survived in {line}");
+            }
+            assert!(line.contains("u{2028}") && line.contains("u{202e}"));
+        }
     }
 }

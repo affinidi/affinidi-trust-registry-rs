@@ -4,11 +4,16 @@
 //! anyone, as fast as they can send. Recording each one individually would let
 //! an unauthenticated sender fill the audit log and bury the entries that
 //! matter. [`BoundedAuditLogger`] records up to a fixed number of such entries
-//! per window and counts the rest; the count is recorded as one entry when the
-//! next window opens. Entries with a proven actor always pass through.
+//! per window and counts the rest. The count is recorded as one entry when the
+//! next window opens, on a timer ([`BoundedAuditLogger::spawn_flusher`]) and
+//! at shutdown ([`BoundedAuditLogger::flush`]), so it is not lost when no
+//! further entry arrives. Entries with a proven actor always pass through.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::audit::model::{AuditLog, AuditLogBuilder, AuditLogger, AuditOperation, AuditResource};
 
@@ -49,6 +54,53 @@ impl BoundedAuditLogger {
         }
     }
 
+    /// Record the refusals counted since the last summary, if any.
+    pub async fn flush(&self) {
+        let suppressed = {
+            let mut budget = self
+                .budget
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut budget.suppressed)
+        };
+        self.log_summary(suppressed).await;
+    }
+
+    /// Flush every window, and once more when `shutdown` is cancelled.
+    pub fn spawn_flusher(self: &Arc<Self>, shutdown: CancellationToken) -> JoinHandle<()> {
+        let logger = self.clone();
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(logger.window);
+            ticks.tick().await;
+            loop {
+                tokio::select! {
+                    _ = ticks.tick() => logger.flush().await,
+                    _ = shutdown.cancelled() => {
+                        logger.flush().await;
+                        return;
+                    }
+                }
+            }
+        })
+    }
+
+    async fn log_summary(&self, suppressed: u64) {
+        if suppressed == 0 {
+            return;
+        }
+        self.inner
+            .log(
+                AuditLogBuilder::new()
+                    .operation(AuditOperation::Update)
+                    .resource(AuditResource::empty())
+                    .build_unauthorized(format!(
+                        "{suppressed} further refusals of unproven documents were counted \
+                         but not recorded individually"
+                    )),
+            )
+            .await;
+    }
+
     /// Open a new window if the current one has closed, returning how many
     /// entries the closed one suppressed. Then decide whether `unproven` fits.
     fn admit(&self, unproven: bool) -> (u64, bool) {
@@ -80,19 +132,7 @@ impl BoundedAuditLogger {
 impl AuditLogger for BoundedAuditLogger {
     async fn log(&self, audit_log: AuditLog) {
         let (suppressed, admitted) = self.admit(audit_log.actor.is_empty());
-        if suppressed > 0 {
-            self.inner
-                .log(
-                    AuditLogBuilder::new()
-                        .operation(AuditOperation::Update)
-                        .resource(AuditResource::empty())
-                        .build_unauthorized(format!(
-                            "{suppressed} further refusals of unproven writes in the previous \
-                             window were counted but not recorded individually"
-                        )),
-                )
-                .await;
-        }
+        self.log_summary(suppressed).await;
         if admitted {
             self.inner.log(audit_log).await;
         }
@@ -154,5 +194,41 @@ mod tests {
             summary.extra
         );
         assert_eq!(entries.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn the_count_is_flushed_without_a_further_entry() {
+        let recording = Arc::new(Recording::default());
+        let bounded = Arc::new(BoundedAuditLogger::with_budget(
+            recording.clone(),
+            1,
+            Duration::from_millis(20),
+        ));
+        let shutdown = CancellationToken::new();
+        let flusher = bounded.spawn_flusher(shutdown.clone());
+
+        for _ in 0..4 {
+            bounded.log(unproven()).await;
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            recording.0.lock().unwrap().len(),
+            2,
+            "one entry and its count"
+        );
+
+        bounded.log(unproven()).await;
+        bounded.log(unproven()).await;
+        shutdown.cancel();
+        flusher.await.unwrap();
+        let entries = recording.0.lock().unwrap();
+        assert!(
+            entries
+                .last()
+                .and_then(|entry| entry.extra.as_deref())
+                .is_some_and(|extra| extra.contains("1 further refusals")),
+            "the count is flushed at shutdown: {:?}",
+            entries.last().map(|e| &e.extra)
+        );
     }
 }

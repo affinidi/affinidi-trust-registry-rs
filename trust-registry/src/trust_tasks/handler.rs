@@ -46,13 +46,17 @@ use uuid::Uuid;
 
 use crate::audit::model::{AuditLogBuilder, AuditLogger, AuditOperation, AuditResource};
 use crate::capabilities::{CONFIG_AUTHORITY, CapabilitySet, DispatcherHandle};
-use crate::dedup::{MessageIdStore, execute_once};
+use crate::dedup::{
+    DEFAULT_QUERY_MAX_ENTRIES, DEFAULT_QUERY_MAX_ENTRIES_PER_ISSUER, MemoryMessageIdStore,
+    MessageIdStore, execute_once,
+};
 use crate::domain::{Action, AuthorityId, EntityId, Resource};
 use crate::trust_tasks::proof::{WRITE_PROOF_PURPOSE, requires_proof, verify_write_proof};
 use crate::trust_tasks::{RegistryDispatcher, handle_document};
 
 /// How old a write's time of issue may be (VTI-OPS-024). The replay record's
-/// retention ([`crate::dedup::DEFAULT_TTL`]) is longer, so every document
+/// retention ([`crate::dedup::DEFAULT_TTL`]) is this plus the skew and a
+/// minute of margin, so every document
 /// inside the window is remembered for as long as it could be accepted.
 pub const WRITE_ACCEPTANCE_WINDOW: chrono::TimeDelta = trust_tasks_rs::DEFAULT_MAX_AGE;
 
@@ -165,6 +169,10 @@ pub struct TaskHandler {
     /// The record of accepted document identifiers (VTI-OPS-025..027), shared
     /// by every binding carrying writes. A handler without one refuses writes.
     dedup: Option<Arc<dyn MessageIdStore>>,
+    /// The record of accepted `registry/record/query` documents, kept apart
+    /// from `dedup` so that queries cannot use up the capacity writes need.
+    /// Shared by every clone of this handler, and so by every binding.
+    query_replay: Arc<dyn MessageIdStore>,
     /// Where capability tasks learn the authority they act under.
     capabilities: Option<Arc<CapabilitySet>>,
     /// Receives an entry for every write, refusals included.
@@ -192,6 +200,10 @@ impl TaskHandler {
             admin_authorities: Arc::new(HashMap::new()),
             verifier,
             dedup: None,
+            query_replay: Arc::new(MemoryMessageIdStore::default().with_limits(
+                DEFAULT_QUERY_MAX_ENTRIES,
+                DEFAULT_QUERY_MAX_ENTRIES_PER_ISSUER,
+            )),
             capabilities: None,
             audit: None,
         }
@@ -618,8 +630,17 @@ impl TaskHandler {
             return Err(doc.reject_with(new_id(), reason));
         }
 
-        let Some(dedup) = &self.dedup else {
-            return Err(doc.reject_with(new_id(), RejectReason::Unavailable { retry_after: None }));
+        let dedup = if doc.type_uri.slug() == "registry/record/query" {
+            &self.query_replay
+        } else {
+            match &self.dedup {
+                Some(dedup) => dedup,
+                None => {
+                    return Err(
+                        doc.reject_with(new_id(), RejectReason::Unavailable { retry_after: None })
+                    );
+                }
+            }
         };
 
         // `registry/did/rotate` rotates *our own* DID's keys through the VTA, so
@@ -1376,6 +1397,34 @@ mod tests {
             .expect_err("refused");
 
         assert_eq!(code(&err), "malformedRequest");
+    }
+
+    /// Queries have their own record, so an admin's queries cannot use up the
+    /// capacity its writes need.
+    #[tokio::test]
+    async fn queries_do_not_use_the_write_record() {
+        let (key, did) = did_key(45);
+        let f = fixture(vec![did.clone()]);
+        let handler = f
+            .handler
+            .clone()
+            .with_dedup(Arc::new(MemoryMessageIdStore::default().with_limits(10, 1)));
+        for _ in 0..3 {
+            let query = signed(
+                unsigned(RECORD_QUERY, Some(&did), json!({ "authority_id": did })),
+                &key,
+            )
+            .await;
+            handler.handle(query, Some(&did)).await.expect("answered");
+        }
+
+        let put = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        handler
+            .handle(put, Some(&did))
+            .await
+            .expect("write accepted");
+
+        assert!(stored(&f.repo, &did).await);
     }
 
     #[tokio::test]

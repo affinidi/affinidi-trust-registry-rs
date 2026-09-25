@@ -666,14 +666,19 @@ Every write and record query, accepted or refused, is recorded in the audit log
 issuer (or, for one refused before its proof was checked, the DID it claimed),
 the authority and record key or capability, the result and reason, the
 document `id`, the thread and the time. Record contents and proofs are not
-logged. Every value is escaped and capped at 256 characters, so an entry is
-always one line. Refusals of documents whose issuer was never proven are
-recorded individually up to 60 a minute; beyond that they are counted, and the
-count is recorded as one entry when the next minute starts.
+logged. Every value is capped at 256 characters, and control characters, the
+line and paragraph separators and Unicode format characters (bidi overrides,
+zero-width characters) are escaped, in both formats, so an entry is always one
+line that reads as written. Refusals of documents whose issuer was never proven
+are recorded individually up to 60 a minute; beyond that they are counted, and
+the count is recorded as one entry every minute and at shutdown.
 
 The record of accepted document identifiers is shared by the DIDComm and TSP
-bindings within one process. It is held in memory, so replicas of one registry
-do not share it.
+bindings within one process. It keeps an identifier for seven minutes (the
+acceptance window, the skew and a minute of margin); an older document is
+refused on its time of issue. Record queries have a separate, smaller record,
+so queries cannot use up the capacity writes need. Both are held in memory, so
+replicas of one registry do not share them.
 
 The legacy `tr-admin/1.0` DIDComm protocol is no longer served; see
 [DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#removed-tr-admin10) for the

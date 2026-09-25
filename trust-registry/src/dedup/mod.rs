@@ -71,12 +71,22 @@ use uuid::Uuid;
 
 use crate::trust_tasks::{RegistryDispatcher, TaskOutcome, handle_document, proof::is_write_slug};
 
-/// How long a completed outcome stays replayable.
+/// How long a completed outcome stays replayable: the write acceptance window
+/// (five minutes of age, one of future skew) plus a minute of margin.
 ///
-/// Must comfortably exceed the mediator's redelivery window: once the entry
-/// expires, a redelivery is indistinguishable from a fresh document and would
-/// be applied a second time.
-pub const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// It only has to cover that window. A document older than it is refused on
+/// its time of issue before the record is consulted, so a redelivery that
+/// arrives after its entry has expired is refused as `expired`, never applied
+/// again. Keeping entries longer would only hold capacity that bounds new
+/// writes.
+pub const DEFAULT_TTL: Duration = Duration::from_secs(7 * 60);
+
+/// Bounds of the record kept for `registry/record/query` documents, which is
+/// separate from the one for writes so that queries cannot use up the
+/// capacity writes need.
+pub const DEFAULT_QUERY_MAX_ENTRIES: usize = 10_000;
+/// Per-issuer bound of the query record.
+pub const DEFAULT_QUERY_MAX_ENTRIES_PER_ISSUER: usize = 1_000;
 
 /// How long an unresolved claim is honoured before another copy may take it.
 ///

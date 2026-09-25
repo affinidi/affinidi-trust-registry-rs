@@ -74,11 +74,14 @@ Missing versions simply reflect internal deployment‑related patches.
   replay record) and must name an `authority_id` the issuer may act under.
   The public surface is the TRQP recognition and authorization queries.
 - **Audit entries cannot be forged through their values.** Every value is
-  escaped and capped at 256 characters, the text format quotes each value, and
+  capped at 256 characters, and control characters, U+2028/U+2029 and Unicode
+  format characters (bidi overrides, zero-width) are escaped in both formats;
+  the text format also quotes each value, and
   `AUDIT_LOG_FORMAT` now defaults to `json`. The reason is no longer labelled
   twice (`audit.reason=audit.reason=…`). Refusals of documents whose issuer
   was never proven are recorded individually up to 60 a minute and counted
-  beyond that (`audit::bounded::BoundedAuditLogger`); the HTTP binding's
+  beyond that (`audit::bounded::BoundedAuditLogger`), and the count is
+  recorded every minute and at shutdown; the HTTP binding's
   refusals are audited through the same logger (`SharedData::audit`).
 - **Capabilities that write records need an authority.**
   `CapabilityDefinition::requires_authority`; enabling such a capability
@@ -86,6 +89,11 @@ Missing versions simply reflect internal deployment‑related patches.
   usable. A capability task is dispatched through the dispatcher read in the
   same snapshot as the authority it was checked against
   (`CapabilitySet::snapshot`).
+- **The record of accepted documents covers only the acceptance window.**
+  `dedup::DEFAULT_TTL` drops from 24 hours to 7 minutes (five minutes of age,
+  one of skew, one of margin); an older document is refused on its time of
+  issue. Record queries have their own smaller record (10,000 entries, 1,000
+  per issuer), so they cannot use up the capacity writes need.
 - **The in-memory record of accepted documents is bounded.** At 100,000
   entries, or 10,000 for one issuer, a new claim is refused (retryable
   `unavailable`) rather than evicting one; expiry is amortised rather than a

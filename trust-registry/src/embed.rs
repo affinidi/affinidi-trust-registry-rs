@@ -88,7 +88,7 @@ pub struct TrustRegistry {
     capabilities: Arc<CapabilitySet>,
     verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     dedup: Arc<dyn MessageIdStore>,
-    audit: Arc<dyn AuditLogger>,
+    audit: Arc<BoundedAuditLogger>,
     health: Arc<RegistryHealth>,
     didcomm_source: DidCommSource,
     shutdown: CancellationToken,
@@ -202,7 +202,7 @@ impl TrustRegistry {
             Vec::new(),
             self.verifier.clone(),
         )
-        .with_audit(self.audit.clone())
+        .with_audit(self.audit.clone() as Arc<dyn AuditLogger>)
     }
 
     /// The live admin dispatcher handle.
@@ -289,7 +289,7 @@ pub(crate) struct RegistryParts {
     pub(crate) capabilities: Arc<CapabilitySet>,
     pub(crate) verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
     pub(crate) dedup: Arc<dyn MessageIdStore>,
-    pub(crate) audit: Arc<dyn AuditLogger>,
+    pub(crate) audit: Arc<BoundedAuditLogger>,
     pub(crate) health: Arc<RegistryHealth>,
     pub(crate) didcomm_source: DidCommSource,
     pub(crate) shutdown: CancellationToken,
@@ -305,7 +305,7 @@ fn write_task_handler(
     capabilities: &Arc<CapabilitySet>,
     verifier: &Arc<dyn trust_tasks_rs::DynProofVerifier>,
     dedup: &Arc<dyn MessageIdStore>,
-    audit: &Arc<dyn AuditLogger>,
+    audit: &Arc<BoundedAuditLogger>,
 ) -> TaskHandler {
     let admin_config = &config.didcomm_config.admin_config;
     TaskHandler::new(
@@ -317,7 +317,7 @@ fn write_task_handler(
     .with_admin_authorities(admin_config.admin_authorities.clone())
     .with_dedup(dedup.clone())
     .with_capabilities(capabilities.clone())
-    .with_audit(audit.clone())
+    .with_audit(audit.clone() as Arc<dyn AuditLogger>)
 }
 
 impl RegistryParts {
@@ -496,13 +496,17 @@ impl TrustRegistryBuilder {
         });
 
         // One logger for every surface, so the bound on unproven refusals
-        // applies to the registry as a whole rather than per binding.
-        let audit: Arc<dyn AuditLogger> = Arc::new(BoundedAuditLogger::new(Arc::new(
-            BaseAuditLogger::new(self.config.didcomm_config.admin_config.audit_config.clone()),
-        )));
+        // applies to the registry as a whole rather than per binding. Its
+        // count of suppressed entries is flushed every window and at shutdown.
+        let audit = Arc::new(BoundedAuditLogger::new(Arc::new(BaseAuditLogger::new(
+            self.config.didcomm_config.admin_config.audit_config.clone(),
+        ))));
+        let shutdown = self.shutdown.unwrap_or_default();
+        audit.spawn_flusher(shutdown.clone());
 
         Ok(TrustRegistry {
             audit,
+            shutdown,
             health: Arc::new(RegistryHealth::new(self.config.didcomm_config.is_enabled)),
             config: self.config,
             repository,
@@ -510,7 +514,6 @@ impl TrustRegistryBuilder {
             verifier,
             dedup,
             didcomm_source: self.didcomm_source.unwrap_or_default(),
-            shutdown: self.shutdown.unwrap_or_default(),
             service_start_timestamp: Utc::now(),
         })
     }
