@@ -208,7 +208,9 @@ async fn trust_task(
     let signed = sign_trust_task(
         &serde_json::to_value(&doc).unwrap(),
         &key,
-        SignOptions::new().with_cryptosuite(cryptosuite),
+        SignOptions::new()
+            .with_cryptosuite(cryptosuite)
+            .with_proof_purpose("authentication"),
     )
     .await
     .expect("sign the Trust Task");

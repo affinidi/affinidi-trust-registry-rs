@@ -32,6 +32,11 @@ use crate::trust_tasks::{RegistryDispatcher, TaskFuture, TaskOutcome};
 
 pub use enable_spec::CapabilityManifest;
 
+/// The enablement-config member naming the authority a capability acts under.
+/// Writes a capability makes are bound to it, so enabling a capability with an
+/// authority is itself bound to it.
+pub const CONFIG_AUTHORITY: &str = "authority";
+
 /// Validates a per-community `config` document.
 pub type ConfigValidator = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 
@@ -265,6 +270,21 @@ impl CapabilitySet {
                 (enabled || include_available).then(|| (d.manifest.clone(), s))
             })
             .collect()
+    }
+
+    /// The authority an enabled capability acts under: the `authority` member
+    /// of its enablement config. `None` when the capability is not enabled or
+    /// its config names no authority.
+    pub async fn configured_authority(&self, capability: &str) -> Option<String> {
+        self.state
+            .read()
+            .await
+            .get(capability)
+            .filter(|state| state.enabled)
+            .and_then(|state| state.config.as_ref())
+            .and_then(|config| config.get(CONFIG_AUTHORITY))
+            .and_then(Value::as_str)
+            .map(str::to_string)
     }
 
     async fn rebuild(&self, state: &BTreeMap<String, CapabilityState>) {

@@ -154,15 +154,12 @@ impl TrustRegistry {
     /// denied. An authenticated sender alone never authorises a write: the
     /// document must also carry a valid proof by the same DID.
     pub fn task_handler(&self) -> TaskHandler {
-        let admin_config = &self.config.didcomm_config.admin_config;
-        TaskHandler::new(
-            self.capabilities.dispatcher(),
-            self.config.didcomm_config.profile_config.did.clone(),
-            admin_config.admin_dids.clone(),
-            self.verifier.clone(),
+        write_task_handler(
+            &self.config,
+            &self.capabilities,
+            &self.verifier,
+            &self.dedup,
         )
-        .with_admin_authorities(admin_config.admin_authorities.clone())
-        .with_dedup(self.dedup.clone())
     }
 
     /// Route a Trust Task that arrived over DIDComm on a socket the **host**
@@ -289,7 +286,43 @@ pub(crate) struct RegistryParts {
     pub(crate) service_start_timestamp: DateTime<Utc>,
 }
 
+/// The Trust Task handler every write-carrying binding shares: the admin
+/// dispatcher, the admin ACL and authority map, proof verification, the one
+/// record of accepted document identifiers, the capability set and the audit
+/// logger.
+fn write_task_handler(
+    config: &TrustRegistryConfig,
+    capabilities: &Arc<CapabilitySet>,
+    verifier: &Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    dedup: &Arc<dyn MessageIdStore>,
+) -> TaskHandler {
+    let admin_config = &config.didcomm_config.admin_config;
+    TaskHandler::new(
+        capabilities.dispatcher(),
+        config.didcomm_config.profile_config.did.clone(),
+        admin_config.admin_dids.clone(),
+        verifier.clone(),
+    )
+    .with_admin_authorities(admin_config.admin_authorities.clone())
+    .with_dedup(dedup.clone())
+    .with_capabilities(capabilities.clone())
+    .with_audit(Arc::new(crate::audit::audit_logger::BaseAuditLogger::new(
+        admin_config.audit_config.clone(),
+    )))
+}
+
 impl RegistryParts {
+    /// The shared write-carrying Trust Task handler, as
+    /// [`TrustRegistry::task_handler`] builds it.
+    pub(crate) fn task_handler(&self) -> TaskHandler {
+        write_task_handler(
+            &self.config,
+            &self.capabilities,
+            &self.verifier,
+            &self.dedup,
+        )
+    }
+
     /// Rebuild the axum state after `crate::server` has taken the pieces apart.
     pub(crate) fn shared_data(&self) -> SharedData<dyn TrustRecordRepository> {
         SharedData {

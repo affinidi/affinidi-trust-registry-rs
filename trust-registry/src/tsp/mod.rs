@@ -288,7 +288,7 @@ mod tests {
                     "type": "DataIntegrityProof",
                     "cryptosuite": "eddsa-jcs-2022",
                     "created": "2026-07-07T00:00:00Z",
-                    "proofPurpose": "assertionMethod",
+                    "proofPurpose": "authentication",
                     "verificationMethod": "did:example:admin#key-1",
                     "proofValue": "z0000"
                 }))

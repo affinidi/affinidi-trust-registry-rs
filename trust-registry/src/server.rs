@@ -181,22 +181,16 @@ fn build_router(parts: &crate::embed::RegistryParts) -> Router {
         .layer(cors)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn start_didcomm_server(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
-    dispatcher: crate::capabilities::DispatcherHandle,
-    dedup: Arc<dyn crate::dedup::MessageIdStore>,
-    verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    tasks: crate::trust_tasks::TaskHandler,
     source: crate::didcomm::listener::DidCommSource,
     shutdown: CancellationToken,
 ) -> Result<(), BoxError> {
     // `start_didcomm_listener` returns the listener task's own result nested
     // inside the join result; the inner listener outcome is discarded here.
-    let _ = start_didcomm_listener(
-        config, repository, dispatcher, dedup, verifier, source, shutdown,
-    )
-    .await?;
+    let _ = start_didcomm_listener(config, repository, tasks, source, shutdown).await?;
     Ok(())
 }
 
@@ -275,9 +269,7 @@ pub(crate) async fn serve_registry(
         (true, source) => Some(tokio::spawn(start_didcomm_server(
             parts.config.didcomm_config.clone(),
             parts.repository.clone(),
-            parts.capabilities.dispatcher(),
-            parts.dedup.clone(),
-            parts.verifier.clone(),
+            parts.task_handler(),
             source.clone(),
             parts.shutdown.clone(),
         ))),

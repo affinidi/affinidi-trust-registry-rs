@@ -34,9 +34,6 @@ use trust_tasks_didcomm::ENVELOPE_TYPE;
 use trust_tasks_rs::{ErrorResponse, TrustTask};
 use uuid::Uuid;
 
-use crate::capabilities::DispatcherHandle;
-use crate::configs::AdminConfig;
-use crate::dedup::MessageIdStore;
 use crate::didcomm::error::DIDCommError;
 use crate::didcomm::handlers::{HandlerContext, ProtocolHandler};
 use crate::trust_tasks::TaskHandler;
@@ -51,26 +48,9 @@ pub struct TrustTasksHandler {
 }
 
 impl TrustTasksHandler {
-    /// Build the handler over the live dispatcher handle (owned by the
-    /// CapabilitySet, so capability enable/disable swaps take effect here
-    /// without a restart), the admin-DID ACL used to gate writes, and the
-    /// Data Integrity proof verifier applied to writes.
-    ///
-    /// `my_did` is the registry's own DID. It comes from the same
-    /// `ProfileConfig` the listener builds its `ATMProfile` from, so it always
-    /// matches the `profile.inner.did` seen per message.
-    pub fn new(
-        dispatcher: DispatcherHandle,
-        admin_config: AdminConfig,
-        verifier: std::sync::Arc<dyn trust_tasks_rs::DynProofVerifier>,
-        dedup: std::sync::Arc<dyn MessageIdStore>,
-        my_did: impl Into<String>,
-    ) -> Self {
-        Self {
-            tasks: TaskHandler::new(dispatcher, my_did, admin_config.admin_dids, verifier)
-                .with_admin_authorities(admin_config.admin_authorities)
-                .with_dedup(dedup),
-        }
+    /// Build the binding over the registry's shared Trust Task handler.
+    pub fn new(tasks: TaskHandler) -> Self {
+        Self { tasks }
     }
 }
 

@@ -19,6 +19,9 @@ pub struct EmitInput {
     pub resource: AuditResource,
     pub extra: Option<String>,
     pub thread_id: Option<String>,
+    pub task: Option<String>,
+    pub document_id: Option<String>,
+    pub claimed_actor: Option<String>,
     pub timestamp: chrono::DateTime<Utc>,
 }
 #[derive(Clone)]
@@ -70,12 +73,17 @@ impl BaseAuditLogger {
             "resource".to_string(),
             self.resource_json_value(&input.resource),
         );
-        if let Some(extra_field) = input.extra.clone() {
-            let ex = extra_field.split("=").collect::<Vec<&str>>()[..2]
-                .iter()
-                .map(|f| f.to_string())
-                .collect::<Vec<String>>();
-            map.insert(ex[0].to_string(), json!(ex[1]));
+        if let Some((key, value)) = input.extra.as_deref().and_then(|e| e.split_once('=')) {
+            map.insert(key.to_string(), json!(value));
+        }
+        for (key, value) in [
+            ("task", &input.task),
+            ("document_id", &input.document_id),
+            ("claimed_actor", &input.claimed_actor),
+        ] {
+            if let Some(value) = value {
+                map.insert(key.to_string(), json!(value));
+            }
         }
         map.insert("timestamp".to_string(), json!(input.timestamp.to_rfc3339()));
         map.insert(
@@ -138,6 +146,16 @@ impl BaseAuditLogger {
             format!("audit.thread_id={}", thread_id_str),
         ];
 
+        for (key, value) in [
+            ("audit.task", &input.task),
+            ("audit.document_id", &input.document_id),
+            ("audit.claimed_actor", &input.claimed_actor),
+        ] {
+            if let Some(value) = value {
+                log_parts.push(format!("{key}={value}"));
+            }
+        }
+
         if let Some((key, val)) = extra {
             log_parts.push(format!("{key}={val}"));
         }
@@ -159,6 +177,9 @@ impl AuditLogger for BaseAuditLogger {
             resource: audit_log.resource,
             extra: audit_log.extra,
             thread_id: audit_log.thread_id,
+            task: audit_log.task,
+            document_id: audit_log.document_id,
+            claimed_actor: audit_log.claimed_actor,
             timestamp: audit_log.timestamp,
         };
 

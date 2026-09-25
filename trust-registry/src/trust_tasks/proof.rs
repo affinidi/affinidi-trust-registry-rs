@@ -10,12 +10,75 @@
 //! Verification is backed by [`trust_tasks_proof`]'s Affinidi verifier over the
 //! shared DID-resolver cache; `did:key` issuers verify offline, `did:web` /
 //! `did:webvh` issuers resolve through the cache.
+//!
+//! A registry write is an operational message (VTI-KEY-084, VTI-KEY-106): it
+//! is signed with the writer's `operational` key, carries the proof purpose
+//! `authentication`, and the key must be listed under `authentication` in the
+//! writer's DID document. [`AuthenticationKeyResolver`] enforces the last part,
+//! so a key the writer lists only under `assertionMethod` cannot sign a write.
 
 use std::sync::Arc;
 
+use affinidi_tdk::data_integrity::{DataIntegrityError, ResolvedKey, VerificationMethodResolver};
+use affinidi_tdk::did_common::Document;
+use affinidi_tdk::did_common::verification_method::VerificationRelationship;
+use affinidi_tdk::did_resolver::DIDCacheClient;
+use async_trait::async_trait;
 use serde_json::Value;
 use trust_tasks_proof::affinidi::{CachedDidResolver, Verifier};
 use trust_tasks_rs::{DynProofVerifier, RejectReason, TrustTask, erase_verifier};
+
+/// The only `proofPurpose` a registry write may carry (VTI-KEY-106).
+pub const WRITE_PROOF_PURPOSE: &str = "authentication";
+
+/// Is `vm` one of the methods `doc` lists under `authentication`, by absolute
+/// DID URL or relative fragment, referenced or embedded?
+pub fn is_authentication_method(doc: &Document, vm: &str) -> bool {
+    let fragment = vm.find('#').map(|i| &vm[i..]);
+    let refers = |id: &str| id == vm || fragment.is_some_and(|f| id == f);
+    doc.authentication
+        .iter()
+        .any(|relationship| match relationship {
+            VerificationRelationship::Reference(id) => refers(id),
+            VerificationRelationship::VerificationMethod(method) => refers(method.id.as_str()),
+            _ => false,
+        })
+}
+
+/// Resolves a proof's verification method only when the controlling DID
+/// document lists it under `authentication`, then hands it to
+/// [`CachedDidResolver`] for the key material.
+pub struct AuthenticationKeyResolver {
+    client: Arc<DIDCacheClient>,
+    keys: CachedDidResolver,
+}
+
+impl AuthenticationKeyResolver {
+    pub fn new(client: Arc<DIDCacheClient>) -> Self {
+        Self {
+            keys: CachedDidResolver::new(client.clone()),
+            client,
+        }
+    }
+}
+
+#[async_trait]
+impl VerificationMethodResolver for AuthenticationKeyResolver {
+    async fn resolve_vm(&self, vm: &str) -> Result<ResolvedKey, DataIntegrityError> {
+        let did = vm.split('#').next().unwrap_or(vm);
+        let resolved = self
+            .client
+            .resolve(did)
+            .await
+            .map_err(|e| DataIntegrityError::Resolver(format!("resolve {did}: {e}")))?;
+        if !is_authentication_method(&resolved.doc, vm) {
+            return Err(DataIntegrityError::Resolver(format!(
+                "verificationMethod {vm} is not an authentication key of {did}"
+            )));
+        }
+        self.keys.resolve_vm(vm).await
+    }
+}
 
 /// Slugs whose operations mutate the registry and therefore carry a required,
 /// verifiable proof plus the admin ACL. The single source of truth — the
@@ -36,15 +99,17 @@ pub fn is_write_slug(slug: &str) -> bool {
 }
 
 /// Build a Data Integrity proof verifier backed by the Affinidi DID-resolver
-/// cache. Falls back to a `did:key`-only verifier (no network) if the resolver
-/// cache cannot be constructed, so proof verification degrades gracefully rather
-/// than failing startup.
+/// cache, accepting only keys the signer lists under `authentication`. Falls
+/// back to a `did:key`-only verifier (no network) if the resolver cache cannot
+/// be constructed, so proof verification degrades gracefully rather than
+/// failing startup; a `did:key`'s only key is by construction its
+/// authentication key.
 pub async fn build_verifier() -> Arc<dyn DynProofVerifier> {
     use affinidi_tdk::did_resolver::{DIDCacheClient, config::DIDCacheConfigBuilder};
 
     match DIDCacheClient::new(DIDCacheConfigBuilder::default().build()).await {
         Ok(client) => {
-            let resolver = Arc::new(CachedDidResolver::new(Arc::new(client)));
+            let resolver = Arc::new(AuthenticationKeyResolver::new(Arc::new(client)));
             erase_verifier(Verifier::with_resolver(resolver))
         }
         Err(e) => {
@@ -153,5 +218,32 @@ mod tests {
             verify_write_proof(&verifier, &doc).await,
             Err(RejectReason::MalformedRequest { .. })
         ));
+    }
+
+    fn document(authentication: Value) -> Document {
+        serde_json::from_value(serde_json::json!({
+            "id": "did:example:writer",
+            "verificationMethod": [{
+                "id": "did:example:writer#key-1",
+                "type": "Multikey",
+                "controller": "did:example:writer",
+                "publicKeyMultibase": "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+            }],
+            "authentication": authentication,
+            "assertionMethod": ["did:example:writer#key-1"]
+        }))
+        .expect("valid DID document")
+    }
+
+    #[test]
+    fn a_key_listed_under_authentication_is_accepted() {
+        let doc = document(serde_json::json!(["#key-1"]));
+        assert!(is_authentication_method(&doc, "did:example:writer#key-1"));
+    }
+
+    #[test]
+    fn a_key_listed_only_under_assertion_method_is_refused() {
+        let doc = document(serde_json::json!([]));
+        assert!(!is_authentication_method(&doc, "did:example:writer#key-1"));
     }
 }

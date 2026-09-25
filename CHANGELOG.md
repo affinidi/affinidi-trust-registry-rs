@@ -36,9 +36,42 @@ Missing versions simply reflect internal deployment‑related patches.
   the proof's signer must be the same DID.** A write with no in-band `issuer`
   is `malformedRequest`; an issuer other than the authenticated sender is
   `identityMismatch`; a proof whose verification method is not under the
-  issuer's DID, or whose `proofPurpose` is not `assertionMethod`, is
-  `proofInvalid`. `verify_write_proof` now refuses a write with no proof or no
-  issuer on its own rather than passing it through.
+  issuer's DID is `proofInvalid`. `verify_write_proof` now refuses a write
+  with no proof or no issuer on its own rather than passing it through.
+- **Writes are operational messages (VTI-KEY-084, VTI-KEY-106).** The proof
+  must carry `proofPurpose` `authentication` (`assertionMethod` is refused as
+  `proofInvalid`), and `build_verifier` accepts only a key the signer's DID
+  document lists under `authentication` (`AuthenticationKeyResolver`).
+- **Operation-document checks on writes (VTI-KEY-107).** A write must name
+  this registry as `recipient` (`malformedRequest` / `wrongRecipient`), carry
+  an `issuedAt` inside a five-minute window with a minute of skew
+  (`malformedRequest` / `expired`; `WRITE_ACCEPTANCE_WINDOW`), and an `id`
+  not already accepted. The record of accepted identifiers is the dedup
+  store, shared by every binding: an identical redelivery is answered from
+  the record without running again, a different document reusing an id is
+  `idConflict`, and a write is refused as `unavailable` when there is no
+  record or it cannot be reached (it used to be applied without dedup).
+  `MessageIdStore::claim` takes the document digest and can return
+  `Claim::Conflict`.
+- **The authority binding covers `git-trust/grant|revoke` and
+  `governance/capability/enable|disable`.** git-trust tasks act under the
+  authority git-trust was enabled with, enable under the authority its config
+  names, and disable under the authority the capability is enabled with; each
+  must be an authority the issuer may act for, so a capability's config cannot
+  widen what an admin may do. `CapabilitySet::configured_authority` and
+  `TaskHandler::{with_capabilities, target_authority}` are new, and
+  `authorize_authority` now takes the authority.
+- **Every write is audited**, refusals included, through the audit logger
+  that previously only the removed `tr-admin/1.0` handlers used: operation,
+  task, proven issuer (or claimed issuer when refused before the proof was
+  checked), authority, record key or capability, result and reason, document
+  id, thread and time. `AuditLog` gains `task`, `document_id` and
+  `claimed_actor`, and `AuditOperation` gains `Put`, `Grant`, `Revoke`,
+  `Enable`, `Disable` and `Rotate`.
+- **One shared `TaskHandler`.** The DIDComm and TSP bindings now take the
+  registry's handler (`TrustRegistry::task_handler`) instead of building their
+  own: `BaseHandler::build_from_arc(repository, tasks)` and
+  `TrustTasksHandler::new(tasks)`.
 - **Party resolution runs inside `TaskHandler::handle`.** Every caller,
   including a host driving an embedded registry through
   `TrustRegistry::task_handler`, gets the in-band-issuer check against the

@@ -1,6 +1,7 @@
 //! Record management over the `registry/record/*` Trust Tasks.
 //!
-//! Writes are signed with the admin's verification key and may only name the
+//! Writes are operational messages signed with the admin's authentication key
+//! (`proofPurpose` `authentication`) and may only name the
 //! admin's own DID as `authority_id` (or an authority the registry's
 //! `ADMIN_AUTHORITIES` grants it).
 
@@ -24,7 +25,7 @@ const RECORD_DELETE: &str = "https://trusttasks.org/spec/registry/record/delete/
 pub struct CommonCrudInput {
     pub atm: Arc<ATM>,
     pub profile: Arc<ATMProfile>,
-    /// The admin's secrets; the verification key signs writes.
+    /// The admin's secrets; its authentication key signs writes.
     pub secrets: Vec<Secret>,
     pub trust_registry_did: String,
     pub entity_id: String,
@@ -130,8 +131,14 @@ async fn send_trust_task(
             KeyType::Ed25519 => CryptoSuite::EddsaJcs2022,
             _ => CryptoSuite::EcdsaJcs2019,
         };
-        body =
-            sign_trust_task(&body, key, SignOptions::new().with_cryptosuite(cryptosuite)).await?;
+        body = sign_trust_task(
+            &body,
+            key,
+            SignOptions::new()
+                .with_cryptosuite(cryptosuite)
+                .with_proof_purpose("authentication"),
+        )
+        .await?;
     }
 
     println!(

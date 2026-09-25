@@ -29,16 +29,26 @@ Trust records are managed with the `registry/record/*` Trust Tasks
 (`https://trusttasks.org/binding/didcomm/0.1/envelope`) or over TSP. See
 [Trust Task protocol surface](README.md#trust-task-protocol-surface).
 
-A record write is accepted only when all of the following hold:
+A write is accepted only when all of the following hold:
 
 - the document carries an in-band `issuer`, and that issuer is the sender the
   transport authenticated;
+- the document names this registry as its `recipient`, carries an `issuedAt`
+  no older than five minutes (and not more than a minute in the future), and
+  its `id` has not been accepted before, on any binding;
 - the document carries a Data Integrity proof with `proofPurpose`
-  `assertionMethod`, made with a verification method of the issuer's own DID,
-  and the proof verifies;
+  `authentication`, made with the issuer's operational key: a verification
+  method of the issuer's own DID that the issuer's DID document lists under
+  `authentication`. The proof must verify;
 - the issuer is listed in `ADMIN_DIDS`;
-- the record's `authority_id` is the issuer's DID, or an authority listed for
-  that issuer in `ADMIN_AUTHORITIES`.
+- the write acts under an authority the issuer may act for: its own DID, or
+  one listed for it in `ADMIN_AUTHORITIES`.
+
+For a record put or delete the authority is the record's `authority_id`. For
+`git-trust/grant` and `git-trust/revoke` it is the authority git-trust was
+enabled with, and for `governance/capability/enable` and `disable` it is the
+authority the capability's config names. Every write, accepted or refused, is
+written to the audit log.
 
 ### Removed: `tr-admin/1.0`
 

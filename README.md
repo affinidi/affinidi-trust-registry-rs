@@ -637,18 +637,34 @@ message shape regardless of carrier.
 | `registry/record/put/0.1`                             | write | admin DID + proof + authority |
 | `registry/record/delete/0.1`                          | write | admin DID + proof + authority |
 | `registry/did/rotate/0.1`                             | write | admin DID + proof (`vta` only)|
+| `git-trust/{grant,revoke}/0.1`                        | write | admin DID + proof + authority |
+| `governance/capability/{enable,disable}/0.1`          | write | admin DID + proof + authority |
 
-**Writes** (record mutations and DID rotation) require:
+**Writes** are operational messages. Each one requires:
 
 - an in-band `issuer` that is the sender the transport authenticated;
-- a Data-Integrity proof with `proofPurpose` `assertionMethod`, made with a
-  verification method of the issuer's own DID, that verifies;
+- the registry's DID as `recipient`, an `issuedAt` inside the five-minute
+  acceptance window, and an `id` not already accepted on any binding;
+- a Data-Integrity proof with `proofPurpose` `authentication`, made with a key
+  the issuer's DID document lists under `authentication`, that verifies;
 - the issuer to be in `ADMIN_DIDS`.
 
-Record mutations are further bound to the authority they write under: the
-record's `authority_id` must be the issuer's DID, or an authority listed for
-that issuer in `ADMIN_AUTHORITIES`. The authenticated sender on its own
-authorises nothing.
+Writes are further bound to the authority they act under, which must be the
+issuer's DID or an authority listed for that issuer in `ADMIN_AUTHORITIES`: a
+record's `authority_id`, the authority git-trust was enabled with (for
+`git-trust/grant` and `revoke`), or the authority a capability's config names
+(for `governance/capability/enable` and `disable`). The authenticated sender on
+its own authorises nothing.
+
+Every write, accepted or refused, is recorded in the audit log
+(`AUDIT_LOG_FORMAT`): the operation and task type, the proven issuer (or, for
+a write refused before its proof was checked, the DID it claimed), the
+authority and record key or capability, the result and reason, the document
+`id`, the thread and the time. Record contents and proofs are not logged.
+
+The record of accepted document identifiers is shared by the DIDComm and TSP
+bindings within one process. It is held in memory, so replicas of one registry
+do not share it.
 
 The legacy `tr-admin/1.0` DIDComm protocol is no longer served; see
 [DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#removed-tr-admin10) for the

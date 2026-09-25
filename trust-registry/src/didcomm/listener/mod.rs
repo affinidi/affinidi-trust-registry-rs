@@ -219,14 +219,11 @@ async fn check_did_document_availability(
     Err(DIDCommError::UnreachableDidDocument)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_one_did_listener(
     profile_config: ProfileConfig,
     config: Arc<DidcommConfig>,
     repository: Arc<dyn TrustRecordAdminRepository>,
-    dispatcher: crate::capabilities::DispatcherHandle,
-    dedup: Arc<dyn crate::dedup::MessageIdStore>,
-    verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    tasks: crate::trust_tasks::TaskHandler,
     source: DidCommSource,
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
@@ -241,13 +238,7 @@ pub(crate) async fn start_one_did_listener(
     )
     .await;
 
-    let handler = BaseHandler::build_from_arc(
-        repository,
-        config.clone(),
-        verifier.clone(),
-        dispatcher.clone(),
-        dedup.clone(),
-    );
+    let handler = BaseHandler::build_from_arc(repository, tasks.clone());
 
     let listener = match source {
         DidCommSource::Managed => {
@@ -269,14 +260,6 @@ pub(crate) async fn start_one_did_listener(
             // handled identically (the same `handler` rehydrates each message).
             #[cfg(feature = "tsp")]
             if config.transport_flags.tsp {
-                let tasks = crate::trust_tasks::TaskHandler::new(
-                    dispatcher.clone(),
-                    profile_config.did.clone(),
-                    config.admin_config.admin_dids.clone(),
-                    verifier.clone(),
-                )
-                .with_admin_authorities(config.admin_config.admin_authorities.clone())
-                .with_dedup(dedup.clone());
                 return crate::messaging::service::start_managed_delivery(
                     profile_config,
                     config,
@@ -335,16 +318,7 @@ pub(crate) async fn start_one_did_listener(
             "[profile = {}] TSP frames multiplexed on the DIDComm socket",
             &listener.profile.inner.alias
         );
-        listener.with_tsp(
-            crate::trust_tasks::TaskHandler::new(
-                dispatcher.clone(),
-                profile_config.did.clone(),
-                config.admin_config.admin_dids.clone(),
-                verifier.clone(),
-            )
-            .with_admin_authorities(config.admin_config.admin_authorities.clone())
-            .with_dedup(dedup.clone()),
-        )
+        listener.with_tsp(tasks)
     } else {
         info!(
             "[profile = {}] TSP disabled (ENABLE_TSP is not 'true'); \
@@ -359,13 +333,10 @@ pub(crate) async fn start_one_did_listener(
 }
 
 /// starts DIDComm listener for the configured DID profile
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_didcomm_listener(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
-    dispatcher: crate::capabilities::DispatcherHandle,
-    dedup: Arc<dyn crate::dedup::MessageIdStore>,
-    verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    tasks: crate::trust_tasks::TaskHandler,
     source: DidCommSource,
     shutdown: CancellationToken,
 ) -> Result<Result<(), DIDCommError>, JoinError> {
@@ -376,9 +347,7 @@ pub(crate) async fn start_didcomm_listener(
         profile_config,
         config,
         repository,
-        dispatcher,
-        dedup,
-        verifier,
+        tasks,
         source,
         shutdown,
     ));

@@ -236,7 +236,7 @@ async fn signed_put(client: &TestUser, recipient: &str, authority: &str) -> Trus
     let signed = sign_trust_task(
         &serde_json::to_value(&doc).expect("serialise task"),
         signer,
-        SignOptions::new(),
+        SignOptions::new().with_proof_purpose("authentication"),
     )
     .await
     .expect("sign the put");

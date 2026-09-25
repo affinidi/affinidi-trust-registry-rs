@@ -1,6 +1,6 @@
 # Running the Test Client
 
-The test client demonstrates how to interact with the Trust Registry using DIDComm for administrative operations (create, read, update, delete, list trust records). Each operation is a `registry/record/*` Trust Task; writes are signed with the admin's verification key and are made under the admin's own DID as `authority_id`.
+The test client demonstrates how to interact with the Trust Registry using DIDComm for administrative operations (create, read, update, delete, list trust records). Each operation is a `registry/record/*` Trust Task; writes are signed with the admin's authentication key (`proofPurpose` `authentication`) and are made under the admin's own DID as `authority_id`.
 
 When the test-client is executed, it performs the following steps:
 
