@@ -19,13 +19,15 @@
 
 use std::sync::Arc;
 
-use affinidi_tdk::data_integrity::{DataIntegrityError, ResolvedKey, VerificationMethodResolver};
+use affinidi_tdk::data_integrity::{DataIntegrityError, ResolvedKey};
 use affinidi_tdk::did_common::Document;
 use affinidi_tdk::did_common::verification_method::VerificationRelationship;
 use affinidi_tdk::did_resolver::DIDCacheClient;
 use async_trait::async_trait;
 use serde_json::Value;
-use trust_tasks_proof::affinidi::{CachedDidResolver, Verifier};
+use trust_tasks_proof::affinidi::{
+    CachedDidResolver, ProofPurpose, ProofPurposeResolver, Verifier,
+};
 use trust_tasks_rs::{DynProofVerifier, RejectReason, TrustTask, erase_verifier};
 
 /// The only `proofPurpose` a registry write may carry (VTI-KEY-106).
@@ -46,37 +48,31 @@ pub fn is_authentication_method(doc: &Document, vm: &str) -> bool {
 }
 
 /// Resolves a proof's verification method only when the controlling DID
-/// document lists it under `authentication`, then hands it to
-/// [`CachedDidResolver`] for the key material.
+/// document lists it under `authentication`, whatever `proofPurpose` the proof
+/// declares, through [`CachedDidResolver`] (which also requires the method's
+/// controller to be the DID that names it).
 pub struct AuthenticationKeyResolver {
-    client: Arc<DIDCacheClient>,
     keys: CachedDidResolver,
 }
 
 impl AuthenticationKeyResolver {
     pub fn new(client: Arc<DIDCacheClient>) -> Self {
         Self {
-            keys: CachedDidResolver::new(client.clone()),
-            client,
+            keys: CachedDidResolver::new(client),
         }
     }
 }
 
 #[async_trait]
-impl VerificationMethodResolver for AuthenticationKeyResolver {
-    async fn resolve_vm(&self, vm: &str) -> Result<ResolvedKey, DataIntegrityError> {
-        let did = vm.split('#').next().unwrap_or(vm);
-        let resolved = self
-            .client
-            .resolve(did)
+impl ProofPurposeResolver for AuthenticationKeyResolver {
+    async fn resolve_vm_for_purpose(
+        &self,
+        vm: &str,
+        _purpose: ProofPurpose,
+    ) -> Result<ResolvedKey, DataIntegrityError> {
+        self.keys
+            .resolve_vm_for_purpose(vm, ProofPurpose::Authentication)
             .await
-            .map_err(|e| DataIntegrityError::Resolver(format!("resolve {did}: {e}")))?;
-        if !is_authentication_method(&resolved.doc, vm) {
-            return Err(DataIntegrityError::Resolver(format!(
-                "verificationMethod {vm} is not an authentication key of {did}"
-            )));
-        }
-        self.keys.resolve_vm(vm).await
     }
 }
 
