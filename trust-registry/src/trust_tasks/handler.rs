@@ -52,6 +52,7 @@ use crate::dedup::{
 };
 use crate::domain::{Action, AuthorityId, EntityId, Resource};
 use crate::trust_tasks::proof::{WRITE_PROOF_PURPOSE, requires_proof, verify_write_proof};
+use crate::trust_tasks::reply::ReplySigner;
 use crate::trust_tasks::{RegistryDispatcher, handle_document};
 
 /// How old a write's time of issue may be (VTI-OPS-024). The replay record's
@@ -177,6 +178,9 @@ pub struct TaskHandler {
     capabilities: Option<Arc<CapabilitySet>>,
     /// Receives an entry for every write, refusals included.
     audit: Option<Arc<dyn AuditLogger>>,
+    /// Signs every reply, errors included. A handler without one sends its
+    /// replies unsigned, which a requester that checks will not accept.
+    reply_signer: Option<ReplySigner>,
 }
 
 impl TaskHandler {
@@ -206,6 +210,7 @@ impl TaskHandler {
             )),
             capabilities: None,
             audit: None,
+            reply_signer: None,
         }
     }
 
@@ -241,6 +246,13 @@ impl TaskHandler {
     /// Attach the audit logger that records every write.
     pub fn with_audit(mut self, audit: Arc<dyn AuditLogger>) -> Self {
         self.audit = Some(audit);
+        self
+    }
+
+    /// Attach the operational key every reply is signed with. It must be a
+    /// key of this handler's own DID.
+    pub fn with_reply_signer(mut self, signer: ReplySigner) -> Self {
+        self.reply_signer = Some(signer);
         self
     }
 
@@ -507,8 +519,53 @@ impl TaskHandler {
     ///
     /// Returns the response document to send back, or the error document to
     /// send back. Both are conformant Trust Task documents; neither is a
-    /// transport-level failure.
+    /// transport-level failure. Both are issued by this registry and, with a
+    /// [`ReplySigner`], signed by it.
     pub async fn handle(
+        &self,
+        doc: TrustTask<Value>,
+        sender_did: Option<&str>,
+    ) -> Result<TrustTask<Value>, ErrorResponse> {
+        match self.handle_unsealed(doc, sender_did).await {
+            Ok(response) => Ok(self.seal_reply(response).await),
+            Err(error) => Err(self.seal_reply(error).await),
+        }
+    }
+
+    /// Make `reply` this registry's: issued by our own DID and signed with the
+    /// operational key.
+    ///
+    /// The issuer is set here rather than trusted from the reply builders,
+    /// which copy it from the request's `recipient` — a value the requester
+    /// chose, and not yet checked when an early refusal is built. A reply that
+    /// cannot be signed goes out unsigned and is logged: a requester that
+    /// checks proofs will not accept it, which is the safe failure.
+    ///
+    /// [`handle`](Self::handle) does this to everything it returns; a binding
+    /// calls it only for a reply it builds itself.
+    pub async fn seal_reply<P>(&self, mut reply: TrustTask<P>) -> TrustTask<P>
+    where
+        P: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        reply.issuer = Some(self.my_did.clone());
+        reply.proof = None;
+        let Some(signer) = &self.reply_signer else {
+            return reply;
+        };
+        match signer.sign(&reply).await {
+            Ok(signed) => signed,
+            Err(e) => {
+                tracing::error!(
+                    "could not sign the reply {} with {}: {e}",
+                    reply.id,
+                    signer.verification_method()
+                );
+                reply
+            }
+        }
+    }
+
+    async fn handle_unsealed(
         &self,
         doc: TrustTask<Value>,
         sender_did: Option<&str>,
@@ -1762,5 +1819,99 @@ mod tests {
             .expect("recognition query should reach the dispatcher");
         assert!(response.type_uri.is_response());
         assert!(f.audit.entries.lock().unwrap().is_empty());
+    }
+
+    /// A registry keyed by its own `did:key`, signing its replies with it.
+    fn signing_registry(admin_dids: Vec<String>) -> (TaskHandler, String) {
+        let (key, registry) = did_key(9);
+        let f = fixture(admin_dids);
+        let handler = TaskHandler::new(
+            f.capabilities.dispatcher(),
+            registry.clone(),
+            f.handler.admin_dids.clone(),
+            trust_tasks_rs::erase_verifier(trust_tasks_proof::affinidi::Verifier::for_did_key()),
+        )
+        .with_dedup(Arc::new(MemoryMessageIdStore::default()))
+        .with_capabilities(f.capabilities.clone())
+        .with_reply_signer(ReplySigner::new(key).expect("an Ed25519 key signs"));
+        (handler, registry)
+    }
+
+    /// `reply` verifies as `registry`'s own operational message.
+    async fn assert_signed_by<P: serde::Serialize>(reply: &TrustTask<P>, registry: &str) {
+        let reply: TrustTask<Value> =
+            serde_json::from_value(serde_json::to_value(reply).expect("serialise"))
+                .expect("reparse");
+        assert_eq!(reply.issuer.as_deref(), Some(registry));
+        let proof = reply.proof.as_ref().expect("the reply carries a proof");
+        assert_eq!(proof.proof_purpose, WRITE_PROOF_PURPOSE);
+        assert_eq!(
+            proof.verification_method.split('#').next(),
+            Some(registry),
+            "signed with the registry's key"
+        );
+        trust_tasks_rs::erase_verifier(trust_tasks_proof::affinidi::Verifier::for_did_key())
+            .verify_json(&reply)
+            .await
+            .expect("the reply's proof verifies");
+    }
+
+    #[tokio::test]
+    async fn a_success_reply_is_signed_by_the_registry() {
+        let (key, did) = did_key(1);
+        let (handler, registry) = signing_registry(vec![did.clone()]);
+        let mut doc = unsigned(RECORD_PUT, Some(&did), put_payload(&did));
+        doc["recipient"] = json!(registry);
+        let doc = signed(doc, &key).await;
+
+        let response = handler
+            .handle(doc, Some(&did))
+            .await
+            .expect("write accepted");
+
+        assert_eq!(response.recipient.as_deref(), Some(did.as_str()));
+        assert_signed_by(&response, &registry).await;
+    }
+
+    /// A rejection is signed as a success is: an unsigned one could be forged
+    /// by anyone who saw the request, and a requester could not tell it from
+    /// the registry's.
+    #[tokio::test]
+    async fn a_rejection_is_signed_by_the_registry() {
+        let (key, did) = did_key(1);
+        let (handler, registry) = signing_registry(Vec::new());
+        let mut doc = unsigned(RECORD_PUT, Some(&did), put_payload(&did));
+        doc["recipient"] = json!(registry);
+        let doc = signed(doc, &key).await;
+
+        let err = handler
+            .handle(doc, Some(&did))
+            .await
+            .expect_err("not on the admin list");
+
+        assert_eq!(code(&err), "permissionDenied");
+        assert_signed_by(&err, &registry).await;
+    }
+
+    /// An early refusal is built before the request's `recipient` is checked,
+    /// so the reply's issuer must not be copied from it.
+    #[tokio::test]
+    async fn a_refusal_names_the_registry_whatever_the_request_addressed() {
+        let (_, did) = did_key(1);
+        let (handler, registry) = signing_registry(Vec::new());
+        let mut doc = unsigned(
+            RECORD_PUT,
+            Some("did:example:someone-else"),
+            put_payload(&did),
+        );
+        doc["recipient"] = json!("did:example:not-the-registry");
+        let doc: TrustTask<Value> = serde_json::from_value(doc).expect("document");
+
+        let err = handler
+            .handle(doc, Some(&did))
+            .await
+            .expect_err("the in-band issuer is not the sender");
+
+        assert_signed_by(&err, &registry).await;
     }
 }

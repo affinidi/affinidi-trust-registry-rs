@@ -70,7 +70,7 @@ use crate::didcomm::listener::DidCommSource;
 use crate::health::RegistryHealth;
 use crate::http::application_routes;
 use crate::storage::repository::{TrustRecordAdminRepository, TrustRecordRepository};
-use crate::trust_tasks::TaskHandler;
+use crate::trust_tasks::{ReplySigner, TaskHandler};
 use crate::{SharedData, server::ServerHandle};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -196,13 +196,14 @@ impl TrustRegistry {
     /// callers it does not authenticate. Writes offered to it are refused and
     /// audited.
     pub fn query_task_handler(&self) -> TaskHandler {
-        TaskHandler::new(
+        let handler = TaskHandler::new(
             self.capabilities.query_dispatcher(),
             self.config.didcomm_config.profile_config.did.clone(),
             Vec::new(),
             self.verifier.clone(),
         )
-        .with_audit(self.audit.clone() as Arc<dyn AuditLogger>)
+        .with_audit(self.audit.clone() as Arc<dyn AuditLogger>);
+        with_reply_signer(handler, &self.config)
     }
 
     /// The live admin dispatcher handle.
@@ -308,7 +309,7 @@ fn write_task_handler(
     audit: &Arc<BoundedAuditLogger>,
 ) -> TaskHandler {
     let admin_config = &config.didcomm_config.admin_config;
-    TaskHandler::new(
+    let handler = TaskHandler::new(
         capabilities.dispatcher(),
         config.didcomm_config.profile_config.did.clone(),
         admin_config.admin_dids.clone(),
@@ -317,7 +318,17 @@ fn write_task_handler(
     .with_admin_authorities(admin_config.admin_authorities.clone())
     .with_dedup(dedup.clone())
     .with_capabilities(capabilities.clone())
-    .with_audit(audit.clone() as Arc<dyn AuditLogger>)
+    .with_audit(audit.clone() as Arc<dyn AuditLogger>);
+    with_reply_signer(handler, config)
+}
+
+/// `handler`, signing its replies with the registry's operational key when the
+/// config carries one.
+pub(crate) fn with_reply_signer(handler: TaskHandler, config: &TrustRegistryConfig) -> TaskHandler {
+    match ReplySigner::for_config(config) {
+        Some(signer) => handler.with_reply_signer(signer),
+        None => handler,
+    }
 }
 
 impl RegistryParts {
@@ -449,6 +460,13 @@ impl TrustRegistryBuilder {
     /// already-enabled capability is live before the first request. Binds no
     /// socket and starts no listener.
     pub async fn build(self) -> Result<TrustRegistry, BoxError> {
+        if ReplySigner::for_config(&self.config).is_none() {
+            warn!(
+                "the registry profile carries no signing key for {}: replies will go out \
+                 unsigned, and a requester that checks proofs will not accept them",
+                self.config.didcomm_config.profile_config.did
+            );
+        }
         let repository = self.repository.ok_or_else(|| {
             BoxError::from(
                 "TrustRegistryBuilder needs a repository: call `.repository(...)`, or build one \

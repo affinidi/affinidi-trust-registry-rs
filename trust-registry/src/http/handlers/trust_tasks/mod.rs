@@ -27,6 +27,7 @@ use trust_tasks_rs::{ErrorResponse, RejectReason, TransportHandler, TrustTask};
 use uuid::Uuid;
 
 use crate::SharedData;
+use crate::embed::with_reply_signer;
 use crate::storage::repository::TrustRecordRepository;
 use crate::trust_tasks::TaskHandler;
 
@@ -66,24 +67,29 @@ where
         }
     };
 
-    // HTTP transport: anonymous caller (no bearer auth wired yet), our VID local.
-    let transport = HttpsHandler::new(Some(my_vid.clone()), None);
-    if let Err(consistency) = transport.resolve_parties(&doc) {
-        return error_response(doc.reject_with(new_id(), RejectReason::from(consistency)));
-    }
-
     // The read-only query dispatcher, and no dedup store: there is no mutation
     // to replay, and keying read answers by message id would change their
     // semantics. `sender_did: None` says the caller is unauthenticated, so the
     // shared handler denies any write outright — the surface stays read-only
     // even if it is ever pointed at a dispatcher that does register writes.
-    let tasks = TaskHandler::new(
-        state.query_dispatcher.clone(),
-        my_vid,
-        Vec::new(),
-        state.verifier.clone(),
-    )
-    .with_audit(state.audit.clone());
+    let tasks = with_reply_signer(
+        TaskHandler::new(
+            state.query_dispatcher.clone(),
+            my_vid.clone(),
+            Vec::new(),
+            state.verifier.clone(),
+        )
+        .with_audit(state.audit.clone()),
+        &state.config,
+    );
+
+    // HTTP transport: anonymous caller (no bearer auth wired yet), our VID local.
+    let transport = HttpsHandler::new(Some(my_vid), None);
+    if let Err(consistency) = transport.resolve_parties(&doc) {
+        let rejection = doc.reject_with(new_id(), RejectReason::from(consistency));
+        return error_response(tasks.seal_reply(rejection).await);
+    }
+
     match tasks.handle(doc, None).await {
         Ok(response) => {
             let body = serde_json::to_value(&response).unwrap_or_else(|_| serde_json::json!({}));

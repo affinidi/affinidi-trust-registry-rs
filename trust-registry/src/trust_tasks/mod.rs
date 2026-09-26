@@ -12,11 +12,13 @@
 pub mod handler;
 pub mod payloads;
 pub mod proof;
+pub mod reply;
 pub mod router;
 
 pub use handler::TaskHandler;
 pub use payloads::type_uris;
 pub use proof::{build_verifier, verify_write_proof};
+pub use reply::ReplySigner;
 pub use router::{
     RegistryDispatcher, TaskFuture, TaskOutcome, build_dispatcher, build_query_dispatcher,
     handle_document,
