@@ -14,6 +14,8 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ## [Unreleased]
 
+## [0.20.0] – 2026‑09‑26
+
 ### Removed (breaking)
 
 - **The `tr-admin/1.0` DIDComm protocol is no longer served.** `create-record`,
@@ -25,6 +27,22 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ### Changed (breaking)
 
+- **Onto the trust-tasks 0.23 stack:** `trust-tasks-*` 0.22.7 → 0.23.0,
+  `affinidi-tdk` 0.17 → 0.18.0, `affinidi-messaging-sdk` 0.27.2 → 0.28.1,
+  `vta-sdk` 0.52 → 0.53.0, `vti-secrets` 0.4.4 → 0.4.5 (`vti-common` 0.25.0 →
+  0.26.0), `affinidi-messaging-delivery` 0.1.18 → 0.1.19,
+  `affinidi-messaging-core` 0.1.10 → 0.1.11, and the
+  `affinidi-messaging-test-mediator` dev-dependency 0.10.2 → 0.11.1 (mediator
+  0.30.2). The graph keeps one copy of each. `trql-client`'s public API
+  carries `trust-tasks-rs` types, so its consumers must move to trust-tasks
+  0.23 with it.
+- **`AuthenticationKeyResolver` is a `ProofPurposeResolver`.** trust-tasks-proof
+  0.23 checks every proof's verification method against its `proofPurpose`,
+  and `Verifier::with_resolver` now takes a `ProofPurposeResolver` instead of
+  a `VerificationMethodResolver`. The resolver still accepts only a key the
+  signer lists under `authentication`, now through `CachedDidResolver`, which
+  also requires the method's controller to be the DID that names it. Replies
+  and writes keep signing with `authentication`.
 - **Record writes are bound to the writer's authority.** `registry/record/put`
   and `registry/record/delete` are refused (`permissionDenied`) unless the
   record's `authority_id` is the issuer's own DID, or an authority listed for
