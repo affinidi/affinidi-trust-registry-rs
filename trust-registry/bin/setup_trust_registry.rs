@@ -18,6 +18,7 @@ use serde_json::json;
 use std::str::FromStr;
 use trust_registry::didcomm::did_document::{
     DIDCOMM_SERVICE_FRAGMENT, DIDCOMM_SERVICE_TYPE, REST_SERVICE_FRAGMENT, REST_SERVICE_TYPE,
+    TRQP_PROFILE_URI, TRUST_REGISTRY_SERVICE_FRAGMENT, TRUST_REGISTRY_SERVICE_TYPE,
     TSP_SERVICE_FRAGMENT, TSP_SERVICE_TYPE, validate_public_url,
 };
 use url::Url;
@@ -386,7 +387,7 @@ pub async fn setup_did_web_tr(
         );
     }
 
-    // Advertise the Trust Tasks HTTPS binding when REST is enabled *and* the operator
+    // Advertise the REST/TRQP surface when REST is enabled *and* the operator
     // has told us where the registry is externally reachable. Absent URL => no
     // entry: never claim a transport a peer cannot reach.
     if transport_flags.rest {
@@ -405,6 +406,27 @@ pub async fn setup_did_web_tr(
                             &[tr_did.to_string(), REST_SERVICE_FRAGMENT.to_string()].concat(),
                         )?)
                         .build(),
+                );
+
+                // The same surface under the ToIP profile's type. Kept in step
+                // with `build_services` deliberately: two builders emitting
+                // different documents for one registry is the drift
+                // `TransportFlags` exists to prevent, and a consumer that finds
+                // `TrustRegistry` from one and not the other would conclude the
+                // registry's capabilities changed when only its bootstrap did.
+                did_document.service.push(
+                    ServiceBuilder::new(
+                        TRUST_REGISTRY_SERVICE_TYPE,
+                        Endpoint::Map(json!({ "uri": url, "profile": TRQP_PROFILE_URI })),
+                    )
+                    .id_url(Url::parse(
+                        &[
+                            tr_did.to_string(),
+                            TRUST_REGISTRY_SERVICE_FRAGMENT.to_string(),
+                        ]
+                        .concat(),
+                    )?)
+                    .build(),
                 );
             }
             None => println!(

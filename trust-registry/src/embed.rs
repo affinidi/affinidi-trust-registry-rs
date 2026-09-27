@@ -112,9 +112,9 @@ impl TrustRegistry {
 
     /// The registry's HTTP surface, ready to mount.
     ///
-    /// Carries the Trust Tasks HTTPS binding (`POST /trust-tasks`, which
-    /// answers the `registry/recognition` and `registry/authorization` queries)
-    /// and `/.well-known/did.json`, relative to wherever the host nests it.
+    /// Carries the TRQP endpoints (`POST /recognition`, `POST /authorization`),
+    /// the Trust Tasks HTTPS binding (`POST /trust-tasks`) and
+    /// `/.well-known/did.json`, relative to wherever the host nests it.
     ///
     /// Deliberately **not** included, because both belong to the host and
     /// applying our own would silently override or conflict with theirs:
@@ -697,9 +697,10 @@ mod tests {
 
     /// The registry's routes must work under whatever prefix the host picks.
     ///
-    /// Asserts a **200** carrying `recognized: true`, not merely "not 404":
-    /// seeding the record the query asks for is what makes the assertion about
-    /// routing through to the store rather than about any answer at all.
+    /// Asserts a **200**, not merely "not 404": the TRQP recognition handler
+    /// answers a missing record with 404 too, so an unmounted route and an
+    /// empty store are indistinguishable. Seeding the record the query asks for
+    /// is what makes the assertion about routing.
     #[tokio::test]
     async fn router_mounts_under_a_host_prefix() {
         use crate::domain::*;
@@ -737,18 +738,14 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/registry/trust-tasks")
+                    .uri("/registry/recognition")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "id": "urn:uuid:embed-router-test",
-                            "type": crate::trust_tasks::type_uris::RECOGNITION,
-                            "payload": {
-                                "entity_id": "did:example:entity",
-                                "authority_id": "did:example:authority",
-                                "action": "issue",
-                                "resource": "vc",
-                            },
+                            "entity_id": "did:example:entity",
+                            "authority_id": "did:example:authority",
+                            "action": "issue",
+                            "resource": "vc",
                         })
                         .to_string(),
                     ))
@@ -760,12 +757,7 @@ mod tests {
         assert_eq!(
             response.status(),
             StatusCode::OK,
-            "the Trust Tasks route should answer at the host's chosen prefix"
+            "recognition route should answer at the host's chosen prefix"
         );
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let reply: serde_json::Value = serde_json::from_slice(&body).expect("json reply");
-        assert_eq!(reply["payload"]["recognized"], serde_json::json!(true));
     }
 }

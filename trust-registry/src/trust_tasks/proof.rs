@@ -97,7 +97,7 @@ pub fn is_write_slug(slug: &str) -> bool {
 /// Slugs a caller may only use with a proof bound to its sender, under the
 /// same rules as a write: the writes, plus `registry/record/query`, whose
 /// answers carry whole records (context included) rather than the yes/no of
-/// the public `registry/recognition` and `registry/authorization` queries.
+/// the public TRQP queries.
 pub fn requires_proof(slug: &str) -> bool {
     is_write_slug(slug) || slug == "registry/record/query"
 }

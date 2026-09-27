@@ -293,7 +293,7 @@ impl Configs for DidcommConfig {
         };
         let profile_config = parse_profile_from_secrets_str(&profile_configs_str)?;
 
-        // Externally reachable base URL for the Trust Tasks HTTPS binding. Absent =>
+        // Externally reachable base URL for the REST/TRQP surface. Absent =>
         // no `TRQPRest` service entry, so the registry never advertises a
         // transport a peer cannot reach. LISTEN_ADDRESS is deliberately not a
         // fallback: it is a bind address, frequently `0.0.0.0`.

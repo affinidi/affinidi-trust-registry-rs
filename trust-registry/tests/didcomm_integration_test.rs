@@ -12,7 +12,13 @@ use serial_test::serial;
 use sha256::digest;
 use std::{env, sync::Arc, time::Duration};
 use tokio::sync::OnceCell;
-use trust_registry::{didcomm::prepare_atm_and_profile, trust_tasks::type_uris};
+use trust_registry::{
+    didcomm::{
+        handlers::trqp::{QUERY_RECOGNITION_MESSAGE_TYPE, QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE},
+        prepare_atm_and_profile,
+    },
+    trust_tasks::type_uris,
+};
 use trust_tasks_didcomm::ENVELOPE_TYPE;
 use trust_tasks_proof::affinidi::{CryptoSuite, SignOptions, sign_trust_task};
 use trust_tasks_rs::TrustTask;
@@ -31,8 +37,6 @@ pub const OTHER_AUTHORITY: &str = "did:example:another-community";
 
 const TR_ADMIN_CREATE_RECORD: &str =
     "https://affinidi.com/didcomm/protocols/tr-admin/1.0/create-record";
-const TRQP_QUERY_RECOGNITION: &str =
-    "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition";
 
 const INITIAL_FETCH_LIMIT: usize = 100;
 const REPLY_ATTEMPTS: u64 = 6;
@@ -477,73 +481,9 @@ async fn test_tr_admin_create_record_is_not_served() {
     assert!(!reply.type_uri.is_response(), "nothing was stored");
 }
 
-/// `registry/recognition` over DIDComm answers from the store and echoes the
-/// tuple it was asked about. Queries need no proof.
 #[tokio::test]
 #[serial]
-async fn test_registry_recognition_over_didcomm() {
-    let (context, config) = get_test_context().await;
-
-    put(&context, &config, "recognition", &config.client_did, true).await;
-
-    let doc = trust_task(
-        &config,
-        type_uris::RECOGNITION,
-        record_key("recognition", &config.client_did),
-        false,
-    )
-    .await;
-    let reply = round_trip(&context, &config, &doc).await;
-
-    assert!(
-        reply.type_uri.is_response(),
-        "recognition refused: {reply:?}"
-    );
-    assert_eq!(reply.type_uri.slug(), "registry/recognition");
-    let payload = &reply.payload;
-    assert_eq!(payload["entity_id"], format!("{ENTITY_ID}_recognition"));
-    assert_eq!(payload["authority_id"], config.client_did);
-    assert_eq!(payload["action"], format!("{ACTION}_recognition"));
-    assert_eq!(payload["resource"], format!("{RESOURCE}_recognition"));
-    assert_eq!(payload["recognized"].as_bool(), Some(true));
-    assert!(payload["time_evaluated"].as_str().is_some());
-}
-
-/// `registry/authorization` over DIDComm answers from the store and echoes the
-/// tuple it was asked about.
-#[tokio::test]
-#[serial]
-async fn test_registry_authorization_over_didcomm() {
-    let (context, config) = get_test_context().await;
-
-    put(&context, &config, "authorization", &config.client_did, true).await;
-
-    let doc = trust_task(
-        &config,
-        type_uris::AUTHORIZATION,
-        record_key("authorization", &config.client_did),
-        false,
-    )
-    .await;
-    let reply = round_trip(&context, &config, &doc).await;
-
-    assert!(
-        reply.type_uri.is_response(),
-        "authorization refused: {reply:?}"
-    );
-    assert_eq!(reply.type_uri.slug(), "registry/authorization");
-    let payload = &reply.payload;
-    assert_eq!(payload["entity_id"], format!("{ENTITY_ID}_authorization"));
-    assert_eq!(payload["authority_id"], config.client_did);
-    assert_eq!(payload["authorized"].as_bool(), Some(true));
-    assert!(payload["time_evaluated"].as_str().is_some());
-}
-
-/// The bespoke `trqp/1.0` query protocol is no longer served: a query gets no
-/// answer.
-#[tokio::test]
-#[serial]
-async fn test_trqp_1_0_query_is_not_served() {
+async fn test_trqp_handler() {
     let (context, config) = get_test_context().await;
 
     put(&context, &config, "trqp", &config.client_did, true).await;
@@ -553,18 +493,44 @@ async fn test_trqp_1_0_query_is_not_served() {
         context.profile.clone(),
         &config.trust_registry_did,
         &record_key("trqp", &config.client_did),
-        TRQP_QUERY_RECOGNITION,
+        QUERY_RECOGNITION_MESSAGE_TYPE,
         None,
     )
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_secs(config.message_wait_duration_secs)).await;
 
-    let answered = fetch_reply(&context.atm, &context.profile, |message| {
-        message.typ.starts_with(TRQP_QUERY_RECOGNITION)
+    let response_body = fetch_reply(&context.atm, &context.profile, |message| {
+        message.typ == QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE
     })
-    .await;
-    assert!(answered.is_none(), "trqp/1.0 answered: {answered:?}");
+    .await
+    .expect("recognition response");
+
+    let expected_entity_id = format!("{ENTITY_ID}_trqp");
+    assert_eq!(response_body["entity_id"], expected_entity_id);
+    assert_eq!(response_body["authority_id"], config.client_did);
+    assert_eq!(response_body["action"], format!("{ACTION}_trqp"));
+    assert_eq!(response_body["resource"], format!("{RESOURCE}_trqp"));
+    assert_eq!(response_body["recognized"].as_bool(), Some(true));
+    // Per TRQP spec, recognition queries should not include the 'authorized' field
+    assert_eq!(response_body["authorized"].as_bool(), None);
+
+    // Verify response metadata fields (FTL-25196)
+    assert!(
+        response_body["time_requested"].as_str().is_some(),
+        "time_requested should be present"
+    );
+    assert!(
+        response_body["time_evaluated"].as_str().is_some(),
+        "time_evaluated should be present"
+    );
+    let message = response_body["message"]
+        .as_str()
+        .expect("message should be present");
+    assert!(
+        message.contains(&expected_entity_id) && message.contains(&config.client_did),
+        "message should contain entity_id and authority_id"
+    );
 }
 
 async fn send_message(

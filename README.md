@@ -2,7 +2,7 @@
 
 [![License: Apache](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-A high-performance, Rust-based implementation of a Trust Registry that answers [Trust Registry Query Protocol (TRQP) v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/) recognition and authorization queries as [Trust Tasks](https://trusttasks.org), over TSP, DIDComm or HTTPS. Built for scalability and reliability, it enables secure, standards-based verification of trusted entities within decentralised identity ecosystems.
+A high-performance, Rust-based implementation of a Trust Registry, fully compliant with the [Trust Registry Query Protocol (TRQP) v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/) specification. Built for scalability and reliability, it enables secure, standards-based verification of trusted entities within decentralised identity ecosystems.
 
 ## Table of Contents
 
@@ -70,18 +70,14 @@ The Trust Registry will start on `http://localhost:3232` using CSV file storage 
 3. Test your Trust Registry setup.
 
 ```bash
-# Query authorization: a registry/authorization Trust Task over HTTPS
-curl --location 'http://localhost:3232/trust-tasks' \
+# Query authorization
+curl --location 'http://localhost:3232/authorization' \
 --header 'Content-Type: application/json' \
 --data '{
-    "id": "urn:uuid:5b1d8f0e-6c1a-4a8e-9f3e-2d7c1b0a9e11",
-    "type": "https://trusttasks.org/spec/registry/authorization/0.1",
-    "payload": {
-        "authority_id": "did:example:authority1",
-        "entity_id": "did:example:entity1",
-        "action": "action1",
-        "resource": "resource1"
-    }
+    "authority_id": "did:example:authority1",
+    "entity_id": "did:example:entity1",
+    "action": "action1",
+    "resource": "resource1"
 }'
 ```
 
@@ -127,7 +123,7 @@ This ensures **security**, **compliance**, and **interoperability** across decen
 
 ## Key Components
 
-- **`trust-registry`**: Unified server whose only remote API is the `registry/*` [Trust Task](https://trusttasks.org) family: the `registry/recognition` and `registry/authorization` queries and the signed record-management tasks, served over TSP, DIDComm and HTTPS (`POST /trust-tasks`, queries only).
+- **`trust-registry`**: Unified server providing both RESTful API (TRQP endpoints for recognition and authorisation queries) and optional DIDComm messaging interface for CRUD admin operations.
 
 - **Storage backends**: Stores authoritative records about the entities for querying. It supports the following storage types:
   - CSV file storage
@@ -418,47 +414,41 @@ redis-cli FLUSHDB
 
 ## Test the API
 
-You can test the Trust Registry by querying the sample data stored in `./sample-data/data.csv`. Queries are Trust Tasks: over HTTPS, `POST` the Trust Task document to `/trust-tasks`. The same document, carried in the DIDComm or TSP binding envelope, is answered identically over those transports; see [DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#trust-task-queries).
+You can test the Trust Registry by querying the sample data stored in `./sample-data/data.csv`:
 
 ### Recognition Query
 
 ```bash
-curl --location 'http://localhost:3232/trust-tasks' \
+curl --location 'http://localhost:3232/recognition' \
 --header 'Content-Type: application/json' \
 --data '{
-    "id": "urn:uuid:0e4b6c1d-8a2f-4f7e-b3d9-6a1c2e5f7b20",
-    "type": "https://trusttasks.org/spec/registry/recognition/0.1",
-    "payload": {
-        "authority_id": "did:example:authority1",
-        "entity_id": "did:example:entity1",
-        "action": "action1",
-        "resource": "resource1"
-    }
+    "authority_id": "did:example:authority1",
+    "entity_id": "did:example:entity1",
+    "action": "action1",
+    "resource": "resource1"
 }'
 ```
 
-The reply is a `registry/recognition/0.1#response` Trust Task whose payload echoes the four identifiers and carries `recognized`: `true` or `false`. A tuple with no record answers `recognized: false`; absence is a denial, not an error.
+The API will return whether the specified entity is recognised by the given authority for the requested action and resource.
+
+To query Trust Registry using DIDComm, refer to the [Trust Registry Recognition Query](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/DIDCOMM_PROTOCOLS.md#query-recognition) protocol.
 
 ### Authorization Query
 
 ```bash
-curl --location 'http://localhost:3232/trust-tasks' \
+curl --location 'http://localhost:3232/authorization' \
 --header 'Content-Type: application/json' \
 --data '{
-    "id": "urn:uuid:7c9e2a4b-1d3f-4e6a-8b5c-0f2d4a6c8e31",
-    "type": "https://trusttasks.org/spec/registry/authorization/0.1",
-    "payload": {
-        "authority_id": "did:example:authority1",
-        "entity_id": "did:example:entity1",
-        "action": "action1",
-        "resource": "resource1"
-    }
+    "authority_id": "did:example:authority1",
+    "entity_id": "did:example:entity1",
+    "action": "action1",
+    "resource": "resource1"
 }'
 ```
 
-The reply is a `registry/authorization/0.1#response` Trust Task carrying `authorized`: `true` or `false`.
+The API will return whether the specified entity is authorised under the given authority for the requested action and resource.
 
-From Rust, [`trql-client`](trql-client) builds these documents, picks the transport the registry's DID document advertises (TSP > DIDComm > HTTPS) and validates the reply.
+To query Trust Registry using DIDComm, refer to the [Trust Registry Authorization Query](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/DIDCOMM_PROTOCOLS.md#query-authorization) protocol.
 
 **Testing Tips:**
 
@@ -508,7 +498,7 @@ let registry = TrustRegistry::builder(TrustRegistryConfig::embedded("/srv/app/re
 let app = host_router.nest("/registry", registry.router());
 ```
 
-`router()` carries the Trust Tasks HTTPS binding (`POST /trust-tasks`) and
+`router()` carries the TRQP endpoints, the Trust Tasks HTTPS binding and
 `/.well-known/did.json`. It deliberately ships **no CORS layer and no
 `/health`** — both belong to the host, and applying ours would override or
 collide with theirs. Use `registry.health()` to fold the registry's health into
@@ -599,7 +589,7 @@ Beyond the core REST/DIDComm server, the Trust Registry ships a set of **optiona
 feature-gated** capabilities that let Verifiable Trust Communities (VTC/OpenVTC)
 and verifiers interact with it as a first-class [Trust Tasks](https://trusttasks.org)
 participant, and let it delegate its own identity and secret custody. All of these
-are **off by default** — the default build is the HTTPS + DIDComm server described
+are **off by default** — the default build is the REST + DIDComm server described
 above.
 
 ### Cargo feature flags
@@ -636,8 +626,8 @@ cargo run --bin trust-registry --features "vta,tsp,secrets-aws"
 
 Each Trust Registry operation is a versioned Trust Task in the `registry/*` family.
 The **same** typed payloads are served over every transport (DIDComm always-on;
-TSP behind the `tsp` feature; HTTPS for the two queries), so a VTC can talk to
-the registry with one message shape regardless of carrier.
+HTTP; TSP behind the `tsp` feature), so a VTC can talk to the registry with one
+message shape regardless of carrier.
 
 | Trust Task (`slug`)                                   | Kind  | Auth                          |
 | ----------------------------------------------------- | ----- | ----------------------------- |
@@ -669,7 +659,7 @@ its own authorises nothing.
 `registry/record/query` returns whole records, `context` included, so it is
 held to the same rules and answered only for an admin, under an
 `authority_id` the query names. The public surface is the TRQP recognition and
-authorization queries, `registry/recognition` and `registry/authorization`.
+authorization queries.
 
 Every write and record query, accepted or refused, is recorded in the audit log
 (`AUDIT_LOG_FORMAT`, JSON by default): the operation and task type, the proven
@@ -690,13 +680,12 @@ refused on its time of issue. Record queries have a separate, smaller record,
 so queries cannot use up the capacity writes need. Both are held in memory, so
 replicas of one registry do not share them.
 
-Trust Tasks are the registry's only remote API. The raw TRQP REST routes
-(`POST /recognition`, `POST /authorization`) and the bespoke DIDComm
-`trqp/1.0` and `tr-admin/1.0` protocols are no longer served; see
-[DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#removed-protocols) for the mapping
-onto these tasks. The query payloads use the
-[TRQP v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/)
-recognition/authorization field names verbatim.
+The legacy `tr-admin/1.0` DIDComm protocol is no longer served; see
+[DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#removed-tr-admin10) for the
+mapping onto these tasks. The reads map
+verbatim onto the [TRQP v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/)
+recognition/authorization field names, so the plain HTTP TRQP endpoints and the
+Trust Task payloads share a single schema.
 
 `registry/record/put` is create-or-replace at the record's four-part key (the
 optional `expectedExisting` assertion recovers strict create-only / update-only
@@ -866,8 +855,8 @@ See the list of environment variables and their usage.
 | `ADMIN_AUTHORITIES`     | JSON object mapping an admin DID to the authority DIDs it may write records under **in addition to its own DID**, e.g. `{"did:web:ops.example": ["did:web:a.example", "did:web:b.example"]}`. Every key must be in `ADMIN_DIDS`; a malformed value stops startup. Unset ⇒ each admin writes only under its own DID. | No                                           |
 | `PROFILE_CONFIG`        | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. **_Sensitive information, do not share._** | Required when DIDComm is enabled             |
 | `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enabled. ExplicitDeny - public mode, ExplicitAllow - private mode                                                                                                          | default: `ExplicitDeny`                             |
-| `TR_PUBLIC_URL`         | Externally reachable base URL of the Trust Tasks HTTPS binding (e.g. `https://registry.example.org`; clients `POST <url>/trust-tasks`). When set, the generated DID document advertises a `TRQPRest` service entry so peers can discover the HTTPS endpoint by resolving the registry's DID. Must be `https://` (loopback `http://` allowed for local dev). Unset ⇒ REST is still served, but not advertised. | No                                           |
-| `ENABLE_REST`           | Serve the Trust Tasks HTTPS binding and advertise `TRQPRest` (needs `TR_PUBLIC_URL` to be advertised).                                                                                                 | default: `true`                              |
+| `TR_PUBLIC_URL`         | Externally reachable base URL of the REST/TRQP surface (e.g. `https://registry.example.org`). When set, the generated DID document advertises a `TRQPRest` service entry so peers can discover the REST endpoint by resolving the registry's DID. Must be `https://` (loopback `http://` allowed for local dev). Unset ⇒ REST is still served, but not advertised. | No                                           |
+| `ENABLE_REST`           | Serve TRQP over REST and advertise `TRQPRest` (needs `TR_PUBLIC_URL` to be advertised).                                                                                                    | default: `true`                              |
 | `ENABLE_DIDCOMM`        | Run the DIDComm listener and advertise `DIDCommMessaging`.                                                                                                                                | default: `true`                              |
 | `ENABLE_TSP`            | Route multiplexed TSP frames and advertise `TSPTransport`. Requires `ENABLE_DIDCOMM=true` and a binary built with `--features tsp`.                                                        | default: `false`                             |
 

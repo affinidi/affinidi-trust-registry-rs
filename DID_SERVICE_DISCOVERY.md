@@ -15,7 +15,7 @@ Three sources, and only one of the three service types we need is standardised.
 | `DIDCommMessaging` | Registered in [W3C DID Extensions](https://www.w3.org/TR/did-extensions-properties/#service-types). Use as-is. |
 | `TSPTransport` | No spec. OpenWallet-Foundation-Labs reference-implementation convention; the ToIP TSP spec names no DID-document service type. |
 | `TrustRegistry` | [ToIP Service Profile spec](https://github.com/trustoverip/tswg-trust-registry-service-profile/blob/main/spec.md), **Pre-Draft 0.0.1**, self-described as "not binding". Written by the Trust Registry Task Force for exactly this problem. |
-| `TRQPRest` | Local to this workspace. No external cover. Its endpoint is the base URL of the Trust Tasks HTTPS binding (`POST <url>/trust-tasks`), not the ToIP TRQP REST binding. |
+| `TRQPRest` | Local to this workspace. No external cover. |
 
 [CID 1.0 §Services](https://www.w3.org/TR/cid-1.0/#services) governs the
 container: `type` is required and may be a string **or a set of strings**;
@@ -50,13 +50,6 @@ for the upstream fix that would remove the divergence.
 
 Advertises what this process actually serves. One entry per transport.
 
-Every query is a Trust Task (`registry/recognition/0.1`,
-`registry/authorization/0.1`), on every transport. The registry serves no raw
-TRQP REST routes (`POST /recognition`, `POST /authorization`), so it does **not**
-advertise a `TrustRegistry` entry with the ToIP TRQP profile in its own
-document: a consumer following that profile would post to routes that are not
-there. `TrustRegistry` survives only as the referral a VTC publishes (§3).
-
 ```json
 {
   "@context": [
@@ -71,6 +64,14 @@ there. `TrustRegistry` survives only as the referral a VTC publishes (§3).
       "id": "did:webvh:QmRegistryScid:registry.example#rest",
       "type": "TRQPRest",
       "serviceEndpoint": "https://registry.example"
+    },
+    {
+      "id": "did:webvh:QmRegistryScid:registry.example#trust-registry",
+      "type": "TrustRegistry",
+      "serviceEndpoint": {
+        "uri": "https://registry.example",
+        "profile": "https://trustoverip.org/profiles/trqp/v2"
+      }
     },
     {
       "id": "did:webvh:QmRegistryScid:registry.example#didcomm",
@@ -92,8 +93,13 @@ there. `TrustRegistry` survives only as the referral a VTC publishes (§3).
 
 Notes:
 
-- **`#rest`** is the Trust Tasks HTTPS binding. It keeps its string `type` and
-  string endpoint, unchanged for every deployed consumer.
+- **`#rest` and `#trust-registry`** are one surface under two type names —
+  `TRQPRest` for this workspace, `TrustRegistry` for anyone following ToIP.
+  §6 proposed folding both onto `#rest` via the set form CID 1.0 permits; the
+  zero-breakage path was taken instead, for the reason §6 gives. `#rest` keeps
+  its string `type` and string endpoint, unchanged for every deployed consumer.
+  `integrity` is omitted deliberately — an unverified multihash is worse than
+  none; add it only when the client actually pins and checks it.
 - **`#didcomm` / `#tsp`** endpoints are the **mediator DID**, not a URL. The
   transport address lives in the mediator's own document, so consumers resolve
   a second hop. This is existing behaviour, unchanged.
@@ -145,9 +151,9 @@ Multiple registries get multiple entries with distinct fragments
 
 ## 4. Client resolution rules
 
-`TrustRegistry` is a referral in a VTC's document. This registry no longer
-publishes one in its own document, but another registry might, so the client
-still disambiguates before parsing capabilities.
+`TrustRegistry` means two different things depending on whose document it is
+in: an endpoint in the registry's own document, a referral in a VTC's. The
+client must disambiguate before parsing capabilities.
 
 1. Resolve the starting DID.
 2. For each `TrustRegistry` entry: if `serviceEndpoint.uri` starts with `did:`
@@ -176,16 +182,16 @@ endpoints always carry `DIDCommMessaging` or `TSPTransport`, never
 
 **Done — `trust-registry/src/didcomm/did_document.rs`**
 
-`build_services` emits `#rest` (gated on `flags.rest` and a public URL),
-`#didcomm` and `#tsp`, and no `TrustRegistry` entry: the ToIP TRQP profile names
-REST routes this registry no longer serves. An earlier release emitted a
-`#trust-registry` profile entry beside `#rest`; it went with the raw TRQP REST
-routes.
+`build_services` emits a `#trust-registry` entry beside `#rest`: same URL,
+`TrustRegistry` type, `{uri, profile}` struct endpoint, `TRQP_PROFILE_URI`
+const. `#rest` is untouched — see §6 for why folding the two together was
+rejected. Both entries are gated on the same `flags.rest`, so the pair cannot
+advertise a transport the process does not serve.
 
-`bin/setup_trust_registry.rs` emits the same set. Keeping the two builders in
-step is the whole reason `TransportFlags` exists; a registry whose bootstrap
-document and runtime document disagree is the drift this repo has already been
-bitten by once.
+`bin/setup_trust_registry.rs` emits the identical entry via `Endpoint::Map`.
+Keeping the two builders in step is the whole reason `TransportFlags` exists;
+a registry whose bootstrap document and runtime document disagree is the drift
+this repo has already been bitten by once.
 
 **Done — `trql-client/src/discovery.rs`**
 
@@ -236,10 +242,23 @@ closed.
 
 ## 6. Compatibility: why `#rest` was left alone
 
-`#rest` keeps its string `type` and string endpoint. A consumer doing
-`s["type"] == "TRQPRest"` or reading `serviceEndpoint` as a string would read a
-reshaped entry as **no REST advertised at all**: a silent capability loss, not a
+The original proposal changed `#rest` on both axes at once — string `type` →
+array, string `serviceEndpoint` → struct. A consumer doing
+`s["type"] == "TRQPRest"` or reading `serviceEndpoint` as a string would read
+the result as **no REST advertised at all**: a silent capability loss, not a
 parse error. That is the R3.4/R3.6 two-sided-contract case from `CLAUDE.md`.
+
+The audit that would have justified it came back incomplete. `trql-client` and
+`vta-sdk` both handle set-valued `type` and struct endpoints, and
+`vta-service` emits its own `VTARest` rather than consuming ours — but
+`vtc-service` could not be located to audit, and it is named in R3.4's own
+worked example as the consumer that broke last time.
+
+So the additive path: same URL under two types, on two entries. CID forbids
+duplicate service `id`s, not duplicate endpoints, and the first-entry-of-a-type
+rule reaches the same place either way. Nothing that works today can regress,
+and the in-place change stays available once `vtc-service` is audited — though
+with both entries served there is little left to gain from it.
 
 ## 7. Upstream actions
 

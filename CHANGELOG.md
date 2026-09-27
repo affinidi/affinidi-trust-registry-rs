@@ -14,42 +14,6 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ## [Unreleased]
 
-## [0.21.0] – 2026‑09‑27
-
-### Removed (breaking)
-
-- **The raw TRQP REST routes are gone.** `POST /recognition` and
-  `POST /authorization` now answer 404, and their unsigned request/response
-  shapes (`InputDto`/`OutputDto`, `trust_registry::http::handlers::trqp`) and
-  `trust_registry::http::error::AppError` are removed. Send the
-  `registry/recognition/0.1` or `registry/authorization/0.1` Trust Task to
-  `POST /trust-tasks` instead. The payload keeps the four TRQP identifiers; the
-  reply no longer merges a request `context` or carries `record_type`, and an
-  unknown tuple answers `false` instead of 404.
-- **The bespoke DIDComm `trqp/1.0` query protocol is no longer served.**
-  `query-authorization` and `query-recognition` messages are not answered, and
-  `trust_registry::didcomm::handlers::trqp` is gone. The same two Trust Tasks
-  answer over DIDComm (and TSP) in the Trust Task envelope. Trust Tasks are now
-  the registry's only remote API; the mapping is in
-  [DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#removed-protocols).
-- **The registry's own DID document no longer carries a `#trust-registry`
-  (`TrustRegistry`, ToIP TRQP profile) entry.** That profile names the REST
-  routes removed above. `#rest` (`TRQPRest`) stays and points at the Trust
-  Tasks HTTPS binding. `TRUST_REGISTRY_SERVICE_TYPE`,
-  `TRUST_REGISTRY_SERVICE_FRAGMENT` and `TRQP_PROFILE_URI` are removed from
-  `trust_registry::didcomm::did_document`.
-- Dead domain helpers that only served those routes: `TrustRecordIds`,
-  `TrustRecordQuery::from_ids`, `TrustRecord::{merge_contexts,
-  none_authorized, none_recognized}` and `Context::merge`.
-
-### Tests
-
-- `registry/recognition` and `registry/authorization` are tested by task over
-  each transport: HTTPS (`test-trust-registry` smoke tests, the live
-  `http_integration_test`), DIDComm and TSP (unit tests through each binding's
-  entry point, plus the `--ignored` routed round-trips through a test
-  mediator).
-
 ## [0.20.0] – 2026‑09‑26
 
 ### Removed (breaking)
@@ -59,7 +23,7 @@ Missing versions simply reflect internal deployment‑related patches.
   are not answered and change nothing, and the
   `trust_registry::didcomm::handlers::admin` module is gone. Use the
   `registry/record/{put,delete,query}` Trust Tasks instead; the mapping is in
-  [DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#tr-admin10).
+  [DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#removed-tr-admin10).
 
 ### Changed (breaking)
 

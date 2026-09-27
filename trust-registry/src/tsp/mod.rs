@@ -305,34 +305,6 @@ mod tests {
     // now shared with the DIDComm binding rather than duplicated here, and is
     // tested once at its new home.
 
-    use crate::trust_tasks::test_support::{CLIENT_DID, query_doc, seeded_handler};
-    use crate::trust_tasks::type_uris;
-
-    /// Route `type_uri` as the TSP binding does, through the same shared
-    /// handler as DIDComm: envelope bytes in, envelope bytes out.
-    async fn query_over_tsp(type_uri: &str) -> TrustTask<Value> {
-        let tasks = seeded_handler();
-        let inbound = parse_envelope(&build_envelope(&query_doc(type_uri))).expect("envelope");
-        let reply = handle_inbound(&tasks, CLIENT_DID, inbound).await;
-        parse_envelope(&reply).expect("reply envelope")
-    }
-
-    #[tokio::test]
-    async fn registry_recognition_over_tsp() {
-        let reply = query_over_tsp(type_uris::RECOGNITION).await;
-        assert!(reply.type_uri.is_response());
-        assert_eq!(reply.type_uri.slug(), "registry/recognition");
-        assert_eq!(reply.payload["recognized"], serde_json::json!(true));
-    }
-
-    #[tokio::test]
-    async fn registry_authorization_over_tsp() {
-        let reply = query_over_tsp(type_uris::AUTHORIZATION).await;
-        assert!(reply.type_uri.is_response());
-        assert_eq!(reply.type_uri.slug(), "registry/authorization");
-        assert_eq!(reply.payload["authorized"], serde_json::json!(true));
-    }
-
     #[test]
     fn envelope_round_trips() {
         let doc = doc_with(RECOGNITION, false);

@@ -1,8 +1,7 @@
 //! Liveness and capability reporting for `/health`.
 //!
-//! The registry has two independent surfaces: a read path (the query Trust
-//! Tasks over the HTTPS binding) and a write path (Trust Tasks over DIDComm
-//! and TSP, via a mediator). They
+//! The registry has two independent surfaces: a read path (REST/TRQP over
+//! HTTP) and a write path (Trust Tasks over DIDComm, via a mediator). They
 //! fail independently, and an unreachable mediator must not take the read
 //! path down with it — a registry that can still answer recognition and
 //! authorization queries is useful even when no new records can arrive.

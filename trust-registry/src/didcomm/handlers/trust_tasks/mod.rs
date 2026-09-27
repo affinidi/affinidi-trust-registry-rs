@@ -17,10 +17,9 @@
 //! with the TSP and HTTP bindings — and with any host driving an embedded
 //! registry — so the transports cannot drift apart on authorisation.
 //!
-//! This is the only registry protocol served over DIDComm. The bespoke
-//! `trqp/1.0` query protocol and the `tr-admin/1.0` record-management protocol
-//! are no longer served: queries go through `registry/recognition` and
-//! `registry/authorization`, record changes through `registry/record/*`.
+//! The legacy read-only `trqp/1.0` handler remains registered for backward
+//! compatibility. The legacy `tr-admin/1.0` record-management protocol is no
+//! longer served; record changes go through `registry/record/*`.
 
 use std::sync::Arc;
 
@@ -209,36 +208,6 @@ mod tests {
     // The write ACL these tests used to cover moved to
     // `crate::trust_tasks::handler` along with `authorize_write` itself, which
     // the TSP binding had its own copy of. It is tested once at its new home.
-
-    use crate::trust_tasks::test_support::{CLIENT_DID, query_doc, seeded_handler};
-    use crate::trust_tasks::type_uris;
-
-    /// Route `type_uri` as the DIDComm binding does: the document as the
-    /// envelope body, the authcrypt sender as the transport identity.
-    async fn query_over_didcomm(type_uri: &str) -> TrustTask<Value> {
-        let tasks = seeded_handler();
-        let body = serde_json::to_value(query_doc(type_uri)).expect("serialise task");
-        route_envelope_body(&tasks, body, Some(CLIENT_DID))
-            .await
-            .expect("a usable Trust Task document")
-            .expect("the query is answered")
-    }
-
-    #[tokio::test]
-    async fn registry_recognition_over_didcomm() {
-        let reply = query_over_didcomm(type_uris::RECOGNITION).await;
-        assert!(reply.type_uri.is_response());
-        assert_eq!(reply.type_uri.slug(), "registry/recognition");
-        assert_eq!(reply.payload["recognized"], serde_json::json!(true));
-    }
-
-    #[tokio::test]
-    async fn registry_authorization_over_didcomm() {
-        let reply = query_over_didcomm(type_uris::AUTHORIZATION).await;
-        assert!(reply.type_uri.is_response());
-        assert_eq!(reply.type_uri.slug(), "registry/authorization");
-        assert_eq!(reply.payload["authorized"], serde_json::json!(true));
-    }
 
     #[test]
     fn envelope_type_is_the_binding_envelope() {

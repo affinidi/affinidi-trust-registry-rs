@@ -44,6 +44,16 @@ impl TrustRecordQuery {
             resource,
         }
     }
+
+    pub fn from_ids(ids: TrustRecordIds) -> Self {
+        let (entity_id, authority_id, action, resource) = ids.into_parts();
+        Self {
+            entity_id,
+            authority_id,
+            action,
+            resource,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

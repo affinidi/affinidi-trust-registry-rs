@@ -1,7 +1,5 @@
 use serde_json::{Value, json};
 use std::env;
-use trust_registry::trust_tasks::type_uris;
-use trust_tasks_rs::TrustTask;
 
 async fn setup_test_environment() -> String {
     dotenvy::from_filename(".env.test").ok();
@@ -53,144 +51,254 @@ async fn test_health_endpoint() {
     );
 }
 
-/// A `registry/*` query Trust Task for `POST /trust-tasks`. Anonymous: no
-/// issuer, no recipient, no proof, which is all a query needs.
-fn query_task(type_uri: &str, entity_id: &str) -> Value {
-    let doc = TrustTask::new(
-        format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-        type_uri.parse().expect("valid type uri"),
-        json!({
-            "entity_id": entity_id,
-            "authority_id": "did:example:authority1",
-            "action": "action1",
-            "resource": "resource1"
-        }),
-    );
-    serde_json::to_value(doc).unwrap()
-}
+#[tokio::test]
+async fn test_recognition_endpoint_success() {
+    let server_url = get_test_server_url().await;
+    let client = reqwest::Client::new();
 
-async fn post_task(server_url: &str, body: &Value) -> reqwest::Response {
-    reqwest::Client::new()
-        .post(format!("{}/trust-tasks", server_url))
-        .json(body)
+    let request_body = json!({
+        "entity_id": "did:example:entity1",
+        "authority_id": "did:example:authority1",
+        "action": "action1",
+        "resource": "resource1"
+    });
+
+    let response = client
+        .post(format!("{}/recognition", server_url))
+        .header("content-type", "application/json")
+        .json(&request_body)
         .send()
         .await
-        .unwrap()
-}
+        .unwrap();
 
-#[tokio::test]
-async fn test_registry_recognition_over_https() {
-    let server_url = get_test_server_url().await;
-
-    let response = post_task(
-        &server_url,
-        &query_task(type_uris::RECOGNITION, "did:example:entity1"),
-    )
-    .await;
     assert_eq!(response.status(), 200);
 
-    let reply: TrustTask<Value> = response.json().await.unwrap();
-    assert!(reply.type_uri.is_response(), "not a response: {reply:?}");
-    assert_eq!(reply.type_uri.slug(), "registry/recognition");
-    assert_eq!(reply.payload["entity_id"], "did:example:entity1");
-    assert_eq!(reply.payload["recognized"], json!(true));
-    assert!(reply.payload.get("authorized").is_none());
-    assert!(
-        reply.payload["message"]
-            .as_str()
-            .unwrap()
-            .contains("recognized by")
-    );
+    let json: Value = response.json().await.unwrap();
+
+    assert!(json.get("entity_id").is_some());
+    assert!(json.get("authority_id").is_some());
+    assert!(json.get("action").is_some());
+    assert!(json.get("resource").is_some());
+    assert!(json.get("time_requested").is_some());
+    assert!(json.get("time_evaluated").is_some());
+    assert!(json.get("message").is_some());
+
+    assert_eq!(json.get("authorized"), None);
+
+    let message = json["message"].as_str().unwrap();
+    assert!(message.contains("recognized by"));
 }
 
 #[tokio::test]
-async fn test_registry_authorization_over_https() {
+async fn test_authorization_endpoint_success() {
     let server_url = get_test_server_url().await;
+    let client = reqwest::Client::new();
 
-    let response = post_task(
-        &server_url,
-        &query_task(type_uris::AUTHORIZATION, "did:example:entity1"),
-    )
-    .await;
-    assert_eq!(response.status(), 200);
+    let request_body = json!({
+        "entity_id": "did:example:entity1",
+        "authority_id": "did:example:authority1",
+        "action": "action1",
+        "resource": "resource1"
+    });
 
-    let reply: TrustTask<Value> = response.json().await.unwrap();
-    assert!(reply.type_uri.is_response(), "not a response: {reply:?}");
-    assert_eq!(reply.type_uri.slug(), "registry/authorization");
-    assert_eq!(reply.payload["authorized"], json!(true));
-    assert!(reply.payload.get("recognized").is_none());
-    assert!(
-        reply.payload["message"]
-            .as_str()
-            .unwrap()
-            .contains("authorized to")
-    );
-}
-
-/// Absence is a denial, not an error: an unknown tuple answers `false`.
-#[tokio::test]
-async fn test_registry_recognition_over_https_unknown_record_is_not_recognized() {
-    let server_url = get_test_server_url().await;
-
-    let response = post_task(
-        &server_url,
-        &query_task(type_uris::RECOGNITION, "did:example:nonexistent"),
-    )
-    .await;
-    assert_eq!(response.status(), 200);
-    let reply: TrustTask<Value> = response.json().await.unwrap();
-    assert_eq!(reply.payload["recognized"], json!(false));
-}
-
-#[tokio::test]
-async fn test_registry_authorization_over_https_unknown_record_is_not_authorized() {
-    let server_url = get_test_server_url().await;
-
-    let response = post_task(
-        &server_url,
-        &query_task(type_uris::AUTHORIZATION, "did:example:nonexistent"),
-    )
-    .await;
-    assert_eq!(response.status(), 200);
-    let reply: TrustTask<Value> = response.json().await.unwrap();
-    assert_eq!(reply.payload["authorized"], json!(false));
-}
-
-#[tokio::test]
-async fn test_trust_tasks_malformed_body_is_bad_request() {
-    let server_url = get_test_server_url().await;
-
-    let response = reqwest::Client::new()
-        .post(format!("{}/trust-tasks", server_url))
+    let response = client
+        .post(format!("{}/authorization", server_url))
         .header("content-type", "application/json")
-        .body("{ invalid json")
+        .json(&request_body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let json: Value = response.json().await.unwrap();
+
+    assert!(json.get("entity_id").is_some());
+    assert!(json.get("authority_id").is_some());
+    assert!(json.get("action").is_some());
+    assert!(json.get("resource").is_some());
+    assert!(json.get("time_requested").is_some());
+    assert!(json.get("time_evaluated").is_some());
+    assert!(json.get("message").is_some());
+
+    assert_eq!(json.get("recognized"), None);
+
+    let message = json["message"].as_str().unwrap();
+    assert!(message.contains("authorized to"));
+    assert!(message.contains("+"));
+}
+
+#[tokio::test]
+async fn test_authorization_endpoint_not_found() {
+    let server_url = get_test_server_url().await;
+    let client = reqwest::Client::new();
+
+    let request_body = json!({
+        "entity_id": "did:example:nonexistent",
+        "authority_id": "did:example:authority1",
+        "action": "action1",
+        "resource": "resource1"
+    });
+
+    let response = client
+        .post(format!("{}/authorization", server_url))
+        .header("content-type", "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 404);
+
+    let json: Value = response.json().await.unwrap();
+
+    assert_eq!(json["title"], "not_found");
+    assert_eq!(json["type"], "about:blank");
+    assert_eq!(json["code"], 404);
+}
+
+#[tokio::test]
+async fn test_recognition_endpoint_not_found() {
+    let server_url = get_test_server_url().await;
+    let client = reqwest::Client::new();
+
+    let request_body = json!({
+        "entity_id": "did:example:nonexistent",
+        "authority_id": "did:example:authority1",
+        "action": "action1",
+        "resource": "resource1"
+    });
+
+    let response = client
+        .post(format!("{}/recognition", server_url))
+        .header("content-type", "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .expect("Failed to send recognition not found request");
+
+    assert_eq!(response.status(), 404);
+
+    let json: Value = response.json().await.unwrap();
+
+    assert_eq!(json["title"], "not_found");
+    assert_eq!(json["type"], "about:blank");
+    assert_eq!(json["code"], 404);
+}
+
+#[tokio::test]
+async fn test_authorization_endpoint_bad_request() {
+    let server_url = get_test_server_url().await;
+    let client = reqwest::Client::new();
+
+    let request_body = json!({
+        "entity_id": "did:example:entity1",
+        "authority_id": "did:example:authority1"
+    });
+
+    let response = client
+        .post(format!("{}/authorization", server_url))
+        .header("content-type", "application/json")
+        .json(&request_body)
         .send()
         .await
         .unwrap();
 
     assert_eq!(response.status(), 400);
+
+    let json: Value = response.json().await.unwrap();
+
+    assert_eq!(json["title"], "bad_request");
+    assert_eq!(json["type"], "about:blank");
+    assert_eq!(json["code"], 400);
 }
 
-/// The raw TRQP REST routes are gone; Trust Tasks are the only query surface.
 #[tokio::test]
-async fn test_legacy_trqp_rest_routes_are_not_served() {
+async fn test_recognition_endpoint_bad_request() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
 
-    for path in ["recognition", "authorization"] {
-        let response = client
-            .post(format!("{}/{path}", server_url))
-            .json(&json!({
-                "entity_id": "did:example:entity1",
-                "authority_id": "did:example:authority1",
-                "action": "action1",
-                "resource": "resource1"
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 404, "/{path} is still served");
-    }
+    let invalid_json = "{ invalid json";
+
+    let response = client
+        .post(format!("{}/recognition", server_url))
+        .header("content-type", "application/json")
+        .body(invalid_json)
+        .send()
+        .await
+        .expect("Failed to send recognition bad request");
+
+    assert_eq!(response.status(), 400);
+
+    let json: Value = response.json().await.unwrap();
+
+    assert_eq!(json["title"], "bad_request");
+    assert_eq!(json["type"], "about:blank");
+    assert_eq!(json["code"], 400);
+}
+
+#[tokio::test]
+async fn test_context_merging_authorization() {
+    let server_url = get_test_server_url().await;
+    let client = reqwest::Client::new();
+
+    let request_body = json!({
+        "entity_id": "did:example:entity1",
+        "authority_id": "did:example:authority1",
+        "action": "action1",
+        "resource": "resource1",
+        "context": {
+            "additional": "info",
+            "test": "overridden"
+        }
+    });
+
+    let response = client
+        .post(format!("{}/authorization", server_url))
+        .header("content-type", "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let json: Value = response.json().await.unwrap();
+
+    let context = &json["context"];
+    assert_eq!(context["additional"], "info");
+    assert_eq!(context["test"], "overridden");
+}
+
+#[tokio::test]
+async fn test_context_merging_recognition() {
+    let server_url = get_test_server_url().await;
+    let client = reqwest::Client::new();
+
+    let request_body = json!({
+        "entity_id": "did:example:entity1",
+        "authority_id": "did:example:authority1",
+        "action": "action1",
+        "resource": "resource1",
+        "context": {
+            "recognition_context": "specific_info"
+        }
+    });
+
+    let response = client
+        .post(format!("{}/recognition", server_url))
+        .header("content-type", "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let json: Value = response.json().await.unwrap();
+
+    let context = &json["context"];
+    assert_eq!(context["recognition_context"], "specific_info");
 }
 
 #[tokio::test]
@@ -216,7 +324,7 @@ async fn test_method_not_allowed() {
     let client = reqwest::Client::new();
 
     let response = client
-        .get(format!("{}/trust-tasks", server_url))
+        .get(format!("{}/authorization", server_url))
         .send()
         .await
         .expect("Failed to send method not allowed request");
