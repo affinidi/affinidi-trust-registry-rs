@@ -14,6 +14,11 @@ pub mod payloads;
 pub mod proof;
 pub mod reply;
 pub mod router;
+// Fixtures for the per-transport query tests. Only the TSP binding's tests
+// consume these today, so this is gated on that feature to avoid dead code in
+// builds without it.
+#[cfg(all(test, feature = "tsp"))]
+pub(crate) mod test_support;
 
 pub use handler::TaskHandler;
 pub use payloads::type_uris;
