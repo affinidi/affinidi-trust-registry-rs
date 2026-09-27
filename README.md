@@ -4,8 +4,21 @@
 
 A high-performance, Rust-based implementation of a Trust Registry, fully compliant with the [Trust Registry Query Protocol (TRQP) v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/) specification. Built for scalability and reliability, it enables secure, standards-based verification of trusted entities within decentralised identity ecosystems.
 
+## Query protocols
+
+The registry answers recognition/authorization queries over three protocols. All three are supported; none is deprecated.
+
+| Protocol | Transport & endpoint | Purpose |
+| --- | --- | --- |
+| **TRQP REST** | HTTPS: `POST /authorization`, `POST /recognition` | The ToIP [Trust Registry Query Protocol v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/) over plain HTTPS, unsigned. Use this for ToIP interop: callers that speak TRQP directly and expect its REST binding. |
+| **TRQP DIDComm** | The DIDComm `trqp/1.0` protocol (`query-recognition` / `query-authorization`), via the mediator | The same TRQP queries carried as DIDComm messages instead of REST. Use this for ToIP interop over a DIDComm mediator connection. See [DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#query-recognition) / [`#query-authorization`](DIDCOMM_PROTOCOLS.md#query-authorization). |
+| **Trust Tasks** | Signed `registry/*` Trust Task documents (`https://trusttasks.org/spec/registry/recognition/0.1`, `.../registry/authorization/0.1`, plus record-management and governance tasks), carried over TSP, DIDComm, or HTTPS `POST /trust-tasks` | Transport-agnostic, cryptographically sender-bound requests. Use this for signed queries/writes and ecosystem integration (VTC/VTA, record management, governance) — see [Trust Task protocol surface](#trust-task-protocol-surface). |
+
+TRQP (REST or DIDComm) is unsigned and read-only, matching the ToIP spec verbatim. Trust Tasks are the superset: the same recognition/authorization reads, plus signed record writes and governance operations, over any of the three transports.
+
 ## Table of Contents
 
+- [Query protocols](#query-protocols)
 - [Quickstart](#quickstart)
 - [What is Trust Registry](#what-is-trust-registry)
   - [Why a Trust Registry Matters](#why-a-trust-registry-matters)
