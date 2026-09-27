@@ -557,17 +557,17 @@ async fn test_redis_context_serialization() {
         }
     });
 
-    let mut record = create_test_record(
-        "did:example:clinic",
-        "did:example:healthdept",
-        "issue",
-        "HealthCredential",
-        true,
-        true,
-        "authorization",
-    );
-
-    record = record.merge_contexts(Context::new(context.clone()));
+    let record = TrustRecordBuilder::new()
+        .entity_id(EntityId::new("did:example:clinic"))
+        .authority_id(AuthorityId::new("did:example:healthdept"))
+        .action(Action::new("issue"))
+        .resource(Resource::new("HealthCredential"))
+        .recognized(true)
+        .authorized(true)
+        .context(Context::new(context.clone()))
+        .record_type(RecordType::Authorization)
+        .build()
+        .unwrap();
 
     // Create and retrieve the record
     storage.create(record.clone()).await.unwrap();

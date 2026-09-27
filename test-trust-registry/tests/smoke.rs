@@ -1,11 +1,14 @@
-//! End-to-end smoke test for the embedded fixture: spawn, drive the REST/TRQP
-//! surface over an in-memory store, and shut down — all in-process, no env vars.
+//! End-to-end smoke test for the embedded fixture: spawn, drive the Trust Task
+//! queries over the HTTPS binding (`POST /trust-tasks`) against an in-memory
+//! store, and shut down — all in-process, no env vars.
 
 use serde_json::{Value, json};
 use test_trust_registry::TestTrustRegistry;
 use trust_registry::domain::{
     Action, AuthorityId, EntityId, RecordType, Resource, TrustRecord, TrustRecordBuilder,
 };
+use trust_registry::trust_tasks::type_uris;
+use trust_tasks_rs::TrustTask;
 
 fn sample_record() -> TrustRecord {
     TrustRecordBuilder::new()
@@ -20,13 +23,31 @@ fn sample_record() -> TrustRecord {
         .expect("valid record")
 }
 
-fn query_body() -> Value {
-    json!({
-        "entity_id": "did:example:entity",
-        "authority_id": "did:example:authority",
-        "action": "issue",
-        "resource": "vc"
-    })
+/// An anonymous query Trust Task of `type_uri` for the sample record's tuple.
+fn query_task(type_uri: &str) -> Value {
+    let doc = TrustTask::new(
+        format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+        type_uri.parse().expect("valid type uri"),
+        json!({
+            "entity_id": "did:example:entity",
+            "authority_id": "did:example:authority",
+            "action": "issue",
+            "resource": "vc"
+        }),
+    );
+    serde_json::to_value(doc).expect("serialise task")
+}
+
+/// `POST /trust-tasks` and return the reply document, asserting a 200.
+async fn post_task(base_url: &str, body: &Value) -> TrustTask<Value> {
+    let resp = reqwest::Client::new()
+        .post(format!("{base_url}/trust-tasks"))
+        .json(body)
+        .send()
+        .await
+        .expect("trust-tasks request");
+    assert_eq!(resp.status(), 200);
+    resp.json().await.expect("reply document")
 }
 
 #[tokio::test]
@@ -44,47 +65,64 @@ async fn health_endpoint_is_ok() {
 }
 
 #[tokio::test]
-async fn recognition_and_authorization_against_a_seeded_record() {
+async fn registry_recognition_over_https() {
     let tr = TestTrustRegistry::with_records(vec![sample_record()])
         .await
         .expect("spawns");
-    let client = reqwest::Client::new();
 
-    let recognition: Value = client
-        .post(format!("{}/recognition", tr.base_url()))
-        .json(&query_body())
-        .send()
-        .await
-        .expect("recognition request")
-        .json()
-        .await
-        .expect("recognition json");
-    assert_eq!(recognition["recognized"], json!(true));
-
-    let authorization: Value = client
-        .post(format!("{}/authorization", tr.base_url()))
-        .json(&query_body())
-        .send()
-        .await
-        .expect("authorization request")
-        .json()
-        .await
-        .expect("authorization json");
-    assert_eq!(authorization["authorized"], json!(true));
+    let reply = post_task(&tr.base_url(), &query_task(type_uris::RECOGNITION)).await;
+    assert!(reply.type_uri.is_response(), "refused: {reply:?}");
+    assert_eq!(reply.type_uri.slug(), "registry/recognition");
+    assert_eq!(reply.payload["entity_id"], json!("did:example:entity"));
+    assert_eq!(reply.payload["recognized"], json!(true));
 
     tr.shutdown().await;
 }
 
 #[tokio::test]
-async fn unknown_record_is_not_found() {
-    let tr = TestTrustRegistry::spawn().await.expect("spawns");
-    let resp = reqwest::Client::new()
-        .post(format!("{}/recognition", tr.base_url()))
-        .json(&query_body())
-        .send()
+async fn registry_authorization_over_https() {
+    let tr = TestTrustRegistry::with_records(vec![sample_record()])
         .await
-        .expect("recognition request");
-    assert_eq!(resp.status(), 404);
+        .expect("spawns");
+
+    let reply = post_task(&tr.base_url(), &query_task(type_uris::AUTHORIZATION)).await;
+    assert!(reply.type_uri.is_response(), "refused: {reply:?}");
+    assert_eq!(reply.type_uri.slug(), "registry/authorization");
+    assert_eq!(reply.payload["authorized"], json!(true));
+
+    tr.shutdown().await;
+}
+
+/// Absence is a denial, not an error.
+#[tokio::test]
+async fn registry_recognition_over_https_of_an_unknown_record_is_false() {
+    let tr = TestTrustRegistry::spawn().await.expect("spawns");
+    let reply = post_task(&tr.base_url(), &query_task(type_uris::RECOGNITION)).await;
+    assert_eq!(reply.payload["recognized"], json!(false));
+    tr.shutdown().await;
+}
+
+/// The raw TRQP REST routes are gone: Trust Tasks are the only query surface.
+#[tokio::test]
+async fn legacy_trqp_rest_routes_are_not_served() {
+    let tr = TestTrustRegistry::with_records(vec![sample_record()])
+        .await
+        .expect("spawns");
+    let client = reqwest::Client::new();
+    for path in ["recognition", "authorization"] {
+        let resp = client
+            .post(format!("{}/{path}", tr.base_url()))
+            .json(&json!({
+                "entity_id": "did:example:entity",
+                "authority_id": "did:example:authority",
+                "action": "issue",
+                "resource": "vc"
+            }))
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), 404, "/{path} is still served");
+    }
     tr.shutdown().await;
 }
 
@@ -99,12 +137,7 @@ async fn seeding_after_spawn_is_visible_to_the_server() {
         .await
         .expect("seed record");
 
-    let recognition = reqwest::Client::new()
-        .post(format!("{}/recognition", tr.base_url()))
-        .json(&query_body())
-        .send()
-        .await
-        .expect("recognition request");
-    assert_eq!(recognition.status(), 200);
+    let reply = post_task(&tr.base_url(), &query_task(type_uris::RECOGNITION)).await;
+    assert_eq!(reply.payload["recognized"], json!(true));
     tr.shutdown().await;
 }

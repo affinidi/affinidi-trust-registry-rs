@@ -12,7 +12,6 @@ use crate::didcomm::{get_parent_thread_id, get_thread_id, listener::MessageHandl
 
 pub mod build;
 pub mod problem_report;
-pub mod trqp;
 pub mod trust_tasks;
 
 pub struct HandlerContext {

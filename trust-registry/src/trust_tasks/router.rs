@@ -139,8 +139,8 @@ where
 ///
 /// Registers only the TRQP query operations (`registry/recognition` and
 /// `registry/authorization`), which need just [`TrustRecordRepository`]. Used by
-/// the HTTP binding, where — mirroring the existing REST TRQP surface — the
-/// registry is read-only and record CRUD stays on the DIDComm transport.
+/// the HTTPS binding, which is read-only: record changes stay on the DIDComm
+/// and TSP transports, where the sender is authenticated.
 pub fn build_query_dispatcher<R>(repository: Arc<R>) -> RegistryDispatcher
 where
     R: TrustRecordRepository + ?Sized + 'static,

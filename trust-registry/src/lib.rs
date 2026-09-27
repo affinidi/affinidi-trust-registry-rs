@@ -30,7 +30,8 @@ where
     pub config: Arc<configs::TrustRegistryConfig>,
     pub service_start_timestamp: DateTime<Utc>,
     pub repository: Arc<R>,
-    /// Live read-only dispatcher (list + TRQP query tasks), owned by the
+    /// Live read-only dispatcher (the `registry/recognition` and
+    /// `registry/authorization` query tasks), owned by the
     /// CapabilitySet so capability enable/disable takes effect without a
     /// restart.
     pub query_dispatcher: capabilities::DispatcherHandle,

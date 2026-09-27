@@ -5,16 +5,16 @@
 //! ephemeral `127.0.0.1:0` port over an in-memory store and hands back a
 //! [`TestTrustRegistryHandle`] exposing the bound URL, the seed repository, and
 //! a `shutdown()`. No environment variables, no external database, no ports to
-//! reserve — a `#[tokio::test]` can stand one up, drive the REST/TRQP surface,
-//! and tear it down.
+//! reserve — a `#[tokio::test]` can stand one up, drive the Trust Task queries
+//! over the HTTPS binding, and tear it down.
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //! use test_trust_registry::TestTrustRegistry;
 //!
 //! let tr = TestTrustRegistry::spawn().await?;
-//! let recognition = format!("{}/recognition", tr.base_url());
-//! // ... POST TRQP queries at `recognition` ...
+//! let trust_tasks = format!("{}/trust-tasks", tr.base_url());
+//! // ... POST `registry/recognition` / `registry/authorization` Trust Tasks ...
 //! tr.shutdown().await;
 //! # Ok(())
 //! # }
@@ -97,7 +97,8 @@ impl TestTrustRegistryBuilder {
 
     /// DIDs authorised to send record-mutating (and DID-rotation) Trust Tasks.
     /// Only used by [`spawn_with_mediator`](Self::spawn_with_mediator); reads and
-    /// TRQP queries need no authorisation.
+    /// `registry/recognition` and `registry/authorization` queries need no
+    /// authorisation.
     #[cfg(feature = "mediator")]
     pub fn admin_dids(mut self, admin_dids: Vec<String>) -> Self {
         self.admin_dids = admin_dids;
@@ -220,7 +221,8 @@ impl TestTrustRegistryHandle {
         self.did.as_deref()
     }
 
-    /// `http://<addr>` base URL for the REST/TRQP surface.
+    /// `http://<addr>` base URL for the Trust Tasks HTTPS binding
+    /// (`POST <base>/trust-tasks`).
     pub fn base_url(&self) -> String {
         self.handle.base_url()
     }

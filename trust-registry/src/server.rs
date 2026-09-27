@@ -52,7 +52,7 @@ impl ServerHandle {
         self.http_addr
     }
 
-    /// Convenience `http://<addr>` base URL for the REST/TRQP surface.
+    /// Convenience `http://<addr>` base URL for the Trust Tasks HTTPS binding.
     pub fn base_url(&self) -> String {
         format!("http://{}", self.http_addr)
     }
@@ -105,7 +105,7 @@ impl ServerHandle {
         tokio::select! {
             result = didcomm_task => {
                 // The DIDComm listener stopping must NOT bring the process
-                // down: the read path (REST/TRQP) is independent and still
+                // down: the read path (HTTPS queries) is independent and still
                 // useful. Previously this arm ended `join`, so an unreachable
                 // mediator killed the HTTP server too. Degrade, keep serving
                 // reads, and let the operator see it on /health.
@@ -166,7 +166,7 @@ fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
         .allow_headers(tower_http::cors::Any)
 }
 
-/// Build the top-level HTTP router (health check + TRQP application routes + CORS).
+/// Build the top-level HTTP router (health check + Trust Tasks HTTPS binding + CORS).
 ///
 /// The service form of the router. The application routes themselves are the
 /// same ones [`crate::TrustRegistry::router`] hands an embedding host; what the

@@ -14,13 +14,18 @@ use test_trust_registry::TestTrustRegistry;
 async fn queries_a_seeded_registry() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let tr = TestTrustRegistry::spawn().await?;
 
+    // A `registry/recognition` Trust Task over the HTTPS binding.
     let resp = reqwest::Client::new()
-        .post(format!("{}/recognition", tr.base_url()))
+        .post(format!("{}/trust-tasks", tr.base_url()))
         .json(&serde_json::json!({
-            "entity_id": "did:example:entity",
-            "authority_id": "did:example:authority",
-            "action": "issue",
-            "resource": "vc",
+            "id": "urn:uuid:3f0c6a52-0d7e-4a8e-9d55-1c2b7c9e0a11",
+            "type": "https://trusttasks.org/spec/registry/recognition/0.1",
+            "payload": {
+                "entity_id": "did:example:entity",
+                "authority_id": "did:example:authority",
+                "action": "issue",
+                "resource": "vc",
+            },
         }))
         .send()
         .await?;
@@ -57,12 +62,13 @@ let tr = TestTrustRegistry::builder()
 let registry_did = tr.did().unwrap(); // address Trust Tasks here
 ```
 
-A full client → mediator → registry → mediator → client **DIDComm** Trust Task
-round-trip is exercised by `tests/mediator.rs` (`--ignored`, since the mediator
-stack has a heavy cold compile).
+Full client → mediator → registry → mediator → client round-trips of
+`registry/recognition` and `registry/authorization` are exercised over **DIDComm**
+and **TSP** by `tests/mediator.rs` (`--ignored`, since the mediator stack has a
+heavy cold compile).
 
 ## Scope
 
-- **REST/TRQP** (`/recognition`, `/authorization`, health) over in-memory `LocalStorage` — always on.
+- **HTTPS Trust Tasks** (`POST /trust-tasks`, health) over in-memory `LocalStorage` — always on.
 - **DIDComm Trust Tasks** via `spawn_with_mediator` (`--features mediator`) — round-trip proven end-to-end.
-- **TSP Trust Tasks** listener starts under `--features tsp`; a full routed TSP round-trip (client↔registry TSP routing) is a follow-up.
+- **TSP Trust Tasks** via `spawn_with_mediator` (`--features tsp`) — round-trip proven end-to-end.

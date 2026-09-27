@@ -12,10 +12,11 @@
 //! ```sh
 //! curl 127.0.0.1:8231/                          # the host's own route
 //! curl 127.0.0.1:8231/healthz                   # the host's own health, including the registry's
-//! curl -X POST 127.0.0.1:8231/registry/recognition \
+//! curl -X POST 127.0.0.1:8231/registry/trust-tasks \
 //!   -H 'content-type: application/json' \
-//!   -d '{"entity_id":"did:example:issuer","authority_id":"did:example:authority",
-//!        "action":"issue","resource":"vc"}'     # the registry, under the host's prefix
+//!   -d '{"id":"urn:uuid:1","type":"https://trusttasks.org/spec/registry/recognition/0.1",
+//!        "payload":{"entity_id":"did:example:issuer","authority_id":"did:example:authority",
+//!        "action":"issue","resource":"vc"}}'    # the registry, under the host's prefix
 //! ```
 //!
 //! What this demonstrates, and why each part matters:

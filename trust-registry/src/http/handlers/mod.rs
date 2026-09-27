@@ -5,7 +5,6 @@ use axum::{
     routing::{get, post},
 };
 
-pub mod trqp;
 pub mod trust_tasks;
 pub mod wellknown;
 
@@ -14,8 +13,6 @@ where
     R: TrustRecordRepository + Send + ?Sized + 'static,
 {
     let all_handlers = Router::new()
-        .route("/authorization", post(trqp::handle_trqp_authorization::<R>))
-        .route("/recognition", post(trqp::handle_trqp_recognition::<R>))
         .route("/trust-tasks", post(trust_tasks::handle_trust_task::<R>))
         .route(
             "/.well-known/did.json",

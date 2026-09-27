@@ -26,17 +26,22 @@ fn sample_record() -> TrustRecord {
         .expect("valid record")
 }
 
-fn query_body() -> Value {
+/// An anonymous `registry/recognition` Trust Task for `POST /trust-tasks`.
+fn https_recognition_task() -> Value {
     json!({
-        "entity_id": "did:example:entity",
-        "authority_id": "did:example:authority",
-        "action": "issue",
-        "resource": "vc"
+        "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+        "type": type_uris::RECOGNITION,
+        "payload": {
+            "entity_id": "did:example:entity",
+            "authority_id": "did:example:authority",
+            "action": "issue",
+            "resource": "vc"
+        }
     })
 }
 
 /// The fixture mints a DIDComm identity on the mediator, starts the listener,
-/// and still serves the REST/TRQP surface over the same in-memory store.
+/// and still serves the Trust Tasks HTTPS binding over the same in-memory store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn spawns_against_a_mediator_and_serves_rest() {
     let env = TestEnvironment::spawn().await.expect("spawn test mediator");
@@ -51,17 +56,17 @@ async fn spawns_against_a_mediator_and_serves_rest() {
     let did = tr.did().expect("mediator-wired registry has a DID");
     assert!(did.starts_with("did:peer:"), "unexpected DID: {did}");
 
-    // The REST surface still answers over the same seeded store.
+    // The HTTPS binding still answers over the same seeded store.
     let recognition: Value = reqwest::Client::new()
-        .post(format!("{}/recognition", tr.base_url()))
-        .json(&query_body())
+        .post(format!("{}/trust-tasks", tr.base_url()))
+        .json(&https_recognition_task())
         .send()
         .await
         .expect("recognition request")
         .json()
         .await
         .expect("recognition json");
-    assert_eq!(recognition["recognized"], json!(true));
+    assert_eq!(recognition["payload"]["recognized"], json!(true));
 
     tr.shutdown().await;
     env.shutdown().await.ok();
@@ -90,10 +95,8 @@ use trust_tasks_rs::TrustTask;
 // stay decoupled from the payload struct representation (which differs across
 // the "adopt published specs" change); the wire shape — flat TRQP identifiers
 // and a `recognized` bool — is identical either way.
-fn build_request(issuer: &str, recipient: &str) -> TrustTask<Value> {
-    let type_uri = type_uris::RECOGNITION
-        .parse()
-        .expect("valid recognition type uri");
+fn build_request(type_uri: &str, issuer: &str, recipient: &str) -> TrustTask<Value> {
+    let type_uri = type_uri.parse().expect("valid query type uri");
     let payload = json!({
         "entity_id": "did:example:entity",
         "authority_id": "did:example:authority",
@@ -113,7 +116,7 @@ fn build_request(issuer: &str, recipient: &str) -> TrustTask<Value> {
 
 /// Poll the client's inbox until a Trust Task envelope arrives, returning its
 /// response payload.
-async fn await_recognition_response(env: &TestEnvironment, profile: &Arc<ATMProfile>) -> Value {
+async fn await_query_response(env: &TestEnvironment, profile: &Arc<ATMProfile>) -> Value {
     for _ in 0..40 {
         let fetched = env
             .atm
@@ -138,7 +141,7 @@ async fn await_recognition_response(env: &TestEnvironment, profile: &Arc<ATMProf
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "routed round-trip through the mediator; run with --ignored"]
-async fn recognition_round_trips_over_didcomm() {
+async fn registry_recognition_over_didcomm() {
     let env = TestEnvironment::spawn().await.expect("spawn test mediator");
     let tr = TestTrustRegistry::builder()
         .record(sample_record())
@@ -149,7 +152,7 @@ async fn recognition_round_trips_over_didcomm() {
     let mediator_did = env.mediator.did().to_string();
     let client = env.add_user("client").await.expect("add client");
 
-    let request = build_request(&client.did, &tr_did);
+    let request = build_request(type_uris::RECOGNITION, &client.did, &tr_did);
     let body = serde_json::to_value(&request).expect("serialise task");
     let message = Message::new(ENVELOPE_TYPE, body)
         .from(client.did.clone())
@@ -176,11 +179,38 @@ async fn recognition_round_trips_over_didcomm() {
         .await
         .expect("forward to trust registry");
 
-    let response = await_recognition_response(&env, &client.profile).await;
+    let response = await_query_response(&env, &client.profile).await;
     assert_eq!(
         response["recognized"],
         json!(true),
         "seeded record recognized"
+    );
+
+    tr.shutdown().await;
+    env.shutdown().await.ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "routed round-trip through the mediator; run with --ignored"]
+async fn registry_authorization_over_didcomm() {
+    let env = TestEnvironment::spawn().await.expect("spawn test mediator");
+    let tr = TestTrustRegistry::builder()
+        .record(sample_record())
+        .spawn_with_mediator(&env.mediator)
+        .await
+        .expect("spawn trust registry");
+    let tr_did = tr.did().expect("tr did").to_string();
+    let client = env.add_user("client").await.expect("add client");
+
+    let request = build_request(type_uris::AUTHORIZATION, &client.did, &tr_did);
+    let reply = round_trip(&env, &client, &tr_did, &request).await;
+
+    assert!(reply.type_uri.is_response(), "refused: {reply:?}");
+    assert_eq!(reply.type_uri.slug(), "registry/authorization");
+    assert_eq!(
+        reply.payload["authorized"],
+        json!(true),
+        "seeded record authorized"
     );
 
     tr.shutdown().await;
@@ -375,28 +405,26 @@ async fn tsp_enabled_registry_spawns_against_a_mediator() {
     assert!(tr.did().is_some_and(|d| d.starts_with("did:peer:")));
 
     let recognition: Value = reqwest::Client::new()
-        .post(format!("{}/recognition", tr.base_url()))
-        .json(&query_body())
+        .post(format!("{}/trust-tasks", tr.base_url()))
+        .json(&https_recognition_task())
         .send()
         .await
         .expect("recognition request")
         .json()
         .await
         .expect("recognition json");
-    assert_eq!(recognition["recognized"], json!(true));
+    assert_eq!(recognition["payload"]["recognized"], json!(true));
 
     tr.shutdown().await;
     env.shutdown().await.ok();
 }
 
-/// Full routed TSP round-trip: a client sends a recognition Trust Task to the
-/// registry over TSP (through the mediator's TSP relay), and the registry —
-/// receiving it multiplexed on its single DIDComm pickup socket — dispatches and
-/// seals the response back over TSP.
+/// Send a query Trust Task of `type_uri` to the registry over TSP (through the
+/// mediator's TSP relay) and return the response payload. The registry receives
+/// it multiplexed on its single DIDComm pickup socket, dispatches, and seals the
+/// response back over TSP.
 #[cfg(feature = "tsp")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "routed TSP round-trip through the mediator; run with --ignored"]
-async fn recognition_round_trips_over_tsp() {
+async fn tsp_query(type_uri: &str) -> Value {
     let env = TestEnvironment::spawn().await.expect("spawn test mediator");
     let tr = TestTrustRegistry::builder()
         .record(sample_record())
@@ -411,7 +439,7 @@ async fn recognition_round_trips_over_tsp() {
 
     // The TSP binding envelope is `{ type, document }` bytes — and uses the
     // *TSP* binding envelope type, not the DIDComm one.
-    let request = build_request(&client.did, &tr_did);
+    let request = build_request(type_uri, &client.did, &tr_did);
     let envelope = json!({ "type": trust_tasks_tsp::ENVELOPE_TYPE, "document": request });
     let bytes = serde_json::to_vec(&envelope).expect("serialise tsp envelope");
     env.atm
@@ -420,7 +448,7 @@ async fn recognition_round_trips_over_tsp() {
         .await
         .expect("tsp send");
 
-    let mut recognized = None;
+    let mut response = None;
     for _ in 0..40 {
         let fetched = env
             .atm
@@ -441,16 +469,39 @@ async fn recognition_round_trips_over_tsp() {
             let envelope: Value = serde_json::from_slice(&payload).expect("parse tsp envelope");
             let task: TrustTask<Value> =
                 serde_json::from_value(envelope["document"].clone()).expect("parse response task");
-            recognized = Some(task.payload["recognized"] == json!(true));
+            response = Some(task.payload);
         }
-        if recognized.is_some() {
+        if response.is_some() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    assert_eq!(recognized, Some(true), "seeded record should be recognized");
-
     tr.shutdown().await;
     env.shutdown().await.ok();
+    response.expect("no TSP response received within the timeout")
+}
+
+#[cfg(feature = "tsp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "routed TSP round-trip through the mediator; run with --ignored"]
+async fn registry_recognition_over_tsp() {
+    let response = tsp_query(type_uris::RECOGNITION).await;
+    assert_eq!(
+        response["recognized"],
+        json!(true),
+        "seeded record should be recognized"
+    );
+}
+
+#[cfg(feature = "tsp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "routed TSP round-trip through the mediator; run with --ignored"]
+async fn registry_authorization_over_tsp() {
+    let response = tsp_query(type_uris::AUTHORIZATION).await;
+    assert_eq!(
+        response["authorized"],
+        json!(true),
+        "seeded record should be authorized"
+    );
 }

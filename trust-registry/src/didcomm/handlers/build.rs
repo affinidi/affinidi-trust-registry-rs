@@ -1,6 +1,5 @@
 use crate::didcomm::handlers::{
-    BaseHandler, problem_report::ProblemReportHandler, trqp::TRQPMessagesHandler,
-    trust_tasks::TrustTasksHandler,
+    BaseHandler, problem_report::ProblemReportHandler, trust_tasks::TrustTasksHandler,
 };
 use crate::storage::repository::TrustRecordAdminRepository;
 use crate::trust_tasks::TaskHandler;
@@ -11,25 +10,17 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
     /// TSP binding uses, so both answer from one replay record and one audit
     /// trail.
     pub fn build_from_arc(repository: Arc<R>, tasks: TaskHandler) -> BaseHandler<R> {
-        let trqp = TRQPMessagesHandler {
-            repository: repository.clone(),
-        };
-
         let problem_report_handler = ProblemReportHandler::new();
 
-        // Trust Task DIDComm binding: routes the `registry/*` task family over
-        // the same mediator connection, alongside the legacy read-only
-        // trqp/1.0 protocol. Record changes are accepted only as signed
+        // Trust Task DIDComm binding: the only registry protocol served over
+        // the mediator connection. Queries are `registry/recognition` and
+        // `registry/authorization`; record changes are accepted only as signed
         // `registry/record/*` Trust Tasks.
         let trust_tasks = TrustTasksHandler::new(tasks);
 
         BaseHandler {
             repository,
-            protocols_handlers: vec![
-                Arc::new(trqp),
-                Arc::new(problem_report_handler),
-                Arc::new(trust_tasks),
-            ],
+            protocols_handlers: vec![Arc::new(problem_report_handler), Arc::new(trust_tasks)],
         }
     }
 }

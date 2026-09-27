@@ -1,21 +1,21 @@
 # Trust Registry DIDComm Protocols
 
-Trust Registry utilises DIDComm protocols to manage and query trust records securely and privately.
+Trust Registry uses DIDComm as one of the transports for its Trust Tasks, to manage and query trust records securely and privately.
 
-DIDComm offers a flexible messaging service that enables you to define higher-level protocols, allowing for workflow orchestration tailored to specific purposes.
+Every remote operation is a `registry/*` [Trust Task](https://trusttasks.org), carried over DIDComm in the Trust Task envelope (`https://trusttasks.org/binding/didcomm/0.1/envelope`). The same documents are answered identically over TSP and, for the queries, over HTTPS (`POST /trust-tasks`). The registry serves no other DIDComm protocol.
 
 <!-- omit from toc -->
 ## Table of Contents
 
 - [Trust Registry Administration](#trust-registry-administration)
-  - [Removed: `tr-admin/1.0`](#removed-tr-admin10)
-- [Trust Registry Queries](#trust-registry-queries)
-  - [Summary](#summary)
-  - [Motivation](#motivation)
+- [Trust Task Queries](#trust-task-queries)
   - [Roles](#roles)
-  - [Requirements](#requirements)
   - [Workflow](#workflow)
-  - [Messages](#messages)
+  - [`registry/authorization/0.1`](#registryauthorization01)
+  - [`registry/recognition/0.1`](#registryrecognition01)
+- [Removed Protocols](#removed-protocols)
+  - [`tr-admin/1.0`](#tr-admin10)
+  - [`trqp/1.0`](#trqp10)
 - [Problem Reporting](#problem-reporting)
 - [Security Considerations](#security-considerations)
 - [Implementation](#implementation)
@@ -52,7 +52,106 @@ enabled with, and for `governance/capability/enable` and `disable` it is the
 authority the capability's config names. Every write, accepted or refused, is
 written to the audit log.
 
-### Removed: `tr-admin/1.0`
+## Trust Task Queries
+
+Recognition and authorization queries are the `registry/recognition/0.1` and
+`registry/authorization/0.1` Trust Tasks. They need no proof and no admin
+listing: anyone may ask. The payload fields are the
+[TRQP v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/)
+names, verbatim.
+
+### Roles
+
+- **Verifier:** the DID that asks whether an entity is authorised or recognised by an authority under its governance framework.
+- **Trust Registry:** the DID that answers from its trust records.
+
+### Workflow
+
+The verifier sends the Trust Task to the Trust Registry's DID through the DIDComm mediator, authcrypted, as the body of a Trust Task envelope. The registry answers on the same thread with the `#response` document, or a `trust-task-error` document.
+
+```mermaid
+sequenceDiagram
+    participant User as Verifier
+    participant DM as DIDComm Mediator
+    participant TR as Trust Registry
+
+    User->>DM: Trust Task envelope <br />registry/authorization/0.1
+    TR->>DM: Trust Registry fetches the message
+    TR->>TR: Answers from its trust records
+    TR->>DM: Trust Task envelope, same thread <br />registry/authorization/0.1#response
+    User->>DM: Fetches the response
+```
+
+### `registry/authorization/0.1`
+
+Is the entity authorised by the authority to take the action on the resource?
+
+**Request payload:**
+
+- **`entity_id` REQUIRED** - the DID of the entity being checked.
+- **`authority_id` REQUIRED** - the DID of the authority whose governance framework applies.
+- **`action` REQUIRED** - the action the entity would take.
+- **`resource` REQUIRED** - the resource it would take it on.
+- **`context`** - optional; `context.time` is echoed back as `time_requested`.
+
+**Response payload:** the four identifiers, echoed; `authorized` (`false` when no record matches: absence is a denial, not an error); `time_evaluated`; `time_requested` when the request carried one; and an advisory `message`.
+
+DIDComm message (body abbreviated to the Trust Task document):
+
+```json
+{
+    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff1",
+    "type": "https://trusttasks.org/binding/didcomm/0.1/envelope",
+    "from": "<VERIFIER_DID>",
+    "to": ["<TRUST_REGISTRY_DID>"],
+    "thid": "urn:uuid:6a627735-6743-4141-8cb7-1359d778936b",
+    "body": {
+        "id": "urn:uuid:6a627735-6743-4141-8cb7-1359d778936b",
+        "type": "https://trusttasks.org/spec/registry/authorization/0.1",
+        "issuer": "<VERIFIER_DID>",
+        "recipient": "<TRUST_REGISTRY_DID>",
+        "issuedAt": "2026-09-27T05:33:52Z",
+        "payload": {
+            "entity_id": "did:example:entity123",
+            "authority_id": "did:example:authority456",
+            "action": "action_xyz",
+            "resource": "resource_abc"
+        }
+    }
+}
+```
+
+Response body:
+
+```json
+{
+    "id": "urn:uuid:9d2c1e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
+    "type": "https://trusttasks.org/spec/registry/authorization/0.1#response",
+    "threadId": "urn:uuid:6a627735-6743-4141-8cb7-1359d778936b",
+    "issuer": "<TRUST_REGISTRY_DID>",
+    "recipient": "<VERIFIER_DID>",
+    "payload": {
+        "entity_id": "did:example:entity123",
+        "authority_id": "did:example:authority456",
+        "action": "action_xyz",
+        "resource": "resource_abc",
+        "authorized": true,
+        "time_evaluated": "2026-09-27T05:33:52Z",
+        "message": "did:example:entity123 authorized to action_xyz+resource_abc by did:example:authority456"
+    }
+}
+```
+
+### `registry/recognition/0.1`
+
+Is the entity recognised by the authority for the action on the resource? The
+request payload is the same four identifiers (and optional `context`); the
+response carries `recognized` in place of `authorized`, with the same
+absence-is-denial rule.
+
+## Removed Protocols
+
+### `tr-admin/1.0`
 
 The legacy `https://affinidi.com/didcomm/protocols/tr-admin/1.0` protocol
 (`create-record`, `update-record`, `delete-record`, `read-record`,
@@ -69,216 +168,30 @@ answered and change nothing. To migrate:
 
 Each of these must be signed and must name an authority the issuer may act
 under, as above: `registry/record/query` is for admins, not the public. The
-public surface is the TRQP recognition and authorization queries below. The `test-client` crate shows the full flow.
+public surface is the [Trust Task queries](#trust-task-queries). The
+`test-client` crate shows the full flow.
 
-## Trust Registry Queries
+### `trqp/1.0`
 
-### Summary
+The bespoke `https://affinidi.com/didcomm/protocols/trqp/1.0` query protocol
+(`query-authorization`, `query-recognition`) is no longer served, and neither
+are the raw TRQP REST routes `POST /recognition` and `POST /authorization`.
+Messages of those types are not answered. To migrate:
 
-A protocol to query trust records from the Trust Registry using TRQP 2.0.
+| Removed | Trust Task |
+| ------- | ---------- |
+| `trqp/1.0/query-authorization`, `POST /authorization` | `registry/authorization/0.1` |
+| `trqp/1.0/query-recognition`, `POST /recognition` | `registry/recognition/0.1` |
 
-### Motivation
-
-To provide a secure, end-to-end encrypted query messages between Verifiers and Trust Registry.
-
-### Roles
-
-There are two roles defined in querying trust records:
-
-- **Verifier:** The DID that queries the Trust Registry to verify whether a particular DID is authorised or recognised by an authority based on governance framework.
-- **Trust Registry:** The DID that processes the request to query trust records and return the result to the requester.
-
-### Requirements
-
-- DIDComm v2.1 protocol.
-
-### Workflow
-
-When querying trust records, the user initiates the request by sending a query message to the Trust Registry's DID through the DIDComm mediator.
-
-*Sample query flow.*
-
-```mermaid
-sequenceDiagram
-    participant User as TR User
-    participant DM as DIDComm Mediator
-    participant TR as Trust Registry
-
-    User->>DM: User sends a message containing the message type and payload. <br />Authorization query request [didcomm/protocols/trqp/1.0/query-authorization]
-    Note over User, DM: User client starts listening to the response
-    TR->>DM: Trust Registry fetches the messages
-    TR->>TR: Processes the message with TRQP 2.0.
-    TR->>DM: Sends a response containing the result of the request <br />  Authorization query response [didcomm/protocols/trqp/1.0/query-authorization/response]
-    User->>DM: Fetches the response from the Trust Registry
-    Note over User, DM: User client terminates the listener
-
-```
-
-### Messages
-
-#### query-authorization
-
-A query message to the Trust Registry if a given entity is authorized by a particular authority through its governance framework.
-
-**Message Type URI:**
-
-Action | Message Type |
--------|--------------|
-Request | `https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization` |
-Response | `https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization/response` |
-
-**Message Fields:**
-
-- **`authority_id` REQUIRED** - The DID of the authority who authorised the entity and publishes the governance framework.
-- **`entity_id` REQUIRED** - The DID of the entity who is the subject of verification whether it is authorised by the authority.
-- **`action` REQUIRED** - A published vocabulary of common actions that the entity is authorised to perform.
-- **`resource` REQUIRED** - The resource identifier where the entity can perform the stated action.
-
-**Additional Fields:**
-
-- **`record_type`** - Part of the query response. The type of record requested by the verifier.
-- **`time_requested`** - Part of the query response. The date and time the query is sent to the Trust Registry by the verifier.
-- **`time_evaluated`** - Part of the query response. The date and time the query is evaluated.
-- **`message`** - Part of the query response. A human-readable message about the result of the query.
-
-**Example:**
-
-Request:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff1",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization",
-    "body": {
-      "action": "action_xyz",
-      "authority_id": "did:example:authority456",
-      "entity_id": "did:example:entity123",
-      "resource": "resource_abc"
-    },
-    "from": "<VERIFIER_DID>",
-    "to": [
-        "<TRUST_REGISTRY_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
-
-Response:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff2",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization/response",
-    "body": {
-      "action": "action_xyz",
-      "authority_id": "did:example:authority456",
-      "authorized": true,
-      "context": {
-        "id": "https://governance.example.org/healthcare-framework",
-        "type": "GovernanceFramework",
-        "name": "Healthcare Trust Framework",
-        "version": "2.0"
-      },
-      "entity_id": "did:example:entity123",
-      "resource": "resource_abc",
-      "record_type":"Authorization",
-      "time_requested":"2025-12-09T05:33:52Z",
-      "time_evaluated":"2025-12-09T05:33:52Z",
-      "message": "did:example:entity123 authorized to action1+resource1 by did:example:authority456 to issue a certificate credential."
-    },
-    "from": "<TRUST_REGISTRY_DID>",
-    "to": [
-        "<VERIFIER_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
-
-#### query-recognition
-
-A query message to the Trust Registry if a given entity is recognised by a particular authority through its governance framework.
-
-**Message Type URI:**
-
-Action | Message Type |
--------|--------------|
-Request | `https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition` |
-Response | `https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition/response` |
-
-**Message Fields:**
-
-- **`authority_id` REQUIRED** - The DID of the authority who recognised the entity and publishes the governance framework.
-- **`entity_id` REQUIRED** - The DID of the entity who is the subject of verification whether it is recognised by the authority.
-- **`action` REQUIRED** - A published vocabulary of common actions that the entity is recognised to perform.
-- **`resource` REQUIRED** - The resource identifier where the entity can perform the stated action.
-
-**Additional Fields:**
-
-- **`record_type`** - Part of the query response. The type of record requested by the verifier.
-- **`time_requested`** - Part of the query response. The date and time the query is sent to the Trust Registry by the verifier.
-- **`time_evaluated`** - Part of the query response. The date and time the query is evaluated.
-- **`message`** - Part of the query response. A human-readable message about the result of the query.
-
-**Example:**
-
-Request:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff1",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition",
-    "body": {
-      "action": "action_xyz",
-      "authority_id": "did:example:authority456",
-      "entity_id": "did:example:entity123",
-      "resource": "resource_abc"
-    },
-    "from": "<VERIFIER_DID>",
-    "to": [
-        "<TRUST_REGISTRY_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
-
-Response:
-
-```json
-{
-    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff2",
-    "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition/response",
-    "body": {
-      "action": "action_xyz",
-      "authority_id": "did:example:authority456",
-      "recognized": true,
-      "context": {
-        "id": "https://governance.example.org/healthcare-framework",
-        "type": "GovernanceFramework",
-        "name": "Healthcare Trust Framework",
-        "version": "2.0"
-      },
-      "entity_id": "did:example:entity123",
-      "resource": "resource_abc",
-      "record_type":"Recognition",
-      "time_requested":"2025-12-09T05:33:52Z",
-      "time_evaluated":"2025-12-09T05:33:52Z",
-      "message": "did:example:entity123 is recognized by did:example:authority456 to issue a certificate credential."
-    },
-    "from": "<TRUST_REGISTRY_DID>",
-    "to": [
-        "<VERIFIER_DID>",
-    ],
-    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
-}
-```
+The payload keeps the same four TRQP identifiers. The response no longer merges
+a request `context` into the record's, nor carries `record_type` or the
+record's `context`; a tuple with no record answers `false` rather than an
+error (the REST routes returned 404). Over HTTPS, `POST` the Trust Task
+document to `/trust-tasks`.
 
 ## Problem Reporting
 
-The existing Problem Reports defined within the DIDComm v2.1 protocol specification for standard reporting of any issues encountered during the data sharing flow.
+Trust Task failures are answered with a `trust-task-error` document on the request's thread. The registry also recognises the Problem Reports defined within the DIDComm v2.1 protocol specification, which the mediator uses for transport-level failures.
 
 The [PIURI](https://identity.foundation/didcomm-messaging/spec/v2.1/#protocol-identifier-uri) for this protocol is `https://didcomm.org/report-problem/2.0`.
 

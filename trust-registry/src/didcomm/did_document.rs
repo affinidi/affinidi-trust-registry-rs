@@ -56,11 +56,13 @@ pub fn build_verification_methods(profile_config: &ProfileConfig) -> Vec<serde_j
         .collect()
 }
 
-/// DID-document service `type` for the Trust Registry's REST/TRQP surface.
+/// DID-document service `type` for the Trust Registry's HTTPS surface.
 ///
-/// `TRQPRest` names the interface actually served — TRQP over REST — matching
-/// how the sibling types `TSPTransport` and `DIDCommMessaging` name protocols
-/// rather than products. Any TRQP-compliant registry can advertise it.
+/// The endpoint is the base URL of the Trust Tasks HTTPS binding: clients
+/// `POST <endpoint>/trust-tasks` with a `registry/recognition` or
+/// `registry/authorization` Trust Task. The type name is kept because every
+/// consumer (`trql-client`, `vta-sdk`) matches on it; the raw TRQP REST routes
+/// (`POST /recognition`, `POST /authorization`) it once also meant are gone.
 ///
 /// Deliberately **not** `VTARest`. That type belongs to a VTA's REST API and
 /// remains correct there; a Trust Registry is not a VTA, and claiming that
@@ -84,30 +86,6 @@ pub const DIDCOMM_SERVICE_FRAGMENT: &str = "#didcomm";
 /// Fragment for the REST service entry.
 pub const REST_SERVICE_FRAGMENT: &str = "#rest";
 
-/// DID-document service `type` from the [ToIP Trust Registry Service
-/// Profile][profile] — the cross-ecosystem name for "a TRQP surface lives
-/// here", where `TRQPRest` is this workspace's own.
-///
-/// Advertised **in addition to** `TRQPRest`, on its own entry rather than as a
-/// second `type` on `#rest`. Adding it to `#rest` would change that entry on
-/// two axes at once — string `type` → array, string `serviceEndpoint` →
-/// struct — and a consumer doing `s["type"] == "TRQPRest"` or reading the
-/// endpoint as a string would read the result as *no REST advertised at all*:
-/// a silent capability loss rather than a parse error (R3.4/R3.6). A separate
-/// entry is additive by construction, so no existing consumer can regress.
-///
-/// [profile]: https://github.com/trustoverip/tswg-trust-registry-service-profile/blob/main/spec.md
-pub const TRUST_REGISTRY_SERVICE_TYPE: &str = "TrustRegistry";
-
-/// Fragment for the ToIP-profile Trust Registry service entry.
-pub const TRUST_REGISTRY_SERVICE_FRAGMENT: &str = "#trust-registry";
-
-/// The TRQP service profile a `TrustRegistry` entry declares conformance to.
-///
-/// Spelled `trqp`, not the `trp` the ToIP Service Profile spec's own example
-/// carries — that spelling predates the protocol's rename to TRQP.
-pub const TRQP_PROFILE_URI: &str = "https://trustoverip.org/profiles/trqp/v2";
-
 /// DID-document service `type` for a TSP transport endpoint. Matches
 /// `vta_sdk::protocol::matching::TSP_SERVICE_TYPE`.
 pub const TSP_SERVICE_TYPE: &str = "TSPTransport";
@@ -128,7 +106,8 @@ pub const TSP_SERVICE_FRAGMENT: &str = "#tsp";
 /// it needs no mediator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransportFlags {
-    /// Serve TRQP over REST, and advertise `TRQPRest` when a public URL is set.
+    /// Serve the Trust Tasks HTTPS binding, and advertise `TRQPRest` when a
+    /// public URL is set.
     pub rest: bool,
     /// Run the DIDComm listener, and advertise `DIDCommMessaging`.
     pub didcomm: bool,
@@ -197,7 +176,7 @@ pub fn validate_public_url(url: &str) -> Result<(), String> {
         // delimited by the closing bracket rather than by the port separator.
         // Matching `rest.starts_with("[::1]")` instead — as this did — also
         // accepted `http://[::1].evil.com`, an entirely different host, which
-        // would have been advertised as a cleartext TRQP endpoint. Same class
+        // would have been advertised as a cleartext registry endpoint. Same class
         // of bug as the named-host arm below already avoids.
         if let Some(after) = rest.strip_prefix('[') {
             return match after.split_once(']') {
@@ -219,7 +198,7 @@ pub fn validate_public_url(url: &str) -> Result<(), String> {
 
 fn cleartext_rejection(url: &str) -> String {
     format!(
-        "TR_PUBLIC_URL must be https:// (got '{url}'); cleartext TRQP is spoofable by an \
+        "TR_PUBLIC_URL must be https:// (got '{url}'); a cleartext registry endpoint is spoofable by an \
          on-path attacker. http:// is allowed only to loopback (localhost, 127.0.0.1, \
          [::1]) for local dev."
     )
@@ -269,23 +248,6 @@ pub fn build_services(
             "id": format!("{did}{REST_SERVICE_FRAGMENT}"),
             "type": REST_SERVICE_TYPE,
             "serviceEndpoint": url,
-        }));
-
-        // The same surface under the ToIP profile's type, so a consumer that
-        // knows only `TrustRegistry` can find us. Separate entry, not a second
-        // `type` on `#rest` — see [`TRUST_REGISTRY_SERVICE_TYPE`] for why
-        // changing that entry in place would be a silent capability loss.
-        //
-        // Two entries pointing at one URL is legal: CID 1.0 requires unique
-        // service `id`s, not unique endpoints, and a consumer taking the first
-        // entry of each type reaches the same place either way.
-        services.push(serde_json::json!({
-            "id": format!("{did}{TRUST_REGISTRY_SERVICE_FRAGMENT}"),
-            "type": TRUST_REGISTRY_SERVICE_TYPE,
-            "serviceEndpoint": {
-                "uri": url,
-                "profile": TRQP_PROFILE_URI,
-            },
         }));
     }
 
@@ -554,10 +516,7 @@ mod tests {
     /// exact wire shape: a plain-string endpoint and the `TRQPRest` type that
     /// consumers match on for a Trust Registry.
     ///
-    /// Pinned deliberately. Every deployed consumer reads this entry, and the
-    /// ToIP-profile surface is advertised as a *separate* entry precisely so
-    /// this one never has to change shape — see
-    /// [`trust_registry_entry_is_additive_and_leaves_rest_untouched`].
+    /// Pinned deliberately: every deployed consumer reads this entry.
     #[test]
     fn public_url_adds_a_trqp_rest_entry() {
         let services = build_services(
@@ -566,7 +525,7 @@ mod tests {
             Some("https://registry.example"),
             TransportFlags::default(),
         );
-        assert_eq!(services.len(), 3, "didcomm + rest + trust-registry");
+        assert_eq!(services.len(), 2, "didcomm + rest");
 
         let rest = rest_entry(&services).expect("REST entry");
         assert_eq!(rest["type"], "TRQPRest");
@@ -580,72 +539,28 @@ mod tests {
         );
     }
 
-    /// The ToIP-profile entry rides alongside `#rest` rather than replacing or
-    /// re-typing it.
-    ///
-    /// Folding `TrustRegistry` into `#rest` would change that entry on two
-    /// axes at once — string `type` → array, string endpoint → struct — and a
-    /// consumer matching `s["type"] == "TRQPRest"` or reading the endpoint as
-    /// a string would see *no REST advertised*: a silent capability loss, not
-    /// a parse error (R3.4/R3.6). Additive cannot regress anyone.
+    /// The registry serves no raw TRQP REST routes, so it must not advertise
+    /// the ToIP TRQP profile: a consumer following that profile would
+    /// `POST /recognition` and find nothing there.
     #[test]
-    fn trust_registry_entry_is_additive_and_leaves_rest_untouched() {
-        let services = build_services(
-            DID,
-            MEDIATOR,
-            Some("https://registry.example/"),
-            TransportFlags::default(),
-        );
-
-        let rest = rest_entry(&services).expect("REST entry");
-        assert!(
-            rest["type"].is_string(),
-            "#rest keeps its string type: {}",
-            rest["type"]
-        );
-        assert!(
-            rest["serviceEndpoint"].is_string(),
-            "#rest keeps its string endpoint: {}",
-            rest["serviceEndpoint"]
-        );
-
-        let profile = services
-            .iter()
-            .find(|s| s["type"] == TRUST_REGISTRY_SERVICE_TYPE)
-            .expect("TrustRegistry entry");
-        assert_eq!(profile["id"], format!("{DID}#trust-registry"));
-        assert_eq!(
-            profile["serviceEndpoint"]["uri"], "https://registry.example",
-            "same surface as #rest, trailing slash trimmed alike"
-        );
-        assert_eq!(profile["serviceEndpoint"]["profile"], TRQP_PROFILE_URI);
-    }
-
-    /// A registry's own `TrustRegistry` entry describes its surface; it is not
-    /// a referral, so a client must not hop away from this document.
-    ///
-    /// The distinguishing test a consumer applies is whether the endpoint URI
-    /// is a DID — ours is a URL, and must stay one.
-    #[test]
-    fn the_trust_registry_entry_is_an_endpoint_not_a_referral() {
+    fn no_toip_trqp_profile_entry_is_advertised() {
         let services = build_services(
             DID,
             MEDIATOR,
             Some("https://registry.example"),
-            TransportFlags::default(),
+            TransportFlags {
+                rest: true,
+                didcomm: true,
+                tsp: true,
+            },
         );
-        let profile = services
-            .iter()
-            .find(|s| s["type"] == TRUST_REGISTRY_SERVICE_TYPE)
-            .expect("TrustRegistry entry");
-        let uri = profile["serviceEndpoint"]["uri"].as_str().unwrap();
         assert!(
-            !uri.starts_with("did:"),
-            "a registry advertises where it serves, never another DID: {uri}"
+            services.iter().all(|s| s["type"] != "TrustRegistry"),
+            "a TrustRegistry profile entry is advertised: {services:?}"
         );
     }
 
-    /// A trailing slash would make consumers build `https://host//recognition`.
+    /// A trailing slash would make consumers build `https://host//trust-tasks`.
     #[test]
     fn public_url_trailing_slash_is_trimmed() {
         let services = build_services(
@@ -743,9 +658,6 @@ mod tests {
 
     /// REST on, everything else off — the default posture for a registry with
     /// no mediator. Nothing DIDComm-shaped may appear.
-    ///
-    /// Both REST entries are the one transport under two type names, so the
-    /// flag still governs: turning REST off drops both.
     #[test]
     fn rest_only_advertises_rest_only() {
         let flags = TransportFlags {
@@ -754,10 +666,7 @@ mod tests {
             tsp: false,
         };
         let services = build_services(DID, MEDIATOR, Some("https://registry.example"), flags);
-        assert_eq!(
-            types_of(&services),
-            vec![REST_SERVICE_TYPE, TRUST_REGISTRY_SERVICE_TYPE]
-        );
+        assert_eq!(types_of(&services), vec![REST_SERVICE_TYPE]);
     }
 
     /// Disabling REST must drop the entry even when TR_PUBLIC_URL is set —

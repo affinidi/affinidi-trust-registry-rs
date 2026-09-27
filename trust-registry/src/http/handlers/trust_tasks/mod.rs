@@ -1,11 +1,10 @@
 //! HTTP transport binding for the Trust Registry's Trust Task queries.
 //!
 //! Exposes `POST /trust-tasks` — the Trust Tasks HTTPS binding
-//! (`trusttasks.org/binding/https/0.1`) — as the Trust Task equivalent of the
-//! existing REST TRQP endpoints. Mirroring that surface, the HTTP binding is
-//! **read-only**: it routes the `registry/recognition` and
-//! `registry/authorization` query tasks. Record CRUD stays on the DIDComm
-//! transport (which carries the admin-DID ACL).
+//! (`trusttasks.org/binding/https/0.1`) — the registry's only HTTP query
+//! surface. It is **read-only**: it routes the `registry/recognition` and
+//! `registry/authorization` query tasks. Record changes stay on the DIDComm
+//! and TSP transports (which carry the admin-DID ACL).
 //!
 //! A single `TrustTask` JSON document is posted in the body; the handler runs
 //! the framework freshness checks, routes through the read-only dispatcher, and
