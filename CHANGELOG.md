@@ -14,6 +14,25 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ## [Unreleased]
 
+## [0.20.2] – 2026‑09‑28
+
+### Changed
+
+- **Dependency update only; no interface changes.** The TRQP REST endpoints
+  (`POST /authorization`, `POST /recognition`), the DIDComm `trqp/1.0` query
+  protocol, and the `registry/*` Trust Task documents are all unchanged in
+  behaviour, wire format and type URIs.
+- **Onto the VTI/TDK 0.56 stack:** `affinidi-tdk` 0.18.0 → 0.20.0,
+  `affinidi-messaging-sdk` 0.28.1 → 0.30.0, `trust-tasks-rs` /
+  `trust-tasks-proof` / `trust-tasks-https` / `trust-tasks-tsp` /
+  `trust-tasks-didcomm` 0.23.4 → 0.24.2, `vta-sdk` 0.54.0 → 0.56.0
+  (`vti-common` 0.27.0 → 0.29.0 alongside it), `vti-secrets` 0.4.6 → 0.4.8, and
+  the `affinidi-messaging-test-mediator` dev-dependency 0.11.1 → 0.14.0 (the
+  release that itself takes `vta-sdk` 0.56, so the dev graph keeps one copy
+  too). `affinidi-messaging-delivery` (0.1.19) and `affinidi-messaging-core`
+  (0.1.11) were already at their latest published versions. `cargo tree -d`
+  is clean: one copy of each of these across the whole workspace.
+
 ## [0.20.1] – 2026‑09‑27
 
 ### Changed
