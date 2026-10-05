@@ -167,6 +167,8 @@ cargo --version
 
 To deploy and run a DIDComm mediator, see the [deployment options](https://docs.affinidi.com/products/affinidi-messaging/didcomm-mediator/deployment-options/) page in the documentation.
 
+**Mediator compatibility.** The Trust Registry sets its own access-list mode (`ACL_MODE`) at the mediator with the `messaging/account/get` and `messaging/account/update` Trust Tasks, so the mediator must answer them. affinidi-messaging-mediator 0.31.0 and later accepts only Trust Tasks for administration (the legacy `mediator/1.0` account and ACL protocols are removed). This release is checked against 0.33.1. Trust Registry releases before 0.19.0 use the legacy protocols and cannot set their mode on a 0.31.0 or later mediator. If the mediator refuses the update, the registry logs `Failed to set ACL mode` and keeps running with whatever mode its account already has.
+
 ## Set up Trust Registry
 
 Configure the environment to run Trust Registry. The setup command creates the `.env` file with default configurations. For testing environments, it generates `.env.test` or `.env.pipeline` files with the appropriate test configurations.

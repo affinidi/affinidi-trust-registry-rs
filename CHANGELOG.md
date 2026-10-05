@@ -14,6 +14,19 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ## [Unreleased]
 
+### Documentation
+
+- **Mediator compatibility is stated.** The README now says which mediators the
+  registry works with: it sets its access-list mode with the
+  `messaging/account/{get,update}` Trust Tasks, the only administration
+  affinidi-messaging-mediator 0.31.0 and later accepts. Checked against
+  mediator 0.33.1, which is built on messaging-sdk 0.30.1, trust-tasks 0.24
+  and data-integrity 0.7. The account Trust Task types, the proof code and the
+  SDK's Trust Task client are unchanged between those and this release's
+  0.32 / 0.26 / 0.8, so both sides put the same documents on the wire.
+  Registries before 0.19.0 use the removed legacy protocols and cannot set
+  their mode on such a mediator. No code change.
+
 ## [0.22.0] – 2026‑10‑02
 
 ### Changed

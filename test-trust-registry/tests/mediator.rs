@@ -397,7 +397,14 @@ async fn tsp_enabled_registry_spawns_against_a_mediator() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "routed TSP round-trip through the mediator; run with --ignored"]
 async fn recognition_round_trips_over_tsp() {
-    let env = TestEnvironment::spawn().await.expect("spawn test mediator");
+    // Client and registry share one mediator, so the request and the reply are
+    // TSP Direct deliveries. The fixture's default mediator refuses those
+    // (`local_direct_delivery_allowed` off, `e.p.direct_delivery.denied`); the
+    // shipped `mediator.toml` allows them, and this test is about the round
+    // trip, not that policy.
+    let env = TestEnvironment::spawn_with_direct_delivery()
+        .await
+        .expect("spawn test mediator");
     let tr = TestTrustRegistry::builder()
         .record(sample_record())
         .spawn_with_mediator(&env.mediator)
