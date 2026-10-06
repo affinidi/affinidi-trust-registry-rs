@@ -2,8 +2,9 @@
 //! mediator's `messaging/account/*` Trust Tasks.
 //!
 //! This replaces the legacy DIDComm `mediator/1.0/account-management` and
-//! `acl-management` protocols, which mediators now warn about and can switch
-//! off (`security.legacy_admin_protocols`, affinidi-messaging-mediator 0.28.29).
+//! `acl-management` protocols. affinidi-messaging-mediator 0.28.29 made them
+//! switchable (`security.legacy_admin_protocols`) and 0.31.0 removed them, so
+//! these Trust Tasks are the only way to set the mode on a current mediator.
 
 use std::sync::Arc;
 

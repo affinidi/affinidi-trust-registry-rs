@@ -29,4 +29,10 @@ pub enum DIDCommError {
 
     #[error("HTTP request error: {0}")]
     HttpRequest(#[from] reqwest::Error),
+
+    #[error(
+        "Failed to set ACL mode ExplicitAllow at the mediator ({0}); not serving DIDComm while \
+         the registry may be reachable by anyone"
+    )]
+    PrivateAclNotApplied(String),
 }

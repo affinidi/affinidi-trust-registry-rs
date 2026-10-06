@@ -14,6 +14,67 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ## [Unreleased]
 
+### Changed
+
+- **`setup-trust-registry` and `generate-secrets` generate Curve25519
+  identities.** New registry and test DIDs (did:peer, did:web and did:webvh)
+  get an Ed25519 signing key and an X25519 key-agreement key instead of two
+  P-256 keys. A mediator holds Curve25519 keys by default (`mediator-setup`
+  adds P-256 only with `--key-suite p256`), so a P-256 DID could not even
+  authenticate to one. The messaging SDK also signs Trust Tasks only with an
+  Ed25519 key, so a P-256 registry's `messaging/account/update` went out
+  unsigned and an enforcing mediator refused it. Existing P-256 registries keep
+  working against mediators that accept them; the server takes either key
+  type.
+- **A private registry fails closed when its access-list mode is refused.**
+  With `ACL_MODE=ExplicitAllow`, a failed `messaging/account/update` used to be
+  logged while the registry went on serving DIDComm from a mediator account
+  that may accept anyone. Now its DIDComm listener does not start, on the
+  pickup path and the TSP delivery path alike. `/health` reports `degraded`
+  with the reason, and REST reads keep answering. A public registry
+  (`ExplicitDeny`) still only logs `Failed to set ACL mode`: if its mode did
+  not change it is, at worst, still private.
+
+### Fixed
+
+- **`/health` names why the DIDComm listener stopped.** The listener's own
+  error was dropped on its way to the health state, so every failure
+  (unreachable DID document, refused access-list mode, …) was reported as
+  `"didcomm listener exited cleanly"`. It now reads `"didcomm listener
+  failed: <reason>"`.
+
+### Documentation
+
+- **Mediator compatibility is stated.** The README now says which mediators the
+  registry works with: it sets its access-list mode with the
+  `messaging/account/{get,update}` Trust Tasks, the only administration
+  affinidi-messaging-mediator 0.31.0 and later accepts. Checked against
+  mediator 0.33.1, which is built on messaging-sdk 0.30.1, trust-tasks 0.24
+  and data-integrity 0.7. The account Trust Task types, the proof code and the
+  SDK's Trust Task client are unchanged between those and this release's
+  0.32 / 0.26 / 0.8, so both sides put the same documents on the wire.
+  Registries before 0.19.0 use the removed legacy protocols and cannot set
+  their mode on such a mediator.
+- **Known limitation for P-256 registries with an enforcing mediator.** The
+  messaging SDK signs Trust Tasks only with an Ed25519 key. A registry DID
+  whose keys are all P-256 (what the setup tools generated before this
+  release) sends `messaging/account/update` unsigned, and a mediator with
+  `trust_task_verification = "enforce"` (the `mediator-setup` default) refuses
+  it with `proof_required`, so its mode is not applied. A private one then
+  does not serve DIDComm (see Changed). Re-key it, or run its mediator in
+  `warn`.
+
+### Added
+
+- **`trust-registry/tests/mediator_e2e.rs`**, an end-to-end test against the
+  published mediator image in Docker (v0.33.1 by default, with Trust Task
+  verification enforced). It covers TRQP over REST and DIDComm, signed
+  `registry/record/put` and `query`, a refused unsigned put, and the
+  registry's own access-list mode. A second test checks that a private P-256
+  registry whose mode is refused does not serve DIDComm. Ignored by default
+  because it needs Docker. `E2E_IDENTITY_KEYS=p256` reproduces the limitation
+  above.
+
 ## [0.22.0] – 2026‑10‑02
 
 ### Changed

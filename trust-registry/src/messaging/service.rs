@@ -32,7 +32,7 @@ use tracing::{info, warn};
 use crate::configs::{DidcommConfig, ProfileConfig};
 use crate::didcomm::error::DIDCommError;
 use crate::didcomm::listener::MessageHandler;
-use crate::didcomm::listener::mediator_functions::set_mediator_acl_mode;
+use crate::didcomm::listener::mediator_functions::{acl_failure_outcome, set_mediator_acl_mode};
 use crate::messaging::kv::{KvKeyspace, MessagingStore};
 use crate::messaging::outbox_store::FjallOutboxStore;
 use crate::messaging::relationship_store::{FjallRelationshipKv, RegistryRelationshipStore};
@@ -91,12 +91,15 @@ pub async fn start_managed_delivery<H: MessageHandler>(
     .await
     .map_err(DIDCommError::Messaging)?;
 
-    // Apply the same ACL mode the pickup path would (advisory — logs, never
-    // refuses to start).
+    // Apply the same ACL mode the pickup path does: a private registry whose
+    // mode was not applied does not start serving (`acl_failure_outcome`). The
+    // ATM holds a live socket by now, so it is shut down before returning.
     if let Err(e) =
         set_mediator_acl_mode(&messaging.atm, &messaging.profile, config.acl_mode.clone()).await
+        && let Err(refused) = acl_failure_outcome(&config.acl_mode, &e.to_string())
     {
-        warn!("Failed to set ACL mode for Trust Registry DID. Error: {e}");
+        messaging.atm.graceful_shutdown().await;
+        return Err(refused);
     }
 
     // The relationship-store maintenance sweep runs ONCE, here — never on the
