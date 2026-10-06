@@ -1,6 +1,9 @@
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
-use crate::didcomm::{error::DIDCommError, listener::*};
+use crate::didcomm::{
+    error::DIDCommError,
+    listener::{mediator_functions::acl_failure_outcome, *},
+};
 use affinidi_tdk::messaging::protocols::mediator::acls::AccessListModeType;
 
 impl<H: MessageHandler> Listener<H> {
@@ -8,17 +11,16 @@ impl<H: MessageHandler> Listener<H> {
         self: Arc<Self>,
         config: Arc<DidcommConfig>,
     ) -> Result<(), DIDCommError> {
-        let _ = if config.acl_mode == AccessListModeType::ExplicitAllow {
+        let applied = if config.acl_mode == AccessListModeType::ExplicitAllow {
             self.set_private_acl_mode().await
         } else {
             self.set_public_acl_mode().await
+        };
+        // A private registry whose mode was not applied does not start
+        // serving; a public one only warns. See `acl_failure_outcome`.
+        if let Err(e) = applied {
+            acl_failure_outcome(&config.acl_mode, &e.to_string())?;
         }
-        .inspect_err(|e| {
-            warn!(
-                "Failed to set ACL mode for Trust Registry DID. Error: {}",
-                e
-            );
-        });
 
         let cloned_self = self.clone();
         cloned_self.spawn_periodic_offline_sync().await;

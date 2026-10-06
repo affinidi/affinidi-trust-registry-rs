@@ -13,6 +13,7 @@ use affinidi_tdk::messaging::protocols::mediator::acls::AccessListModeType;
 use affinidi_tdk::messaging::protocols::message_pickup::InboundFrame;
 use tracing::{debug, error, info, warn};
 
+use crate::didcomm::error::DIDCommError;
 use crate::didcomm::listener::*;
 
 pub const OFFLINE_SYNC_INTERVAL_SECS: u64 = 30;
@@ -62,6 +63,29 @@ pub(crate) async fn set_mediator_acl_mode(
         AccessListModeType::ExplicitDeny => crate::mediator_acl::AccessListMode::ExplicitDeny,
     };
     crate::mediator_acl::set_access_list_mode(atm, profile, mode).await
+}
+
+/// What a refused or failed access-list update means for the listener.
+///
+/// A private registry (`ExplicitAllow`) fails closed: its mediator account may
+/// still accept messages from anyone, so serving DIDComm would expose a
+/// registry configured to answer only its allow list. The listener does not
+/// start, and `/health` reports the reason. A public registry (`ExplicitDeny`)
+/// only warns: if its mode did not change it is, at worst, still private,
+/// which makes it unreachable rather than exposed.
+pub(crate) fn acl_failure_outcome(
+    acl_mode: &AccessListModeType,
+    error: &str,
+) -> Result<(), DIDCommError> {
+    match acl_mode {
+        AccessListModeType::ExplicitAllow => {
+            Err(DIDCommError::PrivateAclNotApplied(error.to_string()))
+        }
+        AccessListModeType::ExplicitDeny => {
+            warn!("Failed to set ACL mode for Trust Registry DID. Error: {error}");
+            Ok(())
+        }
+    }
 }
 
 impl<H: MessageHandler> Listener<H> {
@@ -283,5 +307,24 @@ impl<H: MessageHandler> Listener<H> {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_private_registry_fails_closed_when_its_mode_is_not_applied() {
+        let outcome = acl_failure_outcome(&AccessListModeType::ExplicitAllow, "proof_required");
+        assert!(
+            matches!(&outcome, Err(DIDCommError::PrivateAclNotApplied(e)) if e == "proof_required"),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_public_registry_only_warns_when_its_mode_is_not_applied() {
+        assert!(acl_failure_outcome(&AccessListModeType::ExplicitDeny, "proof_required").is_ok());
     }
 }

@@ -111,14 +111,19 @@ pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Se
     }
 }
 
+/// A did:peer with an Ed25519 signing key and an X25519 key-agreement key.
+/// Curve25519 because a mediator holds those keys by default, and Ed25519 is the
+/// only key the messaging SDK signs Trust Tasks with (a mediator enforcing Trust
+/// Task verification refuses them unsigned).
 pub fn create_did(service: Option<Vec<String>>, auth_service: bool) -> (String, Vec<Secret>) {
-    let mut v_p256_key = Secret::generate_p256(None, None).expect("Couldn't create P256 secret");
-    let mut e_p256_key = Secret::generate_p256(None, None).expect("Couldn't create P256 secret");
+    let mut verification_key = Secret::generate_ed25519(None, None);
+    let mut encryption_key =
+        Secret::generate_x25519(None, None).expect("Couldn't create X25519 secret");
 
-    let v_multibase = v_p256_key
+    let v_multibase = verification_key
         .get_public_keymultibase()
         .expect("Couldn't get verification key multibase");
-    let e_multibase = e_p256_key
+    let e_multibase = encryption_key
         .get_public_keymultibase()
         .expect("Couldn't get encryption key multibase");
 
@@ -159,10 +164,10 @@ pub fn create_did(service: Option<Vec<String>>, auth_service: bool) -> (String, 
         DIDCommon::generate_peer(&keys, services.as_deref()).expect("Failed to create did:peer");
     let did_peer_str = did_peer.to_string();
 
-    v_p256_key.id = [did_peer_str.as_str(), "#key-1"].concat();
-    e_p256_key.id = [did_peer_str.as_str(), "#key-2"].concat();
+    verification_key.id = [did_peer_str.as_str(), "#key-1"].concat();
+    encryption_key.id = [did_peer_str.as_str(), "#key-2"].concat();
 
-    (did_peer_str, vec![v_p256_key, e_p256_key])
+    (did_peer_str, vec![verification_key, encryption_key])
 }
 
 #[tokio::main]

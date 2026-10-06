@@ -197,8 +197,9 @@ async fn start_didcomm_server(
     shutdown: CancellationToken,
 ) -> Result<(), BoxError> {
     // `start_didcomm_listener` returns the listener task's own result nested
-    // inside the join result; the inner listener outcome is discarded here.
-    let _ = start_didcomm_listener(config, repository, tasks, source, shutdown).await?;
+    // inside the join result. Both layers are propagated, so `/health` says
+    // why the listener stopped instead of reporting a failure as a clean exit.
+    start_didcomm_listener(config, repository, tasks, source, shutdown).await??;
     Ok(())
 }
 
