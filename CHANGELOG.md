@@ -12,10 +12,13 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
-## [Unreleased]
+## [0.23.0] – 2026‑10‑07
 
 ### Changed
 
+- **Breaking (library API).** `didcomm::error::DIDCommError` gains
+  `PrivateAclNotApplied`, returned when a private registry's access-list mode
+  is refused (see below). Exhaustive matches on it need a new arm.
 - **`setup-trust-registry` and `generate-secrets` generate Curve25519
   identities.** New registry and test DIDs (did:peer, did:web and did:webvh)
   get an Ed25519 signing key and an X25519 key-agreement key instead of two
