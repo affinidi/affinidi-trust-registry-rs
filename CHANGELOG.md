@@ -12,6 +12,19 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [0.25.0] – 2026‑10‑13
+
+### Changed
+
+- **Breaking (dependency line only; no wire or behaviour change).** trql-client's
+  trust-tasks types are public API, so they move with the line its consumers
+  (VGI's verify-trust, then OpenVTC) use.
+- **Onto the VTI/TDK 0.68 stack:** `affinidi-tdk` 0.24 → 0.26,
+  `affinidi-messaging-sdk` 0.34 → 0.36, `trust-tasks-rs` / `trust-tasks-proof` /
+  `trust-tasks-https` / `trust-tasks-tsp` / `trust-tasks-didcomm` 0.28 → 0.31,
+  `vta-sdk` 0.65 → 0.68, `vti-secrets` 0.14 → 0.17, and the
+  `affinidi-messaging-test-mediator` dev-dependency 0.20 → 0.22.
+
 ## [0.24.0] – 2026‑10‑11
 
 ### Changed
