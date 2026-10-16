@@ -128,9 +128,13 @@ impl TestTrustRegistryBuilder {
         let shutdown = CancellationToken::new();
         let admin_repository: Arc<dyn TrustRecordAdminRepository> = repository.clone();
         let handle = serve(config, admin_repository, shutdown).await?;
+        let http_addr = handle
+            .http_addr()
+            .ok_or("the test registry serves REST, but no HTTP listener was bound")?;
 
         Ok(TestTrustRegistryHandle {
             handle,
+            http_addr,
             repository,
             did: None,
         })
@@ -189,9 +193,13 @@ impl TestTrustRegistryBuilder {
         let shutdown = CancellationToken::new();
         let admin_repository: Arc<dyn TrustRecordAdminRepository> = repository.clone();
         let handle = serve(config, admin_repository, shutdown).await?;
+        let http_addr = handle
+            .http_addr()
+            .ok_or("the test registry serves REST, but no HTTP listener was bound")?;
 
         Ok(TestTrustRegistryHandle {
             handle,
+            http_addr,
             repository,
             did: Some(did),
         })
@@ -202,6 +210,7 @@ impl TestTrustRegistryBuilder {
 /// the end of the process; call [`shutdown`](Self::shutdown) to stop it early.
 pub struct TestTrustRegistryHandle {
     handle: ServerHandle,
+    http_addr: SocketAddr,
     repository: Arc<LocalStorage>,
     did: Option<String>,
 }
@@ -209,9 +218,7 @@ pub struct TestTrustRegistryHandle {
 impl TestTrustRegistryHandle {
     /// The address the HTTP server bound to (with the OS-assigned port).
     pub fn http_addr(&self) -> SocketAddr {
-        self.handle
-            .http_addr()
-            .expect("the test registry always serves REST")
+        self.http_addr
     }
 
     /// The Trust Registry's DIDComm/TSP DID — where clients address Trust Task
@@ -224,9 +231,7 @@ impl TestTrustRegistryHandle {
 
     /// `http://<addr>` base URL for the REST/TRQP surface.
     pub fn base_url(&self) -> String {
-        self.handle
-            .base_url()
-            .expect("the test registry always serves REST")
+        format!("http://{}", self.http_addr)
     }
 
     /// The in-memory repository, so a test can seed further records or assert on
