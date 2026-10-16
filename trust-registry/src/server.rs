@@ -36,10 +36,13 @@ fn setup_logging() {
 /// test) can learn where the server is listening, wait for it, or stop it
 /// cleanly — without the process-global side effects (`dotenv`,
 /// `std::process::exit`) that [`start`] performs.
+///
+/// With `ENABLE_REST=false` no HTTP listener is bound at all (no TRQP routes,
+/// no `/health`), so the HTTP fields are `None`.
 pub struct ServerHandle {
-    http_addr: SocketAddr,
+    http_addr: Option<SocketAddr>,
     shutdown: CancellationToken,
-    http_task: JoinHandle<Result<(), BoxError>>,
+    http_task: Option<JoinHandle<Result<(), BoxError>>>,
     didcomm_task: Option<JoinHandle<Result<(), BoxError>>>,
     health: Arc<RegistryHealth>,
     audit: Arc<crate::audit::bounded::BoundedAuditLogger>,
@@ -48,13 +51,15 @@ pub struct ServerHandle {
 impl ServerHandle {
     /// The address the HTTP server bound to. When the config requested an
     /// ephemeral port (`…:0`), this is the concrete port the OS assigned.
-    pub fn http_addr(&self) -> SocketAddr {
+    /// `None` when REST is disabled and nothing was bound.
+    pub fn http_addr(&self) -> Option<SocketAddr> {
         self.http_addr
     }
 
     /// Convenience `http://<addr>` base URL for the REST/TRQP surface.
-    pub fn base_url(&self) -> String {
-        format!("http://{}", self.http_addr)
+    /// `None` when REST is disabled.
+    pub fn base_url(&self) -> Option<String> {
+        self.http_addr.map(|addr| format!("http://{addr}"))
     }
 
     /// A clone of the shutdown token, so callers can trigger (or observe)
@@ -78,8 +83,11 @@ impl ServerHandle {
 
     /// Await the background tasks without signalling shutdown.
     ///
-    /// Returns when the **HTTP** task ends. A DIDComm listener failure does not
-    /// end this: it degrades health and leaves the read path serving.
+    /// With REST enabled, returns when the **HTTP** task ends: a DIDComm
+    /// listener failure does not end this, it degrades health and leaves the
+    /// read path serving. With REST disabled the DIDComm listener is the whole
+    /// service, so this returns when it ends (or, when DIDComm is host-driven
+    /// and nothing runs here, when the shutdown token is cancelled).
     pub async fn join(self) {
         let audit = self.audit.clone();
         self.join_tasks().await;
@@ -89,17 +97,33 @@ impl ServerHandle {
 
     async fn join_tasks(self) {
         let Self {
-            mut http_task,
+            http_task,
             didcomm_task,
             health,
+            shutdown,
             ..
         } = self;
 
-        let Some(didcomm_task) = didcomm_task else {
-            if let Err(e) = http_task.await {
-                error!("http task panicked: {e:?}");
+        let (mut http_task, didcomm_task) = match (http_task, didcomm_task) {
+            (Some(http_task), Some(didcomm_task)) => (http_task, didcomm_task),
+            (Some(http_task), None) => {
+                if let Err(e) = http_task.await {
+                    error!("http task panicked: {e:?}");
+                }
+                return;
             }
-            return;
+            // No read path to fall back to: the listener ending is the service
+            // ending, so return and let the caller (or supervisor) react.
+            (None, Some(didcomm_task)) => {
+                let result = didcomm_task.await;
+                log_task_exit("didcomm", &result);
+                health.mark_writes_unavailable(describe_task_exit(&result));
+                return;
+            }
+            (None, None) => {
+                shutdown.cancelled().await;
+                return;
+            }
         };
 
         tokio::select! {
@@ -204,13 +228,14 @@ async fn start_didcomm_server(
 }
 
 /// Start the Trust Registry servers over `repository` and return a
-/// [`ServerHandle`] once the HTTP listener is bound.
+/// [`ServerHandle`] once the HTTP listener (if any) is bound.
 ///
 /// This is the reusable core of [`start`]: it performs **no** process-global
-/// setup (no `dotenv`, no logging init, no `std::process::exit`) and binds
-/// whatever `config.server_config.listen_address` requests — including an
-/// ephemeral `…:0` port, which the returned handle reports via
-/// [`ServerHandle::http_addr`]. The HTTP server is wired for graceful shutdown
+/// setup (no `dotenv`, no logging init, no `std::process::exit`). When REST is
+/// enabled (`config.didcomm_config.transport_flags.rest`) it binds whatever
+/// `config.server_config.listen_address` requests — including an ephemeral
+/// `…:0` port, which the returned handle reports via
+/// [`ServerHandle::http_addr`]; when REST is disabled nothing is bound. The HTTP server is wired for graceful shutdown
 /// on `shutdown`; the DIDComm listener (and, with the `tsp` feature, the TSP
 /// receive loop) is started only when `config.didcomm_config.is_enabled`.
 pub async fn serve(
@@ -236,24 +261,39 @@ pub(crate) async fn serve_registry(
 ) -> Result<ServerHandle, BoxError> {
     let parts = registry.into_parts();
 
-    // Bind first so the caller (and the returned handle) learns the concrete
-    // address before any request can race against it.
-    let listener =
-        tokio::net::TcpListener::bind(&parts.config.server_config.listen_address).await?;
-    let http_addr = listener.local_addr()?;
-
-    let router = build_router(&parts);
-
-    info!("HTTP server is starting on {http_addr}...");
     debug!("CONFIGS: {:?}", &parts.config);
 
-    let http_shutdown = parts.shutdown.clone();
-    let http_task = tokio::spawn(async move {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move { http_shutdown.cancelled().await })
+    let (http_addr, http_task) = if parts.config.didcomm_config.transport_flags.rest {
+        // Bind first so the caller (and the returned handle) learns the
+        // concrete address before any request can race against it.
+        let listener = tokio::net::TcpListener::bind(&parts.config.server_config.listen_address)
             .await
-            .map_err(BoxError::from)
-    });
+            .map_err(|e| {
+                format!(
+                    "failed to bind REST listener on {} (LISTEN_ADDRESS): {e}",
+                    parts.config.server_config.listen_address
+                )
+            })?;
+        let http_addr = listener.local_addr()?;
+
+        let router = build_router(&parts);
+
+        info!("HTTP server is starting on {http_addr}...");
+
+        let http_shutdown = parts.shutdown.clone();
+        let http_task = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move { http_shutdown.cancelled().await })
+                .await
+                .map_err(BoxError::from)
+        });
+        (Some(http_addr), Some(http_task))
+    } else {
+        warn!(
+            "REST is disabled (ENABLE_REST=false): no HTTP listener, no TRQP routes, no /health."
+        );
+        (None, None)
+    };
 
     use crate::didcomm::listener::DidCommSource;
 
@@ -347,4 +387,70 @@ pub async fn start() {
     // failure), then terminate the process so a supervisor restarts us.
     handle.join().await;
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capabilities::MemoryCapabilityStore;
+    use crate::didcomm::listener::DidCommSource;
+    use crate::storage::adapters::local_storage::LocalStorage;
+
+    async fn registry(
+        listen_address: String,
+        rest: bool,
+        shutdown: CancellationToken,
+    ) -> crate::TrustRegistry {
+        let mut config = TrustRegistryConfig::embedded("/tmp/tr-server-test");
+        config.server_config.listen_address = listen_address;
+        // Host-driven DIDComm keeps the transport set valid with REST off
+        // without needing a mediator.
+        config.didcomm_config.is_enabled = true;
+        config.didcomm_config.transport_flags.didcomm = true;
+        config.didcomm_config.transport_flags.rest = rest;
+        let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::new());
+        crate::TrustRegistry::builder(Arc::new(config))
+            .repository(repository)
+            .capability_store(Box::new(MemoryCapabilityStore::default()))
+            .didcomm_source(DidCommSource::HostDriven)
+            .shutdown(shutdown)
+            .build()
+            .await
+            .expect("builds")
+    }
+
+    /// `ENABLE_REST=false` must not bind `LISTEN_ADDRESS` at all: a port held
+    /// by another process is no reason for a DIDComm-only registry to fail.
+    #[tokio::test]
+    async fn rest_disabled_binds_nothing() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = occupied.local_addr().unwrap().to_string();
+        let shutdown = CancellationToken::new();
+
+        let handle = serve_registry(registry(addr, false, shutdown.clone()).await)
+            .await
+            .expect("REST-off registry starts even though LISTEN_ADDRESS is taken");
+        assert!(handle.http_addr().is_none());
+        assert!(handle.base_url().is_none());
+
+        // Nothing runs locally, so `join` waits for shutdown and then returns.
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle.join())
+            .await
+            .expect("join returns once shutdown is signalled");
+    }
+
+    /// With REST on, a taken port is still a startup error, and it names the
+    /// env var so the operator knows what to change.
+    #[tokio::test]
+    async fn rest_enabled_bind_failure_names_listen_address() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = occupied.local_addr().unwrap().to_string();
+
+        let err = match serve_registry(registry(addr, true, CancellationToken::new()).await).await {
+            Ok(_) => panic!("binding an occupied port must fail"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("LISTEN_ADDRESS"), "{err}");
+    }
 }

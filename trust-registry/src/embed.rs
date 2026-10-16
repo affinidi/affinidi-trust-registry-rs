@@ -253,9 +253,10 @@ impl TrustRegistry {
         }
     }
 
-    /// Run as a service: bind `config.server_config.listen_address`, apply the
-    /// CORS layer, serve `/health`, and start the DIDComm listener when
-    /// `config.didcomm_config.is_enabled`.
+    /// Run as a service: when REST is enabled, bind
+    /// `config.server_config.listen_address`, apply the CORS layer and serve
+    /// `/health`; start the DIDComm listener when
+    /// `config.didcomm_config.is_enabled`. With REST disabled nothing is bound.
     ///
     /// This is what the standalone binary does. A host mounting
     /// [`router`](Self::router) into its own server must not call this — it

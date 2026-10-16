@@ -863,6 +863,7 @@ See the list of environment variables and their usage.
 
 | Variable Name           | Description                                                                                                                                                                               | Required                                     |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `LISTEN_ADDRESS`        | Socket address the REST/TRQP HTTP server (and `/health`) binds to. Ignored when `ENABLE_REST=false`.                                                                                      | default: `0.0.0.0:3232`                      |
 | `TR_STORAGE_BACKEND`    | Storage backend for trust records. Options: `csv`, `ddb`, `redis`, and `fjall` (with the `storage-fjall` feature).                                                                        | Yes                                          |
 | `FILE_STORAGE_PATH`     | Path to the CSV file when using CSV as the storage backend.                                                                                                                               | Required when `TR_STORAGE_BACKEND` = `csv`   |
 | `DDB_TABLE_NAME`        | DynamoDB table name for storing trust records when using DDB as the storage backend.                                                                                                      | Required when `TR_STORAGE_BACKEND` = `ddb`   |
@@ -896,6 +897,10 @@ DID document, which reads the same flags):
   websocket per DID — so there is no TSP-only receive loop.
 - **`ENABLE_TSP=true` requires `--features tsp`.** A runtime flag cannot enable
   a compiled-out binding; the build fails startup rather than advertise TSP.
+- **`ENABLE_REST=false` binds no socket at all.** There is no HTTP listener —
+  no TRQP routes and no `/health` — so `LISTEN_ADDRESS` is ignored and cannot
+  conflict with another process. Monitor a DIDComm-only registry by other
+  means (process supervision, logs, a DIDComm round-trip).
 - **`ENABLE_REST=true` without `TR_PUBLIC_URL`** serves REST but does not
   advertise it, and warns at startup. The bind address in `LISTEN_ADDRESS` is
   not a fallback: it is frequently `0.0.0.0`.
