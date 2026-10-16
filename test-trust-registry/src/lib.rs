@@ -209,7 +209,9 @@ pub struct TestTrustRegistryHandle {
 impl TestTrustRegistryHandle {
     /// The address the HTTP server bound to (with the OS-assigned port).
     pub fn http_addr(&self) -> SocketAddr {
-        self.handle.http_addr()
+        self.handle
+            .http_addr()
+            .expect("the test registry always serves REST")
     }
 
     /// The Trust Registry's DIDComm/TSP DID — where clients address Trust Task
@@ -222,7 +224,9 @@ impl TestTrustRegistryHandle {
 
     /// `http://<addr>` base URL for the REST/TRQP surface.
     pub fn base_url(&self) -> String {
-        self.handle.base_url()
+        self.handle
+            .base_url()
+            .expect("the test registry always serves REST")
     }
 
     /// The in-memory repository, so a test can seed further records or assert on
