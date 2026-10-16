@@ -12,7 +12,7 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
-## [Unreleased]
+## [0.26.0] – 2026‑10‑16
 
 ### Fixed
 
