@@ -12,6 +12,30 @@ Missing versions simply reflect internal deployment‑related patches.
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **`ENABLE_REST=false` now turns the HTTP surface fully off.** Previously the
+  flag only removed `TRQPRest` from the DID document; the server still bound
+  `LISTEN_ADDRESS`, so a DIDComm-only registry failed with `Address already in
+  use` when that port was taken. With REST off no socket is bound — no TRQP
+  routes and no `/health`. A bind failure with REST on now names
+  `LISTEN_ADDRESS` in the error.
+
+### Changed
+
+- **Breaking (embedding API):** `ServerHandle::http_addr()` and
+  `ServerHandle::base_url()` return `Option`, `None` when REST is disabled.
+  With REST off, `ServerHandle::join` returns when the DIDComm listener ends
+  (the standalone binary then exits for its supervisor to restart it).
+- `LISTEN_ADDRESS` is documented in the README environment table and
+  `.env.example`.
+- Dependencies: `vta-sdk` 0.68 → 0.69, `vti-secrets` 0.17 → 0.18,
+  `affinidi-messaging-sdk` 0.36.0 → 0.36.2, `trust-tasks-*` 0.31.0 → 0.31.12,
+  `affinidi-messaging-test-mediator` dev-dependency 0.22 → 0.42, plus a
+  `cargo update` of the lockfile.
+
 ## [0.25.0] – 2026‑10‑13
 
 ### Changed
