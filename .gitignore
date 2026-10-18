@@ -64,3 +64,6 @@ pubspec.lock
 
 # Superego
 .superego/
+
+# Python bytecode from scripts/
+__pycache__/

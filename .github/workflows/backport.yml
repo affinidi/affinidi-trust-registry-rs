@@ -1,0 +1,57 @@
+name: Backport
+
+# A merged PR labelled `backport release/<major.minor>` is cherry-picked onto
+# that release branch as a new PR (RELEASES.md: fix on main first, then
+# backport). Add the label before or after merging; one label per branch.
+#
+# A cherry-pick that conflicts still opens a PR, as a draft carrying the
+# conflict, for a person to resolve — never silently dropped. A conflict in
+# CHANGELOG.md is expected (main's `## Unreleased` is not on the branch): drop
+# the hunk; the patch's changelog is generated from commit subjects.
+#
+# pull_request_target, so it runs with this repository's token even for a PR
+# from a fork. It checks out no PR code to run: the action only cherry-picks
+# the commits a maintainer already merged. The PR is opened with the
+# release-bot GitHub App's token because one opened with GITHUB_TOKEN triggers
+# no workflows, and the backport needs CI; besides, the enterprise does not
+# allow GITHUB_TOKEN to open pull requests (RELEASES.md).
+on:
+  pull_request_target:
+    types: [closed, labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  backport:
+    name: Backport
+    if: >-
+      github.event.pull_request.merged == true &&
+      (github.event.action == 'closed' || startsWith(github.event.label.name, 'backport '))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: korthout/backport-action@8560fb503c275d433c56f05a2f64850093baa9f7 # v4.7.0
+        with:
+          github_token: ${{ steps.app-token.outputs.token }}
+          label_pattern: '^backport (release/\d+\.\d+)$'
+          pull_title: '${pull_title}'
+          pull_description: |-
+            Backport of #${pull_number} to `${target_branch}`.
+
+            ${pull_description}
+          add_labels: backport
+          copy_assignees: true
+          experimental: '{"conflict_resolution": "draft_commit_conflicts"}'

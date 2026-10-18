@@ -10,7 +10,13 @@ Some versions are omitted because certain CI/CD deployment iterations included m
 
 Missing versions simply reflect internal deployment‑related patches.
 
+From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
+`## Unreleased` on `main`, and the release tooling renames that section when a
+release goes GA (`## 0.27.0 (date)`).
+
 ---
+
+## Unreleased
 
 ## [0.26.0] – 2026‑10‑16
 
