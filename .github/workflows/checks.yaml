@@ -1,10 +1,26 @@
 name: checks
 
+# The whole suite lives in this one file on purpose: nightly.yml advances
+# `nightly` only to a main commit on which EVERY job of this workflow passed
+# (RELEASES.md), so a check kept in a separate workflow would be invisible to
+# that gate. Hence the `push` trigger: the run on main is the build-of-record
+# nightly.yml reads.
 on:
+  push:
+    branches: [main, "release/**"]
   pull_request:
     types:
       - opened
       - synchronize
+      - reopened
+
+# Supersede a PR's in-flight run when new commits land on the same ref.
+# Deliberately NOT cancelled for `push`: cancelling a run on main leaves that
+# commit without a green run, so nightly can never advance to it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   rust-pipeline:
     uses: affinidi/pipeline-rust/.github/workflows/checks-no-test.yaml@main
@@ -12,6 +28,62 @@ jobs:
     with:
       toolchain: '1.96.0'
       rustflags: '-D warnings --cfg tracing_unstable'
+  guards:
+    # Cheap, build-free guards that protect the release pipeline: toolchain
+    # pins agree, lockstep versions, CHANGELOG / RELEASE consistency.
+    name: release guards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base commit, for "RELEASE never moves backwards".
+          fetch-depth: 0
+          persist-credentials: false
+      # Python only (the runner's 3.12); no toolchain, no build.
+      - name: Release guards
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/check-release-guards.py ${BASE_SHA:+--base-sha "$BASE_SHA"}
+  semver:
+    # Patch releases must be semver-compatible. Every PR into a release branch
+    # (a backport, a `release-direct` fix, a prep PR) is checked against the
+    # branch tip it merges into — not against crates.io, whose newest version
+    # may belong to a later release line.
+    name: semver (patch-compatible)
+    if: github.event_name == 'pull_request' && startsWith(github.base_ref, 'release/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      # Rustdoc JSON for the baseline and the PR; warnings are not this job's
+      # concern (the rust-pipeline checks own them).
+      RUSTFLAGS: '--cfg tracing_unstable'
+      RUSTDOCFLAGS: '--cfg tracing_unstable'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.96.0'
+          rustflags: '--cfg tracing_unstable'
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-semver-checks@0.51.0
+      - name: cargo semver-checks --release-type patch
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          cargo semver-checks --workspace \
+            --release-type patch \
+            --baseline-rev "$BASE_SHA"
   test:
     name: Test Suite
     runs-on: ubuntu-24.04

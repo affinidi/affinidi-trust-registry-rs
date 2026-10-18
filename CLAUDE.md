@@ -36,3 +36,10 @@ Rules that bite hardest here:
   Changing any record field's optionality means checking every consumer
   (R3.6), and consumers must treat absence restrictively, not as transport
   failure (R3.5).
+
+## Releases
+
+Branching, versioning and publishing follow `RELEASES.md` (nightly → cut
+`release/<major.minor>` → rc/GA/patch preps). `main` publishes nothing and
+never edits the workspace version; changelog entries go under
+`## Unreleased`. The release scripts need Python ≥ 3.11 (`tomllib`).
