@@ -23,6 +23,10 @@ concurrency:
 jobs:
   prepare:
     name: Prepare ${{ inputs.kind }} on ${{ github.ref_name }}
+    # The release-bot app's secrets live in the `release` environment (as they
+    # did for pipeline-rust's release job), not at repository level. Its branch
+    # policy admits `main` and `release/*`, and it has no required reviewers.
+    environment: release
     if: startsWith(github.ref, 'refs/heads/release/')
     runs-on: ubuntu-latest
     timeout-minutes: 30

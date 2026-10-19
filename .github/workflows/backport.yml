@@ -25,6 +25,10 @@ permissions:
 jobs:
   backport:
     name: Backport
+    # The release-bot app's secrets live in the `release` environment (as they
+    # did for pipeline-rust's release job), not at repository level. Its branch
+    # policy admits `main` and `release/*`, and it has no required reviewers.
+    environment: release
     if: >-
       github.event.pull_request.merged == true &&
       (github.event.action == 'closed' || startsWith(github.event.label.name, 'backport '))
