@@ -22,7 +22,7 @@ homepage = "https://affinidi.com/"
 
 [workspace.dependencies]
 
-affinidi-tdk = "0.26.0"
+affinidi-tdk = "0.27.0"
 # Must track the affinidi-messaging-sdk that affinidi-tdk itself pulls in. This
 # dep exists only to switch on the SDK's `tsp` feature, and a feature only
 # unifies within one semver-compatible copy — a mismatched major/minor silently
@@ -38,7 +38,10 @@ affinidi-tdk = "0.26.0"
 #
 # 0.24 -> 0.26 (SDK 0.34 -> 0.36, trust-tasks 0.28 -> 0.31, vta-sdk 0.65 ->
 # 0.68) again: vta-sdk 0.68 declares all three.
-affinidi-messaging-sdk = "0.36.2"
+#
+# 0.26 -> 0.27 (SDK 0.36 -> 0.37, trust-tasks 0.31 -> 0.32, vta-sdk 0.69 ->
+# 0.72) the same again: vta-sdk 0.72 declares all three.
+affinidi-messaging-sdk = "0.37.0"
 # The D1 delivery layer + its neutral transport types. Used by the messaging
 # module to drive inbound off `MessagingService::subscribe` (which surfaces the
 # TSP relationship-control distinction the registry needs for Rev 3 §7.2.2) and
@@ -46,14 +49,14 @@ affinidi-messaging-sdk = "0.36.2"
 # the SDK's `DidCommTransport` (which implements `MessageTransport`) unifies.
 affinidi-messaging-delivery = "0.1.20"
 affinidi-messaging-core = "0.1.11"
-trust-tasks-rs = "0.31.12"
-trust-tasks-proof = "0.31.12"
-vti-secrets = { version = "0.18.0", default-features = false }
+trust-tasks-rs = "0.32.1"
+trust-tasks-proof = "0.32.1"
+vti-secrets = { version = "0.21.0", default-features = false }
 fjall = "3"
-vta-sdk = { version = "0.69.0", default-features = false }
-trust-tasks-https = { version = "0.31.12", default-features = false }
-trust-tasks-tsp = "0.31.12"
-trust-tasks-didcomm = "0.31.12"
+vta-sdk = { version = "0.72.0", default-features = false }
+trust-tasks-https = { version = "0.32.1", default-features = false }
+trust-tasks-tsp = "0.32.1"
+trust-tasks-didcomm = "0.32.1"
 anyhow = "1.0"
 async-trait = "0.1.92"
 base64 = "0.23"
