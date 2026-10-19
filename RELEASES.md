@@ -171,7 +171,9 @@ Settings, not files:
   published). Each crate's Trusted Publisher on crates.io names this
   repository, `release.yaml` and this environment.
 - **Release-bot GitHub App** (`RELEASE_BOT_APP_ID`, `RELEASE_BOT_PRIVATE_KEY`
-  secrets, as `pipeline-rust` already uses) — `release-tag.yml` creates tags
+  secrets in the `release` environment, as `pipeline-rust` already uses — so
+  `release-tag.yml`, `release-prep.yml` and `backport.yml` run their jobs in
+  that environment) — `release-tag.yml` creates tags
   with it (the `tags_managed` ruleset lets only that app and admins create
   tags), and `release-prep.yml` and `backport.yml` push branches and open PRs
   with it (the enterprise does not allow `GITHUB_TOKEN` to open PRs, and a PR
