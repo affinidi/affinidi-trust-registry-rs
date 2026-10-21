@@ -77,13 +77,18 @@ vti-secrets = { workspace = true, default-features = false, optional = true }
 fjall = { workspace = true, optional = true }
 vta-sdk = { workspace = true, optional = true, features = ["integration"] }
 url = "2.5.8"
-# `setup-trust-registry` only (gated by `dev-tools`).
+# `setup-trust-registry` (gated by `dev-tools`) and `trust-registry setup`
+# (gated by `vta`).
 clap = { version = "4.6", features = ["derive"], optional = true }
+# `trust-registry setup --from <file>` (gated by `vta`).
+toml = { version = "1.1", optional = true }
 crossterm = { version = "0.29", optional = true }
 urlencoding = "2.1.3"
 
 [dev-dependencies]
 tempfile.workspace = true
+# `provision_client::test_helpers`, for the `trust-registry setup` tests.
+vta-sdk = { workspace = true, features = ["provision-client", "test-support"] }
 serial_test.workspace = true
 tower.workspace = true
 
@@ -179,8 +184,16 @@ loaders-aws = ["dep:aws-config", "dep:aws-sdk-ssm", "dep:aws-sdk-secretsmanager"
 standalone = ["dep:dotenvy"]
 # VTA integration: fetch the TR DID + keys from a Verifiable Trust Agent at startup.
 # `secrets-config` because the VTA path caches the fetched bundle through the
-# secret store, so it can boot while the VTA is unreachable.
-vta = ["dep:vta-sdk", "secrets-config"]
+# secret store, so it can boot while the VTA is unreachable. Also builds the
+# headless `trust-registry setup` command that provisions the registry at the
+# VTA in the first place (`vta-sdk/provision-client`, `clap`, `toml`).
+vta = [
+    "dep:vta-sdk",
+    "vta-sdk/provision-client",
+    "secrets-config",
+    "dep:clap",
+    "dep:toml",
+]
 secrets-aws = ["secrets", "vti-secrets/aws-secrets"]
 secrets-gcp = ["secrets", "vti-secrets/gcp-secrets"]
 secrets-azure = ["secrets", "vti-secrets/azure-secrets"]

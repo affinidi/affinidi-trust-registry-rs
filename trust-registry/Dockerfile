@@ -6,6 +6,11 @@
 FROM --platform=$BUILDPLATFORM rust:1.95 AS builder
 
 ARG TARGETPLATFORM
+# Cargo features to build in, space-separated. Empty builds the default
+# service. A VTA-provisioned registry needs `vta` (which also adds the
+# `trust-registry setup` command); add a secrets backend for its offline
+# cache, e.g. --build-arg FEATURES="vta secrets-vault tsp".
+ARG FEATURES=""
 
 WORKDIR /app
 
@@ -23,7 +28,7 @@ COPY . .
 
 RUN set -eux; \
     mkdir -p /app/dist; \
-    cargo build --release --bin trust-registry; \
+    cargo build --release -p trust-registry --bin trust-registry ${FEATURES:+--features "$FEATURES"}; \
     cp target/release/trust-registry /app/dist/trust-registry
 
 ###############################

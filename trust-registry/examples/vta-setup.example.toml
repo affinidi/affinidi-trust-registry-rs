@@ -1,0 +1,52 @@
+# `trust-registry setup --from vta-setup.toml`: phase 2 of the headless setup.
+#
+# The whole sequence (see VTA_SETUP.md, "Headless setup"):
+#
+#   1. trust-registry setup --setup-key-out setup-key.json --context trust-registry
+#        prints the setup DID on the line after `Setup DID (ephemeral):`
+#   2. vta contexts create --id trust-registry --name "Trust Registry" \
+#        --admin-did <setup DID> --admin-expires 1h --admin-handoff
+#        (offline, VTA daemon stopped; or `pnm contexts create …` online)
+#   3. start the VTA, then: trust-registry setup --from vta-setup.toml
+#   4. start the registry with the environment it printed (or wrote to env_out)
+#
+# Relative paths resolve against the working directory.
+
+# The VTA to provision at.
+vta_did = "did:webvh:QmVtaScid:dids.example.com:vta"
+
+# The context the setup key was granted in (step 2). Default "trust-registry".
+context = "trust-registry"
+
+# The key phase 1 wrote.
+setup_key_file = "setup-key.json"
+
+# Where to write the TR_VTA_CREDENTIAL bundle (0600). Must not exist yet.
+credential_out = "vta-credential.json"
+
+# Optional: write the registry's environment here as KEY=value lines.
+env_out = "vta.env"
+
+# What the registry serves, and its DID advertises: "didcomm" (required: the
+# registry loads its VTA identity on the DIDComm path), plus "rest" and/or
+# "tsp". Start the registry with the matching ENABLE_* flags (env_out has them).
+# "tsp" needs a registry built with `--features tsp`.
+transports = ["rest", "didcomm"]
+
+# Required for "rest": the registry's public https:// URL (TR_PUBLIC_URL).
+public_url = "https://trust-registry.example.com"
+
+# Required for "didcomm" / "tsp": the mediator the registry connects through.
+mediator_did = "did:webvh:QmMediatorScid:dids.example.com:mediator"
+
+# Optional: force how this command reaches the VTA ("rest", "didcomm", "tsp").
+# provision_transport = "rest"
+
+# Where the VTA publishes the registry's did:webvh: a DID-hosting server
+# registered at the VTA (`pnm did-mgmt servers add` / `vta did-mgmt servers add`).
+[webvh]
+server_id = "did-hosting-daemon"
+# Optional: the DID's path on the server. Default: the server assigns one.
+path = "trust-registry"
+# Optional: the hosting domain, when the server serves several.
+# domain = "dids.example.com"
