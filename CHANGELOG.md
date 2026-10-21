@@ -18,6 +18,40 @@ release goes GA (`## 0.27.0 (date)`).
 
 ## Unreleased
 
+### Added
+
+- **`trust-registry setup` (feature `vta`):** headless provisioning of the
+  registry at a VTA, in the same two phases as `vtc setup`, `mediator-setup` and
+  `did-hosting-daemon setup`, so an automated pipeline (a VTA farm's full-stack
+  Jobs) can set up the registry with the rest of the stack.
+  - `--setup-key-out <path> [--context <id>]` mints an ephemeral setup key and
+    prints the grant to make for it
+    (`vta contexts create … --admin-did <did> --admin-expires 1h --admin-handoff`).
+  - `--from <toml>` then has the running VTA mint the registry's `did:webvh` from
+    the `trust-registry` DID template, publish it to a registered DID-hosting
+    server, and roll the setup key over to a long-term admin.
+  - It writes that admin as the `TR_VTA_CREDENTIAL` file (0600, never
+    overwritten), optionally writes the registry's environment, and prints a
+    `key=value` summary.
+  - The DID document's services come from the same `build_services` the running
+    registry uses, so the published and served documents agree.
+  - Needs a VTA with the `trust-registry` template
+    (verifiable-trust-infrastructure#2252). Example:
+    `trust-registry/examples/vta-setup.example.toml`.
+- **Dockerfile:** a `FEATURES` build arg (e.g. `--build-arg FEATURES="vta secrets-vault"`),
+  so the image can be built for VTA mode and the setup command. The default
+  image is unchanged.
+
+### Documentation
+
+- `VTA_SETUP.md`:
+  - Leads with the headless setup and a VTA-farm Job mapping.
+  - Adds a native `vta` path for Part A, for provisioning on the VTA host
+    without `pnm`.
+  - Explains the offline `vta did-mgmt dids create --server` failure ("could
+    not sign the DID-management task"), which verifiable-trust-infrastructure#2251
+    fixes.
+
 ## 0.27.0 (release/0.27)
 
 ### Changed

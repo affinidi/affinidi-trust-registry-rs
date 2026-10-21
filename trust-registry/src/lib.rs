@@ -13,6 +13,8 @@ pub mod health;
 pub mod http;
 pub mod mediator_acl;
 pub mod server;
+#[cfg(feature = "vta")]
+pub mod setup;
 pub mod storage;
 pub mod trust_tasks;
 

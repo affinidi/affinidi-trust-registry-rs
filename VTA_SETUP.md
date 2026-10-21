@@ -8,11 +8,20 @@ keys inline via `PROFILE_CONFIG`.
 
 In VTA mode the Trust Registry holds **no private keys of its own**. At startup
 it authenticates to a VTA, pulls its DID + keys for a named **context**, and uses
-them to connect to the DIDComm mediator. Provisioning that context and minting
-the registry's credentials is done with the [`pnm`](https://github.com/) CLI
-("Personal Network Manager" — the single-VTA admin client).
+them to connect to the DIDComm mediator.
 
-There are two roles. They can be the same person:
+There are three ways to provision that context and the registry's credential:
+
+| Path | Use it when | Driven by |
+|---|---|---|
+| [**Headless setup**](#headless-setup-automated) | Provisioning is scripted, e.g. a VTA farm's full-stack pipeline. Same two-phase flow as `vtc setup`, `mediator-setup` and `did-hosting-daemon setup` | `trust-registry setup` + one VTA grant |
+| [**Part A — `pnm`**](#part-a--vta-side-pnm-commands) | A VTA operator and a TR operator hand off by hand, with a sealed bundle | `pnm` |
+| [**Part A — native `vta`**](#part-a-alternative--native-vta-commands-no-pnm) | Everything happens on the VTA host with the daemon stopped, and the DID is self-hosted | offline `vta` |
+
+All three end in the same place: a credential file (`TR_VTA_CREDENTIAL`) and a
+context id (`TR_VTA_CONTEXT_ID`), configured as in [Part B](#part-b--configure-the-trust-registry).
+
+For the `pnm` path there are two roles. They can be the same person:
 
 | Role | Does | Tool |
 |---|---|---|
@@ -26,10 +35,12 @@ TR operator can open it. Private keys never cross the wire.
 ## Prerequisites
 
 - A running VTA service reachable over HTTPS.
-- The `pnm` CLI installed (`~/.cargo/bin/pnm`).
+- The `pnm` CLI installed (`~/.cargo/bin/pnm`), for the `pnm` path.
 - A WebVH DID-hosting server the VTA can create the registry's `did:webvh` on.
-- The Trust Registry built **with the `vta` feature** (it is not in the default
-  build or the Docker image).
+- The Trust Registry built **with the `vta` feature**. It is not in the default
+  build; for the Docker image pass it as a build arg:
+  `docker build -f trust-registry/Dockerfile --build-arg FEATURES="vta secrets-vault" .`
+  (add `tsp` to serve TSP, and the `secrets-*` backend you cache in).
 
 Point `pnm` at your VTA (per command with `--url`, or persist it in the
 environment):
@@ -38,6 +49,120 @@ environment):
 export VTA_URL=https://vta.example.com
 pnm health          # sanity check the VTA is reachable
 ```
+
+---
+
+## Headless setup (automated)
+
+`trust-registry setup` provisions the registry at a VTA without a TTY, in the
+same two phases the VTC, the mediator and the did-hosting daemon use. An
+automated pipeline can therefore run the registry as one more set of Jobs.
+
+What the VTA does in phase 2, in one round trip:
+
+- mints the registry's `did:webvh` from the built-in **`trust-registry`** DID
+  template;
+- publishes it to the DID-hosting server you name;
+- keeps its keys in the context, where the registry pulls them at every boot;
+- rolls the setup key over to a VTA-minted long-term admin, which becomes
+  `TR_VTA_CREDENTIAL`.
+
+The DID document advertises exactly the transports you list, built by the same
+code the running registry uses, so the two cannot disagree.
+
+**Needs** a VTA built from a revision with the `trust-registry` template
+([verifiable-trust-infrastructure#2252](https://github.com/OpenVTC/verifiable-trust-infrastructure/pull/2252)),
+and the DID-hosting server registered at the VTA
+(`vta did-mgmt servers add` / `pnm did-mgmt servers add`).
+
+### H1 — Registry: mint a setup key (no VTA call)
+
+```bash
+trust-registry setup --setup-key-out setup-key.json --context trust-registry
+```
+
+It writes the key (0600) and prints, on stderr, the setup DID on the line after
+`Setup DID (ephemeral):`. The printed `pnm contexts create …` line is the grant
+for step H2.
+
+### H2 — VTA: grant the setup key admin in a new context
+
+Offline, with the VTA daemon stopped:
+
+```bash
+vta contexts create --id trust-registry --name "Trust Registry" \
+  --admin-did <setup DID> --admin-expires 1h --admin-handoff
+```
+
+Online, the same flags work with `pnm contexts create`.
+
+- **`--admin-handoff` is required.** It lets the setup DID roll over once to the
+  VTA-minted admin; without it phase 2 is refused (VTI-ACL-053), and the marker
+  cannot be added to the entry later.
+- The context must not already have a DID. To provision again, create a fresh
+  context or delete this one.
+
+### H3 — Registry: provision (VTA running)
+
+Write the phase-2 file. A commented copy is in
+[`trust-registry/examples/vta-setup.example.toml`](trust-registry/examples/vta-setup.example.toml):
+
+```toml
+vta_did         = "did:webvh:…:dids.example.com:vta"
+context         = "trust-registry"            # as granted in H2
+setup_key_file  = "setup-key.json"            # from H1
+credential_out  = "vta-credential.json"       # TR_VTA_CREDENTIAL, written 0600
+env_out         = "vta.env"                   # optional
+transports      = ["rest", "didcomm"]         # "didcomm" required; "tsp" optional
+public_url      = "https://trust-registry.example.com"   # required for "rest"
+mediator_did    = "did:webvh:…:dids.example.com:mediator"
+
+[webvh]
+server_id = "did-hosting-daemon"              # registered at the VTA
+path      = "trust-registry"                  # optional
+```
+
+```bash
+trust-registry setup --from vta-setup.toml
+```
+
+The file is validated before anything reaches the VTA, by the same rules the
+registry applies at startup. It refuses to run if `credential_out` already
+exists, because provisioning again mints a second DID and admin. On success it
+prints a block to parse on stdout:
+
+```text
+Trust Registry setup complete.
+registry_did=did:webvh:…:dids.example.com:trust-registry
+admin_did=did:key:z6Mk…
+vta_did=did:webvh:…:vta
+context_id=trust-registry
+credential_path=/work/tr/vta-credential.json
+env_path=vta.env
+```
+
+`env_out` holds the environment the registry needs to run as provisioned:
+`TR_VTA_CREDENTIAL`, `TR_VTA_CONTEXT_ID`, the `ENABLE_*` flags matching
+`transports`, `MEDIATOR_DID` and `TR_PUBLIC_URL`. Neither phase prints a
+private key.
+
+### H4 — Start the registry
+
+Load `vta.env` (or set the same variables) and start `trust-registry`. Part B
+covers the remaining options, such as the offline cache.
+
+### In a VTA farm pipeline
+
+| Step | Job | Parse |
+|---|---|---|
+| `step_tr_setup_key` | registry image: `trust-registry setup --setup-key-out setup-key.json --context <ctx>` | `Setup DID \(ephemeral\):\s+(did:\S+)` |
+| `step_tr_acl_grant` | VTA image, before `deploy_vta`: `vta contexts create --id <ctx> --name "Trust Registry" --admin-did <did> --admin-expires 1h --admin-handoff` | nothing |
+| `step_tr_setup` | registry image, after `deploy_vta` is Ready: `trust-registry setup --from /config/tr-setup.toml` | `(?m)^registry_did=(.+)$` and the other `key=value` lines |
+| `deploy_tr` | registry Deployment with the `vta.env` variables | `/health` |
+
+Run `step_tr_setup` before the VTC's setup, and put `registry_did` in the VTC
+setup file's `registry_did`. The community's DID then refers clients to the
+registry.
 
 ---
 
@@ -128,6 +253,91 @@ path in `pnm` before it, so upgrade rather than working around it.
 
 ---
 
+## Part A (alternative) — native `vta` commands, no `pnm`
+
+Use this when Part A has to happen entirely on the VTA host with the daemon
+stopped. For a scripted deployment, prefer the
+[headless setup](#headless-setup-automated): it needs only one offline VTA
+command, and the VTA publishes the DID. The native `vta` subcommands below are
+**offline**: they open the VTA's local keystore directly, so:
+
+- **Stop the VTA daemon first.** The keystore holds an exclusive lock; restart
+  the daemon afterwards so it picks up the new context, keys and ACL entry.
+- They are **not available in TEE deployments** (the enclave's store is not
+  reachable from the parent). Use Part A with `pnm` against the live VTA there.
+
+There is no sealed hand-off in this path: the VTA operator's automation writes
+the credential file directly. That is fine when the same automation, on the
+same trust boundary, deploys the registry. If the credential has to cross to a
+different operator, use the sealed `pnm` flow in Part A instead (`vta bootstrap
+open` has no `--out`, so a sealed bundle can only be opened into a credential
+file with `pnm bootstrap open --out`).
+
+### A1 — Create the context
+
+```bash
+vta contexts create --id trust-registry --name "Trust Registry"
+```
+
+`--id` becomes **`TR_VTA_CONTEXT_ID`**.
+
+### A2 — Create the registry's `did:webvh`
+
+```bash
+vta create-did-webvh \
+  --context trust-registry \
+  --url https://dids.example.com/trust-registry \
+  --did-log-file trust-registry.did.jsonl
+```
+
+- Passing `--url` makes the command non-interactive. The DID is minted with one
+  pre-rotation key and as portable, and it becomes the context's DID.
+- The mediator service endpoint is added automatically when the VTA config has
+  a `[messaging]` section, which a DIDComm-connected VTA has.
+- The command does **not** publish the DID. Upload `trust-registry.did.jsonl`
+  so it is served at `https://dids.example.com/trust-registry/did.jsonl`
+  (the command prints the exact URL).
+
+> **Publishing to a registered DID-hosting server offline** with
+> `vta did-mgmt dids create --server <id> --path <path> --mediator-service`
+> works only on a VTA built with
+> [verifiable-trust-infrastructure#2251](https://github.com/OpenVTC/verifiable-trust-infrastructure/pull/2251).
+> Every document sent to the hosting server carries the VTA's proof, and before
+> that fix the offline CLI had no signer loaded. On an older VTA the command
+> fails with `could not sign the DID-management task with this VTA's
+> operational key`, however the VTA is configured. There, either self-host the
+> log as above, or run the same command as `pnm did-mgmt dids create …` against
+> the **running** VTA. The fixed offline command reaches the hosting server over
+> HTTPS, so the server must advertise an HTTPS endpoint (`TrustTaskHTTPS` or
+> `WebVHHosting`).
+>
+> For a scripted deployment, the [headless setup](#headless-setup-automated)
+> does all of this with the VTA running, and needs neither.
+
+### A3 — Mint the registry's admin credential
+
+```bash
+vta create-did-key --context trust-registry --admin --label trust-registry \
+  | base64 -d > /etc/trust-registry/vta-credential.json
+chmod 600 /etc/trust-registry/vta-credential.json
+```
+
+`--admin` creates an admin ACL entry scoped to `trust-registry` and prints the
+credential to stdout as base64. The registry reads the decoded JSON, which is
+why the output is piped through `base64 -d`. That file is **`TR_VTA_CREDENTIAL`**,
+in the same `{did, privateKeyMultibase, vtaDid, vtaUrl}` shape that Step 3
+produces.
+
+`vtaUrl` is filled in only when the VTA config sets `public_url`. If the file has
+no `vtaUrl`, set **`TR_VTA_URL`** in the registry's `.env`.
+
+### A4 — Restart the VTA, then continue with Part B
+
+Start the VTA daemon again so the registry can authenticate with the new
+credential.
+
+---
+
 ## Part B — Configure the Trust Registry
 
 ### Step 4 — Build with the `vta` feature
@@ -137,6 +347,10 @@ path in `pnm` before it, so upgrade rather than working around it.
 # cache stored in a cloud backend rather than on local disk
 cargo build --release --bin trust-registry --features vta
 ```
+
+The same binary runs `trust-registry setup` (see
+[Headless setup](#headless-setup-automated)). In Docker, pass the features as
+`--build-arg FEATURES="vta …"`.
 
 ### Step 5 — Set the environment (`.env`)
 
@@ -208,12 +422,18 @@ driven as an admin DIDComm task, not a `pnm` command.
 
 | Purpose | Command |
 |---|---|
+| Headless, phase 1: setup key | `trust-registry setup --setup-key-out setup-key.json --context <ctx>` |
+| Headless, VTA grant (offline) | `vta contexts create --id <ctx> --name "Trust Registry" --admin-did <setup DID> --admin-expires 1h --admin-handoff` |
+| Headless, phase 2: provision | `trust-registry setup --from vta-setup.toml` |
 | Point PNM at a VTA | `export VTA_URL=https://vta.example.com` |
 | TR operator: make recipient request | `pnm bootstrap request --out tr-request.json --label trust-registry` |
 | VTA operator: provision context + DID | `pnm contexts provision --id <ctx> --name "Trust Registry" --server <webvh> --mediator-service --recipient tr-request.json` |
 | TR operator: open sealed bundle | `pnm bootstrap open --bundle tr-sealed.txt --expect-digest <hex> --out <path>` |
 | Lighter admin-only credential (no DID) | `pnm contexts bootstrap --id <ctx> --name … --recipient tr-request.json` |
 | Re-mint bundle for existing context | `pnm contexts reprovision …` |
+| Native, offline (daemon stopped): context | `vta contexts create --id <ctx> --name "Trust Registry"` |
+| Native, offline: registry DID (self-hosted log) | `vta create-did-webvh --context <ctx> --url <hosting-url> --did-log-file <file>` |
+| Native, offline: admin credential | `vta create-did-key --context <ctx> --admin \| base64 -d > <path>` |
 
 **Mapping to TR config:** `--id` slug → `TR_VTA_CONTEXT_ID` · recovered bundle
 JSON → `TR_VTA_CREDENTIAL` · `vtaUrl` in the bundle (or `TR_VTA_URL`) → the VTA

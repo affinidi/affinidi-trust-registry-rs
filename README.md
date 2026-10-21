@@ -724,6 +724,11 @@ service can still boot while the VTA is briefly unreachable.
 The registry's DID is a VTA-managed `did:webvh`; its keys can be rotated in place
 via the `registry/did/rotate/0.1` admin Trust Task (admin-DID + proof gated).
 
+The same build adds `trust-registry setup`, which provisions the registry at a
+VTA headless, in two phases (`--setup-key-out`, then `--from <toml>`), the way
+`vtc setup` does. [`VTA_SETUP.md`](VTA_SETUP.md#headless-setup-automated) covers
+it, along with the manual `pnm` and offline `vta` paths.
+
 | Variable            | Description                                                                                               | Required                    |
 | ------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------- |
 | `TR_VTA_CREDENTIAL` | VTA `CredentialBundle` JSON, or a loader URI (`file://`, `aws_secrets://`, …) resolving to it. Its presence enables the VTA path. | Yes (`vta`)   |
