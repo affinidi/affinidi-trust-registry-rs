@@ -34,6 +34,7 @@
 //!
 //! The transport-authenticated sender alone never authorises a write.
 
+use affinidi_did_common::scid::{same_reference, strip_scid_src};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -271,7 +272,7 @@ impl TaskHandler {
         sender_did: Option<&str>,
     ) -> Result<(), ConsistencyError> {
         match (doc.issuer.as_deref(), sender_did) {
-            (Some(in_band), Some(transport)) if in_band != transport => {
+            (Some(in_band), Some(transport)) if !same_reference(in_band, transport) => {
                 Err(ConsistencyError::IssuerMismatch {
                     in_band: in_band.to_string(),
                     transport: transport.to_string(),
@@ -293,7 +294,7 @@ impl TaskHandler {
                     reason: "a write must name its recipient".to_string(),
                 });
             }
-            Some(recipient) if recipient != self.my_did => {
+            Some(recipient) if !same_reference(recipient, &self.my_did) => {
                 return Err(RejectReason::WrongRecipient {
                     in_band: recipient.to_string(),
                     expected: self.my_did.clone(),
@@ -344,7 +345,9 @@ impl TaskHandler {
                 reason: "a write must name its issuer".to_string(),
             });
         };
-        if issuer != sender_did {
+        // Compared by DID: a did:scid party may present its DID with the
+        // `?src=` locator it is resolved through (VTI-KEY-160, VTI-KEY-163).
+        if !same_reference(issuer, sender_did) {
             return Err(RejectReason::IdentityMismatch(
                 ConsistencyError::IssuerMismatch {
                     in_band: issuer.to_string(),
@@ -354,6 +357,8 @@ impl TaskHandler {
         }
         let vm = proof.verification_method.as_str();
         let vm_did = vm.split_once('#').map_or(vm, |(did, _)| did);
+        // Exact (Trust Tasks SPEC §4.8): a did:scid producer writes its issuer
+        // and its method in the same form (VTI-KEY-163).
         if vm_did != issuer {
             return Err(RejectReason::ProofInvalid {
                 reason: format!(
@@ -369,7 +374,7 @@ impl TaskHandler {
                 ),
             });
         }
-        if !self.admin_dids.iter().any(|d| d == issuer) {
+        if !self.admin_dids.iter().any(|d| same_reference(d, issuer)) {
             return Err(RejectReason::PermissionDenied {
                 reason: format!("DID {issuer} is not authorised to modify the registry"),
             });
@@ -498,9 +503,9 @@ impl TaskHandler {
         };
         let delegated = self
             .admin_authorities
-            .get(issuer)
-            .is_some_and(|authorities| authorities.iter().any(|a| a == authority));
-        if authority == issuer || delegated {
+            .get(&*strip_scid_src(issuer))
+            .is_some_and(|authorities| authorities.iter().any(|a| same_reference(a, authority)));
+        if same_reference(authority, issuer) || delegated {
             Ok(())
         } else {
             Err(RejectReason::PermissionDenied {
@@ -1570,6 +1575,52 @@ mod tests {
             .expect_err("refused");
         assert_eq!(code(&err), "proofInvalid");
         assert!(!stored(&f.repo, &did).await);
+    }
+
+    /// A did:scid admin may present its DID with the `?src=` locator it is
+    /// resolved through, while the transport authenticates the bare DID: both
+    /// name the same identity (VTI-KEY-160, VTI-KEY-163). The proof's method is
+    /// written in the issuer's form, and is bound to it exactly.
+    #[tokio::test]
+    async fn a_did_scid_admin_is_matched_by_its_did() {
+        let (key, did) = did_key(40);
+        let bare = "did:scid:vh:1:QmScid";
+        let located = "did:scid:vh:1:QmScid?src=registry.example";
+        let f = fixture(vec![bare.to_string()]);
+        let mut doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        doc.issuer = Some(located.to_string());
+        doc.proof.as_mut().expect("signed").verification_method = format!("{located}#key-1");
+
+        assert!(f.handler.authorize_write(&doc, Some(bare)).is_ok());
+        assert!(f.handler.authorize_write(&doc, Some(located)).is_ok());
+        // A method written in another form than the issuer is not bound to it.
+        let mut other_form = doc.clone();
+        other_form
+            .proof
+            .as_mut()
+            .expect("signed")
+            .verification_method = format!("{bare}#key-1");
+        assert!(matches!(
+            f.handler.authorize_write(&other_form, Some(bare)),
+            Err(RejectReason::ProofInvalid { .. })
+        ));
+        // Its did:webvh log is a different identity (VTI-KEY-164).
+        assert!(matches!(
+            f.handler
+                .authorize_write(&doc, Some("did:webvh:QmScid:registry.example")),
+            Err(RejectReason::IdentityMismatch(_))
+        ));
+
+        let handler = f.handler.clone().with_admin_authorities(HashMap::from([(
+            bare.to_string(),
+            vec![OTHER_AUTHORITY.to_string()],
+        )]));
+        assert!(handler.authorize_authority(&doc, Some(bare)).is_ok());
+        assert!(
+            handler
+                .authorize_authority(&doc, Some(OTHER_AUTHORITY))
+                .is_ok()
+        );
     }
 
     /// A write is an operational message: an `assertionMethod` proof — an

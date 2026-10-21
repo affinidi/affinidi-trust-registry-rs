@@ -30,6 +30,7 @@
 //! - `TR_VTA_URL` — optional VTA URL override (else taken from the credential).
 //! - `TR_ALIAS` — profile alias (default `Trust Registry`).
 
+use affinidi_did_common::scid::strip_scid_src;
 use serde_json::json;
 use vta_sdk::credentials::CredentialBundle;
 use vta_sdk::did_key::secrets_from_bundle;
@@ -130,8 +131,11 @@ pub async fn startup_profile_json() -> Result<Option<String>, String> {
 /// on the DID itself — no context id or SCID needed. Returns
 /// `(did, new_scid, new_version_id)` on success.
 ///
-/// `did` must still be a `did:webvh`; rejecting anything else here keeps the
-/// failure local instead of surfacing as a VTA-side protocol error.
+/// `did` must be a `did:webvh`, or a `did:scid:vh:1` (VTI-KEY-160), whose log
+/// is a did:webvh log and is rotated as one; rejecting anything else here
+/// keeps the failure local instead of surfacing as a VTA-side protocol error.
+/// The returned DID is `did` as the registry presents it: for a did:scid, its
+/// bare DID, which a rotation does not change.
 pub async fn rotate_did(
     did: &str,
     pre_rotation_count: Option<u32>,
@@ -142,10 +146,7 @@ pub async fn rotate_did(
 
     let credential_uri = optional_env("TR_VTA_CREDENTIAL")
         .ok_or_else(|| "VTA is not configured (TR_VTA_CREDENTIAL unset)".to_string())?;
-    did.strip_prefix("did:webvh:")
-        .and_then(|rest| rest.split(':').next())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| format!("DID {did} is not a did:webvh; cannot rotate its keys"))?;
+    let webvh_did = webvh_log_did(did).await?;
 
     let credential_json = load(&credential_uri).await?;
     let credential: CredentialBundle = serde_json::from_str(&credential_json)
@@ -161,11 +162,59 @@ pub async fn rotate_did(
         label,
     };
     let result = client
-        .rotate_did_webvh_keys_by_did(did, body)
+        .rotate_did_webvh_keys_by_did(&webvh_did, body)
         .await
         .map_err(|e| format!("VTA did:webvh key rotation failed: {e}"))?;
 
-    Ok((result.did, result.new_scid, result.new_version_id))
+    let did = if did.starts_with("did:scid:") {
+        strip_scid_src(did).into_owned()
+    } else {
+        result.did
+    };
+    Ok((did, result.new_scid, result.new_version_id))
+}
+
+/// The did:webvh DID of `did`'s log: `did` itself for a did:webvh, and for a
+/// `did:scid:vh:1` the did:webvh its own resolved document lists in
+/// `alsoKnownAs` (VTI-KEY-161), which is the log the VTA rotates.
+///
+/// A bare did:scid resolves only through a source the resolver already holds,
+/// which a fresh one does not; configure the registry's DID as its DID URL
+/// (`did:scid:vh:1:<scid>?src=…`) for this to find the log.
+async fn webvh_log_did(did: &str) -> Result<String, String> {
+    if did
+        .strip_prefix("did:webvh:")
+        .and_then(|rest| rest.split(':').next())
+        .is_some_and(|scid| !scid.is_empty())
+    {
+        return Ok(did.to_string());
+    }
+    let Some(scid) = did
+        .strip_prefix("did:scid:vh:1:")
+        .map(|rest| rest.split(['?', '#']).next().unwrap_or(rest))
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(format!(
+            "DID {did} is not a did:webvh or did:scid:vh:1; cannot rotate its keys"
+        ));
+    };
+
+    use affinidi_tdk::did_resolver::{DIDCacheClient, config::DIDCacheConfigBuilder};
+    let resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build())
+        .await
+        .map_err(|e| format!("cannot build a DID resolver to find {did}'s log: {e}"))?;
+    let resolved = resolver
+        .resolve(did)
+        .await
+        .map_err(|e| format!("cannot resolve {did} to find its did:webvh log: {e}"))?;
+    let prefix = format!("did:webvh:{scid}:");
+    resolved
+        .doc
+        .also_known_as
+        .iter()
+        .find(|alias| alias.starts_with(&prefix))
+        .cloned()
+        .ok_or_else(|| format!("{did}'s document names no did:webvh log to rotate"))
 }
 
 #[cfg(test)]
