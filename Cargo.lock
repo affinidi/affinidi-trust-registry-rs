@@ -6913,6 +6913,7 @@ version = "0.28.0"
 name = "trust-registry"
 version = "0.28.0"
 dependencies = [
+ "affinidi-did-common",
  "affinidi-messaging-core",
  "affinidi-messaging-delivery",
  "affinidi-messaging-sdk",
