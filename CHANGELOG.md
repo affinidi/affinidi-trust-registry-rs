@@ -41,7 +41,6 @@ release goes GA (`## 0.27.0 (date)`).
 - **Dockerfile:** a `FEATURES` build arg (e.g. `--build-arg FEATURES="vta secrets-vault"`),
   so the image can be built for VTA mode and the setup command. The default
   image is unchanged.
-
 - **did:scid identities (VTI-KEY-160 to VTI-KEY-166):** an admin, issuer,
   sender or authority that presents a `did:scid:vh:1` DID URL with a `?src=`
   locator is matched by its DID, so `ADMIN_DIDS`, `ADMIN_AUTHORITIES`, the
