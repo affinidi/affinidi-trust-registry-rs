@@ -18,6 +18,14 @@ release goes GA (`## 0.27.0 (date)`).
 
 ## Unreleased
 
+### Changed
+
+- **Dependencies (breaking for `trql-client` users):** trust-tasks 0.34.1,
+  affinidi-tdk 0.32, affinidi-messaging-sdk 0.40, vta-sdk 0.73, vti-secrets
+  0.22 and test-mediator 0.45. trust-tasks types are part of `trql-client`'s
+  public API, so a consumer on trust-tasks 0.32 must move with it. No wire or
+  behaviour change.
+
 ### Added
 
 - **`trust-registry setup` (feature `vta`):** headless provisioning of the
