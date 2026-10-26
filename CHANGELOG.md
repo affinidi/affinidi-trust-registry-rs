@@ -49,6 +49,21 @@ release goes GA (`## 0.27.0 (date)`).
 - **Dockerfile:** a `FEATURES` build arg (e.g. `--build-arg FEATURES="vta secrets-vault"`),
   so the image can be built for VTA mode and the setup command. The default
   image is unchanged.
+- **did:scid identities (VTI-KEY-160 to VTI-KEY-166):** an admin, issuer,
+  sender or authority that presents a `did:scid:vh:1` DID URL with a `?src=`
+  locator is matched by its DID, so `ADMIN_DIDS`, `ADMIN_AUTHORITIES`, the
+  issuer↔sender check and the recipient check accept either. The proof's
+  `verificationMethod` is still bound to the issuer exactly (Trust Tasks SPEC
+  §4.8); a did:scid producer writes both in the same form. A did:scid and its
+  did:webvh log are different identities.
+- **`registry/did/rotate` for a did:scid registry:** rotates the did:webvh log
+  its document names, and reports the did:scid, which a rotation does not
+  change. Configure the registry DID as its DID URL (`?src=…`) so a fresh
+  resolver can find the log.
+- **`setup-trust-registry --did-method scid`:** writes a did:webvh log and
+  presents its did:scid. A new did:webvh (`webvh` or `scid`) lists its
+  did:scid in `alsoKnownAs` by default; `--no-scid-alias` leaves it out for
+  `webvh` and is refused for `scid`.
 
 ### Documentation
 

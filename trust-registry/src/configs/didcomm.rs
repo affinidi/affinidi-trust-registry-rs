@@ -1,3 +1,4 @@
+use affinidi_did_common::scid::{same_reference, strip_scid_src};
 use affinidi_tdk::{
     messaging::protocols::mediator::acls::AccessListModeType, secrets_resolver::secrets::Secret,
 };
@@ -117,9 +118,22 @@ pub fn parse_admin_authorities(
             "ADMIN_AUTHORITIES must be a JSON object mapping an admin DID to a list of authority DIDs: {e}"
         )
     })?;
+    // Keyed and compared by DID, as `admin_dids` is.
+    let admin_authorities: HashMap<String, Vec<String>> = admin_authorities
+        .into_iter()
+        .map(|(admin, authorities)| {
+            (
+                strip_scid_src(&admin).into_owned(),
+                authorities
+                    .iter()
+                    .map(|a| strip_scid_src(a).into_owned())
+                    .collect(),
+            )
+        })
+        .collect();
     if let Some(unknown) = admin_authorities
         .keys()
-        .find(|admin| !admin_dids.contains(admin))
+        .find(|admin| !admin_dids.iter().any(|d| same_reference(d, admin)))
     {
         return Err(format!(
             "ADMIN_AUTHORITIES names {unknown}, which is not in ADMIN_DIDS"
@@ -258,9 +272,11 @@ impl Configs for DidcommConfig {
             warn!("Missing environment variable: ADMIN_DIDS. The admin list is empty");
             String::new()
         });
+        // A did:scid admin is listed by its DID; a `?src=` locator says where
+        // to fetch it, not who it is (VTI-KEY-160).
         let admin_dids: Vec<String> = admin_dids_str
             .split(',')
-            .map(|e| e.trim().to_string())
+            .map(|e| strip_scid_src(e.trim()).into_owned())
             .collect();
 
         let log_format = env_or("AUDIT_LOG_FORMAT", "json")
@@ -373,6 +389,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed[ADMIN], vec!["did:example:a", "did:example:b"]);
+    }
+
+    /// A did:scid admin and its authorities are keyed by DID: the `?src=`
+    /// locator they may be written with is not part of who they are.
+    #[test]
+    fn a_did_scid_admin_and_authority_are_keyed_by_did() {
+        let parsed = parse_admin_authorities(
+            Some(
+                r#"{"did:scid:vh:1:QmAdmin?src=a.example": ["did:scid:vh:1:QmAuth?src=b.example"]}"#,
+            ),
+            &["did:scid:vh:1:QmAdmin".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            parsed["did:scid:vh:1:QmAdmin"],
+            vec!["did:scid:vh:1:QmAuth"]
+        );
     }
 
     #[test]

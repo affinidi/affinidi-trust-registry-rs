@@ -12,7 +12,9 @@ use affinidi_tdk::{
 };
 
 use clap::Parser;
-use didwebvh_rs::{DIDWebVHState, parameters::Parameters, url::WebVHURL};
+use didwebvh_rs::{
+    DIDWebVHState, create::add_scid_also_known_as, parameters::Parameters, url::WebVHURL,
+};
 use serde_json::Value;
 use serde_json::json;
 use std::str::FromStr;
@@ -52,13 +54,23 @@ struct Args {
     #[arg(long, short = 'd')]
     mediator_did: Option<String>,
 
-    /// DID method to use for Trust Registry (peer, web, or webvh). Generate new DID when specified.
-    #[arg(long, short = 'm', value_parser = ["peer", "web", "webvh"], default_value = "peer")]
+    /// DID method to use for Trust Registry (peer, web, webvh, or scid). Generate new DID when specified.
+    ///
+    /// `scid` writes a did:webvh log and presents its did:scid:vh:1 DID, which
+    /// the same log verifies but which does not change if the log moves.
+    #[arg(long, short = 'm', value_parser = ["peer", "web", "webvh", "scid"], default_value = "peer")]
     did_method: Option<String>,
 
-    /// URL to host the DID document (required only for did:web and did:webvh)
-    #[arg(long, short = 'w', required_if_eq_any([("did_method", "web"), ("did_method", "webvh")]))]
+    /// URL to host the DID document (required only for did:web, did:webvh and did:scid)
+    #[arg(long, short = 'w', required_if_eq_any([("did_method", "web"), ("did_method", "webvh"), ("did_method", "scid")]))]
     didweb_url: Option<String>,
+
+    /// Do not list the did:scid:vh:1 form of a new did:webvh in its
+    /// `alsoKnownAs`. Listed by default, so peers can recognise the Trust
+    /// Registry under either form; not allowed with `--did-method scid`, whose
+    /// identity is that form.
+    #[arg(long, default_value = "false")]
+    no_scid_alias: bool,
 
     /// Profile configuration location using URI schemes:
     ///
@@ -300,9 +312,16 @@ pub async fn setup_did_web_tr(
     mediator_did: String,
     web_url: String,
     did_method: String,
+    scid_alias: bool,
     non_interactive: bool,
 ) -> Result<(String, Vec<Secret>), Box<dyn Error>> {
     println!("Setting up did:{} for Trust Registry...", did_method);
+    // A did:scid is presented from a did:webvh log; the alias is what says so
+    // to a resolver of the did:webvh (VTI-KEY-166).
+    let webvh_log = did_method == "webvh" || did_method == "scid";
+    if did_method == "scid" && !scid_alias {
+        return Err("--no-scid-alias cannot be used with --did-method scid".into());
+    }
 
     let parsed_url = Url::parse(&web_url)?;
     let did_url_raw = WebVHURL::parse_url(&parsed_url)?;
@@ -461,7 +480,7 @@ pub async fn setup_did_web_tr(
         );
     }
 
-    if did_method == "webvh" {
+    if webvh_log {
         // Create the WebVH Parameters
         let mut update_secret = Secret::generate_ed25519(None, None);
         update_secret.id = [
@@ -481,15 +500,17 @@ pub async fn setup_did_web_tr(
             .with_portable(true)
             .build();
 
+        let mut document = serde_json::to_value(&did_document)?;
+        if scid_alias {
+            // Written against the `{SCID}` placeholder, which the log entry
+            // fills in, as `didwebvh_rs::create::create_did` does.
+            add_scid_also_known_as(&mut document, &tr_did)?;
+        }
+
         // Create the WebVH DID
         let mut didwebvh = DIDWebVHState::default();
         let log_entry = didwebvh
-            .create_log_entry(
-                None,
-                &serde_json::to_value(&did_document)?,
-                &parameters,
-                &update_secret,
-            )
+            .create_log_entry(None, &document, &parameters, &update_secret)
             .await?;
         // Get the final DID after log entry creation
         tr_did = log_entry.get_state().get("id").unwrap().to_string();
@@ -500,10 +521,27 @@ pub async fn setup_did_web_tr(
         did_document = serde_json::from_value(log_entry.get_did_document()?)?;
     }
 
+    // A did:scid Trust Registry is known by its bare DID, and its keys are
+    // under it in its own document (VTI-KEY-161). Its profile DID is the DID
+    // URL with `?src=`, so what it sends carries the locator a peer needs to
+    // resolve it (VTI-KEY-163).
+    let key_did = if did_method == "scid" {
+        let scid_url = DIDWebVHState::convert_webvh_id_to_scid_id(&tr_did);
+        let bare = scid_url
+            .split_once('?')
+            .map(|(did, _)| did.to_string())
+            .ok_or_else(|| format!("{tr_did} has no did:scid form"))?;
+        println!("  did:webvh log: {tr_did}");
+        tr_did = scid_url;
+        bare
+    } else {
+        tr_did.clone()
+    };
+
     // Build JWKS secrets
     let mut secrets: Vec<Secret> = Vec::new();
-    let jwk_v_id = [tr_did.to_string(), "#key-1".to_string()].concat();
-    let jwk_e_id = [tr_did.to_string(), "#key-2".to_string()].concat();
+    let jwk_v_id = [key_did.to_string(), "#key-1".to_string()].concat();
+    let jwk_e_id = [key_did.to_string(), "#key-2".to_string()].concat();
 
     if let SecretMaterial::JWK(jwk) = &verification_key.secret_material {
         let secret: Secret = serde_json::from_value(json!({
@@ -704,7 +742,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let (tr_did, tr_secrets) = match did_method.as_str() {
                 "peer" => setup_did_peer_tr(mediator_did.to_string()),
-                "web" | "webvh" => {
+                "web" | "webvh" | "scid" => {
                     let web_url = args.didweb_url.ok_or(format!(
                         "--didweb-url is required when using did:{} method.",
                         did_method
@@ -714,6 +752,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         mediator_did.to_string(),
                         web_url,
                         did_method.clone(),
+                        !args.no_scid_alias,
                         args.non_interactive,
                     )
                     .await?
