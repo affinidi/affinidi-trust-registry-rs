@@ -18,6 +18,8 @@ release goes GA (`## 0.27.0 (date)`).
 
 ## Unreleased
 
+## 0.28.0 (release/0.28)
+
 ### Changed
 
 - **Dependencies (breaking for `trql-client` users):** trust-tasks 0.34.1,
