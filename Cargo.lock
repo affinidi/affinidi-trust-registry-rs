@@ -2432,7 +2432,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -2826,7 +2826,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5173,7 +5173,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5569,7 +5569,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5627,7 +5627,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6414,10 +6414,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6442,9 +6442,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trust-tasks-didcomm",
- "trust-tasks-proof 0.35.0",
+ "trust-tasks-proof 0.35.1",
  "trust-tasks-rs 0.34.2",
- "trust-tasks-rs 0.35.0",
+ "trust-tasks-rs 0.35.1",
  "uuid",
 ]
 
@@ -6462,8 +6462,8 @@ dependencies = [
  "tokio-util",
  "trust-registry",
  "trust-tasks-didcomm",
- "trust-tasks-proof 0.35.0",
- "trust-tasks-rs 0.35.0",
+ "trust-tasks-proof 0.35.1",
+ "trust-tasks-rs 0.35.1",
  "trust-tasks-tsp",
  "uuid",
 ]
@@ -6901,7 +6901,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trust-tasks-didcomm",
- "trust-tasks-rs 0.35.0",
+ "trust-tasks-rs 0.35.1",
  "trust-tasks-tsp",
  "uuid",
 ]
@@ -6956,9 +6956,9 @@ dependencies = [
  "tracing-subscriber",
  "trust-tasks-didcomm",
  "trust-tasks-https",
- "trust-tasks-proof 0.35.0",
+ "trust-tasks-proof 0.35.1",
  "trust-tasks-rs 0.34.2",
- "trust-tasks-rs 0.35.0",
+ "trust-tasks-rs 0.35.1",
  "trust-tasks-tsp",
  "url",
  "urlencoding",
@@ -6983,8 +6983,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-didcomm"
-version = "0.35.0"
-source = "git+https://github.com/trustoverip/dtgwg-trust-tasks-tf?rev=62a1dfd311#62a1dfd31124b25fe16e1c4b9fb8d08a5aa1c3ce"
+version = "0.35.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4444bbdece1a746a6556ca5fcb42221224b981bf6ee45ca624c368a304b3f150"
 dependencies = [
  "affinidi-messaging-didcomm",
  "base64 0.22.1",
@@ -6992,20 +6993,21 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "trust-tasks-rs 0.35.0",
+ "trust-tasks-rs 0.35.1",
  "uuid",
 ]
 
 [[package]]
 name = "trust-tasks-https"
-version = "0.35.0"
-source = "git+https://github.com/trustoverip/dtgwg-trust-tasks-tf?rev=62a1dfd311#62a1dfd31124b25fe16e1c4b9fb8d08a5aa1c3ce"
+version = "0.35.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfaa99e180d778942086dff825ce960293f6b3fe6f2d55f5b691fc35fd006cc8"
 dependencies = [
  "chrono",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "trust-tasks-rs 0.35.0",
+ "trust-tasks-rs 0.35.1",
  "uuid",
 ]
 
@@ -7029,8 +7031,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-proof"
-version = "0.35.0"
-source = "git+https://github.com/trustoverip/dtgwg-trust-tasks-tf?rev=62a1dfd311#62a1dfd31124b25fe16e1c4b9fb8d08a5aa1c3ce"
+version = "0.35.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d64200ff3848445361717768ab072bfb0e6ff2b3e80a8ff2380b81163876a7fb"
 dependencies = [
  "affinidi-crypto",
  "affinidi-data-integrity",
@@ -7041,7 +7044,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "trust-tasks-rs 0.35.0",
+ "trust-tasks-rs 0.35.1",
 ]
 
 [[package]]
@@ -7062,8 +7065,9 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-rs"
-version = "0.35.0"
-source = "git+https://github.com/trustoverip/dtgwg-trust-tasks-tf?rev=62a1dfd311#62a1dfd31124b25fe16e1c4b9fb8d08a5aa1c3ce"
+version = "0.35.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ba0e133a4292a416229c5281203cd43478f0da62f599aa45494de37a1030e7a"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7076,15 +7080,16 @@ dependencies = [
 
 [[package]]
 name = "trust-tasks-tsp"
-version = "0.35.0"
-source = "git+https://github.com/trustoverip/dtgwg-trust-tasks-tf?rev=62a1dfd311#62a1dfd31124b25fe16e1c4b9fb8d08a5aa1c3ce"
+version = "0.35.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e0a1de5cdbe0d89816d766dfe24d83d2001154a3526e37f39f30e94caed9606"
 dependencies = [
  "affinidi-tsp",
  "chrono",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "trust-tasks-rs 0.35.0",
+ "trust-tasks-rs 0.35.1",
 ]
 
 [[package]]
@@ -7659,7 +7664,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
