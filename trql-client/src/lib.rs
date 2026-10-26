@@ -1,8 +1,9 @@
 //! Transport-agnostic query client for the Affinidi Trust Registry.
 //!
 //! Queries are TRQP authorization/recognition checks carried as **Trust Task
-//! documents** (`registry/authorization/0.1`, `registry/recognition/0.1` from
-//! [`trust_tasks_rs::specs::registry`]) — the same contract the registry
+//! documents** (`registry/authorization/0.2` and `registry/recognition/0.2`,
+//! falling back to 0.1 for a registry that answers `unsupportedVersion`; see
+//! [`TrqlClient::authorization`]) — the same contract the registry
 //! serves over every transport. The document is the protocol; a transport is
 //! only a pipe that moves one request document and returns the peer's reply
 //! document (see [`TrqlTransport`]).
@@ -40,11 +41,11 @@
 //! if response.authorized { /* ... */ }
 //! ```
 
-// This client speaks `registry/authorization` and `registry/recognition` 0.1,
-// which the lowerCamelCase 0.2 versions supersede. It stays on 0.1 until
-// registries it talks to answer 0.2; moving is a change to this crate's API.
+// The client still speaks `registry/authorization` and `registry/recognition`
+// 0.1, now superseded by 0.2, as the fallback for registries that predate 0.2.
 #![allow(deprecated)]
 
+mod answer;
 mod client;
 mod discovery;
 mod error;
@@ -59,6 +60,7 @@ mod pending;
 #[cfg(feature = "tsp")]
 mod tsp;
 
+pub use answer::{AuthorizationAnswer, RecognitionAnswer, SpecVersion};
 pub use client::{TrqlClient, TrqpQuery};
 pub use discovery::{
     DIDCOMM_SERVICE_TYPE, PREFERENCE_ORDER, REST_SERVICE_TYPE, REST_SERVICE_TYPES,
@@ -75,15 +77,32 @@ pub use https::{HttpsTransport, HttpsTransportConfig};
 #[cfg(feature = "tsp")]
 pub use tsp::{TspTransport, TspTransportConfig};
 
-/// The generated request/response payload types this client speaks, re-exported
-/// so consumers don't need a direct `trust-tasks-rs` dependency for the basics.
+/// The generated request/response payload types this client speaks, per spec
+/// version, re-exported so consumers don't need a direct `trust-tasks-rs`
+/// dependency to inspect them. [`TrqlClient`] answers with
+/// [`AuthorizationAnswer`] / [`RecognitionAnswer`], not these.
 pub mod payloads {
-    pub use trust_tasks_rs::specs::registry::authorization::v0_1::{
-        Payload as AuthorizationRequest, QueryContext as AuthorizationQueryContext,
-        Response as AuthorizationResponse,
-    };
-    pub use trust_tasks_rs::specs::registry::recognition::v0_1::{
-        Payload as RecognitionRequest, QueryContext as RecognitionQueryContext,
-        Response as RecognitionResponse,
-    };
+    /// `registry/authorization/0.2` and `registry/recognition/0.2`.
+    pub mod v0_2 {
+        pub use trust_tasks_rs::specs::registry::authorization::v0_2::{
+            Payload as AuthorizationRequest, QueryContext as AuthorizationQueryContext,
+            Response as AuthorizationResponse,
+        };
+        pub use trust_tasks_rs::specs::registry::recognition::v0_2::{
+            Payload as RecognitionRequest, QueryContext as RecognitionQueryContext,
+            Response as RecognitionResponse,
+        };
+    }
+    /// `registry/authorization/0.1` and `registry/recognition/0.1`, the
+    /// fallback for registries that predate 0.2.
+    pub mod v0_1 {
+        pub use trust_tasks_rs::specs::registry::authorization::v0_1::{
+            Payload as AuthorizationRequest, QueryContext as AuthorizationQueryContext,
+            Response as AuthorizationResponse,
+        };
+        pub use trust_tasks_rs::specs::registry::recognition::v0_1::{
+            Payload as RecognitionRequest, QueryContext as RecognitionQueryContext,
+            Response as RecognitionResponse,
+        };
+    }
 }

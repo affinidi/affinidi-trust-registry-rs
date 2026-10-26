@@ -37,12 +37,12 @@ async fn authorization_round_trip_over_http() {
             assert_eq!(doc.recipient.as_deref(), Some("did:example:registry"));
             assert_eq!(doc.type_uri.slug(), "registry/authorization");
             let payload = serde_json::json!({
-                "entity_id": doc.payload["entity_id"],
-                "authority_id": doc.payload["authority_id"],
+                "entityId": doc.payload["entityId"],
+                "authorityId": doc.payload["authorityId"],
                 "action": doc.payload["action"],
                 "resource": doc.payload["resource"],
                 "authorized": true,
-                "time_evaluated": "2026-07-16T00:00:00Z",
+                "evaluatedAt": "2026-07-16T00:00:00Z",
             });
             Json(doc.respond_with("urn:uuid:reply".to_string(), payload))
         }),
@@ -155,12 +155,12 @@ async fn correlated_answer_for_another_authority_is_rejected_over_the_wire() {
         "/trust-tasks",
         post(|Json(doc): Json<TrustTask<Value>>| async move {
             let payload = serde_json::json!({
-                "entity_id": doc.payload["entity_id"],
-                "authority_id": "did:example:not-who-we-asked-about",
+                "entityId": doc.payload["entityId"],
+                "authorityId": "did:example:not-who-we-asked-about",
                 "action": doc.payload["action"],
                 "resource": doc.payload["resource"],
                 "authorized": true,
-                "time_evaluated": "2026-07-16T00:00:00Z",
+                "evaluatedAt": "2026-07-16T00:00:00Z",
             });
             Json(doc.respond_with("urn:uuid:reply".to_string(), payload))
         }),
@@ -181,7 +181,7 @@ async fn correlated_answer_for_another_authority_is_rejected_over_the_wire() {
         matches!(
             err,
             TrqlError::AnswerMismatch {
-                field: "authority_id",
+                field: "authorityId",
                 ..
             }
         ),
@@ -200,12 +200,12 @@ async fn unconfirmed_referral_is_rejected_over_the_wire() {
         "/trust-tasks",
         post(|Json(doc): Json<TrustTask<Value>>| async move {
             let payload = serde_json::json!({
-                "entity_id": doc.payload["entity_id"],
-                "authority_id": doc.payload["authority_id"],
+                "entityId": doc.payload["entityId"],
+                "authorityId": doc.payload["authorityId"],
                 "action": doc.payload["action"],
                 "resource": doc.payload["resource"],
                 "authorized": true,
-                "time_evaluated": "2026-07-16T00:00:00Z",
+                "evaluatedAt": "2026-07-16T00:00:00Z",
             });
             Json(doc.respond_with("urn:uuid:reply".to_string(), payload))
         }),

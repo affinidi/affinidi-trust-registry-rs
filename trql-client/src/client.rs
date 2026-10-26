@@ -3,17 +3,17 @@
 //! mapping, payload typing) so every binding behaves identically.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use trust_tasks_rs::{ErrorPayload, Payload, TrustTask};
+use trust_tasks_rs::{ErrorPayload, Payload, StandardCode, TrustTask};
 
+use crate::answer::{AuthorizationAnswer, RecognitionAnswer, SpecVersion};
 use crate::error::TrqlError;
-use crate::payloads::{
-    AuthorizationRequest, AuthorizationResponse, RecognitionRequest, RecognitionResponse,
-};
+use crate::payloads::{v0_1, v0_2};
 use crate::transport::TrqlTransport;
 
 /// Slug of the framework's reserved error document type.
@@ -30,12 +30,22 @@ fn payload_build_error(err: impl std::fmt::Display) -> TrqlError {
     TrqlError::Config(format!("could not build query payload: {err}"))
 }
 
-/// The TRQP 4-tuple members, named identically on requests and responses.
+/// The four tuple members, as one version spells them on both its request and
+/// its response.
 ///
-/// Both `registry/authorization/0.1` and `registry/recognition/0.1` require all
-/// four on the response, verbatim from the request, which is what makes an echo
-/// check possible without knowing which query is in flight.
-const TRQP_TUPLE: [&str; 4] = ["entity_id", "authority_id", "action", "resource"];
+/// Every `registry/authorization` and `registry/recognition` version requires
+/// all four on the response, verbatim from the request, which is what makes an
+/// echo check possible without knowing which query is in flight. The authority
+/// is always the second.
+type Tuple = [&'static str; 4];
+const TUPLE_V0_1: Tuple = ["entity_id", "authority_id", "action", "resource"];
+const TUPLE_V0_2: Tuple = ["entityId", "authorityId", "action", "resource"];
+
+/// Whether `err` is a registry saying it does not speak this version of a task
+/// it does know: the SPEC §8.3 signal to downgrade.
+fn is_unsupported_version(err: &TrqlError) -> bool {
+    matches!(err, TrqlError::Rejected { code, .. } if *code == StandardCode::UnsupportedVersion.into())
+}
 
 /// The TRQP 4-tuple every registry query is keyed on, plus the optional
 /// evaluation context.
@@ -101,6 +111,11 @@ pub struct TrqlClient {
     registry_did: String,
     client_did: Option<String>,
     referred_by: Option<String>,
+    /// Set once this registry has answered a 0.2 query with
+    /// `unsupportedVersion`, so later queries go straight to 0.1 rather than
+    /// paying the extra round trip each time. A client is for one registry;
+    /// one that upgrades is still answered correctly at 0.1.
+    v0_1_only: AtomicBool,
 }
 
 impl TrqlClient {
@@ -112,6 +127,7 @@ impl TrqlClient {
             registry_did: registry_did.into(),
             client_did: None,
             referred_by: None,
+            v0_1_only: AtomicBool::new(false),
         }
     }
 
@@ -153,43 +169,46 @@ impl TrqlClient {
     }
 
     /// Ask whether `entity` is authorized by `authority` for `action` on
-    /// `resource` (`registry/authorization/0.1`).
+    /// `resource`.
     ///
-    /// A registry with no matching record answers `authorized: false` — absence
-    /// is a denial, not an error.
-    pub async fn authorization(
-        &self,
-        query: TrqpQuery,
-    ) -> Result<AuthorizationResponse, TrqlError> {
-        let context: Option<crate::payloads::AuthorizationQueryContext> = query
-            .has_context()
-            .then(|| {
-                crate::payloads::AuthorizationQueryContext::builder()
-                    .time(query.time)
-                    .locator(query.locator.clone())
-                    .extra(std::collections::HashMap::new())
-                    .try_into()
-            })
-            .transpose()
-            .map_err(payload_build_error)?;
-        let payload: AuthorizationRequest = AuthorizationRequest::builder()
-            .entity_id(query.entity_id.clone())
-            .authority_id(query.authority_id.clone())
-            .action(query.action.clone())
-            .resource(query.resource.clone())
-            .context(context)
-            .try_into()
-            .map_err(payload_build_error)?;
-        self.send_query(payload).await
+    /// Sent as `registry/authorization/0.2`; a registry that answers
+    /// `unsupportedVersion` is asked again at 0.1, and remembered. A registry
+    /// with no matching record answers `authorized: false`: absence is a
+    /// denial, not an error.
+    pub async fn authorization(&self, query: TrqpQuery) -> Result<AuthorizationAnswer, TrqlError> {
+        if !self.v0_1_only.load(Ordering::Relaxed) {
+            match self.authorization_v0_2(&query).await {
+                Err(e) if is_unsupported_version(&e) => {
+                    self.v0_1_only.store(true, Ordering::Relaxed)
+                }
+                answered => return answered,
+            }
+        }
+        self.authorization_v0_1(&query).await
     }
 
     /// Ask whether `entity` is recognized by `authority` for `action` on
-    /// `resource` (`registry/recognition/0.1`).
-    pub async fn recognition(&self, query: TrqpQuery) -> Result<RecognitionResponse, TrqlError> {
-        let context: Option<crate::payloads::RecognitionQueryContext> = query
+    /// `resource`. Versions as for [`authorization`](Self::authorization).
+    pub async fn recognition(&self, query: TrqpQuery) -> Result<RecognitionAnswer, TrqlError> {
+        if !self.v0_1_only.load(Ordering::Relaxed) {
+            match self.recognition_v0_2(&query).await {
+                Err(e) if is_unsupported_version(&e) => {
+                    self.v0_1_only.store(true, Ordering::Relaxed)
+                }
+                answered => return answered,
+            }
+        }
+        self.recognition_v0_1(&query).await
+    }
+
+    async fn authorization_v0_2(
+        &self,
+        query: &TrqpQuery,
+    ) -> Result<AuthorizationAnswer, TrqlError> {
+        let context: Option<v0_2::AuthorizationQueryContext> = query
             .has_context()
             .then(|| {
-                crate::payloads::RecognitionQueryContext::builder()
+                v0_2::AuthorizationQueryContext::builder()
                     .time(query.time)
                     .locator(query.locator.clone())
                     .extra(std::collections::HashMap::new())
@@ -197,7 +216,7 @@ impl TrqlClient {
             })
             .transpose()
             .map_err(payload_build_error)?;
-        let payload: RecognitionRequest = RecognitionRequest::builder()
+        let payload: v0_2::AuthorizationRequest = v0_2::AuthorizationRequest::builder()
             .entity_id(query.entity_id.clone())
             .authority_id(query.authority_id.clone())
             .action(query.action.clone())
@@ -205,7 +224,123 @@ impl TrqlClient {
             .context(context)
             .try_into()
             .map_err(payload_build_error)?;
-        self.send_query(payload).await
+        let r: v0_2::AuthorizationResponse = self.send_query(payload, &TUPLE_V0_2).await?;
+        Ok(AuthorizationAnswer {
+            entity_id: r.entity_id,
+            authority_id: r.authority_id,
+            action: r.action,
+            resource: r.resource,
+            authorized: r.authorized,
+            evaluated_at: r.evaluated_at,
+            as_of: r.as_of,
+            message: r.message.map(|m| m.to_string()),
+            version: SpecVersion::V0_2,
+        })
+    }
+
+    async fn authorization_v0_1(
+        &self,
+        query: &TrqpQuery,
+    ) -> Result<AuthorizationAnswer, TrqlError> {
+        let context: Option<v0_1::AuthorizationQueryContext> = query
+            .has_context()
+            .then(|| {
+                v0_1::AuthorizationQueryContext::builder()
+                    .time(query.time)
+                    .locator(query.locator.clone())
+                    .extra(std::collections::HashMap::new())
+                    .try_into()
+            })
+            .transpose()
+            .map_err(payload_build_error)?;
+        let payload: v0_1::AuthorizationRequest = v0_1::AuthorizationRequest::builder()
+            .entity_id(query.entity_id.clone())
+            .authority_id(query.authority_id.clone())
+            .action(query.action.clone())
+            .resource(query.resource.clone())
+            .context(context)
+            .try_into()
+            .map_err(payload_build_error)?;
+        let r: v0_1::AuthorizationResponse = self.send_query(payload, &TUPLE_V0_1).await?;
+        Ok(AuthorizationAnswer {
+            entity_id: r.entity_id,
+            authority_id: r.authority_id,
+            action: r.action,
+            resource: r.resource,
+            authorized: r.authorized,
+            evaluated_at: r.time_evaluated,
+            as_of: r.time_requested,
+            message: r.message.map(|m| m.to_string()),
+            version: SpecVersion::V0_1,
+        })
+    }
+
+    async fn recognition_v0_2(&self, query: &TrqpQuery) -> Result<RecognitionAnswer, TrqlError> {
+        let context: Option<v0_2::RecognitionQueryContext> = query
+            .has_context()
+            .then(|| {
+                v0_2::RecognitionQueryContext::builder()
+                    .time(query.time)
+                    .locator(query.locator.clone())
+                    .extra(std::collections::HashMap::new())
+                    .try_into()
+            })
+            .transpose()
+            .map_err(payload_build_error)?;
+        let payload: v0_2::RecognitionRequest = v0_2::RecognitionRequest::builder()
+            .entity_id(query.entity_id.clone())
+            .authority_id(query.authority_id.clone())
+            .action(query.action.clone())
+            .resource(query.resource.clone())
+            .context(context)
+            .try_into()
+            .map_err(payload_build_error)?;
+        let r: v0_2::RecognitionResponse = self.send_query(payload, &TUPLE_V0_2).await?;
+        Ok(RecognitionAnswer {
+            entity_id: r.entity_id,
+            authority_id: r.authority_id,
+            action: r.action,
+            resource: r.resource,
+            recognized: r.recognized,
+            evaluated_at: r.evaluated_at,
+            as_of: r.as_of,
+            message: r.message.map(|m| m.to_string()),
+            version: SpecVersion::V0_2,
+        })
+    }
+
+    async fn recognition_v0_1(&self, query: &TrqpQuery) -> Result<RecognitionAnswer, TrqlError> {
+        let context: Option<v0_1::RecognitionQueryContext> = query
+            .has_context()
+            .then(|| {
+                v0_1::RecognitionQueryContext::builder()
+                    .time(query.time)
+                    .locator(query.locator.clone())
+                    .extra(std::collections::HashMap::new())
+                    .try_into()
+            })
+            .transpose()
+            .map_err(payload_build_error)?;
+        let payload: v0_1::RecognitionRequest = v0_1::RecognitionRequest::builder()
+            .entity_id(query.entity_id.clone())
+            .authority_id(query.authority_id.clone())
+            .action(query.action.clone())
+            .resource(query.resource.clone())
+            .context(context)
+            .try_into()
+            .map_err(payload_build_error)?;
+        let r: v0_1::RecognitionResponse = self.send_query(payload, &TUPLE_V0_1).await?;
+        Ok(RecognitionAnswer {
+            entity_id: r.entity_id,
+            authority_id: r.authority_id,
+            action: r.action,
+            resource: r.resource,
+            recognized: r.recognized,
+            evaluated_at: r.time_evaluated,
+            as_of: r.time_requested,
+            message: r.message.map(|m| m.to_string()),
+            version: SpecVersion::V0_1,
+        })
     }
 
     /// Build the request document for `payload`, run one exchange, and
@@ -214,7 +349,7 @@ impl TrqlClient {
     /// mapped to [`TrqlError::Rejected`]. A `#response` must additionally
     /// answer the tuple that was asked, and close any referral this client was
     /// built with.
-    async fn send_query<Req, Resp>(&self, payload: Req) -> Result<Resp, TrqlError>
+    async fn send_query<Req, Resp>(&self, payload: Req, tuple: &Tuple) -> Result<Resp, TrqlError>
     where
         Req: Payload + Serialize,
         Resp: DeserializeOwned,
@@ -223,7 +358,7 @@ impl TrqlClient {
             .map_err(|e| TrqlError::Contract(format!("request payload did not serialize: {e}")))?;
         // Capture the tuple before `body` is moved into the request document;
         // the reply is checked against what we actually put on the wire.
-        let asked = TRQP_TUPLE.map(|field| body.get(field).cloned().unwrap_or(Value::Null));
+        let asked = tuple.map(|field| body.get(field).cloned().unwrap_or(Value::Null));
         let id = new_task_id();
         let mut request = TrustTask::new(id.clone(), Req::type_uri(), body);
         request.recipient = Some(self.registry_did.clone());
@@ -261,7 +396,7 @@ impl TrqlClient {
             )));
         }
 
-        self.check_answers_our_question(&asked, &reply.payload)?;
+        self.check_answers_our_question(tuple, &asked, &reply.payload)?;
 
         serde_json::from_value(reply.payload)
             .map_err(|e| TrqlError::Contract(format!("response payload did not parse: {e}")))
@@ -283,10 +418,11 @@ impl TrqlClient {
     /// and either way the query fails closed.
     fn check_answers_our_question(
         &self,
-        asked: &[Value; TRQP_TUPLE.len()],
+        tuple: &Tuple,
+        asked: &[Value; 4],
         answered: &Value,
     ) -> Result<(), TrqlError> {
-        for (&field, asked) in TRQP_TUPLE.iter().zip(asked) {
+        for (&field, asked) in tuple.iter().zip(asked) {
             let Some(answered) = answered.get(field) else {
                 continue;
             };
@@ -305,7 +441,7 @@ impl TrqlClient {
         // caller that follows a referral and then asks about some other
         // authority has learned nothing about the referral.
         if let Some(origin) = self.referred_by.as_deref() {
-            let answered = answered.get("authority_id").and_then(Value::as_str);
+            let answered = answered.get(tuple[1]).and_then(Value::as_str);
             if answered != Some(origin) {
                 return Err(TrqlError::ReferralNotClosed {
                     origin: origin.to_string(),
@@ -392,12 +528,12 @@ mod tests {
 
     fn authorized_response(request: &TrustTask<Value>, authorized: bool) -> TrustTask<Value> {
         let payload = serde_json::json!({
-            "entity_id": request.payload["entity_id"],
-            "authority_id": request.payload["authority_id"],
+            "entityId": request.payload["entityId"],
+            "authorityId": request.payload["authorityId"],
             "action": request.payload["action"],
             "resource": request.payload["resource"],
             "authorized": authorized,
-            "time_evaluated": "2026-07-16T00:00:00Z",
+            "evaluatedAt": "2026-07-16T00:00:00Z",
         });
         request.respond_with("urn:uuid:reply".to_string(), payload)
     }
@@ -480,12 +616,12 @@ mod tests {
     async fn recognition_parses_recognized_flag() {
         let client = client_over(|req| {
             let payload = serde_json::json!({
-                "entity_id": req.payload["entity_id"],
-                "authority_id": req.payload["authority_id"],
+                "entityId": req.payload["entityId"],
+                "authorityId": req.payload["authorityId"],
                 "action": req.payload["action"],
                 "resource": req.payload["resource"],
                 "recognized": false,
-                "time_evaluated": "2026-07-16T00:00:00Z",
+                "evaluatedAt": "2026-07-16T00:00:00Z",
             });
             Ok(req.respond_with("urn:uuid:reply".to_string(), payload))
         });
@@ -525,7 +661,7 @@ mod tests {
         let client = client_over(|req| {
             Ok(answer_substituting(
                 &req,
-                "authority_id",
+                "authorityId",
                 "did:example:other-authority",
             ))
         });
@@ -536,7 +672,7 @@ mod tests {
                 ref asked,
                 ref answered,
             } => {
-                assert_eq!(field, "authority_id");
+                assert_eq!(field, "authorityId");
                 assert_eq!(asked, "did:example:a");
                 assert_eq!(answered, "did:example:other-authority");
             }
@@ -550,7 +686,7 @@ mod tests {
         let client = client_over(|req| {
             Ok(answer_substituting(
                 &req,
-                "entity_id",
+                "entityId",
                 "did:example:someone-else",
             ))
         });
@@ -559,7 +695,7 @@ mod tests {
             matches!(
                 err,
                 TrqlError::AnswerMismatch {
-                    field: "entity_id",
+                    field: "entityId",
                     ..
                 }
             ),
@@ -585,7 +721,7 @@ mod tests {
     async fn a_denial_must_also_answer_the_question_asked() {
         let client = client_over(|req| {
             let mut reply = authorized_response(&req, false);
-            reply.payload["authority_id"] = Value::String("did:example:other".to_string());
+            reply.payload["authorityId"] = Value::String("did:example:other".to_string());
             Ok(reply)
         });
         let err = client.authorization(query()).await.unwrap_err();
@@ -599,12 +735,12 @@ mod tests {
     async fn recognition_answers_are_checked_too() {
         let client = client_over(|req| {
             let payload = serde_json::json!({
-                "entity_id": req.payload["entity_id"],
-                "authority_id": "did:example:other",
+                "entityId": req.payload["entityId"],
+                "authorityId": "did:example:other",
                 "action": req.payload["action"],
                 "resource": req.payload["resource"],
                 "recognized": true,
-                "time_evaluated": "2026-07-16T00:00:00Z",
+                "evaluatedAt": "2026-07-16T00:00:00Z",
             });
             Ok(req.respond_with("urn:uuid:reply".to_string(), payload))
         });
@@ -626,7 +762,7 @@ mod tests {
                 .payload
                 .as_object_mut()
                 .expect("response payload is an object")
-                .remove("authority_id");
+                .remove("authorityId");
             Ok(reply)
         });
         let err = client.authorization(query()).await.unwrap_err();
@@ -671,5 +807,112 @@ mod tests {
     async fn endpoint_path_is_unaffected_by_the_referral_check() {
         let client = client_over(|req| Ok(authorized_response(&req, true)));
         assert!(client.authorization(query()).await.unwrap().authorized);
+    }
+
+    // --- version fallback --------------------------------------------------
+
+    /// A registry from before 0.2: rejects 0.2 with `unsupportedVersion` and
+    /// answers 0.1 in snake_case. Counts the 0.2 attempts.
+    fn pre_0_2_registry(
+        attempts_0_2: Arc<std::sync::atomic::AtomicUsize>,
+        authority_answered: &'static str,
+    ) -> TrqlClient {
+        client_over(move |req| {
+            if req.type_uri.minor() == 2 {
+                attempts_0_2.fetch_add(1, Ordering::Relaxed);
+                return Err(TrqlError::Rejected {
+                    code: StandardCode::UnsupportedVersion.into(),
+                    retryable: false,
+                    retry_after: None,
+                    message: None,
+                });
+            }
+            let payload = serde_json::json!({
+                "entity_id": req.payload["entity_id"],
+                "authority_id": if authority_answered.is_empty() {
+                    req.payload["authority_id"].clone()
+                } else {
+                    Value::String(authority_answered.to_string())
+                },
+                "action": req.payload["action"],
+                "resource": req.payload["resource"],
+                "authorized": true,
+                "time_evaluated": "2026-07-16T00:00:00Z",
+            });
+            Ok(req.respond_with("urn:uuid:reply".to_string(), payload))
+        })
+    }
+
+    #[tokio::test]
+    async fn a_0_2_registry_is_answered_at_0_2() {
+        let client = client_over(|req| {
+            assert_eq!(req.type_uri.minor(), 2, "0.2 is asked first");
+            assert!(req.payload.get("entityId").is_some());
+            Ok(authorized_response(&req, true))
+        });
+        let answer = client.authorization(query()).await.unwrap();
+        assert_eq!(answer.version, SpecVersion::V0_2);
+        assert!(answer.authorized);
+    }
+
+    #[tokio::test]
+    async fn unsupported_version_falls_back_to_0_1_once() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = pre_0_2_registry(attempts.clone(), "");
+        let first = client.authorization(query()).await.unwrap();
+        assert_eq!(first.version, SpecVersion::V0_1);
+        assert!(first.authorized);
+        assert_eq!(first.entity_id, "did:example:e");
+        // Remembered: the next query (of either kind) goes straight to 0.1.
+        client.authorization(query()).await.unwrap();
+        client.recognition(query()).await.ok();
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    }
+
+    /// Only `unsupportedVersion` means "downgrade". Any other rejection is the
+    /// registry's answer, and asking again in an older form must not route
+    /// around it.
+    #[tokio::test]
+    async fn other_rejections_are_not_retried_at_0_1() {
+        for code in [
+            StandardCode::UnsupportedType,
+            StandardCode::PermissionDenied,
+        ] {
+            let asked_0_1 = Arc::new(AtomicBool::new(false));
+            let seen = asked_0_1.clone();
+            let client = client_over(move |req| {
+                if req.type_uri.minor() == 1 {
+                    seen.store(true, Ordering::Relaxed);
+                }
+                Err(TrqlError::Rejected {
+                    code: code.into(),
+                    retryable: false,
+                    retry_after: None,
+                    message: None,
+                })
+            });
+            let err = client.authorization(query()).await.unwrap_err();
+            assert!(matches!(err, TrqlError::Rejected { .. }), "{err}");
+            assert!(
+                !asked_0_1.load(Ordering::Relaxed),
+                "{code:?} must not fall back"
+            );
+        }
+    }
+
+    /// The fallback path holds answers to the same checks: here the 0.1
+    /// registry answers for another authority.
+    #[tokio::test]
+    async fn the_0_1_path_still_checks_the_answer() {
+        let client = pre_0_2_registry(Arc::default(), "did:example:other");
+        match client.authorization(query()).await {
+            Err(TrqlError::AnswerMismatch { field, .. }) => assert_eq!(field, "authority_id"),
+            other => panic!("expected AnswerMismatch, got {other:?}"),
+        }
+        let client = pre_0_2_registry(Arc::default(), "").referred_by("did:example:vtc");
+        assert!(matches!(
+            client.authorization(query()).await,
+            Err(TrqlError::ReferralNotClosed { .. })
+        ));
     }
 }
