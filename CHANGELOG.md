@@ -56,11 +56,11 @@ release goes GA (`## 0.27.0 (date)`).
   `payloads::v0_1` and `payloads::v0_2`. Test fakes standing in for a registry
   must answer 0.2 (lowerCamelCase), or reject it with `unsupportedVersion`.
 
-- **Dependencies:** trust-tasks crates from `dtgwg-trust-tasks-tf` `main`
-  (git, pending a release that carries the new `registry/*` specs). The
-  messaging SDK and vta-sdk are still built on trust-tasks 0.34, so
-  `mediator_acl.rs` builds the SDK's ACL values from that line
-  (`trust-tasks-rs-sdk`); remove it when the SDKs move.
+- **Dependencies:** trust-tasks 0.35.1, the first release carrying the
+  lowerCamelCase `registry/*` specs (the crates were pinned to the spec
+  repository's git `main` until it shipped). The messaging SDK and vta-sdk are
+  still built on trust-tasks 0.34, so `mediator_acl.rs` builds the SDK's ACL
+  values from that line (`trust-tasks-rs-sdk`); remove it when the SDKs move.
 - `registry/record/query/0.1` leaves a record's window out of its answer (the
   0.1 record has no member for it), and `registry/record/put/0.1` replaces a
   stored window along with the rest of the record.
