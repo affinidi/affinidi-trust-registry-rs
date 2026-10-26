@@ -40,6 +40,22 @@ release goes GA (`## 0.27.0 (date)`).
 
 ### Changed
 
+- **`trql-client` asks in `registry/{authorization,recognition}` 0.2 (breaking
+  for `trql-client` users).** A registry that answers `unsupportedVersion` (one
+  that predates 0.2) is asked again at 0.1, and the client remembers that, so it
+  costs one extra round trip per client, not per query. Only `unsupportedVersion`
+  triggers the fallback: any other rejection is the registry's answer. The echo
+  and referral checks apply to whichever version answered.
+  `TrqlClient::authorization` / `recognition` now return the client's own
+  `AuthorizationAnswer` / `RecognitionAnswer` (`authorized` / `recognized`,
+  `evaluated_at`, `as_of`, `message`, and the `SpecVersion` that answered)
+  instead of the generated spec types, so later spec versions no longer change
+  this crate's API. Code reading `.authorized` / `.recognized` / `.entity_id`
+  compiles unchanged; `time_evaluated` is now `evaluated_at`, and
+  `time_requested` is now `as_of`. The generated types moved to
+  `payloads::v0_1` and `payloads::v0_2`. Test fakes standing in for a registry
+  must answer 0.2 (lowerCamelCase), or reject it with `unsupportedVersion`.
+
 - **Dependencies:** trust-tasks crates from `dtgwg-trust-tasks-tf` `main`
   (git, pending a release that carries the new `registry/*` specs). The
   messaging SDK and vta-sdk are still built on trust-tasks 0.34, so
