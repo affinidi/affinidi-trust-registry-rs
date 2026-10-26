@@ -150,6 +150,11 @@ async fn test_authorization_endpoint_not_found() {
 
     assert_eq!(response.status(), 404);
 
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/problem+json",
+        "TRQP errors are RFC 9457 Problem Details"
+    );
     let json: Value = response.json().await.unwrap();
 
     assert_eq!(json["title"], "not_found");
@@ -179,6 +184,11 @@ async fn test_recognition_endpoint_not_found() {
 
     assert_eq!(response.status(), 404);
 
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/problem+json",
+        "TRQP errors are RFC 9457 Problem Details"
+    );
     let json: Value = response.json().await.unwrap();
 
     assert_eq!(json["title"], "not_found");
@@ -206,6 +216,11 @@ async fn test_authorization_endpoint_bad_request() {
 
     assert_eq!(response.status(), 400);
 
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/problem+json",
+        "TRQP errors are RFC 9457 Problem Details"
+    );
     let json: Value = response.json().await.unwrap();
 
     assert_eq!(json["title"], "bad_request");
@@ -230,6 +245,11 @@ async fn test_recognition_endpoint_bad_request() {
 
     assert_eq!(response.status(), 400);
 
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/problem+json",
+        "TRQP errors are RFC 9457 Problem Details"
+    );
     let json: Value = response.json().await.unwrap();
 
     assert_eq!(json["title"], "bad_request");

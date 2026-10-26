@@ -18,6 +18,28 @@ release goes GA (`## 0.27.0 (date)`).
 
 ## Unreleased
 
+### Fixed
+
+- **TRQP REST conformance (#161).** `POST /authorization` and
+  `POST /recognition` now follow TRQP v2.0 more closely:
+  - Errors are served as `application/problem+json` (RFC 9457) and carry the
+    `status` and `detail` members. The `type`, `title` and `code` members are
+    unchanged.
+  - The four identifiers must be non-empty RFC 3986 URI references. Invalid
+    ones are refused with `400 invalid_request` before the lookup. Previously
+    they got `404 not_found`, or `200` if a record had been stored under one.
+  - `context` must be a JSON object and `context.time` an RFC 3339 date-time,
+    or the query gets `400 invalid_request`. Previously a string `context` was
+    accepted and echoed back as a string.
+  - `time_requested` echoes `context.time` when it is supplied, as the
+    Trust Task query path already did. Answers still reflect the registry's
+    current state: records have no validity period to judge another instant
+    against.
+
+  Clients that branch on the status code see no change for valid queries.
+  A client that sent an invalid identifier and treated the `404` as "not
+  recognised" now gets a `400`.
+
 ## 0.28.0 (release/0.28)
 
 ### Changed
