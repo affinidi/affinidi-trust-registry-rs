@@ -469,6 +469,35 @@ The API will return whether the specified entity is authorised under the given a
 
 To query Trust Registry using DIDComm, refer to the [Trust Registry Authorization Query](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/DIDCOMM_PROTOCOLS.md#query-authorization) protocol.
 
+### Request validation and errors
+
+Both REST endpoints validate the query before looking it up, as TRQP v2.0
+requires:
+
+- `entity_id`, `authority_id`, `action` and `resource` must each be a non-empty
+  RFC 3986 URI reference (DIDs, URLs and plain tokens such as `issue` all
+  qualify; spaces, `<`, `>` and other characters RFC 3986 forbids do not).
+- `context`, when present, must be a JSON object, and `context.time`, when
+  present, an RFC 3339 date-time.
+
+A query that fails these checks gets `400` with title `invalid_request`. An
+unparseable body or a missing field gets `400` `bad_request`, and a valid query
+with no matching record gets `404` `not_found`.
+
+Errors are RFC 9457 Problem Details, served as `application/problem+json`:
+
+```json
+{ "type": "about:blank", "title": "invalid_request", "status": 400,
+  "detail": "`action` must not be empty", "code": 400 }
+```
+
+`code` repeats `status` for clients written against earlier releases.
+
+`time_requested` echoes `context.time` when one is sent; otherwise it is the
+time the request arrived. `time_evaluated` is the server time the answer was
+produced at. Records carry no validity period, so the answer always reflects
+the registry's current state, whatever instant `context.time` names.
+
 **Testing Tips:**
 
 - Add more records to `./sample-data/data.csv` to expand test coverage.

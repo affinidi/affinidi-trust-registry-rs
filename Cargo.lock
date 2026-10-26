@@ -6934,6 +6934,7 @@ dependencies = [
  "didwebvh-rs",
  "dotenvy",
  "fjall",
+ "fluent-uri",
  "futures",
  "redis",
  "reqwest",
