@@ -15,17 +15,20 @@
 //! would just push the allocation onto every caller, so — matching the upstream
 //! crate's own `dispatch_or_reject` — we allow `result_large_err` module-wide.
 #![allow(clippy::result_large_err)]
+// The 0.1 `registry/*` types are deprecated (superseded by the lowerCamelCase
+// versions); both are served deliberately, so peers on either keep working.
+#![allow(deprecated)]
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::Serialize;
 use serde_json::Value;
 use trust_tasks_rs::{Dispatcher, ErrorResponse, RejectReason, TrustTask};
 use uuid::Uuid;
 
-use crate::domain::TrustRecord;
+use crate::domain::{Evaluation, TrustRecord};
 use crate::storage::repository::{
     RepositoryError, TrustRecordAdminRepository, TrustRecordRepository,
 };
@@ -33,8 +36,8 @@ use crate::storage::repository::{
 use super::payloads::{
     AuthorizationRequest, AuthorizationResponse, AuthorizationResponseMessage, RecognitionRequest,
     RecognitionResponse, RecognitionResponseMessage, RecordDeleteRequest, RecordDeleteResponse,
-    RecordPutRequest, RecordPutResponse, RecordQueryRequest, RecordQueryResponse, SpecTrustRecord,
-    query_of, reserialize,
+    RecordPutRequest, RecordPutResponse, RecordQueryRequest, RecordQueryResponse, query_of,
+    record_from_v1, record_from_v2, record_to_v1, record_to_v2, v2,
 };
 
 /// Default `registry/record/query` page size when the request names none.
@@ -133,6 +136,26 @@ where
             let repo = repository.clone();
             move |doc| -> TaskFuture { Box::pin(handle_delete(repo.clone(), doc)) }
         })
+        .on::<v2::RecognitionRequest, _>({
+            let repo = repository.clone();
+            move |doc| -> TaskFuture { Box::pin(handle_recognition_v2(repo.clone(), doc)) }
+        })
+        .on::<v2::AuthorizationRequest, _>({
+            let repo = repository.clone();
+            move |doc| -> TaskFuture { Box::pin(handle_authorization_v2(repo.clone(), doc)) }
+        })
+        .on::<v2::RecordPutRequest, _>({
+            let repo = repository.clone();
+            move |doc| -> TaskFuture { Box::pin(handle_put_v2(repo.clone(), doc)) }
+        })
+        .on::<v2::RecordQueryRequest, _>({
+            let repo = repository.clone();
+            move |doc| -> TaskFuture { Box::pin(handle_query_v2(repo.clone(), doc)) }
+        })
+        .on::<v2::RecordDeleteRequest, _>({
+            let repo = repository.clone();
+            move |doc| -> TaskFuture { Box::pin(handle_delete_v2(repo.clone(), doc)) }
+        })
 }
 
 /// Build a read-only [`RegistryDispatcher`] over `repository`.
@@ -154,6 +177,14 @@ where
             let repo = repository.clone();
             move |doc| -> TaskFuture { Box::pin(handle_authorization(repo.clone(), doc)) }
         })
+        .on::<v2::RecognitionRequest, _>({
+            let repo = repository.clone();
+            move |doc| -> TaskFuture { Box::pin(handle_recognition_v2(repo.clone(), doc)) }
+        })
+        .on::<v2::AuthorizationRequest, _>({
+            let repo = repository.clone();
+            move |doc| -> TaskFuture { Box::pin(handle_authorization_v2(repo.clone(), doc)) }
+        })
 }
 
 /// Route a raw inbound document and await its handler.
@@ -172,112 +203,159 @@ pub async fn handle_document(
 }
 
 // --- handlers ---------------------------------------------------------------
+//
+// Each task has one core, shared by its versions, and a thin per-version layer
+// that reads that version's payload and builds its response. The versions
+// differ only in wire spelling (and, for records, whether the validity window
+// can be carried), never in what the registry decides.
 
-async fn handle_recognition<R>(
-    repository: Arc<R>,
-    doc: TrustTask<RecognitionRequest>,
-) -> TaskOutcome
+/// Look up the record a TRQP query names and evaluate it as of the instant
+/// asked (`context.time`), or the registry's clock when none was asked.
+async fn evaluate_query<R>(
+    repository: &R,
+    ids: (&str, &str, &str, &str),
+    asked: Option<DateTime<Utc>>,
+) -> Result<(Option<TrustRecord>, Evaluation), RepositoryError>
 where
-    R: TrustRecordRepository + ?Sized + 'static,
+    R: TrustRecordRepository + ?Sized,
 {
-    let p = &doc.payload;
-    let query = query_of(&p.entity_id, &p.authority_id, &p.action, &p.resource);
-    let record = match repository.find_by_query(query).await {
-        Ok(record) => record,
-        Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
-    };
-    let evaluated_at = Utc::now();
-
-    // Advisory detail only, and the spec caps it at 1024 characters: if
-    // pathologically long identifiers push it past that, answer the query
-    // without the message rather than fail on a field nothing decides on.
-    let message: Option<RecognitionResponseMessage> = record.as_ref().and_then(|tr| {
-        format!(
-            "{} recognized by {}",
-            tr.entity_id().as_str(),
-            tr.authority_id().as_str()
-        )
-        .try_into()
-        .ok()
-    });
-    let response: RecognitionResponse = RecognitionResponse::builder()
-        .entity_id(p.entity_id.clone())
-        .authority_id(p.authority_id.clone())
-        .action(p.action.clone())
-        .resource(p.resource.clone())
-        .recognized(record.map(|tr| tr.is_recognized()).unwrap_or(false))
-        .time_evaluated(evaluated_at)
-        .time_requested(p.context.as_ref().and_then(|c| c.time))
-        .message(message)
-        .try_into()
-        .map_err(|e| reject_build_err(&doc, e))?;
-    respond(&doc, response)
+    let record = repository
+        .find_by_query(query_of(ids.0, ids.1, ids.2, ids.3))
+        .await?;
+    let evaluation = Evaluation::of(record.as_ref(), asked, Utc::now());
+    Ok((record, evaluation))
 }
 
-async fn handle_authorization<R>(
-    repository: Arc<R>,
-    doc: TrustTask<AuthorizationRequest>,
-) -> TaskOutcome
+/// The advisory `message`. The spec caps it at 1024 characters, so an answer
+/// whose message would exceed that (pathologically long identifiers) goes
+/// without one rather than failing on a field nothing decides on.
+fn query_message<M>(record: Option<&TrustRecord>, evaluation: &Evaluation, verb: &str) -> Option<M>
 where
-    R: TrustRecordRepository + ?Sized + 'static,
+    M: TryFrom<String>,
 {
-    let p = &doc.payload;
-    let query = query_of(&p.entity_id, &p.authority_id, &p.action, &p.resource);
-    let record = match repository.find_by_query(query).await {
-        Ok(record) => record,
-        Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
-    };
-    let evaluated_at = Utc::now();
-
-    // Same 1024-character cap as the recognition message, handled the same way.
-    let message: Option<AuthorizationResponseMessage> = record.as_ref().and_then(|tr| {
-        format!(
+    let tr = record?;
+    let text = match evaluation.out_of_window_reason(tr) {
+        Some(reason) => format!(
+            "{} not {verb} by {}: {reason}",
+            tr.entity_id().as_str(),
+            tr.authority_id().as_str()
+        ),
+        None if verb == "authorized" => format!(
             "{} authorized to {}+{} by {}",
             tr.entity_id().as_str(),
             tr.action().as_str(),
             tr.resource().as_str(),
             tr.authority_id().as_str()
-        )
-        .try_into()
-        .ok()
-    });
-    let response: AuthorizationResponse = AuthorizationResponse::builder()
-        .entity_id(p.entity_id.clone())
-        .authority_id(p.authority_id.clone())
-        .action(p.action.clone())
-        .resource(p.resource.clone())
-        .authorized(record.map(|tr| tr.is_authorized()).unwrap_or(false))
-        .time_evaluated(evaluated_at)
-        .time_requested(p.context.as_ref().and_then(|c| c.time))
-        .message(message)
-        .try_into()
-        .map_err(|e| reject_build_err(&doc, e))?;
-    respond(&doc, response)
+        ),
+        None => format!(
+            "{} recognized by {}",
+            tr.entity_id().as_str(),
+            tr.authority_id().as_str()
+        ),
+    };
+    text.try_into().ok()
 }
 
-/// Convert a spec record (carried by a put payload) into the domain record the
-/// repository operates on, mapping a malformed record to a `MalformedRequest`
-/// rejection.
-fn record_from_payload<P>(
-    doc: &TrustTask<P>,
-    spec: &impl Serialize,
-) -> Result<TrustRecord, ErrorResponse> {
-    reserialize(spec)
-        .map_err(|reason| doc.reject_with(new_id(), RejectReason::MalformedRequest { reason }))
+/// One TRQP query handler per version. `$evaluated`/`$asked` are the builder
+/// setters for that version's two time members (`time_evaluated` /
+/// `time_requested` in 0.1, `evaluated_at` / `as_of` in 0.2).
+macro_rules! trqp_handler {
+    ($name:ident, $req:ty, $resp:ty, $msg:ty, $flag:ident, $is:ident, $verb:literal, $evaluated:ident, $asked:ident) => {
+        async fn $name<R>(repository: Arc<R>, doc: TrustTask<$req>) -> TaskOutcome
+        where
+            R: TrustRecordRepository + ?Sized + 'static,
+        {
+            let p = &doc.payload;
+            let asked = p.context.as_ref().and_then(|c| c.time);
+            let (record, evaluation) = match evaluate_query(
+                repository.as_ref(),
+                (&p.entity_id, &p.authority_id, &p.action, &p.resource),
+                asked,
+            )
+            .await
+            {
+                Ok(found) => found,
+                Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
+            };
+            // Outside its window, a record answers false whatever it stores.
+            let holds = evaluation.in_window() && record.as_ref().is_some_and(|tr| tr.$is());
+            let message: Option<$msg> = query_message(record.as_ref(), &evaluation, $verb);
+            let response: $resp = <$resp>::builder()
+                .entity_id(p.entity_id.clone())
+                .authority_id(p.authority_id.clone())
+                .action(p.action.clone())
+                .resource(p.resource.clone())
+                .$flag(holds)
+                .$evaluated(Utc::now())
+                .$asked(asked)
+                .message(message)
+                .try_into()
+                .map_err(|e| reject_build_err(&doc, e))?;
+            respond(&doc, response)
+        }
+    };
 }
+
+trqp_handler!(
+    handle_recognition,
+    RecognitionRequest,
+    RecognitionResponse,
+    RecognitionResponseMessage,
+    recognized,
+    is_recognized,
+    "recognized",
+    time_evaluated,
+    time_requested
+);
+trqp_handler!(
+    handle_authorization,
+    AuthorizationRequest,
+    AuthorizationResponse,
+    AuthorizationResponseMessage,
+    authorized,
+    is_authorized,
+    "authorized",
+    time_evaluated,
+    time_requested
+);
+trqp_handler!(
+    handle_recognition_v2,
+    v2::RecognitionRequest,
+    v2::RecognitionResponse,
+    v2::RecognitionResponseMessage,
+    recognized,
+    is_recognized,
+    "recognized",
+    evaluated_at,
+    as_of
+);
+trqp_handler!(
+    handle_authorization_v2,
+    v2::AuthorizationRequest,
+    v2::AuthorizationResponse,
+    v2::AuthorizationResponseMessage,
+    authorized,
+    is_authorized,
+    "authorized",
+    evaluated_at,
+    as_of
+);
 
 /// `registry/record/put` — create or replace at the record's four-part key.
 ///
 /// `expectedExisting` recovers the strict semantics of the superseded
 /// create/update pair: `Some(false)` is create-only, `Some(true)` is
 /// update-only, `None` is create-or-replace (create first, fall back to update
-/// when the key is already present).
-async fn handle_put<R>(repository: Arc<R>, doc: TrustTask<RecordPutRequest>) -> TaskOutcome
+/// when the key is already present). Returns whether the record was created.
+async fn put_record<R>(
+    repository: &R,
+    record: TrustRecord,
+    expected_existing: Option<bool>,
+) -> Result<bool, RepositoryError>
 where
-    R: TrustRecordAdminRepository + ?Sized + 'static,
+    R: TrustRecordAdminRepository + ?Sized,
 {
-    let record = record_from_payload(&doc, &doc.payload.record)?;
-    let outcome = match doc.payload.expected_existing {
+    match expected_existing {
         // Strict update: the key must already exist.
         Some(true) => repository.update(record).await.map(|()| false),
         // Strict create: the key must not exist.
@@ -290,8 +368,21 @@ where
             }
             Err(e) => Err(e),
         },
-    };
-    match outcome {
+    }
+}
+
+fn malformed<P>(doc: &TrustTask<P>) -> impl FnOnce(String) -> ErrorResponse + '_ {
+    move |reason| doc.reject_with(new_id(), RejectReason::MalformedRequest { reason })
+}
+
+/// `registry/record/put/0.1`. The record has no validity window, so a put
+/// replaces any window the stored record had.
+async fn handle_put<R>(repository: Arc<R>, doc: TrustTask<RecordPutRequest>) -> TaskOutcome
+where
+    R: TrustRecordAdminRepository + ?Sized + 'static,
+{
+    let record = record_from_v1(&doc.payload.record).map_err(malformed(&doc))?;
+    match put_record(repository.as_ref(), record, doc.payload.expected_existing).await {
         Ok(created) => respond(
             &doc,
             RecordPutResponse {
@@ -300,6 +391,27 @@ where
                 message: None,
             },
         ),
+        Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
+    }
+}
+
+/// `registry/record/put/0.3`: lowerCamelCase, with the optional validity
+/// window. A window whose `validFrom` is not before its `validUntil` is
+/// refused as `malformedRequest`.
+async fn handle_put_v2<R>(repository: Arc<R>, doc: TrustTask<v2::RecordPutRequest>) -> TaskOutcome
+where
+    R: TrustRecordAdminRepository + ?Sized + 'static,
+{
+    let record = record_from_v2(&doc.payload.record).map_err(malformed(&doc))?;
+    match put_record(repository.as_ref(), record, doc.payload.expected_existing).await {
+        Ok(was_created) => {
+            let response: v2::RecordPutResponse = v2::RecordPutResponse::builder()
+                .ok(true)
+                .was_created(was_created)
+                .try_into()
+                .map_err(|e| reject_build_err(&doc, e))?;
+            respond(&doc, response)
+        }
         Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
     }
 }
@@ -322,75 +434,89 @@ where
     }
 }
 
-/// `registry/record/query` — exact fetch when all four key parts are present
-/// (notFound on a miss, via the repository's `read`), filtered cursor-paginated
-/// enumeration otherwise.
-///
-/// The cursor is an opaque-to-callers offset into the deterministically sorted
-/// match set; enumeration order is therefore stable across the pages of one
-/// traversal, as the spec requires.
-async fn handle_query<R>(repository: Arc<R>, doc: TrustTask<RecordQueryRequest>) -> TaskOutcome
+async fn handle_delete_v2<R>(
+    repository: Arc<R>,
+    doc: TrustTask<v2::RecordDeleteRequest>,
+) -> TaskOutcome
 where
     R: TrustRecordAdminRepository + ?Sized + 'static,
 {
     let p = &doc.payload;
+    let query = query_of(&p.entity_id, &p.authority_id, &p.action, &p.resource);
+    match repository.delete(query).await {
+        Ok(()) => {
+            let response: v2::RecordDeleteResponse = v2::RecordDeleteResponse::builder()
+                .ok(true)
+                .try_into()
+                .map_err(|e| reject_build_err(&doc, e))?;
+            respond(&doc, response)
+        }
+        Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
+    }
+}
 
+/// The filters and paging of a `registry/record/query`, whatever its version.
+struct RecordFilter<'a> {
+    entity_id: Option<&'a str>,
+    authority_id: Option<&'a str>,
+    action: Option<&'a str>,
+    resource: Option<&'a str>,
+    cursor: Option<&'a str>,
+    limit: Option<u64>,
+}
+
+/// `registry/record/query` — exact fetch when all four key parts are present
+/// (notFound on a miss, via the repository's `read`), filtered cursor-paginated
+/// enumeration otherwise. Returns the page and the next cursor.
+///
+/// The cursor is an opaque-to-callers offset into the deterministically sorted
+/// match set; enumeration order is therefore stable across the pages of one
+/// traversal, as the spec requires. Records are returned whatever their
+/// validity window: this task inspects what is stored.
+async fn query_records<R>(
+    repository: &R,
+    f: RecordFilter<'_>,
+) -> Result<(Vec<TrustRecord>, Option<String>), RejectReason>
+where
+    R: TrustRecordAdminRepository + ?Sized,
+{
     // Fully keyed: an exact fetch of the single record, notFound on a miss.
     if let (Some(entity_id), Some(authority_id), Some(action), Some(resource)) =
-        (&p.entity_id, &p.authority_id, &p.action, &p.resource)
+        (f.entity_id, f.authority_id, f.action, f.resource)
     {
         let query = query_of(entity_id, authority_id, action, resource);
-        return match repository.read(query).await {
-            Ok(record) => match reserialize::<_, SpecTrustRecord>(&record) {
-                Ok(record) => respond(
-                    &doc,
-                    RecordQueryResponse {
-                        records: vec![record],
-                        next_cursor: None,
-                    },
-                ),
-                Err(reason) => {
-                    Err(doc.reject_with(new_id(), RejectReason::InternalError { reason }))
-                }
-            },
-            Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
-        };
+        return repository
+            .read(query)
+            .await
+            .map(|record| (vec![record], None))
+            .map_err(map_repo_err);
     }
 
     // Partially keyed (or unkeyed): filtered, paginated enumeration.
-    let offset: usize = match p.cursor.as_deref() {
+    let offset: usize = match f.cursor {
         None => 0,
-        Some(cursor) => match cursor.parse() {
-            Ok(offset) => offset,
-            Err(_) => {
-                return Err(doc.reject_with(
-                    new_id(),
-                    RejectReason::MalformedRequest {
-                        reason: "unrecognized cursor".to_string(),
-                    },
-                ));
-            }
-        },
+        Some(cursor) => cursor.parse().map_err(|_| RejectReason::MalformedRequest {
+            reason: "unrecognized cursor".to_string(),
+        })?,
     };
-    let limit = p
+    let limit = f
         .limit
-        .map_or(QUERY_DEFAULT_LIMIT, |l| l as usize)
+        .map_or(QUERY_DEFAULT_LIMIT, |l| {
+            usize::try_from(l).unwrap_or(usize::MAX)
+        })
         .clamp(1, QUERY_MAX_LIMIT);
 
-    let list = match repository.list().await {
-        Ok(list) => list,
-        Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
-    };
+    let list = repository.list().await.map_err(map_repo_err)?;
     let field_matches =
         |filter: Option<&str>, value: &str| filter.is_none_or(|wanted| wanted == value);
     let mut matches: Vec<TrustRecord> = list
         .into_records()
         .into_iter()
         .filter(|r| {
-            field_matches(p.entity_id.as_deref(), r.entity_id().as_str())
-                && field_matches(p.authority_id.as_deref(), r.authority_id().as_str())
-                && field_matches(p.action.as_deref(), r.action().as_str())
-                && field_matches(p.resource.as_deref(), r.resource().as_str())
+            field_matches(f.entity_id, r.entity_id().as_str())
+                && field_matches(f.authority_id, r.authority_id().as_str())
+                && field_matches(f.action, r.action().as_str())
+                && field_matches(f.resource, r.resource().as_str())
         })
         .collect();
     matches.sort_by(|a, b| {
@@ -410,22 +536,73 @@ where
 
     let next_cursor =
         (offset.saturating_add(limit) < matches.len()).then(|| (offset + limit).to_string());
-    let page: Result<Vec<SpecTrustRecord>, String> = matches
+    let page = matches.into_iter().skip(offset).take(limit).collect();
+    Ok((page, next_cursor))
+}
+
+/// `registry/record/query/0.1`. Its records have no validity window, so a
+/// stored window is left out of the answer.
+async fn handle_query<R>(repository: Arc<R>, doc: TrustTask<RecordQueryRequest>) -> TaskOutcome
+where
+    R: TrustRecordAdminRepository + ?Sized + 'static,
+{
+    let p = &doc.payload;
+    let filter = RecordFilter {
+        entity_id: p.entity_id.as_deref(),
+        authority_id: p.authority_id.as_deref(),
+        action: p.action.as_deref(),
+        resource: p.resource.as_deref(),
+        cursor: p.cursor.as_deref(),
+        limit: p.limit.map(u64::from),
+    };
+    let (page, next_cursor) = query_records(repository.as_ref(), filter)
+        .await
+        .map_err(|reason| doc.reject_with(new_id(), reason))?;
+    let records = page
         .iter()
-        .skip(offset)
-        .take(limit)
-        .map(reserialize)
-        .collect();
-    match page {
-        Ok(records) => respond(
-            &doc,
-            RecordQueryResponse {
-                records,
-                next_cursor,
-            },
-        ),
-        Err(reason) => Err(doc.reject_with(new_id(), RejectReason::InternalError { reason })),
-    }
+        .map(record_to_v1)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|reason| doc.reject_with(new_id(), RejectReason::InternalError { reason }))?;
+    respond(
+        &doc,
+        RecordQueryResponse {
+            records,
+            next_cursor,
+        },
+    )
+}
+
+/// `registry/record/query/0.3`: lowerCamelCase records, window included.
+async fn handle_query_v2<R>(
+    repository: Arc<R>,
+    doc: TrustTask<v2::RecordQueryRequest>,
+) -> TaskOutcome
+where
+    R: TrustRecordAdminRepository + ?Sized + 'static,
+{
+    let p = &doc.payload;
+    let filter = RecordFilter {
+        entity_id: p.entity_id.as_deref(),
+        authority_id: p.authority_id.as_deref(),
+        action: p.action.as_deref(),
+        resource: p.resource.as_deref(),
+        cursor: p.cursor.as_deref(),
+        limit: p.limit.map(|l| l.get()),
+    };
+    let (page, next_cursor) = query_records(repository.as_ref(), filter)
+        .await
+        .map_err(|reason| doc.reject_with(new_id(), reason))?;
+    let records = page
+        .iter()
+        .map(record_to_v2)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|reason| doc.reject_with(new_id(), RejectReason::InternalError { reason }))?;
+    let response: v2::RecordQueryResponse = v2::RecordQueryResponse::builder()
+        .records(records)
+        .next_cursor(next_cursor)
+        .try_into()
+        .map_err(|e| reject_build_err(&doc, e))?;
+    respond(&doc, response)
 }
 
 #[cfg(test)]
@@ -579,7 +756,7 @@ mod tests {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
-            record: reserialize(&sample_record()).expect("domain -> spec record"),
+            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
             expected_existing: None,
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
@@ -598,7 +775,7 @@ mod tests {
         });
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
-            record: reserialize(&sample_record()).expect("domain -> spec record"),
+            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
             expected_existing: None,
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
@@ -618,7 +795,7 @@ mod tests {
         });
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
-            record: reserialize(&sample_record()).expect("domain -> spec record"),
+            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
             expected_existing: Some(false),
         });
         let out = handle_document(&dispatcher, doc).await;
@@ -631,7 +808,7 @@ mod tests {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
-            record: reserialize(&sample_record()).expect("domain -> spec record"),
+            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
             expected_existing: Some(true),
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
@@ -787,19 +964,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dispatcher_registers_all_five_ops() {
-        // recognition, authorization, record/put, record/query, record/delete.
-        let repo = Arc::new(MockRepo::default());
-        let dispatcher = build_dispatcher(repo);
-        assert_eq!(dispatcher.registered_uris().len(), 5);
+    fn registered(dispatcher: &RegistryDispatcher) -> Vec<String> {
+        let mut uris: Vec<String> = dispatcher
+            .registered_uris()
+            .into_iter()
+            .map(|u| {
+                u.to_string()
+                    .trim_start_matches("https://trusttasks.org/spec/")
+                    .to_string()
+            })
+            .collect();
+        uris.sort();
+        uris
     }
 
     #[test]
-    fn query_dispatcher_registers_only_the_two_reads() {
-        let repo = Arc::new(MockRepo::default());
-        let dispatcher = build_query_dispatcher(repo);
-        assert_eq!(dispatcher.registered_uris().len(), 2);
+    fn dispatcher_registers_both_versions_of_all_five_ops() {
+        let dispatcher = build_dispatcher(Arc::new(MockRepo::default()));
+        assert_eq!(
+            registered(&dispatcher),
+            [
+                "registry/authorization/0.1",
+                "registry/authorization/0.2",
+                "registry/recognition/0.1",
+                "registry/recognition/0.2",
+                "registry/record/delete/0.1",
+                "registry/record/delete/0.2",
+                "registry/record/put/0.1",
+                "registry/record/put/0.3",
+                "registry/record/query/0.1",
+                "registry/record/query/0.3",
+            ]
+        );
+    }
+
+    #[test]
+    fn query_dispatcher_registers_only_the_reads() {
+        let dispatcher = build_query_dispatcher(Arc::new(MockRepo::default()));
+        assert_eq!(
+            registered(&dispatcher),
+            [
+                "registry/authorization/0.1",
+                "registry/authorization/0.2",
+                "registry/recognition/0.1",
+                "registry/recognition/0.2",
+            ]
+        );
     }
 
     #[tokio::test]
@@ -826,7 +1036,7 @@ mod tests {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_query_dispatcher(repo);
         let doc = value_doc(RecordPutRequest {
-            record: reserialize(&sample_record()).expect("domain -> spec record"),
+            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
             expected_existing: None,
         });
         let out = handle_document(&dispatcher, doc).await;
@@ -834,5 +1044,231 @@ mod tests {
             out.is_err(),
             "write over the query dispatcher must be rejected"
         );
+    }
+
+    // --- validity window and the lowerCamelCase versions --------------------
+
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s)
+            .expect("rfc3339")
+            .with_timezone(&Utc)
+    }
+
+    /// `sample_record` with a window from 2026-01-01 to 2027-01-01.
+    fn windowed_record() -> TrustRecord {
+        TrustRecordBuilder::new()
+            .entity_id(EntityId::new("did:example:entity"))
+            .authority_id(AuthorityId::new("did:example:authority"))
+            .action(Action::new("issue"))
+            .resource(Resource::new("vc"))
+            .recognized(true)
+            .authorized(true)
+            .record_type(RecordType::Authorization)
+            .valid_from(Some(ts("2026-01-01T00:00:00Z")))
+            .valid_until(Some(ts("2027-01-01T00:00:00Z")))
+            .build()
+            .expect("valid record")
+    }
+
+    fn raw_doc<P: Payload>(payload: Value) -> TrustTask<Value> {
+        TrustTask::new(new_id(), P::type_uri(), payload)
+    }
+
+    async fn answer(repo: MockRepo, doc: TrustTask<Value>) -> Value {
+        let dispatcher = build_dispatcher(Arc::new(repo));
+        handle_document(&dispatcher, doc)
+            .await
+            .expect("ok response")
+            .payload
+    }
+
+    fn windowed_repo() -> MockRepo {
+        MockRepo {
+            record: Some(windowed_record()),
+            ..Default::default()
+        }
+    }
+
+    fn v2_query(time: Option<&str>) -> Value {
+        let mut q = serde_json::json!({
+            "entityId": "did:example:entity",
+            "authorityId": "did:example:authority",
+            "action": "issue",
+            "resource": "vc",
+        });
+        if let Some(t) = time {
+            q["context"] = serde_json::json!({ "time": t });
+        }
+        q
+    }
+
+    #[tokio::test]
+    async fn v2_authorization_inside_the_window_is_authorized_and_echoes_as_of() {
+        let out = answer(
+            windowed_repo(),
+            raw_doc::<v2::AuthorizationRequest>(v2_query(Some("2026-06-01T00:00:00Z"))),
+        )
+        .await;
+        assert_eq!(out["authorized"], true);
+        assert_eq!(out["entityId"], "did:example:entity");
+        assert_eq!(out["asOf"], "2026-06-01T00:00:00Z");
+        assert!(out["evaluatedAt"].is_string());
+        assert!(
+            out.get("time_evaluated").is_none(),
+            "0.2 is lowerCamelCase: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_authorization_outside_the_window_is_false_with_a_reason() {
+        for (time, reason) in [
+            ("2025-12-31T23:59:59Z", "not valid until"),
+            // validUntil is exclusive.
+            ("2027-01-01T00:00:00Z", "stopped being valid"),
+        ] {
+            let out = answer(
+                windowed_repo(),
+                raw_doc::<v2::AuthorizationRequest>(v2_query(Some(time))),
+            )
+            .await;
+            assert_eq!(out["authorized"], false, "{time}: {out}");
+            assert!(
+                out["message"].as_str().unwrap_or_default().contains(reason),
+                "{time}: {out}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_time_gets_no_start_leeway() {
+        // 30 s before validFrom: inside the 60 s allowance, but the client
+        // named the instant, so it is judged exactly.
+        let out = answer(
+            windowed_repo(),
+            raw_doc::<v2::RecognitionRequest>(v2_query(Some("2025-12-31T23:59:30Z"))),
+        )
+        .await;
+        assert_eq!(out["recognized"], false, "{out}");
+    }
+
+    #[tokio::test]
+    async fn the_0_1_queries_apply_the_window_too() {
+        let out = answer(
+            windowed_repo(),
+            raw_doc::<AuthorizationRequest>(serde_json::json!({
+                "entity_id": "did:example:entity",
+                "authority_id": "did:example:authority",
+                "action": "issue",
+                "resource": "vc",
+                "context": { "time": "2030-01-01T00:00:00Z" },
+            })),
+        )
+        .await;
+        assert_eq!(out["authorized"], false, "{out}");
+        assert_eq!(out["time_requested"], "2030-01-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn v2_put_stores_the_window() {
+        let repo = Arc::new(MockRepo::default());
+        let dispatcher = build_dispatcher(repo.clone());
+        let out = handle_document(
+            &dispatcher,
+            raw_doc::<v2::RecordPutRequest>(serde_json::json!({
+                "record": {
+                    "entityId": "did:example:entity",
+                    "authorityId": "did:example:authority",
+                    "action": "issue",
+                    "resource": "vc",
+                    "authorized": true,
+                    "recordType": "authorization",
+                    "validFrom": "2026-01-01T00:00:00Z",
+                    "validUntil": "2027-01-01T00:00:00Z",
+                }
+            })),
+        )
+        .await
+        .expect("stored");
+        assert_eq!(out.payload["wasCreated"], true);
+        let created = repo.created.lock().expect("lock");
+        assert_eq!(created[0].valid_from(), Some(ts("2026-01-01T00:00:00Z")));
+        assert_eq!(created[0].valid_until(), Some(ts("2027-01-01T00:00:00Z")));
+    }
+
+    #[tokio::test]
+    async fn v2_put_with_an_inverted_window_is_malformed() {
+        let repo = Arc::new(MockRepo::default());
+        let dispatcher = build_dispatcher(repo.clone());
+        let err = handle_document(
+            &dispatcher,
+            raw_doc::<v2::RecordPutRequest>(serde_json::json!({
+                "record": {
+                    "entityId": "e", "authorityId": "a", "action": "x", "resource": "r",
+                    "recordType": "recognition",
+                    "validFrom": "2027-01-01T00:00:00Z",
+                    "validUntil": "2026-01-01T00:00:00Z",
+                }
+            })),
+        )
+        .await
+        .expect_err("refused");
+        assert_eq!(err.payload.code.to_string(), "malformedRequest");
+        assert!(repo.created.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_0_3_returns_the_window_and_0_1_leaves_it_out() {
+        let keyed = |camel: bool| {
+            let (e, a) = if camel {
+                ("entityId", "authorityId")
+            } else {
+                ("entity_id", "authority_id")
+            };
+            serde_json::json!({ e: "did:example:entity", a: "did:example:authority", "action": "issue", "resource": "vc" })
+        };
+        let v2_out = answer(
+            windowed_repo(),
+            raw_doc::<v2::RecordQueryRequest>(keyed(true)),
+        )
+        .await;
+        let record = &v2_out["records"][0];
+        assert_eq!(record["validFrom"], "2026-01-01T00:00:00Z");
+        assert_eq!(record["recordType"], "authorization");
+
+        // A 0.1 reader rejects unknown members, so the window is not sent.
+        let v1_out = answer(windowed_repo(), raw_doc::<RecordQueryRequest>(keyed(false))).await;
+        let record = &v1_out["records"][0];
+        assert_eq!(record["record_type"], "authorization");
+        assert!(
+            record.get("valid_from").is_none() && record.get("validFrom").is_none(),
+            "{record}"
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_delete_uses_camel_case_members() {
+        let out = answer(
+            MockRepo::default(),
+            raw_doc::<v2::RecordDeleteRequest>(serde_json::json!({
+                "entityId": "e", "authorityId": "a", "action": "x", "resource": "r",
+            })),
+        )
+        .await;
+        assert_eq!(out["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn the_old_spelling_is_refused_at_the_new_version() {
+        let dispatcher = build_dispatcher(Arc::new(windowed_repo()));
+        let snake = serde_json::json!({
+            "entity_id": "did:example:entity",
+            "authority_id": "did:example:authority",
+            "action": "issue",
+            "resource": "vc",
+        });
+        let err = handle_document(&dispatcher, raw_doc::<v2::AuthorizationRequest>(snake))
+            .await
+            .expect_err("snake_case at 0.2 is malformed");
+        assert_eq!(err.payload.code.to_string(), "malformedRequest");
     }
 }

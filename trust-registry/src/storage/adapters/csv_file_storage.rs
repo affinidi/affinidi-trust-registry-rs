@@ -3,6 +3,7 @@ use crate::storage::repository::*;
 use anyhow::anyhow;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as base64;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -312,6 +313,13 @@ struct TrustRecordCsvRow {
     authorized: bool,
     context: Option<String>,
     record_type: String,
+    /// RFC 3339; an empty cell or a missing column means no lower bound, so
+    /// files written before these columns existed still load.
+    #[serde(default)]
+    valid_from: Option<DateTime<Utc>>,
+    /// RFC 3339; empty or missing means no upper bound.
+    #[serde(default)]
+    valid_until: Option<DateTime<Utc>>,
 }
 
 impl TrustRecordCsvRow {
@@ -349,6 +357,8 @@ impl TrustRecordCsvRow {
             authorized: record.is_authorized(),
             context,
             record_type: record.record_type().to_string(),
+            valid_from: record.valid_from(),
+            valid_until: record.valid_until(),
         }
     }
 
@@ -361,7 +371,9 @@ impl TrustRecordCsvRow {
             .resource(Resource::new(self.resource))
             .recognized(self.recognized)
             .authorized(self.authorized)
-            .record_type(RecordType::from_str(&self.record_type)?);
+            .record_type(RecordType::from_str(&self.record_type)?)
+            .valid_from(self.valid_from)
+            .valid_until(self.valid_until);
 
         if let Some(c) = ctx {
             builder = builder.context(Context::new(c));
@@ -400,6 +412,37 @@ mod tests {
     async fn fails_when_initial_load_fails() {
         let result = FileStorage::try_new("/does/not/exist.csv", 1).await;
         assert!(result.is_err());
+    }
+
+    /// The validity columns are optional: an empty cell is no bound, and a
+    /// file without the columns at all (every test above) still loads.
+    #[tokio::test]
+    async fn reads_the_optional_validity_columns() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            "entity_id,authority_id,action,resource,recognized,authorized,context,record_type,valid_from,valid_until\n\
+             e1,a1,ac1,r1,true,true,e30=,authorization,,2027-01-01T00:00:00Z\n\
+             e2,a1,ac1,r1,true,true,e30=,authorization,,\n"
+        )
+        .unwrap();
+        let storage = FileStorage::try_new(file.path(), 1).await.unwrap();
+        let find = |e: &str| {
+            storage.find_by_query(TrustRecordQuery::new(
+                EntityId::new(e),
+                AuthorityId::new("a1"),
+                Action::new("ac1"),
+                Resource::new("r1"),
+            ))
+        };
+        let bounded = find("e1").await.unwrap().unwrap();
+        assert_eq!(bounded.valid_from(), None);
+        assert_eq!(
+            bounded.valid_until().map(|t| t.to_rfc3339()),
+            Some("2027-01-01T00:00:00+00:00".to_string())
+        );
+        let open = find("e2").await.unwrap().unwrap();
+        assert_eq!((open.valid_from(), open.valid_until()), (None, None));
     }
 
     #[tokio::test]

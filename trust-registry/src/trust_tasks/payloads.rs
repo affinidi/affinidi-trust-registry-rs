@@ -12,14 +12,23 @@
 //! add the small glue that bridges the spec payloads to the Trust Registry's
 //! own [`crate::domain`] types (query construction + record conversion).
 
+// The 0.1 `registry/*` versions are superseded (the generated types are
+// `#[deprecated]`), and this registry still answers them on purpose: peers that
+// have not moved to the lowerCamelCase versions keep working.
+#![allow(deprecated)]
+
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use trust_tasks_rs::Payload;
 use trust_tasks_rs::specs::registry;
 
-use crate::domain::{Action, AuthorityId, EntityId, Resource};
+use crate::domain::{
+    Action, AuthorityId, Context, EntityId, RecordType, Resource, TrustRecord, TrustRecordBuilder,
+};
 use crate::storage::repository::TrustRecordQuery;
+use chrono::{DateTime, Utc};
+use serde_json::{Map, Value};
 
 // --- Request / response types (from the published specs) --------------------
 
@@ -68,6 +77,189 @@ pub mod type_uris {
     /// `registry/did/rotate/0.1` request — rotate the registry's own
     /// VTA-managed `did:webvh` keys.
     pub const DID_ROTATE: &str = "https://trusttasks.org/spec/registry/did/rotate/0.1";
+}
+
+// --- The lowerCamelCase versions ---------------------------------------------
+//
+// `registry/authorization` and `registry/recognition` 0.2, `registry/record/put`
+// and `registry/record/query` 0.3, `registry/record/delete` and
+// `registry/did/rotate` 0.2: the same tasks with lowerCamelCase members and,
+// on records, the optional `validFrom`/`validUntil` window. Served alongside
+// the versions above, which keep their snake_case wire form.
+
+/// Generated types for the lowerCamelCase `registry/*` versions.
+pub mod v2 {
+    pub use trust_tasks_rs::specs::registry::authorization::v0_2::{
+        Payload as AuthorizationRequest, Response as AuthorizationResponse,
+        ResponseMessage as AuthorizationResponseMessage,
+    };
+    pub use trust_tasks_rs::specs::registry::did::rotate::v0_2::{
+        Payload as DidRotateRequest, Response as DidRotateResponse,
+    };
+    pub use trust_tasks_rs::specs::registry::recognition::v0_2::{
+        Payload as RecognitionRequest, Response as RecognitionResponse,
+        ResponseMessage as RecognitionResponseMessage,
+    };
+    pub use trust_tasks_rs::specs::registry::record::delete::v0_2::{
+        Payload as RecordDeleteRequest, Response as RecordDeleteResponse,
+    };
+    pub use trust_tasks_rs::specs::registry::record::put::v0_3::{
+        Payload as RecordPutRequest, Response as RecordPutResponse,
+    };
+    pub use trust_tasks_rs::specs::registry::record::query::v0_3::{
+        Payload as RecordQueryRequest, Response as RecordQueryResponse,
+    };
+}
+
+// --- Record wire forms ---------------------------------------------------------
+//
+// One explicit mapping per wire form, rather than a JSON round-trip through the
+// domain type: the 0.1 form has no validity window (and its generated types
+// reject unknown members, so the window must be dropped, not passed through),
+// and the 0.2 form spells every member differently.
+
+/// The 0.1 record (`registry/_shared/0.1` `TrustRecord`): snake_case, no window.
+#[derive(Serialize, Deserialize)]
+struct WireRecordV1 {
+    entity_id: String,
+    authority_id: String,
+    action: String,
+    resource: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recognized: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authorized: Option<bool>,
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    context: Map<String, Value>,
+    record_type: RecordType,
+}
+
+/// The 0.2 record (`registry/_shared/0.2` `TrustRecord`): lowerCamelCase, with
+/// the optional validity window.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireRecordV2 {
+    entity_id: String,
+    authority_id: String,
+    action: String,
+    resource: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recognized: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authorized: Option<bool>,
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    context: Map<String, Value>,
+    record_type: RecordType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    valid_from: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    valid_until: Option<DateTime<Utc>>,
+}
+
+fn context_map(record: &TrustRecord) -> Map<String, Value> {
+    record
+        .context()
+        .as_value()
+        .as_object()
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_record(
+    entity_id: String,
+    authority_id: String,
+    action: String,
+    resource: String,
+    recognized: Option<bool>,
+    authorized: Option<bool>,
+    context: Map<String, Value>,
+    record_type: RecordType,
+    valid_from: Option<DateTime<Utc>>,
+    valid_until: Option<DateTime<Utc>>,
+) -> Result<TrustRecord, String> {
+    let mut builder = TrustRecordBuilder::new()
+        .entity_id(EntityId::new(entity_id))
+        .authority_id(AuthorityId::new(authority_id))
+        .action(Action::new(action))
+        .resource(Resource::new(resource))
+        .context(Context::new(Value::Object(context)))
+        .record_type(record_type)
+        .valid_from(valid_from)
+        .valid_until(valid_until);
+    if let Some(recognized) = recognized {
+        builder = builder.recognized(recognized);
+    }
+    if let Some(authorized) = authorized {
+        builder = builder.authorized(authorized);
+    }
+    builder.build().map_err(|e| e.to_string())
+}
+
+/// A domain record in the 0.1 wire form. The validity window is dropped: a
+/// 0.1 reader has no member for it.
+pub(crate) fn record_to_v1<T: DeserializeOwned>(record: &TrustRecord) -> Result<T, String> {
+    reserialize(&WireRecordV1 {
+        entity_id: record.entity_id().to_string(),
+        authority_id: record.authority_id().to_string(),
+        action: record.action().to_string(),
+        resource: record.resource().to_string(),
+        recognized: record.recognized_value(),
+        authorized: record.authorized_value(),
+        context: context_map(record),
+        record_type: record.record_type().clone(),
+    })
+}
+
+/// A domain record in the 0.2 wire form, window included.
+pub(crate) fn record_to_v2<T: DeserializeOwned>(record: &TrustRecord) -> Result<T, String> {
+    reserialize(&WireRecordV2 {
+        entity_id: record.entity_id().to_string(),
+        authority_id: record.authority_id().to_string(),
+        action: record.action().to_string(),
+        resource: record.resource().to_string(),
+        recognized: record.recognized_value(),
+        authorized: record.authorized_value(),
+        context: context_map(record),
+        record_type: record.record_type().clone(),
+        valid_from: record.valid_from(),
+        valid_until: record.valid_until(),
+    })
+}
+
+/// A 0.1 wire record as a domain record (no validity window).
+pub(crate) fn record_from_v1<T: Serialize>(spec: &T) -> Result<TrustRecord, String> {
+    let w: WireRecordV1 = reserialize(spec)?;
+    build_record(
+        w.entity_id,
+        w.authority_id,
+        w.action,
+        w.resource,
+        w.recognized,
+        w.authorized,
+        w.context,
+        w.record_type,
+        None,
+        None,
+    )
+}
+
+/// A 0.2 wire record as a domain record. Refuses a window whose `validFrom`
+/// is not earlier than its `validUntil`.
+pub(crate) fn record_from_v2<T: Serialize>(spec: &T) -> Result<TrustRecord, String> {
+    let w: WireRecordV2 = reserialize(spec)?;
+    build_record(
+        w.entity_id,
+        w.authority_id,
+        w.action,
+        w.resource,
+        w.recognized,
+        w.authorized,
+        w.context,
+        w.record_type,
+        w.valid_from,
+        w.valid_until,
+    )
 }
 
 // --- Glue between the spec payloads and the domain --------------------------

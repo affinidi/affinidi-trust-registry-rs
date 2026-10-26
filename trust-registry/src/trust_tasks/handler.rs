@@ -34,6 +34,11 @@
 //!
 //! The transport-authenticated sender alone never authorises a write.
 
+// `TaskOutcome`'s error is a whole `trust-task-error` document, which is large
+// by design; boxing it would only move the allocation onto every caller. The
+// router allows this lint for the same reason.
+#![allow(clippy::result_large_err)]
+
 use affinidi_did_common::scid::{same_reference, strip_scid_src};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -104,6 +109,22 @@ fn audit_operation(slug: &str) -> AuditOperation {
     }
 }
 
+/// Whether a `registry/*` document spells its members in lowerCamelCase:
+/// `registry/record/put` and `registry/record/query` from 0.3, every other
+/// `registry/*` task from 0.2. Earlier versions are snake_case.
+fn camel_case(doc: &TrustTask<Value>) -> bool {
+    let first = match doc.type_uri.slug() {
+        "registry/record/put" | "registry/record/query" => 3,
+        _ => 2,
+    };
+    (doc.type_uri.major(), doc.type_uri.minor()) >= (0, first)
+}
+
+/// `snake` or `camel`, whichever spelling this document's version uses.
+fn member<'a>(doc: &TrustTask<Value>, snake: &'a str, camel: &'a str) -> &'a str {
+    if camel_case(doc) { camel } else { snake }
+}
+
 fn text(payload: &Value, pointer: &str) -> Option<String> {
     payload
         .pointer(pointer)
@@ -117,12 +138,15 @@ fn audit_resource(doc: &TrustTask<Value>, authority: Option<&str>) -> AuditResou
     let payload = &doc.payload;
     let (entity, action, resource) = match doc.type_uri.slug() {
         "registry/record/put" => (
-            text(payload, "/record/entity_id"),
+            text(
+                payload,
+                member(doc, "/record/entity_id", "/record/entityId"),
+            ),
             text(payload, "/record/action"),
             text(payload, "/record/resource"),
         ),
         "registry/record/delete" | "registry/record/query" => (
-            text(payload, "/entity_id"),
+            text(payload, member(doc, "/entity_id", "/entityId")),
             text(payload, "/action"),
             text(payload, "/resource"),
         ),
@@ -415,16 +439,28 @@ impl TaskHandler {
                 })
         };
         match doc.type_uri.slug() {
+            // The member is read in the spelling the document's version
+            // uses. A document carrying the other spelling has no authority
+            // here and is refused, before its payload is ever parsed.
             "registry/record/put" => Ok((
-                required_authority(payload.pointer("/record/authority_id"), "a record mutation")?,
+                required_authority(
+                    payload.pointer(member(doc, "/record/authority_id", "/record/authorityId")),
+                    "a record mutation",
+                )?,
                 None,
             )),
             "registry/record/delete" => Ok((
-                required_authority(payload.get("authority_id"), "a record mutation")?,
+                required_authority(
+                    payload.get(member(doc, "authority_id", "authorityId")),
+                    "a record mutation",
+                )?,
                 None,
             )),
             "registry/record/query" => Ok((
-                required_authority(payload.get("authority_id"), "a record query")?,
+                required_authority(
+                    payload.get(member(doc, "authority_id", "authorityId")),
+                    "a record query",
+                )?,
                 None,
             )),
             "governance/capability/enable" => {
@@ -730,27 +766,52 @@ impl TaskHandler {
     ) -> Result<TrustTask<Value>, ErrorResponse> {
         #[cfg(feature = "vta")]
         {
-            use crate::trust_tasks::payloads::{DidRotateRequest, DidRotateResponse};
+            use crate::trust_tasks::payloads::{DidRotateRequest, DidRotateResponse, v2};
 
-            let req: DidRotateRequest =
-                serde_json::from_value(doc.payload.clone()).map_err(|e| {
-                    doc.reject_with(
-                        new_id(),
-                        RejectReason::MalformedRequest {
-                            reason: e.to_string(),
-                        },
-                    )
-                })?;
-            match crate::configs::vta::rotate_did(&self.my_did, req.pre_rotation_count, req.label)
-                .await
-            {
+            let malformed = |reason: String| {
+                doc.reject_with(new_id(), RejectReason::MalformedRequest { reason })
+            };
+            // 0.1 is snake_case and hand-written; 0.2 is the generated
+            // lowerCamelCase type. Both carry the same two optional members.
+            let (pre_rotation_count, label) = if camel_case(doc) {
+                let req: v2::DidRotateRequest = serde_json::from_value(doc.payload.clone())
+                    .map_err(|e| malformed(e.to_string()))?;
+                let count = req
+                    .pre_rotation_count
+                    .map(u32::try_from)
+                    .transpose()
+                    .map_err(|_| malformed("preRotationCount is out of range".to_string()))?;
+                (count, req.label.map(|l| l.to_string()))
+            } else {
+                let req: DidRotateRequest = serde_json::from_value(doc.payload.clone())
+                    .map_err(|e| malformed(e.to_string()))?;
+                (req.pre_rotation_count, req.label)
+            };
+            match crate::configs::vta::rotate_did(&self.my_did, pre_rotation_count, label).await {
                 Ok((did, new_scid, new_version_id)) => {
-                    let response = DidRotateResponse {
-                        did,
-                        new_scid,
-                        new_version_id,
+                    let value = if camel_case(doc) {
+                        let response: v2::DidRotateResponse = v2::DidRotateResponse::builder()
+                            .did(did)
+                            .new_scid(new_scid)
+                            .new_version_id(new_version_id)
+                            .try_into()
+                            .map_err(|e: trust_tasks_rs::specs::registry::did::rotate::v0_2::error::ConversionError| {
+                                doc.reject_with(
+                                    new_id(),
+                                    RejectReason::InternalError {
+                                        reason: format!("could not build response payload: {e}"),
+                                    },
+                                )
+                            })?;
+                        serde_json::to_value(response).unwrap_or(Value::Null)
+                    } else {
+                        serde_json::to_value(DidRotateResponse {
+                            did,
+                            new_scid,
+                            new_version_id,
+                        })
+                        .unwrap_or(Value::Null)
                     };
-                    let value = serde_json::to_value(response).unwrap_or(Value::Null);
                     Ok(doc.respond_with(new_id(), value))
                 }
                 Err(reason) => Err(doc.reject_with(
@@ -984,6 +1045,83 @@ mod tests {
             entry.resource.entity_id.as_ref().map(|e| e.as_str()),
             Some("did:example:member")
         );
+    }
+
+    const RECORD_PUT_0_3: &str = "https://trusttasks.org/spec/registry/record/put/0.3";
+
+    fn put_payload_0_3(authority: &str) -> Value {
+        json!({
+            "record": {
+                "entityId": "did:example:member",
+                "authorityId": authority,
+                "action": "git.commit.sign",
+                "resource": "repo",
+                "authorized": true,
+                "recordType": "authorization",
+                "validUntil": "2099-01-01T00:00:00Z",
+            }
+        })
+    }
+
+    /// 0.3 names the authority `authorityId`; the write is bound to it exactly
+    /// as a 0.1 write is bound to `authority_id`.
+    #[tokio::test]
+    async fn a_0_3_put_is_bound_to_its_camel_case_authority() {
+        let (key, did) = did_key(1);
+        let f = fixture(vec![did.clone()]);
+        let doc = signed(
+            unsigned(RECORD_PUT_0_3, Some(&did), put_payload_0_3(&did)),
+            &key,
+        )
+        .await;
+        f.handler
+            .handle(doc, Some(&did))
+            .await
+            .expect("write accepted");
+        assert!(stored(&f.repo, &did).await);
+        let entry = last_audit(&f);
+        assert_eq!(
+            entry.resource.entity_id.as_ref().map(|e| e.as_str()),
+            Some("did:example:member")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_0_3_put_under_another_authority_is_refused() {
+        let (key, did) = did_key(1);
+        let f = fixture(vec![did.clone()]);
+        let doc = signed(
+            unsigned(RECORD_PUT_0_3, Some(&did), put_payload_0_3(OTHER_AUTHORITY)),
+            &key,
+        )
+        .await;
+        let err = f
+            .handler
+            .handle(doc, Some(&did))
+            .await
+            .expect_err("refused");
+        assert_eq!(code(&err), "permissionDenied");
+        assert!(!stored(&f.repo, OTHER_AUTHORITY).await);
+    }
+
+    /// A 0.3 document spelled the 0.1 way has no `authorityId`, so it names no
+    /// authority and is refused before anything is parsed or stored.
+    #[tokio::test]
+    async fn a_0_3_put_in_the_old_spelling_is_refused() {
+        let (key, did) = did_key(1);
+        let f = fixture(vec![did.clone()]);
+        let doc = signed(
+            unsigned(RECORD_PUT_0_3, Some(&did), put_payload(&did)),
+            &key,
+        )
+        .await;
+        let err = f
+            .handler
+            .handle(doc, Some(&did))
+            .await
+            .expect_err("refused");
+        assert_eq!(code(&err), "malformedRequest");
+        assert!(!stored(&f.repo, &did).await);
     }
 
     /// P-256 keys sign with `ecdsa-jcs-2019`; the binding checks are the same.

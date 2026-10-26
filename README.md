@@ -495,8 +495,10 @@ Errors are RFC 9457 Problem Details, served as `application/problem+json`:
 
 `time_requested` echoes `context.time` when one is sent; otherwise it is the
 time the request arrived. `time_evaluated` is the server time the answer was
-produced at. Records carry no validity period, so the answer always reflects
-the registry's current state, whatever instant `context.time` names.
+produced at. The answer is judged as of `context.time` (or now) against the
+record's [validity window](#record-validity-windows): outside it, the response
+is `200` with `authorized` / `recognized` `false` and a `message` saying why. A
+record that does not exist is still `404`.
 
 **Testing Tips:**
 
@@ -679,14 +681,46 @@ message shape regardless of carrier.
 
 | Trust Task (`slug`)                                   | Kind  | Auth                          |
 | ----------------------------------------------------- | ----- | ----------------------------- |
-| `registry/recognition/0.1`                            | read  | none (TRQP recognition query) |
-| `registry/authorization/0.1`                          | read  | none (TRQP authorization query)|
-| `registry/record/query/0.1`                           | read  | admin DID + proof + authority |
-| `registry/record/put/0.1`                             | write | admin DID + proof + authority |
-| `registry/record/delete/0.1`                          | write | admin DID + proof + authority |
-| `registry/did/rotate/0.1`                             | write | admin DID + proof (`vta` only)|
+| `registry/recognition/{0.1,0.2}`                      | read  | none (TRQP recognition query) |
+| `registry/authorization/{0.1,0.2}`                    | read  | none (TRQP authorization query)|
+| `registry/record/query/{0.1,0.3}`                     | read  | admin DID + proof + authority |
+| `registry/record/put/{0.1,0.3}`                       | write | admin DID + proof + authority |
+| `registry/record/delete/{0.1,0.2}`                    | write | admin DID + proof + authority |
+| `registry/did/rotate/{0.1,0.2}`                       | write | admin DID + proof (`vta` only)|
 | `git-trust/{grant,revoke}/0.1`                        | write | admin DID + proof + authority |
 | `governance/capability/{enable,disable}/0.1`          | write | admin DID + proof + authority |
+
+The newer version of each `registry/*` task spells its members in
+lowerCamelCase (`entityId`, `authorityId`, `recordType`, `evaluatedAt`, `asOf`)
+and carries records' validity window. The older version keeps its snake_case
+form and is still served, so peers can move when they are ready. The plain TRQP
+endpoints (`POST /authorization`, `POST /recognition`) keep TRQP's own
+snake_case names.
+
+#### Record validity windows
+
+A record may carry `validFrom` (inclusive) and `validUntil` (exclusive), as RFC
+3339 instants, set with `registry/record/put/0.3`. Either may be omitted, which
+leaves that side open, so a record with neither holds at every instant: every
+record written before windows existed keeps answering as it did.
+
+Every recognition and authorization query, on every transport, is judged as of
+`context.time`, or the registry's clock when none is sent:
+
+- inside the window, the answer is the record's own `recognized` /
+  `authorized`;
+- outside it, the answer is `false`, and `message` says whether the statement
+  has not started or has ended;
+- when judging at its own clock, the registry treats a record as started up to
+  60 seconds before its `validFrom`, to absorb clock skew with the writer. It
+  never extends `validUntil`, and an explicit `context.time` is judged exactly.
+
+A record whose window has ended stays stored until it is replaced or deleted, so
+a query about an instant inside the window still finds it. The registry keeps
+current records, not their history. `registry/record/query/0.3` returns the
+window; `0.1` cannot carry it, so leaves it out. A `put/0.1` replaces the
+record, window included. The CSV backend reads optional `valid_from` and
+`valid_until` columns.
 
 **Writes** are operational messages. Each one requires:
 

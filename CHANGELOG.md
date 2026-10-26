@@ -18,6 +18,38 @@ release goes GA (`## 0.27.0 (date)`).
 
 ## Unreleased
 
+### Added
+
+- **Record validity windows.** Trust records may carry `validFrom`
+  (inclusive) and `validUntil` (exclusive). Every recognition and
+  authorization query is judged as of `context.time` (or now) against the
+  window: outside it the answer is `false`, with a `message` saying why. On the
+  plain TRQP endpoints that is a `200`, not a `404`. When judging at its own
+  clock, the registry starts a record up to 60 s early to absorb clock skew. It
+  never extends `validUntil`, and an explicit `context.time` is judged exactly.
+  Records without a window answer as before. Storage: the CSV backend reads
+  optional `valid_from` / `valid_until` columns; the other backends store the
+  fields when set.
+- **lowerCamelCase `registry/*` versions**, served alongside the snake_case
+  ones: `registry/recognition` and `registry/authorization` 0.2 (`evaluatedAt`,
+  `asOf`), `registry/record/put` and `registry/record/query` 0.3 (records with
+  their window), `registry/record/delete` and `registry/did/rotate` 0.2.
+  Writes are bound to `authorityId` in the new versions exactly as to
+  `authority_id` in the old; a new-version document in the old spelling names
+  no authority and is refused.
+
+### Changed
+
+- **Dependencies:** trust-tasks crates from `dtgwg-trust-tasks-tf` `main`
+  (git, pending a release that carries the new `registry/*` specs). The
+  messaging SDK and vta-sdk are still built on trust-tasks 0.34, so
+  `mediator_acl.rs` builds the SDK's ACL values from that line
+  (`trust-tasks-rs-sdk`); remove it when the SDKs move.
+- `registry/record/query/0.1` leaves a record's window out of its answer (the
+  0.1 record has no member for it), and `registry/record/put/0.1` replaces a
+  stored window along with the rest of the record.
+
+
 ### Fixed
 
 - **TRQP REST conformance (#161).** `POST /authorization` and

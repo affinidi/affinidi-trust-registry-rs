@@ -1,5 +1,5 @@
 use crate::{
-    domain::{Context, TrustRecord, TrustRecordIds},
+    domain::{Context, Evaluation, TrustRecord, TrustRecordIds},
     storage::repository::{TrustRecordQuery, TrustRecordRepository},
 };
 use anyhow::anyhow;
@@ -134,11 +134,9 @@ where
 /// response schema and the `registry/*` Trust Task schema both say so), and
 /// falls back to the time the request arrived.
 ///
-/// The answer itself always reflects the registry's current state: records
-/// carry no validity period, so there is no history to judge an earlier or
-/// later instant against. `time_evaluated` is the server time that answer was
-/// produced at, which is how a client sees that it differs from the instant it
-/// asked about. The Trust Task query path behaves the same way.
+/// The answer is judged against the record's validity window as of that
+/// instant (see [`apply_window`]); the registry keeps current records, not
+/// their history. `time_evaluated` is the server time the answer was produced.
 fn response_times(asked: Option<DateTime<Utc>>, received_at: DateTime<Utc>) -> (String, String) {
     let requested = asked.map_or_else(
         || received_at.to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -146,6 +144,25 @@ fn response_times(asked: Option<DateTime<Utc>>, received_at: DateTime<Utc>) -> (
     );
     let evaluated = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     (requested, evaluated)
+}
+
+/// Answer `false` for a record outside its validity window, and say why.
+///
+/// The record exists, so its identifiers are recognised and the answer is not
+/// a 404: it is a statement that does not hold at the instant asked. Returns
+/// the record with its flag set accordingly, and the reason when it was out of
+/// window.
+fn apply_window(
+    record: TrustRecord,
+    asked: Option<DateTime<Utc>>,
+    authorization: bool,
+) -> (TrustRecord, Option<String>) {
+    let evaluation = Evaluation::of(Some(&record), asked, Utc::now());
+    match evaluation.out_of_window_reason(&record) {
+        None => (record, None),
+        Some(reason) if authorization => (record.with_authorized(false), Some(reason)),
+        Some(reason) => (record.with_recognized(false), Some(reason)),
+    }
 }
 
 pub async fn handle_trqp_authorization<R>(
@@ -156,16 +173,24 @@ where
     R: TrustRecordRepository + Send + ?Sized + 'static,
 {
     let received_at = Utc::now();
-    let (mut trust_record, asked) = handle_trqp(state, payload).await?;
+    let (trust_record, asked) = handle_trqp(state, payload).await?;
+    let (trust_record, out_of_window) = apply_window(trust_record, asked, true);
     // in order to follow spec remove this field from output
-    trust_record = trust_record.none_recognized();
-    let message = format!(
-        "{} authorized to {}+{} by {}",
-        trust_record.entity_id(),
-        trust_record.action(),
-        trust_record.resource(),
-        trust_record.authority_id()
-    );
+    let trust_record = trust_record.none_recognized();
+    let message = match out_of_window {
+        Some(reason) => format!(
+            "{} not authorized by {}: {reason}",
+            trust_record.entity_id(),
+            trust_record.authority_id()
+        ),
+        None => format!(
+            "{} authorized to {}+{} by {}",
+            trust_record.entity_id(),
+            trust_record.action(),
+            trust_record.resource(),
+            trust_record.authority_id()
+        ),
+    };
     let (time_requested, time_evaluated) = response_times(asked, received_at);
 
     Ok(Json(OutputDto {
@@ -184,14 +209,22 @@ where
     R: TrustRecordRepository + Send + ?Sized + 'static,
 {
     let received_at = Utc::now();
-    let (mut trust_record, asked) = handle_trqp(state, payload).await?;
+    let (trust_record, asked) = handle_trqp(state, payload).await?;
+    let (trust_record, out_of_window) = apply_window(trust_record, asked, false);
     // in order to follow spec remove this field from output
-    trust_record = trust_record.none_authorized();
-    let message = format!(
-        "{} recognized by {}",
-        trust_record.entity_id(),
-        trust_record.authority_id()
-    );
+    let trust_record = trust_record.none_authorized();
+    let message = match out_of_window {
+        Some(reason) => format!(
+            "{} not recognized by {}: {reason}",
+            trust_record.entity_id(),
+            trust_record.authority_id()
+        ),
+        None => format!(
+            "{} recognized by {}",
+            trust_record.entity_id(),
+            trust_record.authority_id()
+        ),
+    };
     let (time_requested, time_evaluated) = response_times(asked, received_at);
 
     Ok(Json(OutputDto {
@@ -224,6 +257,7 @@ mod tests {
 
     const ENTITY: &str = "did:example:entity";
     const AUTHORITY: &str = "did:example:authority";
+    const WINDOWED: &str = "did:example:windowed";
 
     fn record(entity: &str) -> TrustRecord {
         TrustRecordBuilder::new()
@@ -248,6 +282,20 @@ mod tests {
             .create(record("has spaces and <angle brackets>"))
             .await
             .expect("seeded");
+        // Valid for 2026 only.
+        let year_2026 = TrustRecordBuilder::new()
+            .entity_id(EntityId::new(WINDOWED))
+            .authority_id(AuthorityId::new(AUTHORITY))
+            .action(Action::new("issue"))
+            .resource(Resource::new("vc"))
+            .recognized(true)
+            .authorized(true)
+            .record_type(RecordType::Authorization)
+            .valid_from(Some("2026-01-01T00:00:00Z".parse().expect("instant")))
+            .valid_until(Some("2027-01-01T00:00:00Z".parse().expect("instant")))
+            .build()
+            .expect("valid record");
+        repository.create(year_2026).await.expect("seeded");
         TrustRegistry::builder(TrustRegistryConfig::embedded("/tmp/tr-trqp-test"))
             .repository(repository)
             .capability_store(Box::new(MemoryCapabilityStore::default()))
@@ -455,5 +503,67 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body["time_requested"].as_str().unwrap().ends_with('Z'));
+    }
+
+    fn windowed_query(time: &str) -> Value {
+        with(
+            with(query(), "entity_id", json!(WINDOWED)),
+            "context",
+            json!({ "time": time }),
+        )
+    }
+
+    #[tokio::test]
+    async fn inside_its_window_a_record_answers_true() {
+        for path in ["/authorization", "/recognition"] {
+            let (status, _, body) = post(path, windowed_query("2026-06-01T00:00:00Z")).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let flag = if path == "/authorization" {
+                "authorized"
+            } else {
+                "recognized"
+            };
+            assert_eq!(body[flag], true, "{body}");
+            // The plain TRQP binding keeps TRQP's snake_case names.
+            assert_eq!(body["valid_from"], "2026-01-01T00:00:00Z", "{body}");
+        }
+    }
+
+    /// Outside its window a record is still recognised as existing (no 404),
+    /// but the statement does not hold.
+    #[tokio::test]
+    async fn outside_its_window_a_record_answers_false_with_the_reason() {
+        for (time, reason) in [
+            ("2025-06-01T00:00:00Z", "not valid until"),
+            ("2027-01-01T00:00:00Z", "stopped being valid"),
+        ] {
+            let (status, _, body) = post("/authorization", windowed_query(time)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["authorized"], false, "{time}: {body}");
+            assert!(body["message"].as_str().unwrap().contains(reason), "{body}");
+            assert_eq!(body["time_requested"], time);
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_time_a_record_is_judged_now() {
+        // The seeded record is valid for 2026 only; with no `context.time` the
+        // registry's own clock decides the answer.
+        let body_now = post(
+            "/authorization",
+            with(query(), "entity_id", json!(WINDOWED)),
+        )
+        .await
+        .2;
+        let now = chrono::Utc::now();
+        let expected = now
+            >= "2026-01-01T00:00:00Z"
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .unwrap()
+            && now
+                < "2027-01-01T00:00:00Z"
+                    .parse::<chrono::DateTime<chrono::Utc>>()
+                    .unwrap();
+        assert_eq!(body_now["authorized"], expected, "{body_now}");
     }
 }

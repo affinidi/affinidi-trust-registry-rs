@@ -58,6 +58,11 @@
 //! rejections — malformed, expired, proof invalid, permission denied — are
 //! properties of the document itself and replay correctly.
 
+// `TaskOutcome`'s error is a whole `trust-task-error` document, which is large
+// by design; boxing it would only move the allocation onto every caller. The
+// router allows this lint for the same reason.
+#![allow(clippy::result_large_err)]
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     didcomm::error::DIDCommError,
+    domain::Evaluation,
     storage::repository::{TrustRecordQuery, TrustRecordRepository},
 };
 use affinidi_tdk::didcomm::Message;
@@ -53,6 +54,16 @@ impl<R: ?Sized + TrustRecordRepository + 'static> ProtocolHandler for TRQPMessag
 
         let mut output_body = json!({});
         if let Some(tr) = record {
+            // This protocol carries no `context.time`, so the record is judged
+            // at the registry's clock; outside its validity window it answers
+            // false, as on every other query path.
+            let evaluation = Evaluation::of(Some(&tr), None, evaluated_at);
+            let out_of_window = evaluation.out_of_window_reason(&tr);
+            let tr = match (&out_of_window, is_authorization) {
+                (None, _) => tr,
+                (Some(_), true) => tr.with_authorized(false),
+                (Some(_), false) => tr.with_recognized(false),
+            };
             // Apply the same field filtering as HTTP handler
             let tr = if is_authorization {
                 tr.none_recognized()
@@ -61,16 +72,25 @@ impl<R: ?Sized + TrustRecordRepository + 'static> ProtocolHandler for TRQPMessag
             };
 
             // Build message like HTTP handler does
-            let message_text = if is_authorization {
-                format!(
+            let verb = if is_authorization {
+                "authorized"
+            } else {
+                "recognized"
+            };
+            let message_text = match out_of_window {
+                Some(reason) => format!(
+                    "{} not {verb} by {}: {reason}",
+                    tr.entity_id(),
+                    tr.authority_id()
+                ),
+                None if is_authorization => format!(
                     "{} authorized to {}+{} by {}",
                     tr.entity_id(),
                     tr.action(),
                     tr.resource(),
                     tr.authority_id()
-                )
-            } else {
-                format!("{} recognized by {}", tr.entity_id(), tr.authority_id())
+                ),
+                None => format!("{} recognized by {}", tr.entity_id(), tr.authority_id()),
             };
 
             output_body = serde_json::to_value(&tr)?;
