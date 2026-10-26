@@ -10,6 +10,11 @@
 //! authority DID every tuple is recorded under. There is no default
 //! authority: absent or malformed config rejects, it never guesses.
 
+// `TaskOutcome`'s error is a whole `trust-task-error` document, which is large
+// by design; boxing it would only move the allocation onto every caller. The
+// router allows this lint for the same reason.
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -226,7 +231,8 @@ fn respond<P>(doc: &TrustTask<P>, payload: Value) -> TaskOutcome {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // `deprecated`: exercises the superseded 0.1 query types on purpose.
+    #![allow(clippy::unwrap_used, clippy::expect_used, deprecated)]
 
     use super::*;
     use crate::capabilities::{CapabilitySet, MemoryCapabilityStore};

@@ -40,6 +40,11 @@
 //! if response.authorized { /* ... */ }
 //! ```
 
+// This client speaks `registry/authorization` and `registry/recognition` 0.1,
+// which the lowerCamelCase 0.2 versions supersede. It stays on 0.1 until
+// registries it talks to answer 0.2; moving is a change to this crate's API.
+#![allow(deprecated)]
+
 mod client;
 mod discovery;
 mod error;

@@ -52,14 +52,21 @@ affinidi-messaging-sdk = "0.40.0"
 # the SDK's `DidCommTransport` (which implements `MessageTransport`) unifies.
 affinidi-messaging-delivery = "0.1.20"
 affinidi-messaging-core = "0.1.11"
-trust-tasks-rs = "0.34.1"
-trust-tasks-proof = "0.34.1"
+trust-tasks-rs = { git = "https://github.com/trustoverip/dtgwg-trust-tasks-tf", rev = "62a1dfd311" }
+trust-tasks-proof = { git = "https://github.com/trustoverip/dtgwg-trust-tasks-tf", rev = "62a1dfd311" }
 vti-secrets = { version = "0.22.0", default-features = false }
 fjall = "3"
 vta-sdk = { version = "0.73.0", default-features = false }
-trust-tasks-https = { version = "0.34.1", default-features = false }
-trust-tasks-tsp = "0.34.1"
-trust-tasks-didcomm = "0.34.1"
+trust-tasks-https = { git = "https://github.com/trustoverip/dtgwg-trust-tasks-tf", rev = "62a1dfd311", default-features = false }
+trust-tasks-tsp = { git = "https://github.com/trustoverip/dtgwg-trust-tasks-tf", rev = "62a1dfd311" }
+trust-tasks-didcomm = { git = "https://github.com/trustoverip/dtgwg-trust-tasks-tf", rev = "62a1dfd311" }
+# The trust-tasks line the messaging SDK and vta-sdk are built on (^0.34).
+# The registry's own trust-tasks crates are newer (they carry the registry/*
+# lowerCamelCase specs), and Rust treats 0.34 and 0.35 as different crates, so
+# a value handed to the SDK has to be built from the SDK's copy. Only
+# `mediator_acl.rs` does that. Remove this once affinidi-messaging-sdk and
+# vta-sdk release on the registry's trust-tasks line.
+trust-tasks-rs-sdk = { package = "trust-tasks-rs", version = "0.34.1" }
 anyhow = "1.0"
 async-trait = "0.1.92"
 base64 = "0.23"
