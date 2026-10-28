@@ -30,7 +30,7 @@ pub mod sender;
 pub mod service_configs;
 
 async fn set_public_acls_mode(atm: Arc<ATM>, profile: Arc<ATMProfile>) -> Result<()> {
-    use trust_tasks_rs_sdk::specs::messaging::account::update::v0_1::{
+    use affinidi_tdk::messaging::tasks::messaging::account::update::v0_2::{
         MediatorAcl, MediatorAclAccessListMode,
     };
     // Public: anyone not on the deny list may send. `account/update` is a

@@ -5,6 +5,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+use affinidi_tdk::messaging::tasks::messaging::account::update::v0_2::{
+    MediatorAcl, MediatorAclAccessListMode,
+};
 use affinidi_tdk::{
     did_common::{DID, PeerCreateKey, PeerKeyPurpose, PeerService, PeerServiceEndpoint},
     didcomm::Message,
@@ -19,9 +22,6 @@ use trust_registry::didcomm::prepare_atm_and_profile;
 use trust_tasks_didcomm::ENVELOPE_TYPE;
 use trust_tasks_proof::affinidi::{CryptoSuite, SignOptions, sign_trust_task};
 use trust_tasks_rs::TrustTask;
-use trust_tasks_rs_sdk::specs::messaging::account::update::v0_1::{
-    MediatorAcl, MediatorAclAccessListMode,
-};
 
 /// The key types of the identities the test mints (`E2E_IDENTITY_KEYS`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,3 +1,6 @@
+use affinidi_tdk::messaging::tasks::messaging::account::update::v0_2::{
+    MediatorAcl, MediatorAclAccessListMode,
+};
 use affinidi_tdk::{
     didcomm::Message,
     messaging::{
@@ -22,9 +25,6 @@ use trust_registry::{
 use trust_tasks_didcomm::ENVELOPE_TYPE;
 use trust_tasks_proof::affinidi::{CryptoSuite, SignOptions, sign_trust_task};
 use trust_tasks_rs::TrustTask;
-use trust_tasks_rs_sdk::specs::messaging::account::update::v0_1::{
-    MediatorAcl, MediatorAclAccessListMode,
-};
 use uuid::Uuid;
 
 static TEST_CONTEXT: OnceCell<Arc<TestConfig>> = OnceCell::const_new();
