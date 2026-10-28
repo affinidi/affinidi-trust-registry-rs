@@ -9,10 +9,11 @@
 use std::sync::Arc;
 
 use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
-// The SDK's trust-tasks copy, not ours: these values go to and come from
-// `atm.trust_tasks()`. See `trust-tasks-rs-sdk` in the workspace Cargo.toml.
-use trust_tasks_rs::specs::messaging::account::get::v0_1::MediatorAclAccessListMode as ReportedMode;
-use trust_tasks_rs::specs::messaging::account::update::v0_1::{
+// The SDK's own generated types, not trust-tasks-rs's: these values go to and
+// come from `atm.trust_tasks()`, and the SDK generates the tasks it speaks
+// (`affinidi_messaging_sdk::tasks`), so its types are distinct from ours.
+use affinidi_tdk::messaging::tasks::messaging::account::get::v0_2::MediatorAclAccessListMode as ReportedMode;
+use affinidi_tdk::messaging::tasks::messaging::account::update::v0_2::{
     MediatorAcl, MediatorAclAccessListMode,
 };
 

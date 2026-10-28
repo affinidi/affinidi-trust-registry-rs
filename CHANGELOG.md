@@ -56,12 +56,19 @@ release goes GA (`## 0.27.0 (date)`).
   `payloads::v0_1` and `payloads::v0_2`. Test fakes standing in for a registry
   must answer 0.2 (lowerCamelCase), or reject it with `unsupportedVersion`.
 
-- **Dependencies:** trust-tasks 0.35.1, the first release carrying the
-  lowerCamelCase `registry/*` specs (the crates were pinned to the spec
-  repository's git `main` until it shipped). With `vta-sdk` 0.74,
-  `affinidi-tdk` 0.33, `affinidi-messaging-sdk` 0.41, `vti-secrets` 0.23 and the
-  test mediator 0.46, the whole graph is on that one line, so the
-  `trust-tasks-rs-sdk` (0.34) alias is gone.
+- **Dependencies:** trust-tasks 0.36.1. 0.35.1 was the first release carrying
+  the lowerCamelCase `registry/*` specs (the crates were pinned to the spec
+  repository's git `main` until it shipped). With `vta-sdk` 0.75,
+  `affinidi-tdk` 0.36, `affinidi-messaging-sdk` 0.44, `vti-secrets` 0.24 and the
+  test mediator 0.48, the whole graph is on that one line, so the
+  `trust-tasks-rs-sdk` (0.34) alias is gone. trust-tasks 0.36 deprecates its
+  prebuilt spec modules; the workspace allows `deprecated` until it generates
+  its own with `trust-tasks-build`.
+- The registry sets its access-list mode at its mediator with
+  `messaging/account/update` 0.2 and reads it with `messaging/account/get` 0.2,
+  the versions `affinidi-messaging-sdk` 0.44 speaks. The values come from the
+  SDK's own generated types (`affinidi_messaging_sdk::tasks`), which are
+  distinct from trust-tasks-rs's.
 - `registry/record/query/0.1` leaves a record's window out of its answer (the
   0.1 record has no member for it), and `registry/record/put/0.1` replaces a
   stored window along with the rest of the record.

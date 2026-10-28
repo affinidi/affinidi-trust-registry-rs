@@ -22,7 +22,7 @@ homepage = "https://affinidi.com/"
 
 [workspace.dependencies]
 
-affinidi-tdk = "0.33.0"
+affinidi-tdk = "0.36.0"
 # Must track the affinidi-messaging-sdk that affinidi-tdk itself pulls in. This
 # dep exists only to switch on the SDK's `tsp` feature, and a feature only
 # unifies within one semver-compatible copy — a mismatched major/minor silently
@@ -47,7 +47,10 @@ affinidi-tdk = "0.33.0"
 #
 # 0.32 -> 0.33 (SDK 0.40 -> 0.41, trust-tasks 0.34 -> 0.35, vta-sdk 0.73 ->
 # 0.74) the same again: vta-sdk 0.74 declares all three.
-affinidi-messaging-sdk = "0.41.0"
+#
+# 0.33 -> 0.36 (SDK 0.41 -> 0.44, trust-tasks 0.35 -> 0.36, vta-sdk 0.74 ->
+# 0.75) the same again: vta-sdk 0.75 declares all three.
+affinidi-messaging-sdk = "0.44.0"
 # The D1 delivery layer + its neutral transport types. Used by the messaging
 # module to drive inbound off `MessagingService::subscribe` (which surfaces the
 # TSP relationship-control distinction the registry needs for Rev 3 §7.2.2) and
@@ -55,14 +58,14 @@ affinidi-messaging-sdk = "0.41.0"
 # the SDK's `DidCommTransport` (which implements `MessageTransport`) unifies.
 affinidi-messaging-delivery = "0.1.20"
 affinidi-messaging-core = "0.1.11"
-trust-tasks-rs = "0.35.1"
-trust-tasks-proof = "0.35.1"
-vti-secrets = { version = "0.23.0", default-features = false }
+trust-tasks-rs = "0.36.1"
+trust-tasks-proof = "0.36.1"
+vti-secrets = { version = "0.24.0", default-features = false }
 fjall = "3"
-vta-sdk = { version = "0.74.0", default-features = false }
-trust-tasks-https = { version = "0.35.1", default-features = false }
-trust-tasks-tsp = "0.35.1"
-trust-tasks-didcomm = "0.35.1"
+vta-sdk = { version = "0.75.0", default-features = false }
+trust-tasks-https = { version = "0.36.1", default-features = false }
+trust-tasks-tsp = "0.36.1"
+trust-tasks-didcomm = "0.36.1"
 anyhow = "1.0"
 async-trait = "0.1.92"
 base64 = "0.23"
@@ -132,6 +135,12 @@ redis = { version = "1.7", features = ["tokio-comp", "connection-manager"] }
 reqwest = { version = "0.13", features = ["json"] }
 serial_test = "4.0"
 tower = { version = "0.5", features = ["util"] }
+
+[workspace.lints.rust]
+# trust-tasks-rs 0.36 deprecates its prebuilt spec modules in favour of
+# generating them with trust-tasks-build; until this workspace generates its
+# own, the registry, capability and admin tasks still come from them.
+deprecated = "allow"
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
