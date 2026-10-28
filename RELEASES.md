@@ -13,7 +13,8 @@ in the workspace carries the release's version (lockstep).
 The workflows are thin callers of `affinidi/pipeline-rust`'s release-branch
 actions (`release-cut`, `release-prep`, `release-tag`, `release-publish`,
 `release-backport`, `release-nightly`, `release-branch-rules`,
-`release-guards`), which carry the scripts.
+`release-guards`), which carry the scripts. The cut is still a local script for
+now (see Cut below).
 
 ## Branches
 
@@ -92,8 +93,8 @@ description says why.
 The `branch rules` check (`branch-rules.yml`) holds all of this: a PR into
 `release/**` is a backport or prep PR the release bot opened, or labelled
 `release-direct`; only the release tooling changes the version or `RELEASE`, on
-any branch, and a cut PR into `main` counts only when the release bot opened
-it.
+any branch, and a cut PR into `main` counts only when the release bot or, while
+cuts are still local, a maintainer opened it.
 
 ## Changelog
 
@@ -105,15 +106,24 @@ GA prep turn `## Unreleased` into `## 0.27.0 (date)`.
 
 ### Cut
 
-Actions → **Cut a release** on `main`, with the release name (`0.29`). It is a
-dry run (builds both commits, pushes nothing) unless that box is cleared. It
-pushes `release/0.29` (workspace at `0.29.0`, `RELEASE` = `0.29.0-rc.0`, which
-`release-tag.yml` tags), creates the `backport release/0.29` label, and opens
-the `release-cut/0.29` PR that moves `main` to `0.30.0` and closes `main`'s
-`## Unreleased` changelog section under `## 0.29.0`. Merge it, then update the
-schedule table above.
+```sh
+python3 scripts/cut-release.py 0.29 --dry-run   # builds both commits, pushes nothing
+python3 scripts/cut-release.py 0.29
+```
 
-`from` cuts from something other than `origin/nightly`.
+From a clean checkout with push access, Python ≥ 3.11, cargo, and `gh`
+authenticated. It pushes `release/0.29` (workspace at `0.29.0`, `RELEASE` =
+`0.29.0-rc.0`, which `release-tag.yml` tags), creates the
+`backport release/0.29` label, and opens the `release-cut/0.29` PR that moves
+`main` to `0.30.0` and closes `main`'s `## Unreleased` changelog section under
+`## 0.29.0`. Merge it, then update the schedule table above.
+
+`--from <rev>` cuts from something other than `origin/nightly`.
+
+This local script is transitional. Cuts are moving to Actions → **Cut a
+release** (`release-cut.yml`, run on `main`, a dry run unless that box is
+cleared), which does the same with the release bot; then the script and
+`scripts/release_lib.py` go.
 
 ### Release candidate, GA, patch
 

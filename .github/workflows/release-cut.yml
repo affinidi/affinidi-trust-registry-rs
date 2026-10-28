@@ -6,9 +6,10 @@ name: Cut a release
 # minor, and creates the `backport release/<major.minor>` label. Run it from
 # the Actions tab on main; it is a dry run unless that box is cleared.
 #
-# With the release-bot app's token: branch-rules.yml accepts a cut PR only
-# when that app opened it, and a branch GITHUB_TOKEN pushed would never be
-# tagged.
+# With the release-bot app's token: branch-rules.yml accepts a cut PR from
+# that app, and a branch GITHUB_TOKEN pushed would never be tagged. Until
+# maintainers stop cutting with scripts/cut-release.py, this is the
+# replacement in waiting.
 on:
   workflow_dispatch:
     inputs:
