@@ -90,7 +90,7 @@ jobs:
           toolchain: '1.96.0'
           rustflags: '--cfg tracing_unstable'
 
-      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@feat/release-branch-actions
         if: steps.gate.outputs.publish == 'true'
 
       - name: Publish plan
