@@ -40,37 +40,11 @@ jobs:
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
-      - uses: actions/checkout@v4
+      # The release-bot app's token: the enterprise does not allow GITHUB_TOKEN
+      # to open pull requests, and one it opened would run no CI (RELEASES.md).
+      - uses: affinidi/pipeline-rust/.github/actions/release-prep@feat/release-branch-actions
         with:
-          # Tags: a patch's changelog is the commits since the last `v…` tag.
-          fetch-depth: 0
-          persist-credentials: false
-      # cargo is needed for `cargo update -w` after a patch's version bump.
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
+          kind: ${{ inputs.kind }}
+          token: ${{ steps.app-token.outputs.token }}
+          # cargo runs `cargo update -w` after a patch's version bump.
           toolchain: '1.96.0'
-          rustflags: ''
-      - name: Bump versions, write the changelog, move RELEASE
-        env:
-          KIND: ${{ inputs.kind }}
-        run: python3 scripts/prepare-release.py --kind "$KIND" --pr-body "$RUNNER_TEMP/body.md"
-      - name: Open the PR
-        env:
-          # The release-bot app's token: the enterprise does not allow
-          # GITHUB_TOKEN to open pull requests, and one it opened would run no
-          # CI (RELEASES.md).
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          BASE: ${{ github.ref_name }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          target=$(cat RELEASE)
-          head="release-prep/${BASE#release/}/$target"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$head"
-          git add -A
-          git commit -s -m "chore(release): v$target"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/$head"
-          gh pr create --base "$BASE" --head "$head" --title "chore(release): v$target" \
-            --body-file "$RUNNER_TEMP/body.md"

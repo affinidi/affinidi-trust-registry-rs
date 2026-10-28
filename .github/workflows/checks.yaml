@@ -30,7 +30,9 @@ jobs:
       rustflags: '-D warnings --cfg tracing_unstable'
   guards:
     # Cheap, build-free guards that protect the release pipeline: toolchain
-    # pins agree, lockstep versions, CHANGELOG / RELEASE consistency.
+    # pins agree, lockstep versions, CHANGELOG / RELEASE consistency. Kept
+    # here, not pipeline-rust's release-guards: that one requires a
+    # rust-toolchain.toml, and this repository's toolchain is the CI pin.
     name: release guards
     runs-on: ubuntu-24.04
     timeout-minutes: 15

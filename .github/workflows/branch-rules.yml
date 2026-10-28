@@ -1,8 +1,9 @@
 name: Branch rules
 
 # Where a PR may go and what it may change: fixes reach a release branch by
-# backport, only the release tooling edits versions and RELEASE. See
-# scripts/check-branch-rules.py and RELEASES.md.
+# backport, only the release tooling edits versions and RELEASE, and a cut,
+# prep or backport PR counts as one only when the release bot opened it. See
+# RELEASES.md.
 #
 # Its own workflow for the trigger: `labeled` / `unlabeled` must re-run it (the
 # `release-direct` label changes the verdict), and adding those to ci.yml would
@@ -22,14 +23,5 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-        with:
-          # The merge commit and its first parent: the PR's effect on the base.
-          fetch-depth: 2
-          persist-credentials: false
-      - name: Check the PR against the branch rules
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          HEAD_REF: ${{ github.head_ref }}
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-        run: python3 scripts/check-branch-rules.py
+      # The action's default release-bot, affinidi-semantic-release[bot], is this repository's app.
+      - uses: affinidi/pipeline-rust/.github/actions/release-branch-rules@feat/release-branch-actions
