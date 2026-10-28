@@ -26,5 +26,5 @@ jobs:
       # The action's default release-bot, affinidi-semantic-release[bot], is this repository's app.
       - uses: affinidi/pipeline-rust/.github/actions/release-branch-rules@feat/release-branch-actions
         with:
-          # Transitional: maintainers still cut locally; drop it once cuts use release-cut.yml.
-          maintainer-cuts: "true"
+          # Transitional: also accepts a maintainer's local cut or prep PR; drop it once both use the release workflows.
+          maintainer-releases: "true"
