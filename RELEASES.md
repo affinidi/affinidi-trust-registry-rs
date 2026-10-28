@@ -12,9 +12,8 @@ in the workspace carries the release's version (lockstep).
 
 The workflows are thin callers of `affinidi/pipeline-rust`'s release-branch
 actions (`release-cut`, `release-prep`, `release-tag`, `release-publish`,
-`release-backport`, `release-nightly`, `release-branch-rules`), which carry the
-scripts. Only the `release guards` check (`scripts/check-release-guards.py`)
-lives here.
+`release-backport`, `release-nightly`, `release-branch-rules`,
+`release-guards`), which carry the scripts.
 
 ## Branches
 
@@ -121,7 +120,7 @@ schedule table above.
 Actions → **Prepare a release** → choose the release branch as the ref and
 `rc`, `ga` or `patch`. It moves `RELEASE`, writes the changelog (GA: the
 `## Unreleased` section becomes `## 0.27.0 (date)`; patch: a new section listing
-the commits since the last tag), moves the whole workspace for a patch, and
+the commits since the last tag, above the newest version's), moves the whole workspace for a patch, and
 opens a `chore(release): v…` PR from `release-prep/<major.minor>/<version>`.
 
 **Merging it is the release.** On that push to the release branch:
