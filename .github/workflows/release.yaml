@@ -16,26 +16,20 @@ name: release
 #   * only crates whose version is not already on crates.io (read from the
 #     sparse index), so a push that changes nothing — a backport before its
 #     prep PR — is a no-op, and a re-run resumes where a failed one stopped;
-#   * in dependency order (derived from `cargo metadata`, see
-#     .github/scripts/publish-crates.py `plan`), waiting for each crate to
-#     reach the index before its dependents are verified.
+#   * in dependency order (derived from `cargo metadata`), waiting for each
+#     crate to reach the index before its dependents are verified.
+#
+# The publishing itself is pipeline-rust's release-publish action, run inside
+# this job so the Trusted Publishing identity stays this file and environment.
 #
 # main no longer publishes: it carries the next release's version.
 #
 # Trusted Publishing ONLY: no CARGO_REGISTRY_TOKEN secret, no fallback to one.
-# A short-lived token is minted per crate by rust-lang/crates-io-auth-action.
-#
-# Token lifetime. A Trusted Publishing token lives 30 minutes. So the verify
-# build and the upload are separate steps: each slot below (1) picks the next
-# unpublished crate and verify-builds it with `cargo package` — no token
-# exists yet — then (2) mints a fresh token and (3) uploads with
-# `cargo publish --no-verify`, which takes seconds.
-#
-# Retries. An upload failure is `continue-on-error`; the next slot finds the
-# same crate still pending, verifies it again (warm, so fast) and retries on a
-# new token. There are more slots than crates for exactly that. A verify-build
-# failure is NOT retried — it would fail identically — and stops the job. The
-# final step fails the run unless every crate is on crates.io.
+# Each crate is verify-built with no token in existence, then uploaded with a
+# token minted for it alone and revoked afterwards, so the 30-minute token
+# lifetime never cuts a release short. A failed upload is retried on a new
+# token; a verify-build failure is not. The run fails unless every crate is on
+# crates.io.
 #
 # A brand-new crate cannot be published this way (RELEASES.md, "A new crate").
 
@@ -67,121 +61,13 @@ jobs:
       contents: read
     env:
       CARGO_TERM_COLOR: always
-      CARGO_BUILD_JOBS: "4"
-      # Deliberately without `-D warnings`: CI already holds the code to that,
-      # and failing a real release half-way through on a lint that appeared
-      # upstream since helps nobody.
-      RUSTFLAGS: "--cfg tracing_unstable"
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      # Cheap and first: decides whether this push publishes anything at all,
-      # before a toolchain is installed. Fails (rather than skips) when RELEASE
-      # and the workspace version disagree.
-      - name: Should this push publish?
-        id: gate
-        run: python3 .github/scripts/publish-crates.py gate
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        if: steps.gate.outputs.publish == 'true'
+      - uses: affinidi/pipeline-rust/.github/actions/release-publish@feat/release-branch-actions
         with:
           toolchain: '1.96.0'
+          # Deliberately without `-D warnings`: CI already holds the code to that,
+          # and failing a real release half-way through on a lint that appeared
+          # upstream since helps nobody.
           rustflags: '--cfg tracing_unstable'
-
-      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@feat/release-branch-actions
-        if: steps.gate.outputs.publish == 'true'
-
-      - name: Publish plan
-        if: steps.gate.outputs.publish == 'true'
-        run: python3 .github/scripts/publish-crates.py plan
-
-      # ---- slot 1 -------------------------------------------------------
-      - name: "Slot 1: verify the next crate"
-        id: next1
-        if: steps.gate.outputs.publish == 'true'
-        run: python3 .github/scripts/publish-crates.py next
-      - name: "Slot 1: authenticate to crates.io (Trusted Publishing)"
-        id: auth1
-        if: steps.next1.outputs.crate != ''
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
-      - name: "Slot 1: upload ${{ steps.next1.outputs.crate }}"
-        if: steps.next1.outputs.crate != ''
-        continue-on-error: true
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth1.outputs.token }}
-          CRATE: ${{ steps.next1.outputs.crate }}
-        run: python3 .github/scripts/publish-crates.py upload "$CRATE"
-
-      # ---- slot 2 -------------------------------------------------------
-      - name: "Slot 2: verify the next crate"
-        id: next2
-        if: steps.next1.outputs.crate != ''
-        run: python3 .github/scripts/publish-crates.py next
-      - name: "Slot 2: authenticate to crates.io (Trusted Publishing)"
-        id: auth2
-        if: steps.next2.outputs.crate != ''
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
-      - name: "Slot 2: upload ${{ steps.next2.outputs.crate }}"
-        if: steps.next2.outputs.crate != ''
-        continue-on-error: true
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth2.outputs.token }}
-          CRATE: ${{ steps.next2.outputs.crate }}
-        run: python3 .github/scripts/publish-crates.py upload "$CRATE"
-
-      # ---- slot 3 -------------------------------------------------------
-      - name: "Slot 3: verify the next crate"
-        id: next3
-        if: steps.next2.outputs.crate != ''
-        run: python3 .github/scripts/publish-crates.py next
-      - name: "Slot 3: authenticate to crates.io (Trusted Publishing)"
-        id: auth3
-        if: steps.next3.outputs.crate != ''
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
-      - name: "Slot 3: upload ${{ steps.next3.outputs.crate }}"
-        if: steps.next3.outputs.crate != ''
-        continue-on-error: true
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth3.outputs.token }}
-          CRATE: ${{ steps.next3.outputs.crate }}
-        run: python3 .github/scripts/publish-crates.py upload "$CRATE"
-
-      # ---- slot 4 -------------------------------------------------------
-      - name: "Slot 4: verify the next crate"
-        id: next4
-        if: steps.next3.outputs.crate != ''
-        run: python3 .github/scripts/publish-crates.py next
-      - name: "Slot 4: authenticate to crates.io (Trusted Publishing)"
-        id: auth4
-        if: steps.next4.outputs.crate != ''
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
-      - name: "Slot 4: upload ${{ steps.next4.outputs.crate }}"
-        if: steps.next4.outputs.crate != ''
-        continue-on-error: true
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth4.outputs.token }}
-          CRATE: ${{ steps.next4.outputs.crate }}
-        run: python3 .github/scripts/publish-crates.py upload "$CRATE"
-
-      # ---- slot 5 -------------------------------------------------------
-      - name: "Slot 5: verify the next crate"
-        id: next5
-        if: steps.next4.outputs.crate != ''
-        run: python3 .github/scripts/publish-crates.py next
-      - name: "Slot 5: authenticate to crates.io (Trusted Publishing)"
-        id: auth5
-        if: steps.next5.outputs.crate != ''
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
-      - name: "Slot 5: upload ${{ steps.next5.outputs.crate }}"
-        if: steps.next5.outputs.crate != ''
-        continue-on-error: true
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth5.outputs.token }}
-          CRATE: ${{ steps.next5.outputs.crate }}
-        run: python3 .github/scripts/publish-crates.py upload "$CRATE"
-
-      - name: Every crate is on crates.io
-        if: steps.gate.outputs.publish == 'true'
-        run: python3 .github/scripts/publish-crates.py check-all
+          ubuntu-rust-deps: build-essential libdbus-1-dev libssl-dev
+          build-jobs: '4'

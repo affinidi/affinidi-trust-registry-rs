@@ -1,4 +1,4 @@
-"""Shared helpers for the release tooling (RELEASES.md).
+"""Lockstep helpers for the release guards (RELEASES.md).
 
 A release is named `major.minor` (`0.27`) and lives on `release/<major.minor>`.
 The workspace is versioned in **lockstep**: `[workspace.package] version` in
@@ -15,28 +15,14 @@ patches publish.
 
 import pathlib
 import re
-import subprocess
 import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-RELEASE_NAME = re.compile(r"(\d+)\.(\d+)")
 RELEASE_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?")
-CRATE_VERSION = re.compile(r"\d+\.\d+\.\d+")
 
 # Dependency tables a manifest may name a workspace member in.
 DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
-
-
-def run(*args, cwd=ROOT, check=True):
-    out = subprocess.run(args, capture_output=True, text=True, cwd=cwd)
-    if check and out.returncode:
-        raise SystemExit(f"`{' '.join(args)}` failed in {cwd}:\n{out.stderr.strip()}")
-    return out
-
-
-def git(*args, cwd=ROOT, check=True):
-    return run("git", *args, cwd=cwd, check=check)
 
 
 def root_manifest(root):
@@ -55,26 +41,6 @@ def member_names(root):
 
 def workspace_version(root):
     return root_manifest(root)["workspace"]["package"]["version"]
-
-
-def is_publishable(pkg, root):
-    """`publish` as cargo reads it: absent/true -> yes, false/[] -> no."""
-    publish = pkg.get("publish", True)
-    if isinstance(publish, dict) and publish.get("workspace"):
-        publish = root_manifest(root)["workspace"].get("package", {}).get("publish", True)
-    if publish is False or publish == []:
-        return False
-    return True
-
-
-def publishable_crates(root):
-    """name -> manifest path for every member cargo would publish."""
-    out = {}
-    for manifest in members(root):
-        pkg = tomllib.loads(manifest.read_text())["package"]
-        if is_publishable(pkg, root):
-            out[pkg["name"]] = manifest
-    return out
 
 
 def _dep_tables(data):
@@ -132,85 +98,9 @@ def lockstep_problems(root):
     return problems
 
 
-def set_version(root, version):
-    """Move the whole workspace to `version`, lockstep.
-
-    Sets `[workspace.package] version` in the root Cargo.toml and rewrites
-    every internal requirement — `<member> = { version = "…", path = … }` in
-    any member's [dependencies], [dev-dependencies], [build-dependencies] or
-    target-specific table — to the same version. Only names that are
-    workspace members are touched: an external crate that happens to share
-    the number is never rewritten.
-
-    Then refreshes Cargo.lock for the members only (`cargo update -w`) and
-    re-verifies the invariant, so a dependency written in a shape the regex
-    does not know (a `[dependencies.<name>]` table, say) fails loudly here
-    instead of shipping a stale requirement.
-    """
-    # Validated before it reaches any file: the replacements below insert it
-    # verbatim, and only a plain crate version belongs there.
-    if not CRATE_VERSION.fullmatch(version):
-        raise SystemExit(f"{version!r} is not major.minor.patch")
-
-    cargo_toml = root / "Cargo.toml"
-    text = cargo_toml.read_text()
-    head, sep, rest = text.partition("[workspace.package]")
-    if not sep:
-        raise SystemExit(f"{cargo_toml}: no [workspace.package] section")
-    rest, n = re.subn(
-        r"""^version\s*=\s*(["'])[^"']*\1""", lambda _: f'version = "{version}"', rest, count=1, flags=re.M
-    )
-    if n != 1:
-        raise SystemExit(f"{cargo_toml}: no version line in [workspace.package]")
-    cargo_toml.write_text(head + sep + rest)
-
-    names = member_names(root)
-    pin_re = re.compile(
-        r'^(\s*(?:' + "|".join(map(re.escape, names)) + r')\s*=\s*\{[^}\n]*?\bversion\s*=\s*")[^"]*(")',
-        re.M,
-    )
-    for manifest in [cargo_toml, *members(root)]:
-        text = manifest.read_text()
-        new = pin_re.sub(lambda m: f"{m.group(1)}{version}{m.group(2)}", text)
-        if new != text:
-            manifest.write_text(new)
-
-    problems = lockstep_problems(root)
-    if problems:
-        raise SystemExit("set_version left the lockstep invariant broken:\n  " + "\n  ".join(problems))
-    run("cargo", "update", "-w", cwd=root)
-
-
 def parse_release(text):
     m = RELEASE_VERSION.fullmatch(text.strip())
     if not m:
         raise SystemExit(f"RELEASE holds {text.strip()!r}, not major.minor.patch[-rc.N]")
     major, minor, patch, rc = m.groups()
     return int(major), int(minor), int(patch), (None if rc is None else int(rc))
-
-
-# A released version's heading: `## 0.27.0 (date)` from this tooling, or the
-# `## [0.26.0] – date` form the changelog used before it.
-VERSION_HEADING = re.compile(r"^## \[?\d+\.\d+\.\d+", re.M)
-
-
-def insert_section(changelog, section):
-    """`changelog` with `section` placed above the newest released version.
-
-    The preamble (title, `## Changelog History`, …) stays on top; with no
-    released version yet, the section goes at the end.
-    """
-    m = VERSION_HEADING.search(changelog)
-    if not m:
-        return f"{changelog.rstrip()}\n\n{section}"
-    return f"{changelog[: m.start()]}{section}{changelog[m.start():]}"
-
-
-def unreleased_split(changelog):
-    """(before, body, after) around the `## Unreleased` section, or None."""
-    m = re.search(r"^## Unreleased[^\n]*\n", changelog, re.M)
-    if not m:
-        return None
-    nxt = re.search(r"^## ", changelog[m.end():], re.M)
-    end = m.end() + nxt.start() if nxt else len(changelog)
-    return changelog[: m.start()], changelog[m.end(): end], changelog[end:]

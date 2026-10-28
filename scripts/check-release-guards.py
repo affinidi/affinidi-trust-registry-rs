@@ -13,11 +13,11 @@ at the worst moment — mid-cut, or mid-publish:
      The release workflows build with the toolchain CI tested.
   2. lockstep — every member inherits `version.workspace = true`, and every
      internal dependency requires exactly the workspace version
-     (`{ version = "0.27.0", path = ... }`). `set_version` moves them together;
-     a hand-edited one drifts, and a published crate then requires a sibling
-     version that is never published.
+     (`{ version = "0.27.0", path = ... }`). The release tooling moves them
+     together; a hand-edited one drifts, and a published crate then requires a
+     sibling version that is never published.
   3. changelog — CHANGELOG.md exists at the root. On main it has an
-     `## Unreleased` section (cut-release.py and the GA prep rename it). On a
+     `## Unreleased` section (the cut and the GA prep rename it). On a
      release branch at a GA or patch version it has that version's section,
      which release-tag.yml turns into the GitHub Release notes.
   4. RELEASE ↔ version — on a release branch, RELEASE's `major.minor.patch` is
@@ -122,7 +122,7 @@ def main():
         else:
             print(f"ok    {name}")
     if failed:
-        print("\nSee RELEASES.md. Versions are only ever moved by scripts/release_lib.py.", file=sys.stderr)
+        print("\nSee RELEASES.md. Versions are only ever moved by the release tooling.", file=sys.stderr)
         return 1
     return 0
 

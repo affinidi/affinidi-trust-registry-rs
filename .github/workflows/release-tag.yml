@@ -38,42 +38,6 @@ jobs:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           permission-contents: write
-      - uses: actions/checkout@v4
+      - uses: affinidi/pipeline-rust/.github/actions/release-tag@feat/release-branch-actions
         with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Tag and publish the GitHub Release
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          version=$(tr -d '[:space:]' < RELEASE)
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
-            echo "::error::RELEASE holds '$version', not major.minor.patch[-rc.N]"
-            exit 1
-          fi
-          tag="v$version"
-          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            echo "::warning::$tag already exists; not moving it"
-            exit 0
-          fi
-          # The version's own CHANGELOG section, heading excluded.
-          : > "$RUNNER_TEMP/notes.md"
-          if [ -f CHANGELOG.md ]; then
-            awk -v v="$version" '
-              $0 ~ "^## " v "( |$)" { on = 1; next }
-              on && /^## / { exit }
-              on { print }
-            ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
-          fi
-          args=(--target "$SHA" --title "$tag")
-          case "$version" in
-            *-rc.*) args+=(--prerelease --latest=false) ;;
-          esac
-          if [ -s "$RUNNER_TEMP/notes.md" ]; then
-            args+=(--notes-file "$RUNNER_TEMP/notes.md")
-          else
-            args+=(--generate-notes)
-          fi
-          gh release create "$tag" "${args[@]}" --repo "$GITHUB_REPOSITORY"
+          token: ${{ steps.app-token.outputs.token }}
