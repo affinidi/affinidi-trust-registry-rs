@@ -19,7 +19,7 @@ use trust_registry::didcomm::prepare_atm_and_profile;
 use trust_tasks_didcomm::ENVELOPE_TYPE;
 use trust_tasks_proof::affinidi::{CryptoSuite, SignOptions, sign_trust_task};
 use trust_tasks_rs::TrustTask;
-use trust_tasks_rs_sdk::specs::messaging::account::update::v0_1::{
+use trust_tasks_rs::specs::messaging::account::update::v0_1::{
     MediatorAcl, MediatorAclAccessListMode,
 };
 

@@ -19,7 +19,6 @@ affinidi-tdk.workspace = true
 affinidi-did-common = "0.4.4"
 trust-tasks-rs.workspace = true
 # See the workspace Cargo.toml: only for the types the messaging SDK takes.
-trust-tasks-rs-sdk.workspace = true
 trust-tasks-proof.workspace = true
 trust-tasks-https.workspace = true
 trust-tasks-didcomm.workspace = true

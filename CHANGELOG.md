@@ -58,9 +58,10 @@ release goes GA (`## 0.27.0 (date)`).
 
 - **Dependencies:** trust-tasks 0.35.1, the first release carrying the
   lowerCamelCase `registry/*` specs (the crates were pinned to the spec
-  repository's git `main` until it shipped). The messaging SDK and vta-sdk are
-  still built on trust-tasks 0.34, so `mediator_acl.rs` builds the SDK's ACL
-  values from that line (`trust-tasks-rs-sdk`); remove it when the SDKs move.
+  repository's git `main` until it shipped). With `vta-sdk` 0.74,
+  `affinidi-tdk` 0.33, `affinidi-messaging-sdk` 0.41, `vti-secrets` 0.23 and the
+  test mediator 0.46, the whole graph is on that one line, so the
+  `trust-tasks-rs-sdk` (0.34) alias is gone.
 - `registry/record/query/0.1` leaves a record's window out of its answer (the
   0.1 record has no member for it), and `registry/record/put/0.1` replaces a
   stored window along with the rest of the record.
