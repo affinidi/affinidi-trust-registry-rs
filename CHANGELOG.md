@@ -42,6 +42,13 @@ release goes GA (`## 0.27.0 (date)`).
   allows.
 - **The test client sends the latest record versions**
   (`registry/record/{put,query}` 0.3, `registry/record/delete` 0.2).
+- **Tests pin every Type URI to a generated schema.** With the prebuilt
+  families off, `trust_tasks_rs::schema_index` no longer knows the
+  `registry/*`, `git-trust/*` or `governance/capability/*` URIs. Nothing here
+  used it: payloads are checked through the generated types. New tests check
+  that every URI the registry answers, and every one `trql-client` sends,
+  is exactly a version in the crate's `trust-tasks.lock`, and that each has a
+  generated schema. A missing pin or a lost schema now fails the build.
 
 ## 0.29.0 (release/0.29)
 

@@ -2113,4 +2113,118 @@ mod tests {
 
         assert_signed_by(&err, &registry).await;
     }
+
+    /// One locked request version: its Type URI, the schema its generated
+    /// module embeds, and whether a payload deserializes into its type.
+    type LockedVersion = (String, Option<&'static str>, fn(Value) -> bool);
+
+    /// Every request version `trust-tasks.lock` pins, from the generated
+    /// `crate::specs` modules. The superseded 0.1 versions are deprecated and
+    /// still answered on purpose.
+    #[allow(deprecated)]
+    fn locked_versions() -> Vec<LockedVersion> {
+        macro_rules! locked {
+            ($($module:path),* $(,)?) => {
+                vec![$({
+                    use $module as m;
+                    (
+                        <m::Payload as trust_tasks_rs::Payload>::type_uri().to_string(),
+                        <m::Payload as trust_tasks_rs::Payload>::PAYLOAD_SCHEMA,
+                        (|v: Value| serde_json::from_value::<m::Payload>(v).is_ok())
+                            as fn(Value) -> bool,
+                    )
+                }),*]
+            };
+        }
+        locked![
+            crate::specs::git_trust::grant::v0_1,
+            crate::specs::git_trust::revoke::v0_1,
+            crate::specs::governance::capability::disable::v0_1,
+            crate::specs::governance::capability::enable::v0_1,
+            crate::specs::governance::capability::list::v0_1,
+            crate::specs::registry::authorization::v0_1,
+            crate::specs::registry::authorization::v0_2,
+            crate::specs::registry::did::rotate::v0_1,
+            crate::specs::registry::did::rotate::v0_2,
+            crate::specs::registry::recognition::v0_1,
+            crate::specs::registry::recognition::v0_2,
+            crate::specs::registry::record::delete::v0_1,
+            crate::specs::registry::record::delete::v0_2,
+            crate::specs::registry::record::put::v0_1,
+            crate::specs::registry::record::put::v0_3,
+            crate::specs::registry::record::query::v0_1,
+            crate::specs::registry::record::query::v0_3,
+        ]
+    }
+
+    /// Every Type URI the registry answers resolves to a schema generated
+    /// from `trust-tasks.lock`, and a payload that breaks it is refused.
+    ///
+    /// trust-tasks-rs is built without its prebuilt spec families, so
+    /// `trust_tasks_rs::schema_index` does not know these URIs and a lookup
+    /// there returns `None`. Nothing in the registry may use it. Payload
+    /// schemas come from the generated types, so this fails if a registration
+    /// has no locked version behind it, if the lock gains a version the table
+    /// below does not name, or if a generated type loses its schema.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn every_answered_type_uri_resolves_to_a_generated_schema() {
+        let (_, did) = did_key(40);
+        let f = fixture(vec![did.clone()]);
+        enable_git_trust(&f, &did).await;
+
+        let mut answered: Vec<String> = Vec::new();
+        for handle in [
+            f.capabilities.dispatcher(),
+            f.capabilities.query_dispatcher(),
+        ] {
+            let dispatcher = handle.read().await.clone();
+            answered.extend(
+                dispatcher
+                    .registered_uris()
+                    .into_iter()
+                    .map(|u| u.to_string()),
+            );
+        }
+        // `registry/did/rotate` is answered by the handler itself, not the
+        // dispatcher.
+        answered.push(<crate::specs::registry::did::rotate::v0_1::Payload as trust_tasks_rs::Payload>::type_uri().to_string());
+        answered.push(<crate::specs::registry::did::rotate::v0_2::Payload as trust_tasks_rs::Payload>::type_uri().to_string());
+        answered.sort();
+        answered.dedup();
+
+        let locked = locked_versions();
+        let mut pinned: Vec<String> = include_str!("../../trust-tasks.lock")
+            .lines()
+            .filter_map(|l| l.strip_prefix("type_uri = \""))
+            .map(|l| l.trim_end_matches('"').to_string())
+            .collect();
+        pinned.sort();
+        let mut generated: Vec<String> = locked.iter().map(|(uri, _, _)| uri.clone()).collect();
+        generated.sort();
+        assert_eq!(
+            generated, pinned,
+            "the table must name every locked version"
+        );
+        assert_eq!(
+            answered, pinned,
+            "the registry answers exactly the locked versions"
+        );
+
+        for (uri, schema, accepts) in &locked {
+            let schema = schema.unwrap_or_else(|| panic!("{uri}: generated type has no schema"));
+            let schema: Value = serde_json::from_str(schema).expect("schema is JSON");
+            assert!(schema.is_object(), "{uri}: schema is not an object");
+            assert!(
+                !accepts(json!("not a payload")),
+                "{uri}: accepted a non-object"
+            );
+            if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+                assert!(
+                    !accepts(json!({ "notAMember": true })),
+                    "{uri}: accepted an unknown member its schema refuses"
+                );
+            }
+        }
+    }
 }
