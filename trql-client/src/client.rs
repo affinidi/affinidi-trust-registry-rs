@@ -915,4 +915,46 @@ mod tests {
             Err(TrqlError::ReferralNotClosed { .. })
         ));
     }
+
+    /// Every version this client sends, and the response it reads back,
+    /// resolves to a schema generated from `trust-tasks.lock`.
+    ///
+    /// trust-tasks-rs is built without its prebuilt spec families, so
+    /// `trust_tasks_rs::schema_index` does not know these URIs; the client
+    /// must not depend on it. This fails if the lock and the versions the
+    /// client speaks drift apart, or if a generated type loses its schema.
+    #[test]
+    fn every_sent_type_uri_resolves_to_a_generated_schema() {
+        use crate::payloads::{v0_1, v0_2};
+
+        fn check<Req: Payload, Resp: Payload + DeserializeOwned>() -> String {
+            let uri = Req::type_uri().to_string();
+            for schema in [Req::PAYLOAD_SCHEMA, Resp::PAYLOAD_SCHEMA] {
+                let schema = schema.unwrap_or_else(|| panic!("{uri}: no generated schema"));
+                let schema: serde_json::Value =
+                    serde_json::from_str(schema).expect("schema is JSON");
+                assert!(schema.is_object(), "{uri}: schema is not an object");
+            }
+            assert!(
+                serde_json::from_value::<Resp>(serde_json::json!("not a payload")).is_err(),
+                "{uri}: response type accepted a non-object"
+            );
+            uri
+        }
+
+        let mut sent = vec![
+            check::<v0_1::AuthorizationRequest, v0_1::AuthorizationResponse>(),
+            check::<v0_2::AuthorizationRequest, v0_2::AuthorizationResponse>(),
+            check::<v0_1::RecognitionRequest, v0_1::RecognitionResponse>(),
+            check::<v0_2::RecognitionRequest, v0_2::RecognitionResponse>(),
+        ];
+        sent.sort();
+        let mut pinned: Vec<String> = include_str!("../trust-tasks.lock")
+            .lines()
+            .filter_map(|l| l.strip_prefix("type_uri = \""))
+            .map(|l| l.trim_end_matches('"').to_string())
+            .collect();
+        pinned.sort();
+        assert_eq!(sent, pinned, "the client sends exactly the locked versions");
+    }
 }
