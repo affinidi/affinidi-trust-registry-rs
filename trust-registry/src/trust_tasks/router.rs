@@ -383,14 +383,14 @@ where
 {
     let record = record_from_v1(&doc.payload.record).map_err(malformed(&doc))?;
     match put_record(repository.as_ref(), record, doc.payload.expected_existing).await {
-        Ok(created) => respond(
-            &doc,
-            RecordPutResponse {
-                ok: true,
-                created,
-                message: None,
-            },
-        ),
+        Ok(created) => {
+            let response: RecordPutResponse = RecordPutResponse::builder()
+                .ok(true)
+                .created(created)
+                .try_into()
+                .map_err(|e| reject_build_err(&doc, e))?;
+            respond(&doc, response)
+        }
         Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
     }
 }
@@ -553,7 +553,7 @@ where
         action: p.action.as_deref(),
         resource: p.resource.as_deref(),
         cursor: p.cursor.as_deref(),
-        limit: p.limit.map(u64::from),
+        limit: p.limit.map(|l| l.get()),
     };
     let (page, next_cursor) = query_records(repository.as_ref(), filter)
         .await
@@ -563,13 +563,12 @@ where
         .map(record_to_v1)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|reason| doc.reject_with(new_id(), RejectReason::InternalError { reason }))?;
-    respond(
-        &doc,
-        RecordQueryResponse {
-            records,
-            next_cursor,
-        },
-    )
+    let response: RecordQueryResponse = RecordQueryResponse::builder()
+        .records(records)
+        .next_cursor(next_cursor)
+        .try_into()
+        .map_err(|e| reject_build_err(&doc, e))?;
+    respond(&doc, response)
 }
 
 /// `registry/record/query/0.3`: lowerCamelCase records, window included.
@@ -756,6 +755,7 @@ mod tests {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
+            ext: None,
             record: record_to_v1(&sample_record()).expect("domain -> spec record"),
             expected_existing: None,
         });
@@ -775,6 +775,7 @@ mod tests {
         });
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
+            ext: None,
             record: record_to_v1(&sample_record()).expect("domain -> spec record"),
             expected_existing: None,
         });
@@ -795,6 +796,7 @@ mod tests {
         });
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
+            ext: None,
             record: record_to_v1(&sample_record()).expect("domain -> spec record"),
             expected_existing: Some(false),
         });
@@ -808,6 +810,7 @@ mod tests {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
+            ext: None,
             record: record_to_v1(&sample_record()).expect("domain -> spec record"),
             expected_existing: Some(true),
         });
@@ -881,7 +884,7 @@ mod tests {
         // Page 1 of 2.
         let doc = value_doc(RecordQueryRequest {
             authority_id: Some("did:example:authority".into()),
-            limit: Some(2),
+            limit: std::num::NonZeroU64::new(2),
             ..Default::default()
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
@@ -894,7 +897,7 @@ mod tests {
         // Page 2 of 2.
         let doc = value_doc(RecordQueryRequest {
             authority_id: Some("did:example:authority".into()),
-            limit: Some(2),
+            limit: std::num::NonZeroU64::new(2),
             cursor: Some(cursor),
             ..Default::default()
         });
@@ -1036,6 +1039,7 @@ mod tests {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_query_dispatcher(repo);
         let doc = value_doc(RecordPutRequest {
+            ext: None,
             record: record_to_v1(&sample_record()).expect("domain -> spec record"),
             expected_existing: None,
         });

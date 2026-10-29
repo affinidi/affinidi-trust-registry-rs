@@ -1,10 +1,10 @@
 //! Trust Task payload types for the Trust Registry (`registry/*` family).
 //!
 //! These are the **published** specs: the types are re-exported from
-//! [`trust_tasks_rs::specs::registry`], which is generated from the
-//! `registry/*` JSON schemas in `dtgwg-trust-tasks-tf`. This crate no longer
-//! hand-writes the payloads — the generated types are the single source of
-//! truth for field names, the `TYPE_URI`s, and the `IS_PROOF_REQUIRED` policy,
+//! [`crate::specs::registry`], which `build.rs` generates with
+//! `trust-tasks-build` from the bundles pinned in `trust-tasks.lock`. Nothing
+//! here is hand-written — the generated types are the single source of truth
+//! for field names, the `TYPE_URI`s, and the proof/`issuedAt`/recipient policy,
 //! so the wire format cannot drift from the spec.
 //!
 //! Each generated module exposes a `Payload` (request) and a `Response`. We
@@ -20,8 +20,7 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use trust_tasks_rs::Payload;
-use trust_tasks_rs::specs::registry;
+use crate::specs::registry;
 
 use crate::domain::{
     Action, AuthorityId, Context, EntityId, RecordType, Resource, TrustRecord, TrustRecordBuilder,
@@ -36,6 +35,7 @@ pub use registry::authorization::v0_1::{
     Payload as AuthorizationRequest, Response as AuthorizationResponse,
     ResponseMessage as AuthorizationResponseMessage,
 };
+pub use registry::did::rotate::v0_1::{Payload as DidRotateRequest, Response as DidRotateResponse};
 pub use registry::recognition::v0_1::{
     Payload as RecognitionRequest, Response as RecognitionResponse,
     ResponseMessage as RecognitionResponseMessage,
@@ -43,17 +43,17 @@ pub use registry::recognition::v0_1::{
 pub use registry::record::delete::v0_1::{
     Payload as RecordDeleteRequest, Response as RecordDeleteResponse,
 };
+pub use registry::record::put::v0_1::{
+    Payload as RecordPutRequest, Response as RecordPutResponse,
+    ResponseMessage as RecordPutResponseMessage,
+};
+pub use registry::record::query::v0_1::{
+    Payload as RecordQueryRequest, Response as RecordQueryResponse,
+};
 
-/// The spec-side `TrustRecord` wire shape (verbatim TRQP field names).
-///
-/// Re-used from the generated `record/create` module: `registry/record/create`
-/// is retired in the spec registry (superseded by `registry/record/put`), but
-/// its generated types remain in `trust-tasks-rs` and the `TrustRecord` shape
-/// is identical. Once a `trust-tasks-rs` release carrying the generated
-/// `registry::record::put` / `registry::record::query` modules is picked up,
-/// this alias and the hand-written put/query payloads below should be replaced
-/// by re-exports of the generated types.
-pub use registry::record::create::v0_1::TrustRecord as SpecTrustRecord;
+/// The spec-side `TrustRecord` wire shape (verbatim TRQP field names), as
+/// `registry/record/put/0.1` carries it.
+pub use registry::record::put::v0_1::TrustRecord as SpecTrustRecord;
 
 /// Canonical Type URIs for the `registry/*` Trust Task family.
 ///
@@ -76,7 +76,7 @@ pub mod type_uris {
     pub const RECORD_DELETE: &str = RecordDeleteRequest::TYPE_URI;
     /// `registry/did/rotate/0.1` request — rotate the registry's own
     /// VTA-managed `did:webvh` keys.
-    pub const DID_ROTATE: &str = "https://trusttasks.org/spec/registry/did/rotate/0.1";
+    pub const DID_ROTATE: &str = DidRotateRequest::TYPE_URI;
 }
 
 // --- The lowerCamelCase versions ---------------------------------------------
@@ -89,24 +89,24 @@ pub mod type_uris {
 
 /// Generated types for the lowerCamelCase `registry/*` versions.
 pub mod v2 {
-    pub use trust_tasks_rs::specs::registry::authorization::v0_2::{
+    pub use crate::specs::registry::authorization::v0_2::{
         Payload as AuthorizationRequest, Response as AuthorizationResponse,
         ResponseMessage as AuthorizationResponseMessage,
     };
-    pub use trust_tasks_rs::specs::registry::did::rotate::v0_2::{
+    pub use crate::specs::registry::did::rotate::v0_2::{
         Payload as DidRotateRequest, Response as DidRotateResponse,
     };
-    pub use trust_tasks_rs::specs::registry::recognition::v0_2::{
+    pub use crate::specs::registry::recognition::v0_2::{
         Payload as RecognitionRequest, Response as RecognitionResponse,
         ResponseMessage as RecognitionResponseMessage,
     };
-    pub use trust_tasks_rs::specs::registry::record::delete::v0_2::{
+    pub use crate::specs::registry::record::delete::v0_2::{
         Payload as RecordDeleteRequest, Response as RecordDeleteResponse,
     };
-    pub use trust_tasks_rs::specs::registry::record::put::v0_3::{
+    pub use crate::specs::registry::record::put::v0_3::{
         Payload as RecordPutRequest, Response as RecordPutResponse,
     };
-    pub use trust_tasks_rs::specs::registry::record::query::v0_3::{
+    pub use crate::specs::registry::record::query::v0_3::{
         Payload as RecordQueryRequest, Response as RecordQueryResponse,
     };
 }
@@ -299,140 +299,6 @@ where
     serde_json::from_value(json).map_err(|e| e.to_string())
 }
 
-// --- registry/record/put + registry/record/query -----------------------------
-//
-// Hand-written against the published `registry/record/put/0.1` and
-// `registry/record/query/0.1` specs, on the same footing as `DidRotateRequest`
-// below: the generated modules for these tasks land in the next
-// `trust-tasks-rs` release, at which point these become re-exports (see the
-// `SpecTrustRecord` alias note above).
-
-/// `registry/record/put/0.1` request — create or replace the trust record at
-/// its four-part key. **Proof required** (administrative, state-changing).
-///
-/// Supersedes `registry/record/create` + `registry/record/update`; the strict
-/// create-only / update-only semantics remain available via `expectedExisting`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecordPutRequest {
-    /// The record to store at its entity+authority+action+resource key.
-    pub record: SpecTrustRecord,
-    /// Optional existence assertion: `true` = strict update (reject when the
-    /// key is absent), `false` = strict create (reject when the key exists),
-    /// absent = pure create-or-update.
-    #[serde(
-        rename = "expectedExisting",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub expected_existing: Option<bool>,
-}
-
-impl Payload for RecordPutRequest {
-    const TYPE_URI: &'static str = "https://trusttasks.org/spec/registry/record/put/0.1";
-    const IS_PROOF_REQUIRED: bool = true;
-}
-
-/// `registry/record/put/0.1#response` — whether the put created or replaced.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecordPutResponse {
-    /// Whether the record was stored.
-    pub ok: bool,
-    /// True when the put created a new record, false when it replaced one.
-    pub created: bool,
-    /// Optional human-readable detail.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-impl Payload for RecordPutResponse {
-    const TYPE_URI: &'static str = "https://trusttasks.org/spec/registry/record/put/0.1#response";
-    const IS_PROOF_REQUIRED: bool = true;
-}
-
-/// `registry/record/query/0.1` request — exact fetch when all four key parts
-/// are supplied (notFound on a miss), filtered cursor-paginated enumeration
-/// otherwise.
-///
-/// Supersedes `registry/record/read` + `registry/record/list`, adding the
-/// pagination `list` conceded it lacked.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RecordQueryRequest {
-    /// Filter to records for this entity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entity_id: Option<String>,
-    /// Filter to records asserted by this authority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authority_id: Option<String>,
-    /// Filter to records for this action.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
-    /// Filter to records for this resource.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource: Option<String>,
-    /// Opaque continuation token from a previous page's `nextCursor`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-    /// Page size; clamped to 1..=200 (default 50).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u32>,
-}
-
-impl Payload for RecordQueryRequest {
-    const TYPE_URI: &'static str = "https://trusttasks.org/spec/registry/record/query/0.1";
-}
-
-/// `registry/record/query/0.1#response` — the matching records and, on an
-/// enumeration with more matches remaining, the continuation cursor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecordQueryResponse {
-    /// The matching trust records (exactly one on a fully keyed fetch).
-    pub records: Vec<SpecTrustRecord>,
-    /// Continuation token for the next page; absent on the last page and on a
-    /// fully keyed fetch.
-    #[serde(
-        rename = "nextCursor",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub next_cursor: Option<String>,
-}
-
-impl Payload for RecordQueryResponse {
-    const TYPE_URI: &'static str = "https://trusttasks.org/spec/registry/record/query/0.1#response";
-}
-
-/// `registry/did/rotate/0.1` request — rotate the registry's own VTA-managed
-/// `did:webvh` keys. **Proof required** (administrative, state-changing).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DidRotateRequest {
-    /// Override the pre-rotation commitment count for the new key set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pre_rotation_count: Option<u32>,
-    /// Operator-facing audit label for the rotation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-impl Payload for DidRotateRequest {
-    const TYPE_URI: &'static str = type_uris::DID_ROTATE;
-    const IS_PROOF_REQUIRED: bool = true;
-}
-
-/// `registry/did/rotate/0.1#response` — the outcome of a key rotation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DidRotateResponse {
-    /// The DID whose keys were rotated.
-    pub did: String,
-    /// The new SCID after rotation.
-    pub new_scid: String,
-    /// The new webvh log version id.
-    pub new_version_id: String,
-}
-
-impl Payload for DidRotateResponse {
-    const TYPE_URI: &'static str = "https://trusttasks.org/spec/registry/did/rotate/0.1#response";
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,10 +361,11 @@ mod tests {
         let put_json = serde_json::to_value(&put).expect("serialises");
         assert!(put_json.get("expectedExisting").is_some());
 
-        let response = RecordQueryResponse {
-            records: vec![],
-            next_cursor: Some("50".into()),
-        };
+        let response: RecordQueryResponse = RecordQueryResponse::builder()
+            .records(vec![])
+            .next_cursor(Some("50".to_string()))
+            .try_into()
+            .expect("valid response");
         let json = serde_json::to_value(&response).expect("serialises");
         assert_eq!(json["nextCursor"], "50");
     }

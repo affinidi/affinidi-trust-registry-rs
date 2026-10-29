@@ -1,0 +1,27 @@
+# Written by `trust-tasks`. Do not edit by hand.
+version = 1
+registry = "https://trusttasks.org"
+
+[[task]]
+slug = "registry/authorization"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/registry/authorization/0.1"
+digest = "sha256:500c52f705477a5ba65eca03c8b7d9f999903d1f53cab0302181950bef4b268e"
+
+[[task]]
+slug = "registry/authorization"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/registry/authorization/0.2"
+digest = "sha256:1e3fe74cffbd0ca66ecdb510186bd2bde4368da64bc587c121195e32c9161c6d"
+
+[[task]]
+slug = "registry/recognition"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/registry/recognition/0.1"
+digest = "sha256:8cf129eae98f45367131c9535742f93914ab20badc88446bf2f18ef57ea0e7b4"
+
+[[task]]
+slug = "registry/recognition"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/registry/recognition/0.2"
+digest = "sha256:869ff2c00bb55833c8514754b279322b65223115b4a5bb851504f2998f991615"

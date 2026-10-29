@@ -23,13 +23,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::specs::governance::capability::disable::v0_1 as disable_spec;
+use crate::specs::governance::capability::enable::v0_1 as enable_spec;
+use crate::specs::governance::capability::list::v0_1 as list_spec;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
-use trust_tasks_rs::specs::governance::capability::disable::v0_1 as disable_spec;
-use trust_tasks_rs::specs::governance::capability::enable::v0_1 as enable_spec;
-use trust_tasks_rs::specs::governance::capability::list::v0_1 as list_spec;
 use trust_tasks_rs::{RejectReason, TrustTask};
 use uuid::Uuid;
 
@@ -562,7 +562,7 @@ mod tests {
     /// A capability whose handler answers `registry/recognition` (a type the
     /// empty base does not register).
     fn test_capability(slug: &str) -> CapabilityDefinition {
-        use trust_tasks_rs::specs::registry::recognition::v0_1 as recognition;
+        use crate::specs::registry::recognition::v0_1 as recognition;
         CapabilityDefinition {
             manifest: manifest(slug),
             register: Arc::new(|d: RegistryDispatcher, _state: &CapabilityState| {
@@ -630,7 +630,7 @@ mod tests {
     }
 
     fn recognition_doc() -> TrustTask<Value> {
-        use trust_tasks_rs::specs::registry::recognition::v0_1 as recognition;
+        use crate::specs::registry::recognition::v0_1 as recognition;
         TrustTask::new(
             "urn:uuid:q".to_string(),
             recognition::Payload::type_uri(),

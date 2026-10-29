@@ -1,0 +1,8 @@
+# The Trust Task specifications this application uses. `trust-tasks add`,
+# `remove` and `update` edit this file; `trust-tasks.lock` records what each
+# entry resolved to. A value is an exact version ("0.4") or "latest".
+# Tasks from a third-party source are named "<source>:<slug>", with the
+# source declared as [sources.<source>] url = "https://…" (or path = "…").
+[tasks]
+"registry/authorization" = ["0.1", "0.2"]
+"registry/recognition" = ["0.1", "0.2"]

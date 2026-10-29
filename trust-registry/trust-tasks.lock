@@ -1,0 +1,105 @@
+# Written by `trust-tasks`. Do not edit by hand.
+version = 1
+registry = "https://trusttasks.org"
+
+[[task]]
+slug = "git-trust/grant"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/git-trust/grant/0.1"
+digest = "sha256:18c1175a16c22b3d22bc3b441a034cf2119bf8a76eee7c6eae62ac0f2a7bc662"
+
+[[task]]
+slug = "git-trust/revoke"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/git-trust/revoke/0.1"
+digest = "sha256:33d0583d7320f797cc9b0d7da03fe5df486dfe08a91a09370bdbe83a1fe65da0"
+
+[[task]]
+slug = "governance/capability/disable"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/governance/capability/disable/0.1"
+digest = "sha256:1173b9f7dff3bb9be98978fb3293022aa53f924b81253abefd2b8316d99ca272"
+
+[[task]]
+slug = "governance/capability/enable"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/governance/capability/enable/0.1"
+digest = "sha256:bc5184a3fdae49fe0eebc070f6cab5f37e71d5d94d7d0897e2ad96d6a96e80bd"
+
+[[task]]
+slug = "governance/capability/list"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/governance/capability/list/0.1"
+digest = "sha256:bcd7c27f7b76cb024a9d28040628c8f63ad1be79744ec1e699b262fdedf9422e"
+
+[[task]]
+slug = "registry/authorization"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/registry/authorization/0.1"
+digest = "sha256:500c52f705477a5ba65eca03c8b7d9f999903d1f53cab0302181950bef4b268e"
+
+[[task]]
+slug = "registry/authorization"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/registry/authorization/0.2"
+digest = "sha256:1e3fe74cffbd0ca66ecdb510186bd2bde4368da64bc587c121195e32c9161c6d"
+
+[[task]]
+slug = "registry/did/rotate"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/registry/did/rotate/0.1"
+digest = "sha256:dd81216dcba9fcf46b06da7c7fd0a60410dc2a24a00fa4901b1a2524684b60e4"
+
+[[task]]
+slug = "registry/did/rotate"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/registry/did/rotate/0.2"
+digest = "sha256:8b368b4c368cd20029e09fa06829b45b63b1c1e5af791656df072a2e2ac138f4"
+
+[[task]]
+slug = "registry/recognition"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/registry/recognition/0.1"
+digest = "sha256:8cf129eae98f45367131c9535742f93914ab20badc88446bf2f18ef57ea0e7b4"
+
+[[task]]
+slug = "registry/recognition"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/registry/recognition/0.2"
+digest = "sha256:869ff2c00bb55833c8514754b279322b65223115b4a5bb851504f2998f991615"
+
+[[task]]
+slug = "registry/record/delete"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/registry/record/delete/0.1"
+digest = "sha256:d059883e860f842c8df19f7233b6441df1e8a716e87dbbf8248b4fbd50ef6669"
+
+[[task]]
+slug = "registry/record/delete"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/registry/record/delete/0.2"
+digest = "sha256:40b359c9a8823b0815828140a4bf3be1944b686a72f9b01927c64c69bd0b38a1"
+
+[[task]]
+slug = "registry/record/put"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/registry/record/put/0.1"
+digest = "sha256:6f6959a9a07b21652754a5150029d0770097f9a214f0289bc82ded3ccfacab08"
+
+[[task]]
+slug = "registry/record/put"
+version = "0.3"
+type_uri = "https://trusttasks.org/spec/registry/record/put/0.3"
+digest = "sha256:a3082fbd2bf0513c95052f38753920adbe10371a076f550944a3c01bef2538d4"
+
+[[task]]
+slug = "registry/record/query"
+version = "0.1"
+type_uri = "https://trusttasks.org/spec/registry/record/query/0.1"
+digest = "sha256:f12538bd43094aaf75336ce4b189a836ed866cb7440f5bec5bf27bc94caa2ebd"
+
+[[task]]
+slug = "registry/record/query"
+version = "0.3"
+type_uri = "https://trusttasks.org/spec/registry/record/query/0.3"
+digest = "sha256:c3e5158ff54ce6c79d3b242d9d2022c01e3c98254b7950a6378511853672f957"

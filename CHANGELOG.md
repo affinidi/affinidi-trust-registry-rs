@@ -18,6 +18,31 @@ release goes GA (`## 0.27.0 (date)`).
 
 ## Unreleased
 
+### Changed
+
+- **Trust Task types are generated per crate.** `trust-registry` and
+  `trql-client` each pin the specifications they speak in `trust-tasks.toml`
+  / `trust-tasks.lock`, vendor the bundles under `trust-tasks/`, and generate
+  `specs` in `build.rs` with `trust-tasks-build`, instead of using
+  `trust-tasks-rs`'s deprecated prebuilt modules (now left out with
+  `default-features = false`). `trust-registry` pins every version it serves:
+  the latest of each task (`registry/{authorization,recognition}` 0.2,
+  `registry/record/{put,query}` 0.3, `registry/record/delete` and
+  `registry/did/rotate` 0.2, `git-trust/{grant,revoke}` and
+  `governance/capability/*` 0.1) plus the superseded 0.1 versions it still
+  answers; `trql-client` pins `registry/{authorization,recognition}` 0.2 and
+  its 0.1 fallback. `trust-tasks check` (trust-tasks-cli) verifies the pins;
+  `trust-tasks update` moves them.
+- **`registry/record/{put,query}` 0.1 and `registry/did/rotate` 0.1 use the
+  generated types** in place of the hand-written ones, so they follow the spec
+  exactly: unknown members are refused, a query `limit` of 0 is malformed, and
+  a 0.1 put requires `issuedAt` and `recipient`, and a 0.1 query `recipient`,
+  as the spec declares. The
+  workspace-wide `deprecated = "allow"` is gone; the 0.1 handling keeps scoped
+  allows.
+- **The test client sends the latest record versions**
+  (`registry/record/{put,query}` 0.3, `registry/record/delete` 0.2).
+
 ## 0.29.0 (release/0.29)
 
 ### Added

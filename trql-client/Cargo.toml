@@ -51,6 +51,9 @@ tokio = { workspace = true, optional = true }
 trust-tasks-didcomm = { workspace = true, optional = true }
 trust-tasks-tsp = { workspace = true, optional = true }
 
+[build-dependencies]
+trust-tasks-build.workspace = true
+
 [dev-dependencies]
 axum.workspace = true
 tokio.workspace = true

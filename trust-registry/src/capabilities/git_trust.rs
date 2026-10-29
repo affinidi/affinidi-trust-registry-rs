@@ -17,9 +17,9 @@
 
 use std::sync::Arc;
 
+use crate::specs::git_trust::grant::v0_1 as grant_spec;
+use crate::specs::git_trust::revoke::v0_1 as revoke_spec;
 use serde_json::Value;
-use trust_tasks_rs::specs::git_trust::grant::v0_1 as grant_spec;
-use trust_tasks_rs::specs::git_trust::revoke::v0_1 as revoke_spec;
 use trust_tasks_rs::{RejectReason, TrustTask};
 use uuid::Uuid;
 
@@ -236,8 +236,8 @@ mod tests {
 
     use super::*;
     use crate::capabilities::{CapabilitySet, MemoryCapabilityStore};
+    use crate::specs::registry::authorization::v0_1 as authz;
     use crate::storage::adapters::local_storage::LocalStorage;
-    use trust_tasks_rs::specs::registry::authorization::v0_1 as authz;
     use trust_tasks_rs::{Dispatcher, Payload as _};
 
     const AUTHORITY: &str = "did:example:community-authority";
