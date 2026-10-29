@@ -62,8 +62,9 @@ Up to `0.26.0`, every merge to `main` published from `main` through
 |---|---|---|---|---|---|
 | ≤ 0.26 | — | — | — | `0.26.0` | published from `main` (`trust-registry-v…` tags) |
 | 0.27 | `release/0.27` | 2026-10-19 | 2026-10-19 | `0.27.0` | end of life (2026-10-29) |
-| 0.28 | `release/0.28` | 2026-10-26 | 2026-10-26 | `0.28.0` | supported (N-1) |
-| 0.29 | `release/0.29` | 2026-10-29 | 2026-10-29 | `0.29.0` | supported (N) |
+| 0.28 | `release/0.28` | 2026-10-26 | 2026-10-26 | `0.28.0` | end of life (2026-10-29) |
+| 0.29 | `release/0.29` | 2026-10-29 | 2026-10-29 | `0.29.0` | supported (N-1) |
+| 0.30 | `release/0.30` | 2026-10-29 | 2026-10-29 | `0.30.0` | supported (N) |
 
 ## Support
 
