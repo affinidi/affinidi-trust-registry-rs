@@ -81,14 +81,22 @@ pub use tsp::{TspTransport, TspTransportConfig};
 /// version, re-exported so consumers don't need a direct `trust-tasks-rs`
 /// dependency to inspect them. [`TrqlClient`] answers with
 /// [`AuthorizationAnswer`] / [`RecognitionAnswer`], not these.
+/// The Trust Task specifications this crate speaks, generated at build time by
+/// `trust-tasks-build` from the versions pinned in `trust-tasks.lock`, at the
+/// module paths `crate::specs` used (`specs::registry::recognition::v0_2`).
+#[allow(clippy::all, clippy::unwrap_used, clippy::expect_used, missing_docs)]
+pub mod specs {
+    include!(concat!(env!("OUT_DIR"), "/trust_tasks_generated.rs"));
+}
+
 pub mod payloads {
     /// `registry/authorization/0.2` and `registry/recognition/0.2`.
     pub mod v0_2 {
-        pub use trust_tasks_rs::specs::registry::authorization::v0_2::{
+        pub use crate::specs::registry::authorization::v0_2::{
             Payload as AuthorizationRequest, QueryContext as AuthorizationQueryContext,
             Response as AuthorizationResponse,
         };
-        pub use trust_tasks_rs::specs::registry::recognition::v0_2::{
+        pub use crate::specs::registry::recognition::v0_2::{
             Payload as RecognitionRequest, QueryContext as RecognitionQueryContext,
             Response as RecognitionResponse,
         };
@@ -96,11 +104,11 @@ pub mod payloads {
     /// `registry/authorization/0.1` and `registry/recognition/0.1`, the
     /// fallback for registries that predate 0.2.
     pub mod v0_1 {
-        pub use trust_tasks_rs::specs::registry::authorization::v0_1::{
+        pub use crate::specs::registry::authorization::v0_1::{
             Payload as AuthorizationRequest, QueryContext as AuthorizationQueryContext,
             Response as AuthorizationResponse,
         };
-        pub use trust_tasks_rs::specs::registry::recognition::v0_1::{
+        pub use crate::specs::registry::recognition::v0_1::{
             Payload as RecognitionRequest, QueryContext as RecognitionQueryContext,
             Response as RecognitionResponse,
         };

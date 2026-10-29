@@ -16,6 +16,13 @@ pub mod server;
 #[cfg(feature = "vta")]
 pub mod setup;
 pub mod storage;
+/// The Trust Task specifications this crate speaks, generated at build time by
+/// `trust-tasks-build` from the versions pinned in `trust-tasks.lock`, at the
+/// module paths `crate::specs` used (`specs::registry::recognition::v0_2`).
+#[allow(clippy::all, clippy::unwrap_used, clippy::expect_used, missing_docs)]
+pub mod specs {
+    include!(concat!(env!("OUT_DIR"), "/trust_tasks_generated.rs"));
+}
 pub mod trust_tasks;
 
 pub use embed::{TrustRegistry, TrustRegistryBuilder};

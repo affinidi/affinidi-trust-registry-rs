@@ -18,9 +18,9 @@ use trust_tasks_proof::affinidi::{CryptoSuite, SignOptions, sign_trust_task};
 use trust_tasks_rs::TrustTask;
 use uuid::Uuid;
 
-const RECORD_PUT: &str = "https://trusttasks.org/spec/registry/record/put/0.1";
-const RECORD_QUERY: &str = "https://trusttasks.org/spec/registry/record/query/0.1";
-const RECORD_DELETE: &str = "https://trusttasks.org/spec/registry/record/delete/0.1";
+const RECORD_PUT: &str = "https://trusttasks.org/spec/registry/record/put/0.3";
+const RECORD_QUERY: &str = "https://trusttasks.org/spec/registry/record/query/0.3";
+const RECORD_DELETE: &str = "https://trusttasks.org/spec/registry/record/delete/0.2";
 
 pub struct CommonCrudInput {
     pub atm: Arc<ATM>,
@@ -38,8 +38,8 @@ pub struct CommonCrudInput {
 impl CommonCrudInput {
     fn key(&self) -> Value {
         json!({
-            "entity_id": self.entity_id,
-            "authority_id": self.authority_id,
+            "entityId": self.entity_id,
+            "authorityId": self.authority_id,
             "action": self.action,
             "resource": self.resource,
         })
@@ -49,7 +49,7 @@ impl CommonCrudInput {
         let mut record = self.key();
         record["recognized"] = json!(recognized);
         record["authorized"] = json!(authorized);
-        record["record_type"] = json!(self.record_type);
+        record["recordType"] = json!(self.record_type);
         if let Some(context) = context {
             record["context"] = context;
         }
@@ -95,7 +95,7 @@ pub async fn read_record(input: CommonCrudInput) -> Result<(), Box<dyn std::erro
 
 /// List the records held under the input's authority.
 pub async fn list_records(input: CommonCrudInput) -> Result<(), Box<dyn std::error::Error>> {
-    let payload = json!({ "authority_id": input.authority_id });
+    let payload = json!({ "authorityId": input.authority_id });
     send_trust_task(&input, RECORD_QUERY, payload).await
 }
 

@@ -1,0 +1,17 @@
+# The Trust Task specifications this application uses. `trust-tasks add`,
+# `remove` and `update` edit this file; `trust-tasks.lock` records what each
+# entry resolved to. A value is an exact version ("0.4") or "latest".
+# Tasks from a third-party source are named "<source>:<slug>", with the
+# source declared as [sources.<source>] url = "https://…" (or path = "…").
+[tasks]
+"git-trust/grant" = "0.1"
+"git-trust/revoke" = "0.1"
+"governance/capability/disable" = "0.1"
+"governance/capability/enable" = "0.1"
+"governance/capability/list" = "0.1"
+"registry/authorization" = ["0.1", "0.2"]
+"registry/did/rotate" = ["0.1", "0.2"]
+"registry/recognition" = ["0.1", "0.2"]
+"registry/record/delete" = ["0.1", "0.2"]
+"registry/record/put" = ["0.1", "0.3"]
+"registry/record/query" = ["0.1", "0.3"]

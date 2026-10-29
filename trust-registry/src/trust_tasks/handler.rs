@@ -760,6 +760,9 @@ impl TaskHandler {
 
     /// Rotate the registry's own VTA-managed `did:webvh` keys. Requires the
     /// `vta` feature; otherwise the request is rejected as unavailable.
+    // `deprecated`: 0.1 is superseded by 0.2 and still answered on purpose, for
+    // operators whose tooling has not moved.
+    #[allow(deprecated)]
     async fn handle_did_rotate(
         &self,
         doc: &TrustTask<Value>,
@@ -771,22 +774,21 @@ impl TaskHandler {
             let malformed = |reason: String| {
                 doc.reject_with(new_id(), RejectReason::MalformedRequest { reason })
             };
-            // 0.1 is snake_case and hand-written; 0.2 is the generated
-            // lowerCamelCase type. Both carry the same two optional members.
+            // 0.1 is snake_case, 0.2 lowerCamelCase. Both carry the same two
+            // optional members.
             let (pre_rotation_count, label) = if camel_case(doc) {
                 let req: v2::DidRotateRequest = serde_json::from_value(doc.payload.clone())
                     .map_err(|e| malformed(e.to_string()))?;
-                let count = req
-                    .pre_rotation_count
-                    .map(u32::try_from)
-                    .transpose()
-                    .map_err(|_| malformed("preRotationCount is out of range".to_string()))?;
-                (count, req.label.map(|l| l.to_string()))
+                (req.pre_rotation_count, req.label.map(|l| l.to_string()))
             } else {
                 let req: DidRotateRequest = serde_json::from_value(doc.payload.clone())
                     .map_err(|e| malformed(e.to_string()))?;
-                (req.pre_rotation_count, req.label)
+                (req.pre_rotation_count, req.label.map(|l| l.to_string()))
             };
+            let pre_rotation_count = pre_rotation_count
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| malformed("the pre-rotation count is out of range".to_string()))?;
             match crate::configs::vta::rotate_did(&self.my_did, pre_rotation_count, label).await {
                 Ok((did, new_scid, new_version_id)) => {
                     let value = if camel_case(doc) {
@@ -795,7 +797,7 @@ impl TaskHandler {
                             .new_scid(new_scid)
                             .new_version_id(new_version_id)
                             .try_into()
-                            .map_err(|e: trust_tasks_rs::specs::registry::did::rotate::v0_2::error::ConversionError| {
+                            .map_err(|e: crate::specs::registry::did::rotate::v0_2::error::ConversionError| {
                                 doc.reject_with(
                                     new_id(),
                                     RejectReason::InternalError {
@@ -805,12 +807,20 @@ impl TaskHandler {
                             })?;
                         serde_json::to_value(response).unwrap_or(Value::Null)
                     } else {
-                        serde_json::to_value(DidRotateResponse {
-                            did,
-                            new_scid,
-                            new_version_id,
-                        })
-                        .unwrap_or(Value::Null)
+                        let response: DidRotateResponse = DidRotateResponse::builder()
+                            .did(did)
+                            .new_scid(new_scid)
+                            .new_version_id(new_version_id)
+                            .try_into()
+                            .map_err(|e: crate::specs::registry::did::rotate::v0_1::error::ConversionError| {
+                                doc.reject_with(
+                                    new_id(),
+                                    RejectReason::InternalError {
+                                        reason: format!("could not build response payload: {e}"),
+                                    },
+                                )
+                            })?;
+                        serde_json::to_value(response).unwrap_or(Value::Null)
                     };
                     Ok(doc.respond_with(new_id(), value))
                 }
