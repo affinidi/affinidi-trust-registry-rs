@@ -8,8 +8,8 @@ name: Nightly
 # Read from each run's own jobs, not the run's conclusion: the rollup reports
 # a re-run's staleness as success.
 #
-# Moved with GITHUB_TOKEN: nothing triggers on a push to `nightly`, so the
-# token's no-workflows rule costs nothing here.
+# Moved with the release bot's token: a ruleset lets only the bot, maintainers
+# and admins move `nightly`, and it cannot let GITHUB_TOKEN bypass.
 on:
   schedule:
     - cron: "0 2 * * *"
