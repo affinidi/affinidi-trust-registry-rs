@@ -1,0 +1,64 @@
+name: Cut a release
+
+# Cuts release/<major.minor> from `nightly` (RELEASES.md): pushes the branch at
+# <major.minor>.0 with RELEASE = <major.minor>.0-rc.0, which release-tag.yml
+# tags, opens the release-cut/<major.minor> PR that moves main to the next
+# minor, and creates the `backport release/<major.minor>` label. Run it from
+# the Actions tab on main; it is a dry run unless that box is cleared.
+#
+# With the release-bot app's token: branch-rules.yml accepts a cut PR from
+# that app, and a branch GITHUB_TOKEN pushed would never be tagged. Until
+# maintainers stop cutting with scripts/cut-release.py, this is the
+# replacement in waiting.
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "major.minor, e.g. 0.29"
+        required: true
+        type: string
+      from:
+        description: "Revision to cut from"
+        required: true
+        type: string
+        default: origin/nightly
+      dry-run:
+        description: "Build both commits, push nothing"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-cut
+  cancel-in-progress: false
+
+jobs:
+  cut:
+    name: Cut release/${{ inputs.name }}
+    # The release-bot app's secrets live in the `release` environment, whose
+    # branch policy admits `main` and `release/*`.
+    environment: release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: affinidi/pipeline-rust/.github/actions/release-cut@feat/release-branch-actions
+        with:
+          name: ${{ inputs.name }}
+          from: ${{ inputs.from }}
+          dry-run: ${{ inputs.dry-run }}
+          token: ${{ steps.app-token.outputs.token }}
+          # cargo runs `cargo update -w` after each version move.
+          toolchain: '1.96.0'

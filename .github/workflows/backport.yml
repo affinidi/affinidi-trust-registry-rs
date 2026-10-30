@@ -44,18 +44,6 @@ jobs:
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
-      - uses: actions/checkout@v4
+      - uses: affinidi/pipeline-rust/.github/actions/release-backport@feat/release-branch-actions
         with:
           token: ${{ steps.app-token.outputs.token }}
-      - uses: korthout/backport-action@8560fb503c275d433c56f05a2f64850093baa9f7 # v4.7.0
-        with:
-          github_token: ${{ steps.app-token.outputs.token }}
-          label_pattern: '^backport (release/\d+\.\d+)$'
-          pull_title: '${pull_title}'
-          pull_description: |-
-            Backport of #${pull_number} to `${target_branch}`.
-
-            ${pull_description}
-          add_labels: backport
-          copy_assignees: true
-          experimental: '{"conflict_resolution": "draft_commit_conflicts"}'

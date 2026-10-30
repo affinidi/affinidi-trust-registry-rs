@@ -8,8 +8,8 @@ name: Nightly
 # Read from each run's own jobs, not the run's conclusion: the rollup reports
 # a re-run's staleness as success.
 #
-# Moved with GITHUB_TOKEN: nothing triggers on a push to `nightly`, so the
-# token's no-workflows rule costs nothing here.
+# Moved with the release bot's token: a ruleset lets only the bot, maintainers
+# and admins move `nightly`, and it cannot let GITHUB_TOKEN bypass.
 on:
   schedule:
     - cron: "0 2 * * *"
@@ -26,60 +26,16 @@ jobs:
   advance:
     name: Advance nightly to the last green main
     runs-on: ubuntu-latest
+    # The nightly ruleset lets only the release bot move nightly.
+    environment: release
     timeout-minutes: 10
-    permissions:
-      contents: write
-      actions: read
     steps:
-      - name: Find the newest fully green main commit and fast-forward to it
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          # Test the exit status, not the output: on a 404 `gh api` prints the
-          # error body to stdout, so `$(… || true)` would hold that JSON.
-          if ! current=$(gh api "repos/$REPO/git/ref/heads/nightly" --jq .object.sha 2>/dev/null); then
-            current=""
-          fi
-          echo "nightly is at ${current:-<none>}"
-
-          # Newest first. Only completed push runs on main whose latest attempt succeeded.
-          gh api "repos/$REPO/actions/workflows/checks.yaml/runs?branch=main&event=push&status=success&per_page=30" \
-            --jq '.workflow_runs[] | "\(.id) \(.head_sha)"' > runs.txt
-
-          target=""
-          while read -r id sha; do
-            bad=$(gh api --paginate "repos/$REPO/actions/runs/$id/jobs?filter=latest&per_page=100" \
-              --jq '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | .name')
-            if [ -n "$bad" ]; then
-              echo "skip $sha (run $id): $(echo "$bad" | tr '\n' ',' )"
-              continue
-            fi
-            target=$sha
-            echo "newest green: $sha (run $id)"
-            break
-          done < runs.txt
-
-          if [ -z "$target" ]; then
-            echo "::warning::no fully green main run among the last 30 — nightly stays at ${current:-<none>}"
-            exit 0
-          fi
-
-          if [ -z "$current" ]; then
-            gh api -X POST "repos/$REPO/git/refs" -f ref=refs/heads/nightly -f sha="$target" >/dev/null
-            echo "created nightly at $target"
-            exit 0
-          fi
-
-          status=$(gh api "repos/$REPO/compare/$current...$target" --jq .status)
-          case "$status" in
-            identical) echo "nightly already at $target" ;;
-            ahead)
-              # force=false: the API refuses anything but a fast-forward.
-              gh api -X PATCH "repos/$REPO/git/refs/heads/nightly" -f sha="$target" -F force=false >/dev/null
-              echo "nightly: $current -> $target" ;;
-            *)
-              echo "::error::newest green main ($target) is $status relative to nightly ($current); not moving it"
-              exit 1 ;;
-          esac
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+      - uses: affinidi/pipeline-rust/.github/actions/release-nightly@feat/release-branch-actions
+        with:
+          token: ${{ steps.app.outputs.token }}
+          workflow: checks.yaml
