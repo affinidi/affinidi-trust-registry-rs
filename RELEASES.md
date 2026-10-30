@@ -195,5 +195,6 @@ Settings, not files:
   `branch rules`, block force pushes and deletion.
 - **Ruleset on `main`** (`Default_branch_managed`): add `branch rules` as a
   required check.
-- **Ruleset on `nightly`:** block force pushes and deletion; only the
-  workflow's identity (`github-actions`) may update it.
+- **Ruleset on `nightly`:** block force pushes and deletion; only the release
+  bot (which `nightly.yml` runs as), maintainers and admins may create or
+  update it.
