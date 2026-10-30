@@ -26,11 +26,16 @@ jobs:
   advance:
     name: Advance nightly to the last green main
     runs-on: ubuntu-latest
+    # The nightly ruleset lets only the release bot move nightly.
+    environment: release
     timeout-minutes: 10
-    permissions:
-      contents: write
-      actions: read
     steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
       - uses: affinidi/pipeline-rust/.github/actions/release-nightly@feat/release-branch-actions
         with:
+          token: ${{ steps.app.outputs.token }}
           workflow: checks.yaml
