@@ -18,6 +18,16 @@ release goes GA (`## 0.27.0 (date)`).
 
 ## Unreleased
 
+### Changed
+
+- **Dependencies:** `affinidi-tdk` 0.37, `affinidi-messaging-sdk` 0.45,
+  trust-tasks 0.37.2 (`trust-tasks-rs`, `-proof`, `-https`, `-tsp`,
+  `-didcomm`), `vta-sdk` 0.80, `vti-secrets` 0.29 and the test mediator 0.50,
+  so the whole graph stays on one trust-tasks, TDK, messaging-sdk and vta-sdk
+  line. No API changes were needed and the pinned task versions are unchanged.
+  A `trql-client` on this line lets consumers on vta-sdk 0.80 depend on it
+  without a second trust-tasks-rs.
+
 ## 0.30.0 (release/0.30)
 
 ### Changed
