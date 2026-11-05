@@ -18,6 +18,8 @@ release goes GA (`## 0.27.0 (date)`).
 
 ## Unreleased
 
+## 0.31.0 (release/0.31)
+
 ### Changed
 
 - **Dependencies:** `affinidi-tdk` 0.37, `affinidi-messaging-sdk` 0.45,
