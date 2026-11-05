@@ -16,7 +16,7 @@ release goes GA (`## 0.27.0 (date)`).
 
 ---
 
-## Unreleased
+## 0.31.0 (2026-11-05)
 
 ### Changed
 
