@@ -42,4 +42,14 @@ Rules that bite hardest here:
 Branching, versioning and publishing follow `RELEASES.md` (nightly → cut
 `release/<major.minor>` → rc/GA/patch preps). `main` publishes nothing and
 never edits the workspace version; changelog entries go under
-`## Unreleased`. The release scripts need Python ≥ 3.11 (`tomllib`).
+`## Unreleased`. To release, trigger the release workflows rather than
+running the scripts:
+
+- cut: `gh workflow run release-cut.yml --ref main -f name=0.42` (a dry run;
+  add `-f dry-run=false` to cut);
+- rc, GA or patch: `gh workflow run release-prep.yml --ref release/0.42 -f kind=rc`
+  (or `ga`, `patch`);
+- backport: label the merged PR `backport release/0.42`.
+
+`scripts/cut-release.py` is a maintainer's local fallback only; it needs
+Python ≥ 3.11 (`tomllib`).
