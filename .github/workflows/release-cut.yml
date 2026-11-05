@@ -54,7 +54,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
-      - uses: affinidi/pipeline-rust/.github/actions/release-cut@feat/release-branch-actions
+      - uses: affinidi/pipeline-rust/.github/actions/release-cut@main
         with:
           name: ${{ inputs.name }}
           from: ${{ inputs.from }}

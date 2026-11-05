@@ -38,6 +38,6 @@ jobs:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           permission-contents: write
-      - uses: affinidi/pipeline-rust/.github/actions/release-tag@feat/release-branch-actions
+      - uses: affinidi/pipeline-rust/.github/actions/release-tag@main
         with:
           token: ${{ steps.app-token.outputs.token }}

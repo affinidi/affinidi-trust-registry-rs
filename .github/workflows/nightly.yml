@@ -35,7 +35,7 @@ jobs:
         with:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-      - uses: affinidi/pipeline-rust/.github/actions/release-nightly@feat/release-branch-actions
+      - uses: affinidi/pipeline-rust/.github/actions/release-nightly@main
         with:
           token: ${{ steps.app.outputs.token }}
           workflow: checks.yaml
