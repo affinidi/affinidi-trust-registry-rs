@@ -122,7 +122,13 @@ impl TrustRegistry {
     /// - a CORS layer — see [`crate::server`]'s standalone wiring for what the
     ///   service applies to itself;
     /// - `/health` — available separately as [`health_router`](Self::health_router),
-    ///   or fold [`health`](Self::health) into the host's own endpoint.
+    ///   or fold [`health`](Self::health) into the host's own endpoint;
+    /// - request time, concurrency and connection limits — every route here
+    ///   is unauthenticated, so a host exposing them must bound requests
+    ///   itself, as [`crate::http::limits`] does for the standalone service.
+    ///
+    /// The request body limit (`server_config.http_limits.max_body_bytes`) is
+    /// applied to these routes.
     ///
     /// Note `/.well-known/did.json` is only meaningful at the server root; a
     /// host nesting the registry under a prefix should serve the registry's DID
@@ -658,6 +664,43 @@ mod tests {
             registry.shutdown_token().is_cancelled(),
             "the registry must observe the host's token, not one of its own"
         );
+    }
+
+    /// The mountable router applies the body limit, and answers an oversized
+    /// body `413` in each route's own error shape rather than as a malformed
+    /// request.
+    #[tokio::test]
+    async fn mountable_router_answers_an_oversized_body_413() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let registry = registry().await;
+        let max = crate::http::limits::DEFAULT_MAX_BODY_BYTES;
+        let oversized = format!("{{\"pad\":\"{}\"}}", "x".repeat(max));
+
+        for (path, expect_code) in [
+            ("/recognition", serde_json::json!(413)),
+            ("/authorization", serde_json::json!(413)),
+            ("/trust-tasks", serde_json::json!("malformedRequest")),
+        ] {
+            let response = registry
+                .router()
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(oversized.clone()))
+                        .expect("request"),
+                )
+                .await
+                .expect("router responds");
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+            assert_eq!(body["code"], expect_code, "{path}");
+        }
     }
 
     /// The mountable router must not carry `/health` — the host owns that path,

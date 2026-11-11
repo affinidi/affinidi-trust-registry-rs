@@ -71,6 +71,28 @@ release goes GA (`## 0.27.0 (date)`).
   `FjallRelationshipKv`, `start_managed_delivery` the health handle and
   `run_inbound_loop` the relationship store; `FjallRelationshipKv::new` is
   replaced by the async `FjallRelationshipKv::open`.
+- **The HTTP server bounds requests and connections.** The standalone service
+  reads a request body within `TR_HTTP_REQUEST_TIMEOUT_SECS` (default 10;
+  else `408`) before the request takes one of `TR_HTTP_MAX_CONCURRENT_REQUESTS`
+  (default 256) slots (beyond that, `503` with `Retry-After` at once), and
+  answers a request not ready within the same timeout with `503`. `/health` is
+  exempt from the slots. It holds at most `TR_HTTP_MAX_CONNECTIONS` (default
+  1024) connections; a request's headers must be complete within
+  `TR_HTTP_HEADER_TIMEOUT_SECS` (default 15) of the connection opening or of
+  the next request's first byte, whatever bytes trickle in; a connection idle
+  for `TR_HTTP_IDLE_TIMEOUT_SECS` (default 30) is closed, and one open for
+  `TR_HTTP_MAX_CONNECTION_AGE_SECS` (default 300) is closed between requests
+  (a request being answered may finish, up to twice the request timeout
+  later). Request bodies
+  are limited to `TR_HTTP_MAX_BODY_BYTES` (default 64 KiB, was axum's 2 MB),
+  also on `TrustRegistry::router()`; a larger body is answered `413` (was a
+  `400` on the TRQP routes), as a problem document on the TRQP routes and as
+  `{"code": "malformedRequest", …}` on `/trust-tasks`. A malformed value of any
+  of these stops startup. Answers carry `X-Content-Type-Options: nosniff` and
+  `Cache-Control: no-store`. `ServerConfig` has a new `http_limits` member.
+- **`/health` names the failure class, not the error.** `detail` says whether
+  the DIDComm listener failed or panicked; the error itself is logged.
+- **4xx HTTP answers are logged at `debug`**, not `warn`; 5xx stay at `error`.
 
 ## 0.31.0 (release/0.31)
 

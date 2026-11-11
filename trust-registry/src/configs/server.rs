@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::{Configs, loaders::environment::*};
+use crate::http::limits::HttpLimits;
 
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3232";
 pub const DEFAULT_CAPABILITY_STATE_PATH: &str = "./.trust-registry/capabilities.json";
@@ -24,6 +25,10 @@ pub struct ServerConfig {
     /// state file in whatever directory the host happens to run from, and two
     /// embedded registries in one process would silently share it.
     pub capability_state_path: Option<PathBuf>,
+    /// Bounds on HTTP requests and connections. The body limit applies to the
+    /// application routes wherever they are mounted; the rest are applied by
+    /// the standalone service.
+    pub http_limits: HttpLimits,
 }
 
 impl Default for ServerConfig {
@@ -32,6 +37,7 @@ impl Default for ServerConfig {
             listen_address: DEFAULT_LISTEN_ADDRESS.to_string(),
             cors_allowed_origins: Vec::new(),
             capability_state_path: None,
+            http_limits: HttpLimits::default(),
         }
     }
 }
@@ -61,6 +67,7 @@ impl Configs for ServerConfig {
             listen_address,
             cors_allowed_origins,
             capability_state_path: optional_env("TR_CAPABILITY_STATE").map(PathBuf::from),
+            http_limits: HttpLimits::from_env()?,
         })
     }
 }
