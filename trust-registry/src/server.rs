@@ -18,15 +18,31 @@ use crate::{
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Diagnostics follow `RUST_LOG`; audit entries have a layer of their own,
+/// always on at `INFO`, so lowering the log level never drops them.
 #[cfg(feature = "standalone")]
 fn setup_logging() {
-    use tracing_subscriber::EnvFilter;
+    use crate::audit::audit_logger::AUDIT_TARGET;
+    use tracing_subscriber::{
+        EnvFilter, Layer, filter::filter_fn, layer::SubscriberExt, util::SubscriberInitExt,
+    };
 
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env()) // reads RUST_LOG
+    let diagnostics = tracing_subscriber::fmt::layer()
         .with_target(false)
         .with_level(true)
         .with_thread_ids(true)
+        .with_filter(EnvFilter::from_default_env()) // reads RUST_LOG
+        .with_filter(filter_fn(|metadata| metadata.target() != AUDIT_TARGET));
+    let audit = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_level(true)
+        .with_thread_ids(true)
+        .with_filter(filter_fn(|metadata| {
+            metadata.target() == AUDIT_TARGET && *metadata.level() <= tracing::Level::INFO
+        }));
+    let _ = tracing_subscriber::registry()
+        .with(diagnostics)
+        .with(audit)
         .try_init();
 }
 

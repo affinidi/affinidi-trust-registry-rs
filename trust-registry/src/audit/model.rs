@@ -25,6 +25,11 @@ pub struct AuditLog {
     /// proof verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_actor: Option<String>,
+    /// The sender the transport authenticated (a DIDComm authcrypt sender, a
+    /// TSP VID), when there was one. Unlike `claimed_actor` this was checked;
+    /// unlike `actor` it does not mean the document's proof verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticated_sender: Option<String>,
     pub timestamp: chrono::DateTime<Utc>,
 }
 
@@ -64,6 +69,7 @@ impl AuditLogBuilder {
                 task: None,
                 document_id: None,
                 claimed_actor: None,
+                authenticated_sender: None,
                 timestamp: Utc::now(),
             },
         }
@@ -101,6 +107,11 @@ impl AuditLogBuilder {
 
     pub fn claimed_actor(mut self, claimed_actor: Option<String>) -> Self {
         self.audit_log.claimed_actor = claimed_actor;
+        self
+    }
+
+    pub fn authenticated_sender(mut self, authenticated_sender: Option<String>) -> Self {
+        self.audit_log.authenticated_sender = authenticated_sender;
         self
     }
 

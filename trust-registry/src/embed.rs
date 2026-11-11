@@ -55,9 +55,9 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{error, warn};
 
-use crate::audit::audit_logger::BaseAuditLogger;
+use crate::audit::audit_logger::{AUDIT_TARGET, BaseAuditLogger};
 use crate::audit::bounded::BoundedAuditLogger;
 use crate::audit::model::AuditLogger;
 use crate::capabilities::{
@@ -107,6 +107,7 @@ impl TrustRegistry {
             verifier: None,
             didcomm_source: None,
             shutdown: None,
+            audit_logger: None,
         }
     }
 
@@ -378,6 +379,7 @@ pub struct TrustRegistryBuilder {
     verifier: Option<Arc<dyn trust_tasks_rs::DynProofVerifier>>,
     didcomm_source: Option<DidCommSource>,
     shutdown: Option<CancellationToken>,
+    audit_logger: Option<Arc<dyn AuditLogger>>,
 }
 
 impl TrustRegistryBuilder {
@@ -461,6 +463,18 @@ impl TrustRegistryBuilder {
         self
     }
 
+    /// Where audit entries are recorded.
+    ///
+    /// Defaults to [`BaseAuditLogger`], which writes each entry to the
+    /// `tracing` target [`AUDIT_TARGET`] at `INFO`, so the host's subscriber
+    /// decides whether entries are kept. A host with its own audit store passes
+    /// a logger that writes there. Either way the registry applies its bound on
+    /// unproven refusals in front of it.
+    pub fn audit_logger(mut self, audit_logger: Arc<dyn AuditLogger>) -> Self {
+        self.audit_logger = Some(audit_logger);
+        self
+    }
+
     /// Assemble the registry.
     ///
     /// Loads persisted capability state and composes the dispatchers, so an
@@ -520,12 +534,25 @@ impl TrustRegistryBuilder {
             Arc::new(MemoryMessageIdStore::default())
         });
 
-        // One logger for every surface, so the bound on unproven refusals
-        // applies to the registry as a whole rather than per binding. Its
-        // count of suppressed entries is flushed every window and at shutdown.
-        let audit = Arc::new(BoundedAuditLogger::new(Arc::new(BaseAuditLogger::new(
-            self.config.didcomm_config.admin_config.audit_config.clone(),
-        ))));
+        let audit_sink = self.audit_logger.unwrap_or_else(|| {
+            if !BaseAuditLogger::sink_enabled() {
+                error!(
+                    "audit entries are written to the tracing target `{AUDIT_TARGET}` at INFO, \
+                     which the current subscriber does not record: writes will leave no audit \
+                     trail. Enable that target, or pass a logger with \
+                     `TrustRegistryBuilder::audit_logger`."
+                );
+            }
+            Arc::new(BaseAuditLogger::new(
+                self.config.didcomm_config.admin_config.audit_config.clone(),
+            ))
+        });
+        // One logger for every surface. Its bound on unproven refusals keeps a
+        // separate budget for unauthenticated callers and for each
+        // transport-authenticated sender, so no one source can use up the
+        // entries another's refusals need. Its count of suppressed entries is
+        // flushed every window and at shutdown.
+        let audit = Arc::new(BoundedAuditLogger::new(audit_sink));
         let shutdown = self.shutdown.unwrap_or_default();
         audit.spawn_flusher(shutdown.clone());
 

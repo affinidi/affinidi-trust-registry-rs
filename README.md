@@ -773,9 +773,26 @@ document `id`, the thread and the time. Record contents and proofs are not
 logged. Every value is capped at 256 characters, and control characters, the
 line and paragraph separators and Unicode format characters (bidi overrides,
 zero-width characters) are escaped, in both formats, so an entry is always one
-line that reads as written. Refusals of documents whose issuer was never proven
-are recorded individually up to 60 a minute; beyond that they are counted, and
-the count is recorded as one entry every minute and at shutdown.
+line that reads as written. Each entry carries `seq`, its position in the
+process's audit sequence (from 1 at start-up), so a missing entry shows as a
+gap, and `authenticated_sender` when the transport authenticated the sender
+(DIDComm, TSP) even though the document's proof was not verified.
+
+Refusals of documents whose issuer was never proven are recorded individually
+up to 60 a minute per source, where a source is either "unauthenticated
+callers" (the HTTP surface) or one transport-authenticated sender; beyond that
+they are counted, and each source's count is recorded as one entry every
+minute and at shutdown, with its reason codes, task types and the first few
+claimed issuers. Anonymous HTTP traffic therefore cannot use up the entries
+that refusals over DIDComm or TSP need.
+
+Audit entries are written to the `tracing` target `audit` at `INFO`. The
+standalone service gives that target an output layer of its own that is always
+on, so `RUST_LOG` (which still controls every other log line) cannot switch
+the audit trail off. A host embedding the registry must keep the `audit`
+target enabled at `INFO` in its subscriber, or pass its own logger with
+`TrustRegistryBuilder::audit_logger`; `build()` logs an error when neither
+holds.
 
 The record of accepted document identifiers is shared by the DIDComm and TSP
 bindings within one process. It keeps an identifier for seven minutes (the

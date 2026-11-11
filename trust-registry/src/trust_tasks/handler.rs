@@ -673,12 +673,13 @@ impl TaskHandler {
                     .clone()
                     .or_else(|| sender_did.map(str::to_string)),
                 doc.clone(),
+                sender_did.map(str::to_string),
             )
         });
         let mut progress = WriteProgress::default();
         let outcome = self.handle_write(doc, sender_did, &mut progress).await;
 
-        if let (Some(audit), Some((slug, id, thread_id, claimed, original))) =
+        if let (Some(audit), Some((slug, id, thread_id, claimed, original, authenticated))) =
             (&self.audit, audit_template)
         {
             let builder = AuditLogBuilder::new()
@@ -692,6 +693,7 @@ impl TaskHandler {
                         .flatten(),
                 )
                 .resource(audit_resource(&original, progress.authority.as_deref()))
+                .authenticated_sender(authenticated)
                 .task(slug)
                 .document_id(id)
                 .thread_id(thread_id);
@@ -2554,5 +2556,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- Audit attribution ---------------------------------------------------
+
+    /// What the HTTP surface does with a write: no authenticated sender.
+    #[tokio::test]
+    async fn a_write_without_an_authenticated_sender_is_audited_as_such() {
+        let (key, did) = did_key(40);
+        let f = fixture(vec![did.clone()]);
+        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+
+        f.handler.handle(doc, None).await.expect_err("refused");
+
+        let entry = last_audit(&f);
+        assert!(matches!(entry.status, AuditStatus::Unauthorized));
+        assert!(entry.actor.is_empty());
+        assert_eq!(entry.claimed_actor.as_deref(), Some(did.as_str()));
+        assert_eq!(entry.authenticated_sender, None);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_records_the_transport_authenticated_sender() {
+        let (_, did) = did_key(41);
+        let f = fixture(vec![did.clone()]);
+        let doc: TrustTask<Value> =
+            serde_json::from_value(unsigned(RECORD_PUT, Some(&did), put_payload(&did)))
+                .expect("document parses");
+
+        f.handler
+            .handle(doc, Some(&did))
+            .await
+            .expect_err("refused");
+
+        let entry = last_audit(&f);
+        assert!(entry.actor.is_empty(), "the proof was never checked");
+        assert_eq!(entry.authenticated_sender.as_deref(), Some(did.as_str()));
     }
 }
