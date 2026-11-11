@@ -104,9 +104,17 @@ async fn handle_trqp<R>(
 where
     R: TrustRecordRepository + Send + ?Sized + 'static,
 {
-    let body = payload.map_err(|e| AppError::BadRequest {
-        details: Some(json!([{ "issue": e.body_text() }])),
-        internal_error: e.into(),
+    let body = payload.map_err(|e| {
+        if e.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+            AppError::PayloadTooLarge {
+                max_bytes: state.config.server_config.http_limits.max_body_bytes,
+            }
+        } else {
+            AppError::BadRequest {
+                details: Some(json!([{ "issue": e.body_text() }])),
+                internal_error: e.into(),
+            }
+        }
     })?;
     let query = validate(body.0)?;
     let query_result = state

@@ -45,10 +45,31 @@ fn error_response(err: ErrorResponse) -> Response {
 }
 
 /// `POST /trust-tasks` — route a single Trust Task query document.
-pub async fn handle_trust_task<R>(State(state): State<SharedData<R>>, body: Bytes) -> Response
+pub async fn handle_trust_task<R>(
+    State(state): State<SharedData<R>>,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
+) -> Response
 where
     R: TrustRecordRepository + Send + ?Sized + 'static,
 {
+    let body = match body {
+        Ok(body) => body,
+        Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return crate::http::limits::trust_task_too_large(
+                state.config.server_config.http_limits.max_body_bytes,
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "code": "malformedRequest",
+                    "message": format!("could not read the Trust Task document: {}", e.body_text()),
+                })),
+            )
+                .into_response();
+        }
+    };
     let my_vid = state.config.didcomm_config.profile_config.did.clone();
 
     // Parse the framework document. A malformed body cannot be addressed as a

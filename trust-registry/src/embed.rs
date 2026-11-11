@@ -666,6 +666,43 @@ mod tests {
         );
     }
 
+    /// The mountable router applies the body limit, and answers an oversized
+    /// body `413` in each route's own error shape rather than as a malformed
+    /// request.
+    #[tokio::test]
+    async fn mountable_router_answers_an_oversized_body_413() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let registry = registry().await;
+        let max = crate::http::limits::DEFAULT_MAX_BODY_BYTES;
+        let oversized = format!("{{\"pad\":\"{}\"}}", "x".repeat(max));
+
+        for (path, expect_code) in [
+            ("/recognition", serde_json::json!(413)),
+            ("/authorization", serde_json::json!(413)),
+            ("/trust-tasks", serde_json::json!("malformedRequest")),
+        ] {
+            let response = registry
+                .router()
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(oversized.clone()))
+                        .expect("request"),
+                )
+                .await
+                .expect("router responds");
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+            assert_eq!(body["code"], expect_code, "{path}");
+        }
+    }
+
     /// The mountable router must not carry `/health` — the host owns that path,
     /// and silently claiming it would collide with the host's own endpoint.
     #[tokio::test]

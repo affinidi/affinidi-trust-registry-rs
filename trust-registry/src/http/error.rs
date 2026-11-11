@@ -32,6 +32,8 @@ pub enum AppError {
     /// `context.time` that is not RFC 3339). `detail` is sent to the client,
     /// so it must only describe the client's own input.
     InvalidRequest { detail: String },
+    /// The body is larger than the server accepts.
+    PayloadTooLarge { max_bytes: usize },
     NotFound {
         internal_error: Error,
         details: Option<Value>,
@@ -62,6 +64,13 @@ impl AppError {
                 detail: "The request is not valid JSON or is missing required fields".into(),
                 details,
                 internal_error: Some(internal_error),
+            },
+            AppError::PayloadTooLarge { max_bytes } => Parts {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                title: "payload_too_large",
+                detail: format!("The request body is larger than {max_bytes} bytes"),
+                details: None,
+                internal_error: None,
             },
             AppError::InvalidRequest { detail } => Parts {
                 status: StatusCode::BAD_REQUEST,
