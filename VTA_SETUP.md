@@ -414,7 +414,10 @@ authenticating to the mediator.
 Building with `vta` also enables the `registry/did/rotate/0.1` admin Trust Task.
 Rotation requires the registry DID to be a `did:webvh` (which the
 `contexts provision --server` flow gives you); pre-rotation keys help. It is
-driven as an admin DIDComm task, not a `pnm` command.
+driven as an admin DIDComm task, not a `pnm` command, by an admin that
+`ADMIN_AUTHORITIES` lists for the registry's own DID (for example
+`ADMIN_AUTHORITIES={"<admin DID>":["<registry DID>"]}`); any other admin is
+refused with `permissionDenied`.
 
 ---
 

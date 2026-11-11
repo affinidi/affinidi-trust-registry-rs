@@ -19,7 +19,7 @@
 // router allows this lint for the same reason.
 #![allow(clippy::result_large_err)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -30,9 +30,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
-use trust_tasks_rs::{RejectReason, TrustTask};
+use trust_tasks_rs::{Dispatcher, Payload as _, RejectReason, TrustTask, TypeUri};
 use uuid::Uuid;
 
+use crate::trust_tasks::proof::requires_proof;
 use crate::trust_tasks::{RegistryDispatcher, TaskFuture, TaskOutcome};
 
 pub use enable_spec::CapabilityManifest;
@@ -52,12 +53,34 @@ pub type RegisterFn =
 
 /// A capability the host can serve: its manifest plus the dispatcher
 /// registrations it contributes when enabled.
+///
+/// A capability's tasks are writes unless it declares them as reads: every
+/// task [`register`](Self::register) adds is handled as a write, so it needs a
+/// proof from an admin, acts under an authority, is executed at most once and
+/// is audited. Only tasks added by [`register_reads`](Self::register_reads)
+/// are served as reads, on the read-only surface as well as the admin one.
 pub struct CapabilityDefinition {
     pub manifest: CapabilityManifest,
-    /// Contributes the capability's `.on::<P, _>()` registrations. Receives
-    /// the community's enablement state (version, config, delegate) so
-    /// handlers can bind per-community configuration.
+    /// Contributes the capability's write tasks, as `.on::<P, _>()`
+    /// registrations, to the admin surface only. Receives the community's
+    /// enablement state (version, config, delegate) so handlers can bind
+    /// per-community configuration. It must register the same task types
+    /// whatever that state is: the set is read once, when the
+    /// [`CapabilitySet`] is built, to decide which tasks are writes. A state
+    /// under which it registers anything else is refused at enable, and a
+    /// persisted one leaves the capability unserved.
     pub register: RegisterFn,
+    /// Contributes the capability's read-only tasks, served on both the admin
+    /// and the read-only surface **without a proof, an admin check, an
+    /// authority, the replay record or an audit entry**, to unauthenticated
+    /// callers included. A task registered here must therefore not change any
+    /// state, in the registry or elsewhere: that is the capability author's
+    /// contract, which the registry cannot check. `None` = the capability has
+    /// no read tasks. A task type registered here must not also be registered
+    /// by [`register`](Self::register) or be one of the registry's own
+    /// writes; [`CapabilitySet::new`] refuses such a definition. Like
+    /// `register`, it must register the same task types whatever the state.
+    pub register_reads: Option<RegisterFn>,
     /// Validates a per-community `config` document. `None` = no config
     /// accepted beyond an empty object.
     pub validate_config: Option<ConfigValidator>,
@@ -171,7 +194,127 @@ pub struct CapabilitySet {
     base_query: Box<dyn Fn() -> RegistryDispatcher + Send + Sync>,
     dispatcher: DispatcherHandle,
     query_dispatcher: DispatcherHandle,
+    /// Which tasks each available capability serves, enabled or not.
+    classification: Classification,
     weak: std::sync::Weak<Self>,
+}
+
+/// Task slug -> the capability that serves it, as a write or as a declared
+/// read, learned once when the [`CapabilitySet`] is built.
+#[derive(Default)]
+struct Classification {
+    writes: BTreeMap<String, String>,
+    reads: BTreeMap<String, String>,
+}
+
+impl Classification {
+    /// Refuse `state` for `capability` if under it the definition registers a
+    /// task other than the ones it was classified with: a write it did not
+    /// register under the probe state would be handled as a read, and a read
+    /// could put a write on the read-only surface.
+    fn check(
+        &self,
+        capability: &str,
+        definition: &CapabilityDefinition,
+        state: &CapabilityState,
+    ) -> Result<(), String> {
+        let owned = |kind: &BTreeMap<String, String>, slug: &str| {
+            kind.get(slug).is_some_and(|owner| owner == capability)
+        };
+        for slug in slugs_of(&(definition.register)(Dispatcher::new(), state))? {
+            if !owned(&self.writes, &slug) {
+                return Err(format!(
+                    "{capability} registers {slug} under this state, which it does not \
+                     register otherwise; a capability must register the same tasks whatever \
+                     its state"
+                ));
+            }
+        }
+        if let Some(register_reads) = &definition.register_reads {
+            for slug in slugs_of(&register_reads(Dispatcher::new(), state))? {
+                if !owned(&self.reads, &slug) {
+                    return Err(format!(
+                        "{capability} declares {slug} as a read under this state, which it does \
+                         not declare otherwise; a capability must register the same tasks \
+                         whatever its state"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The state [`CapabilitySet::new`] registers a definition with to learn
+/// which task types it serves.
+fn probe_state() -> CapabilityState {
+    CapabilityState {
+        version: String::new(),
+        enabled: true,
+        config: None,
+        enabled_at: DateTime::<Utc>::UNIX_EPOCH,
+        delegate: None,
+    }
+}
+
+/// The task slugs `register` adds to an empty dispatcher.
+fn registered_slugs(register: &RegisterFn) -> Result<BTreeSet<String>, String> {
+    slugs_of(&register(Dispatcher::new(), &probe_state()))
+}
+
+fn slugs_of(dispatcher: &RegistryDispatcher) -> Result<BTreeSet<String>, String> {
+    dispatcher
+        .registered_uris()
+        .into_iter()
+        .map(|uri| {
+            uri.parse::<TypeUri>()
+                .map(|uri| uri.slug().to_string())
+                .map_err(|e| format!("capability registers an invalid Type URI {uri}: {e}"))
+        })
+        .collect()
+}
+
+/// Which task slugs each capability serves as a write.
+///
+/// Refuses a definition that registers a task the registry itself serves
+/// (`reserved`), and one that declares as a read a task that is also a write,
+/// its own, another capability's or the registry's, so no write can be served
+/// on the read-only surface.
+fn classify(
+    available: &BTreeMap<String, CapabilityDefinition>,
+    reserved: &BTreeSet<String>,
+) -> Result<Classification, String> {
+    let mut writes: BTreeMap<String, String> = BTreeMap::new();
+    let mut reads: BTreeMap<String, String> = BTreeMap::new();
+    for (capability, definition) in available {
+        for slug in registered_slugs(&definition.register)? {
+            if let Some(other) = writes.insert(slug.clone(), capability.clone()) {
+                return Err(format!(
+                    "capabilities {other} and {capability} both register the task {slug}"
+                ));
+            }
+        }
+        if let Some(register_reads) = &definition.register_reads {
+            for slug in registered_slugs(register_reads)? {
+                reads.insert(slug, capability.clone());
+            }
+        }
+    }
+    for (slug, capability) in writes.iter().chain(&reads) {
+        if reserved.contains(slug) {
+            return Err(format!(
+                "capability {capability} registers {slug}, which the registry itself serves"
+            ));
+        }
+    }
+    for (slug, capability) in &reads {
+        if writes.contains_key(slug) || requires_proof(slug) {
+            return Err(format!(
+                "capability {capability} declares {slug} as a read, but it is a write"
+            ));
+        }
+    }
+    Ok(Classification { writes, reads })
 }
 
 impl CapabilitySet {
@@ -189,10 +332,23 @@ impl CapabilitySet {
             .into_iter()
             .map(|d| (d.manifest.capability.to_string(), d))
             .collect();
+        let mut reserved = slugs_of(&base())?;
+        reserved.extend(slugs_of(&base_query())?);
+        reserved.extend(
+            [
+                list_spec::Payload::type_uri(),
+                enable_spec::Payload::type_uri(),
+                disable_spec::Payload::type_uri(),
+            ]
+            .iter()
+            .map(|uri| uri.slug().to_string()),
+        );
+        let classification = classify(&available, &reserved)?;
         Ok(Arc::new_cyclic(|weak: &std::sync::Weak<Self>| Self {
             dispatcher: Arc::new(RwLock::new(Arc::new(compose(
                 &base,
                 &available,
+                &classification,
                 &state,
                 weak.clone(),
                 true,
@@ -200,11 +356,13 @@ impl CapabilitySet {
             query_dispatcher: Arc::new(RwLock::new(Arc::new(compose(
                 &base_query,
                 &available,
+                &classification,
                 &state,
                 weak.clone(),
                 false,
             )))),
             weak: weak.clone(),
+            classification,
             available,
             state: RwLock::new(state),
             store,
@@ -260,6 +418,9 @@ impl CapabilitySet {
             enabled_at: Utc::now(),
             delegate,
         };
+        self.classification
+            .check(capability, definition, &entry)
+            .map_err(CapabilityError::ConfigInvalid)?;
         state.insert(capability.to_string(), entry.clone());
         // Persist first (Remote-First): a crash after this line re-converges
         // at startup; a crash before it loses nothing.
@@ -333,6 +494,17 @@ impl CapabilitySet {
         }
     }
 
+    /// Whether `slug` is a write task of an available capability, enabled or
+    /// not. Every task a capability does not declare as a read is one.
+    pub fn is_write(&self, slug: &str) -> bool {
+        self.classification.writes.contains_key(slug)
+    }
+
+    /// The capability `slug` is a write task of, if any.
+    pub fn write_owner(&self, slug: &str) -> Option<&str> {
+        self.classification.writes.get(slug).map(String::as_str)
+    }
+
     /// Whether `capability` writes records and so needs an authority.
     pub fn requires_authority(&self, capability: &str) -> bool {
         self.available
@@ -344,6 +516,7 @@ impl CapabilitySet {
         *self.dispatcher.write().await = Arc::new(compose(
             &self.base,
             &self.available,
+            &self.classification,
             state,
             self.weak.clone(),
             true,
@@ -351,6 +524,7 @@ impl CapabilitySet {
         *self.query_dispatcher.write().await = Arc::new(compose(
             &self.base_query,
             &self.available,
+            &self.classification,
             state,
             self.weak.clone(),
             false,
@@ -359,11 +533,17 @@ impl CapabilitySet {
 }
 
 /// Base registrations plus the governance surface plus every enabled
-/// capability's registrations. The admin surface gets enable/disable/list;
-/// the read-only (query) surface gets only list.
+/// capability's registrations. The admin surface gets enable/disable/list and
+/// every task of an enabled capability; the read-only (query) surface gets
+/// only list and the tasks capabilities declare as reads.
+///
+/// A capability whose state makes it register tasks other than the ones it
+/// was classified with ([`Classification::check`]) is left out of both
+/// surfaces, so none of its tasks can run unclassified.
 fn compose(
     base: &(impl Fn() -> RegistryDispatcher + ?Sized),
     available: &BTreeMap<String, CapabilityDefinition>,
+    classification: &Classification,
     state: &BTreeMap<String, CapabilityState>,
     set: std::sync::Weak<CapabilitySet>,
     admin: bool,
@@ -390,7 +570,16 @@ fn compose(
     }
     for (slug, definition) in available {
         if let Some(entry) = state.get(slug).filter(|s| s.enabled) {
-            dispatcher = (definition.register)(dispatcher, entry);
+            if let Err(e) = classification.check(slug, definition, entry) {
+                tracing::error!("capability {slug} is enabled but not served: {e}");
+                continue;
+            }
+            if let Some(register_reads) = &definition.register_reads {
+                dispatcher = register_reads(dispatcher, entry);
+            }
+            if admin {
+                dispatcher = (definition.register)(dispatcher, entry);
+            }
         }
     }
     dispatcher
@@ -575,6 +764,7 @@ mod tests {
                     })
                 })
             }),
+            register_reads: None,
             validate_config: Some(Arc::new(|config: &Value| {
                 if config.get("bad").is_some() {
                     Err("bad key".to_string())
@@ -758,6 +948,313 @@ mod tests {
                 .is_err(),
             "writes must not route on the query surface"
         );
+    }
+
+    fn answers_handled<P: Payload + Send + 'static>(d: RegistryDispatcher) -> RegistryDispatcher {
+        d.on::<P, _>(|doc| -> crate::trust_tasks::TaskFuture {
+            Box::pin(async move {
+                Ok(doc.respond_with(
+                    "urn:uuid:test-reply".to_string(),
+                    serde_json::json!({ "handled": true }),
+                ))
+            })
+        })
+    }
+
+    /// A capability with one write (`registry/recognition` 0.1) and one
+    /// declared read (`registry/authorization` 0.1).
+    fn capability_with_a_read(slug: &str) -> CapabilityDefinition {
+        use crate::specs::registry::authorization::v0_1 as authorization;
+        use crate::specs::registry::recognition::v0_1 as recognition;
+        let mut definition = test_capability(slug);
+        definition.register = Arc::new(|d: RegistryDispatcher, _: &CapabilityState| {
+            answers_handled::<recognition::Payload>(d)
+        });
+        definition.register_reads = Some(Arc::new(|d: RegistryDispatcher, _: &CapabilityState| {
+            answers_handled::<authorization::Payload>(d)
+        }));
+        definition
+    }
+
+    fn slugs(handle: &DispatcherHandle) -> BTreeSet<String> {
+        slugs_of(&handle.try_read().expect("unlocked")).expect("valid URIs")
+    }
+
+    /// A capability's tasks are writes unless declared as reads: only the
+    /// declared reads reach the read-only surface, whatever is enabled.
+    #[tokio::test]
+    async fn only_declared_reads_are_served_on_the_read_only_surface() {
+        let set = CapabilitySet::new(
+            vec![capability_with_a_read("demo")],
+            Box::new(MemoryCapabilityStore::default()),
+            empty_base(),
+            empty_base(),
+        )
+        .unwrap();
+        set.enable("demo", "0.1", None, None).await.unwrap();
+
+        let admin = slugs(&set.dispatcher());
+        assert!(admin.contains("registry/recognition"));
+        assert!(admin.contains("registry/authorization"));
+        let query = slugs(&set.query_dispatcher());
+        assert!(!query.contains("registry/recognition"));
+        assert!(query.contains("registry/authorization"));
+
+        assert!(set.is_write("registry/recognition"));
+        assert_eq!(set.write_owner("registry/recognition"), Some("demo"));
+        assert!(!set.is_write("registry/authorization"));
+    }
+
+    /// The classification is known before the capability is enabled, so a
+    /// task never changes kind when its capability is switched on.
+    #[test]
+    fn writes_are_known_while_the_capability_is_off() {
+        let set = set_with("demo");
+        assert!(set.is_write("registry/recognition"));
+        assert!(!slugs(&set.query_dispatcher()).contains("registry/recognition"));
+    }
+
+    #[test]
+    fn git_trust_tasks_are_not_on_the_read_only_surface() {
+        let repo = Arc::new(crate::storage::adapters::local_storage::LocalStorage::new());
+        let base_repo = repo.clone();
+        let query_repo = repo.clone();
+        let set = CapabilitySet::new(
+            vec![git_trust::definition(repo).unwrap()],
+            Box::new(MemoryCapabilityStore::default()),
+            Box::new(move || crate::trust_tasks::build_dispatcher(base_repo.clone())),
+            Box::new(move || crate::trust_tasks::build_query_dispatcher(query_repo.clone())),
+        )
+        .unwrap();
+        let state = BTreeMap::from([(
+            "git-trust".to_string(),
+            CapabilityState {
+                enabled: true,
+                config: Some(serde_json::json!({ "authority": "did:example:a" })),
+                ..probe_state()
+            },
+        )]);
+        let query = compose(
+            &*set.base_query,
+            &set.available,
+            &set.classification,
+            &state,
+            set.weak.clone(),
+            false,
+        );
+        let admin = compose(
+            &*set.base,
+            &set.available,
+            &set.classification,
+            &state,
+            set.weak.clone(),
+            true,
+        );
+
+        let query = slugs_of(&query).unwrap();
+        assert!(!query.contains("git-trust/grant"));
+        assert!(!query.contains("git-trust/revoke"));
+        assert!(slugs_of(&admin).unwrap().contains("git-trust/grant"));
+        assert!(set.is_write("git-trust/grant"));
+    }
+
+    fn allows_extra(state: &CapabilityState) -> bool {
+        state
+            .config
+            .as_ref()
+            .is_some_and(|c| c.get("extra").is_some())
+    }
+
+    /// A capability whose `register` adds `registry/authorization` only when
+    /// its config says `extra`: a task the probe state never shows.
+    fn state_dependent_write(slug: &str) -> CapabilityDefinition {
+        use crate::specs::registry::authorization::v0_1 as authorization;
+        use crate::specs::registry::recognition::v0_1 as recognition;
+        let mut definition = test_capability(slug);
+        definition.register = Arc::new(|d: RegistryDispatcher, state: &CapabilityState| {
+            let d = answers_handled::<recognition::Payload>(d);
+            if allows_extra(state) {
+                answers_handled::<authorization::Payload>(d)
+            } else {
+                d
+            }
+        });
+        definition
+    }
+
+    /// A capability whose `register_reads` adds `registry/authorization` only
+    /// when its config says `extra`.
+    fn state_dependent_read(slug: &str) -> CapabilityDefinition {
+        use crate::specs::registry::authorization::v0_1 as authorization;
+        let mut definition = test_capability(slug);
+        definition.register_reads = Some(Arc::new(
+            |d: RegistryDispatcher, state: &CapabilityState| {
+                if allows_extra(state) {
+                    answers_handled::<authorization::Payload>(d)
+                } else {
+                    d
+                }
+            },
+        ));
+        definition
+    }
+
+    fn set_of(
+        definition: CapabilityDefinition,
+        store: MemoryCapabilityStore,
+    ) -> Arc<CapabilitySet> {
+        CapabilitySet::new(
+            vec![definition],
+            Box::new(store),
+            empty_base(),
+            empty_base(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn enabling_a_state_that_adds_an_unclassified_task_is_refused() {
+        for definition in [state_dependent_write("demo"), state_dependent_read("demo")] {
+            let set = set_of(definition, MemoryCapabilityStore::default());
+            let refused = set
+                .enable(
+                    "demo",
+                    "0.1",
+                    Some(serde_json::json!({ "extra": true })),
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(refused, Err(CapabilityError::ConfigInvalid(_))),
+                "{refused:?}"
+            );
+            assert!(!set.snapshot("demo").await.enabled);
+            assert!(!slugs(&set.dispatcher()).contains("registry/authorization"));
+            assert!(!slugs(&set.query_dispatcher()).contains("registry/authorization"));
+
+            set.enable("demo", "0.1", None, None)
+                .await
+                .expect("the classified state is accepted");
+        }
+    }
+
+    /// A persisted state (written before the check, or by hand) that makes a
+    /// capability register an unclassified task leaves the whole capability
+    /// unserved on both surfaces.
+    #[tokio::test]
+    async fn a_persisted_state_that_adds_an_unclassified_task_is_not_served() {
+        for definition in [state_dependent_write("demo"), state_dependent_read("demo")] {
+            let store = MemoryCapabilityStore::default();
+            store
+                .save(&BTreeMap::from([(
+                    "demo".to_string(),
+                    CapabilityState {
+                        config: Some(serde_json::json!({ "extra": true })),
+                        ..probe_state()
+                    },
+                )]))
+                .unwrap();
+            let set = set_of(definition, store);
+            for handle in [set.dispatcher(), set.query_dispatcher()] {
+                let served = slugs(&handle);
+                assert!(!served.contains("registry/authorization"));
+                assert!(!served.contains("registry/recognition"));
+            }
+        }
+    }
+
+    /// The free-standing helpers treat a capability's write as a write when
+    /// given the capability set.
+    #[tokio::test]
+    async fn the_standalone_helpers_classify_capability_writes() {
+        use crate::specs::registry::recognition::v0_1 as recognition;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = runs.clone();
+        let mut definition = test_capability("demo");
+        definition.register = Arc::new(move |d: RegistryDispatcher, _: &CapabilityState| {
+            let counted = counted.clone();
+            d.on::<recognition::Payload, _>(move |doc| -> crate::trust_tasks::TaskFuture {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(doc.respond_with(new_id(), serde_json::json!({}))) })
+            })
+        });
+        let set = set_of(definition, MemoryCapabilityStore::default());
+        set.enable("demo", "0.1", None, None).await.unwrap();
+
+        let verifier =
+            trust_tasks_rs::erase_verifier(trust_tasks_proof::affinidi::Verifier::for_did_key());
+        assert_eq!(
+            crate::trust_tasks::verify_write_proof(&verifier, Some(&set), &recognition_doc()).await,
+            Err(RejectReason::ProofRequired)
+        );
+
+        let dispatcher = set.dispatcher().read().await.clone();
+        let store = crate::dedup::MemoryMessageIdStore::default();
+        for _ in 0..2 {
+            crate::dedup::dispatch_idempotent(&dispatcher, &store, Some(&set), recognition_doc())
+                .await
+                .expect("answered");
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the redelivery is replayed");
+    }
+
+    fn refused(definitions: Vec<CapabilityDefinition>) -> String {
+        match CapabilitySet::new(
+            definitions,
+            Box::new(MemoryCapabilityStore::default()),
+            empty_base(),
+            empty_base(),
+        ) {
+            Ok(_) => panic!("the set should be refused"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn a_task_declared_as_both_read_and_write_is_refused() {
+        use crate::specs::registry::recognition::v0_1 as recognition;
+        let mut definition = test_capability("demo");
+        definition.register_reads = Some(Arc::new(|d: RegistryDispatcher, _: &CapabilityState| {
+            answers_handled::<recognition::Payload>(d)
+        }));
+        assert!(refused(vec![definition]).contains("declares registry/recognition as a read"));
+    }
+
+    #[test]
+    fn a_registry_write_declared_as_a_read_is_refused() {
+        use crate::specs::registry::record::put::v0_3 as put;
+        let mut definition = test_capability("demo");
+        definition.register_reads = Some(Arc::new(|d: RegistryDispatcher, _: &CapabilityState| {
+            answers_handled::<put::Payload>(d)
+        }));
+        assert!(refused(vec![definition]).contains("registry/record/put"));
+    }
+
+    #[test]
+    fn two_capabilities_registering_one_task_are_refused() {
+        assert!(
+            refused(vec![test_capability("one"), test_capability("two")]).contains("both register")
+        );
+    }
+
+    #[test]
+    fn a_capability_registering_a_registry_task_is_refused() {
+        let error = match CapabilitySet::new(
+            vec![test_capability("demo")],
+            Box::new(MemoryCapabilityStore::default()),
+            empty_base(),
+            Box::new(|| {
+                answers_handled::<crate::specs::registry::recognition::v0_1::Payload>(
+                    Dispatcher::new(),
+                )
+            }),
+        ) {
+            Ok(_) => panic!("the set should be refused"),
+            Err(e) => e,
+        };
+        assert!(error.contains("which the registry itself serves"));
     }
 
     #[tokio::test]

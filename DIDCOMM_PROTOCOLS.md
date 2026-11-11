@@ -49,8 +49,11 @@ For a record put, delete or query the authority is the `authority_id` it names
 (a query must name one). For
 `git-trust/grant` and `git-trust/revoke` it is the authority git-trust was
 enabled with, and for `governance/capability/enable` and `disable` it is the
-authority the capability's config names. Every write, accepted or refused, is
-written to the audit log.
+authority the capability's config names. `registry/did/rotate`, and enabling or
+disabling a capability whose config names no authority, act on the registry
+itself, so their authority is the registry's own DID: only an admin listed for
+that DID in `ADMIN_AUTHORITIES` may send them. Every write, accepted or refused,
+is written to the audit log.
 
 ### Removed: `tr-admin/1.0`
 

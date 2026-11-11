@@ -76,11 +76,15 @@ impl ProofPurposeResolver for AuthenticationKeyResolver {
     }
 }
 
-/// Slugs whose operations mutate the registry and therefore carry a required,
-/// verifiable proof plus the admin ACL. The single source of truth — the
-/// DIDComm and TSP bindings both gate on this list (they previously carried
-/// diverging local copies: `registry/did/rotate` was gated over DIDComm but
-/// not over TSP).
+/// The registry's own slugs whose operations mutate the registry and therefore
+/// carry a required, verifiable proof plus the admin ACL. The DIDComm and TSP
+/// bindings both gate on this list (they previously carried diverging local
+/// copies: `registry/did/rotate` was gated over DIDComm but not over TSP).
+///
+/// A capability's write tasks are not listed here: the
+/// [`CapabilitySet`](crate::capabilities::CapabilitySet) classifies them
+/// ([`CapabilitySet::is_write`](crate::capabilities::CapabilitySet::is_write)),
+/// and the [`TaskHandler`](crate::trust_tasks::TaskHandler) consults both.
 pub fn is_write_slug(slug: &str) -> bool {
     matches!(
         slug,
@@ -133,13 +137,30 @@ pub async fn build_verifier() -> Arc<dyn DynProofVerifier> {
 /// [`TaskHandler::authorize_write`](crate::trust_tasks::TaskHandler::authorize_write),
 /// so this check is safe to call on its own. A present proof that fails
 /// verification is [`RejectReason::ProofInvalid`].
+///
+/// A write is one of the registry's own ([`requires_proof`]) or, given the
+/// `capabilities` being served, a capability's write task. Pass the capability
+/// set whenever capabilities are served; without it their writes pass through
+/// unverified.
 pub async fn verify_write_proof(
+    verifier: &Arc<dyn DynProofVerifier>,
+    capabilities: Option<&crate::capabilities::CapabilitySet>,
+    doc: &TrustTask<Value>,
+) -> Result<(), RejectReason> {
+    let slug = doc.type_uri.slug();
+    if !requires_proof(slug) && !capabilities.is_some_and(|c| c.is_write(slug)) {
+        return Ok(());
+    }
+    verify_proof(verifier, doc).await
+}
+
+/// [`verify_write_proof`] for a document the caller has already classified as
+/// a write, whatever its slug: a capability's write tasks are not in
+/// [`is_write_slug`], so this check does not consult it.
+pub async fn verify_proof(
     verifier: &Arc<dyn DynProofVerifier>,
     doc: &TrustTask<Value>,
 ) -> Result<(), RejectReason> {
-    if !requires_proof(doc.type_uri.slug()) {
-        return Ok(());
-    }
     if doc.proof.is_none() {
         return Err(RejectReason::ProofRequired);
     }
@@ -185,7 +206,7 @@ mod tests {
     async fn read_document_skips_verification() {
         let verifier = erase_verifier(Verifier::for_did_key());
         let doc = doc_with_dummy_proof("https://trusttasks.org/spec/registry/recognition/0.1");
-        assert!(verify_write_proof(&verifier, &doc).await.is_ok());
+        assert!(verify_write_proof(&verifier, None, &doc).await.is_ok());
     }
 
     #[tokio::test]
@@ -195,7 +216,7 @@ mod tests {
         let verifier = erase_verifier(Verifier::for_did_key());
         let doc = doc_with_dummy_proof("https://trusttasks.org/spec/registry/record/put/0.1");
         assert!(matches!(
-            verify_write_proof(&verifier, &doc).await,
+            verify_write_proof(&verifier, None, &doc).await,
             Err(RejectReason::ProofInvalid { .. })
         ));
     }
@@ -208,7 +229,7 @@ mod tests {
         let mut doc = doc_with_dummy_proof(RECORD_PUT);
         doc.proof = None;
         assert!(matches!(
-            verify_write_proof(&verifier, &doc).await,
+            verify_write_proof(&verifier, None, &doc).await,
             Err(RejectReason::ProofRequired)
         ));
     }
@@ -219,7 +240,7 @@ mod tests {
         let mut doc = doc_with_dummy_proof(RECORD_PUT);
         doc.issuer = None;
         assert!(matches!(
-            verify_write_proof(&verifier, &doc).await,
+            verify_write_proof(&verifier, None, &doc).await,
             Err(RejectReason::MalformedRequest { .. })
         ));
     }

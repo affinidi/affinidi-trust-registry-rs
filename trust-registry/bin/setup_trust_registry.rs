@@ -125,6 +125,13 @@ struct Args {
     #[arg(long, short = 'a')]
     admin_dids: Option<String>,
 
+    /// Admin DIDs (comma-separated, each also in --admin-dids) that may act on
+    /// the registry itself: rotate its DID and enable or disable capabilities
+    /// that have no authority. Written to ADMIN_AUTHORITIES as an entry for
+    /// the registry's DID. Without it no admin can rotate the registry's DID.
+    #[arg(long)]
+    operator_dids: Option<String>,
+
     /// Trust Registry DID (optional, used to set existing DID)
     #[arg(long, short = 'r')]
     tr_did: Option<String>,
@@ -703,6 +710,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Trust Registry DID profile
     let mut profile = args.profile.unwrap_or("".to_string());
 
+    let operator_dids: Vec<String> = args
+        .operator_dids
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
+        .collect();
+    if let Some(stranger) = operator_dids
+        .iter()
+        .find(|d| !admin_dids.split(',').any(|a| a.trim() == d.as_str()))
+    {
+        return Err(
+            format!("--operator-dids names {stranger}, which is not in --admin-dids").into(),
+        );
+    }
+    // The registry's DID, once known, for the operators' ADMIN_AUTHORITIES entry.
+    let mut registry_did: Option<String> = None;
+
     // Skips DIDComm related tasks if no mediator details are provided
     let enable_didcomm = !mediator_did.is_empty();
 
@@ -723,6 +749,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let tr_secrets: Vec<Secret> = serde_json::from_str(&existing_tr_did_secret)
                 .map_err(|e| format!("Failed to parse existing_tr_did_secret as JSON: {}", e))?;
 
+            registry_did = Some(existing_tr_did.clone());
             let profile_config = Some(ProfileConfig {
                 alias: "Trust Registry".to_string(),
                 did: existing_tr_did.clone(),
@@ -765,6 +792,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("✓ Profile configuration configured.");
             println!();
 
+            registry_did = Some(tr_did.clone());
             let profile_config = Some(ProfileConfig {
                 alias: "Trust Registry".to_string(),
                 did: tr_did.clone(),
@@ -830,6 +858,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     server_vars.insert("MEDIATOR_DID".to_string(), mediator_did.clone());
     server_vars.insert("ADMIN_DIDS".to_string(), admin_dids.clone());
+    match (operator_dids.is_empty(), &registry_did) {
+        (false, Some(registry_did)) => {
+            let authorities: serde_json::Map<String, serde_json::Value> = operator_dids
+                .iter()
+                .map(|operator| (operator.clone(), json!([registry_did])))
+                .collect();
+            server_vars.insert(
+                "ADMIN_AUTHORITIES".to_string(),
+                format!("'{}'", serde_json::to_string(&authorities)?),
+            );
+            println!(
+                "✓ ADMIN_AUTHORITIES lets {} act on the registry itself (DID rotation, \
+                 capabilities without an authority).",
+                operator_dids.join(", ")
+            );
+        }
+        (false, None) => println!(
+            "⚠ --operator-dids needs the registry's DID, which this run does not set. Add \
+             ADMIN_AUTHORITIES={{\"<operator DID>\":[\"<registry DID>\"]}} to the .env yourself."
+        ),
+        (true, _) if !admin_dids.is_empty() => println!(
+            "Note: no admin may rotate the registry's DID or enable a capability without an \
+             authority until ADMIN_AUTHORITIES lists the registry's DID for it. Pass \
+             --operator-dids <admin DID> to write that entry."
+        ),
+        (true, _) => {}
+    }
     server_vars.insert("ACL_MODE".to_string(), acl_mode.to_string());
 
     // Storage configuration

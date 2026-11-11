@@ -686,7 +686,7 @@ message shape regardless of carrier.
 | `registry/record/query/{0.1,0.3}`                     | read  | admin DID + proof + authority |
 | `registry/record/put/{0.1,0.3}`                       | write | admin DID + proof + authority |
 | `registry/record/delete/{0.1,0.2}`                    | write | admin DID + proof + authority |
-| `registry/did/rotate/{0.1,0.2}`                       | write | admin DID + proof (`vta` only)|
+| `registry/did/rotate/{0.1,0.2}`                       | write | admin DID + proof + the registry's DID as authority (`vta` only) |
 | `git-trust/{grant,revoke}/0.1`                        | write | admin DID + proof + authority |
 | `governance/capability/{enable,disable}/0.1`          | write | admin DID + proof + authority |
 
@@ -738,6 +738,23 @@ record's `authority_id`, the authority git-trust was enabled with (for
 (for `governance/capability/enable` and `disable`). The authenticated sender on
 its own authorises nothing.
 
+A write that acts on the registry itself acts under **the registry's own DID**:
+`registry/did/rotate`, enabling or disabling a capability whose config names no
+authority, and the tasks of a capability that writes no records. Only an admin
+that `ADMIN_AUTHORITIES` lists for the registry's DID may make one, e.g.
+`{"did:web:ops.example": ["<the registry's DID>"]}`. With no such entry no admin
+can, so in a registry shared by several communities one community's admin
+cannot rotate the registry's keys. A write task with no authority rule is
+refused.
+
+A capability's tasks are writes unless the capability declares them as reads
+(`CapabilityDefinition::register_reads`): every task its `register` adds needs
+an admin, a proof and an authority, is executed at most once and is audited,
+and is served only over the authenticated transports. Only declared reads are
+served on the read-only HTTP surface. A capability set that declares one of the
+registry's writes as a read, registers a task the registry itself serves, or
+shares a task with another capability is refused when the registry is built.
+
 `registry/record/query` returns whole records, `context` included, so it is
 held to the same rules and answered only for an admin, under an
 `authority_id` the query names. The public surface is the TRQP recognition and
@@ -785,7 +802,8 @@ the configured [secret-store backend](#secret-store-backends-secrets-) so the
 service can still boot while the VTA is briefly unreachable.
 
 The registry's DID is a VTA-managed `did:webvh`; its keys can be rotated in place
-via the `registry/did/rotate/0.1` admin Trust Task (admin-DID + proof gated).
+via the `registry/did/rotate` admin Trust Task (admin-DID + proof gated, by an
+admin that `ADMIN_AUTHORITIES` lists for the registry's own DID).
 
 The same build adds `trust-registry setup`, which provisions the registry at a
 VTA headless, in two phases (`--setup-key-out`, then `--from <toml>`), the way
@@ -940,7 +958,7 @@ See the list of environment variables and their usage.
 | `AUDIT_LOG_FORMAT`      | Output format for audit logs. Options: `json` (default), `text` (`audit.<key>="<escaped value>"` pairs).                                                                                  | default: `json`                              |
 | `MEDIATOR_DID`          | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records.                                                                              | Required when DIDComm is enabled             |
 | `ADMIN_DIDS`            | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry.                                                                                                    | Required when DIDComm is enabled             |
-| `ADMIN_AUTHORITIES`     | JSON object mapping an admin DID to the authority DIDs it may write records under **in addition to its own DID**, e.g. `{"did:web:ops.example": ["did:web:a.example", "did:web:b.example"]}`. Every key must be in `ADMIN_DIDS`; a malformed value stops startup. Unset ⇒ each admin writes only under its own DID. | No                                           |
+| `ADMIN_AUTHORITIES`     | JSON object mapping an admin DID to the authority DIDs it may write records under **in addition to its own DID**, e.g. `{"did:web:ops.example": ["did:web:a.example", "did:web:b.example"]}`. Every key must be in `ADMIN_DIDS`; a malformed value stops startup. Unset ⇒ each admin writes only under its own DID. List the registry's own DID for an admin to let it rotate the registry's DID and enable or disable capabilities that have no authority. | No                                           |
 | `PROFILE_CONFIG`        | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. **_Sensitive information, do not share._** | Required when DIDComm is enabled             |
 | `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enabled. ExplicitDeny - public mode, ExplicitAllow - private mode                                                                                                          | default: `ExplicitDeny`                             |
 | `TR_PUBLIC_URL`         | Externally reachable base URL of the REST/TRQP surface (e.g. `https://registry.example.org`). When set, the generated DID document advertises a `TRQPRest` service entry so peers can discover the REST endpoint by resolving the registry's DID. Must be `https://` (loopback `http://` allowed for local dev). Unset ⇒ REST is still served, but not advertised. | No                                           |

@@ -125,6 +125,12 @@ Admin DIDs that can manage Trust Registry records. Multiple DIDs should be comma
 
 **Expected Value:** `did:peer:2.Vz6Mk...,did:peer:2.Vz6Mn...`
 
+#### `--operator-dids`
+
+Admin DIDs (each also in `--admin-dids`, comma-separated) that may act on the registry itself: rotate the registry's DID and enable or disable capabilities that have no authority. The command writes `ADMIN_AUTHORITIES` mapping each of them to the registry's DID, which it knows when it generates the DID or is given `--tr-did`. Without such an entry no admin can rotate the registry's DID.
+
+**Expected Value:** `did:peer:2.Vz6Mk...`
+
 ### Existing DID Configuration
 
 #### `--tr-did`, `-r`
