@@ -137,11 +137,18 @@ pub async fn build_verifier() -> Arc<dyn DynProofVerifier> {
 /// [`TaskHandler::authorize_write`](crate::trust_tasks::TaskHandler::authorize_write),
 /// so this check is safe to call on its own. A present proof that fails
 /// verification is [`RejectReason::ProofInvalid`].
+///
+/// A write is one of the registry's own ([`requires_proof`]) or, given the
+/// `capabilities` being served, a capability's write task. Pass the capability
+/// set whenever capabilities are served; without it their writes pass through
+/// unverified.
 pub async fn verify_write_proof(
     verifier: &Arc<dyn DynProofVerifier>,
+    capabilities: Option<&crate::capabilities::CapabilitySet>,
     doc: &TrustTask<Value>,
 ) -> Result<(), RejectReason> {
-    if !requires_proof(doc.type_uri.slug()) {
+    let slug = doc.type_uri.slug();
+    if !requires_proof(slug) && !capabilities.is_some_and(|c| c.is_write(slug)) {
         return Ok(());
     }
     verify_proof(verifier, doc).await
@@ -199,7 +206,7 @@ mod tests {
     async fn read_document_skips_verification() {
         let verifier = erase_verifier(Verifier::for_did_key());
         let doc = doc_with_dummy_proof("https://trusttasks.org/spec/registry/recognition/0.1");
-        assert!(verify_write_proof(&verifier, &doc).await.is_ok());
+        assert!(verify_write_proof(&verifier, None, &doc).await.is_ok());
     }
 
     #[tokio::test]
@@ -209,7 +216,7 @@ mod tests {
         let verifier = erase_verifier(Verifier::for_did_key());
         let doc = doc_with_dummy_proof("https://trusttasks.org/spec/registry/record/put/0.1");
         assert!(matches!(
-            verify_write_proof(&verifier, &doc).await,
+            verify_write_proof(&verifier, None, &doc).await,
             Err(RejectReason::ProofInvalid { .. })
         ));
     }
@@ -222,7 +229,7 @@ mod tests {
         let mut doc = doc_with_dummy_proof(RECORD_PUT);
         doc.proof = None;
         assert!(matches!(
-            verify_write_proof(&verifier, &doc).await,
+            verify_write_proof(&verifier, None, &doc).await,
             Err(RejectReason::ProofRequired)
         ));
     }
@@ -233,7 +240,7 @@ mod tests {
         let mut doc = doc_with_dummy_proof(RECORD_PUT);
         doc.issuer = None;
         assert!(matches!(
-            verify_write_proof(&verifier, &doc).await,
+            verify_write_proof(&verifier, None, &doc).await,
             Err(RejectReason::MalformedRequest { .. })
         ));
     }

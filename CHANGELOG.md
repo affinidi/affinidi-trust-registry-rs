@@ -30,7 +30,8 @@ release goes GA (`## 0.27.0 (date)`).
   rotation answers `permissionDenied`. Enabling `git-trust` (which names its
   authority) is unchanged, and disabling a capability that is not enabled still
   answers `not_enabled`. A write task with no authority rule is now refused
-  rather than run under none.
+  rather than run under none. `setup_trust_registry --operator-dids <admin>`
+  writes the `ADMIN_AUTHORITIES` entry for the registry's DID.
 - **Capability tasks are writes unless declared as reads.**
   `CapabilityDefinition` has a new `register_reads` member for a capability's
   read-only tasks. Every task `register` adds is handled as a write (proof,
@@ -41,8 +42,14 @@ release goes GA (`## 0.27.0 (date)`).
   (`None` if it has no reads) and move any read-only task into it.
   `CapabilitySet::new` refuses a set that declares one of the registry's writes
   as a read, registers a task the registry itself serves, or registers one task
-  in two capabilities. New: `CapabilitySet::is_write`, `write_owner`,
-  `TaskHandler::is_write` and `trust_tasks::proof::verify_proof`.
+  in two capabilities. A capability must register the same tasks whatever its
+  enablement state: enabling it with a state under which it registers another
+  task is refused (`config_invalid`), and a persisted state that does leaves
+  the capability unserved. Tasks in `register_reads` must not change state.
+  New: `CapabilitySet::is_write`, `write_owner`, `TaskHandler::is_write` and
+  `trust_tasks::proof::verify_proof`. `dedup::dispatch_idempotent` and
+  `trust_tasks::verify_write_proof` take the capability set
+  (`Option<&CapabilitySet>`) so they classify capability writes too.
 
 ## 0.31.0 (release/0.31)
 

@@ -74,6 +74,7 @@ use serde_json::Value;
 use trust_tasks_rs::{ErrorResponse, RejectReason, TrustTask, document_digest};
 use uuid::Uuid;
 
+use crate::capabilities::CapabilitySet;
 use crate::trust_tasks::{RegistryDispatcher, TaskOutcome, handle_document, proof::is_write_slug};
 
 /// How long a completed outcome stays replayable: the write acceptance window
@@ -419,12 +420,19 @@ fn is_cacheable(outcome: &TaskOutcome) -> bool {
 /// never mutates the registry twice. A different document reusing an accepted
 /// id is refused as `idConflict`, and a write is refused as `unavailable`
 /// when the store cannot be consulted.
+///
+/// A write is one of the registry's own ([`is_write_slug`]) or, given the
+/// `capabilities` the dispatcher serves, a capability's write task. Pass the
+/// capability set whenever `dispatcher` serves capabilities; without it their
+/// writes are dispatched without the replay record.
 pub async fn dispatch_idempotent(
     dispatcher: &RegistryDispatcher,
     store: &dyn MessageIdStore,
+    capabilities: Option<&CapabilitySet>,
     doc: TrustTask<Value>,
 ) -> TaskOutcome {
-    if !is_write_slug(doc.type_uri.slug()) {
+    let slug = doc.type_uri.slug();
+    if !is_write_slug(slug) && !capabilities.is_some_and(|c| c.is_write(slug)) {
         return handle_document(dispatcher, doc).await;
     }
     execute_once(store, doc, |doc| handle_document(dispatcher, doc)).await
@@ -747,8 +755,8 @@ mod tests {
         let store = store();
         let doc = create_doc("msg-1", "did:example:admin");
 
-        let first = dispatch_idempotent(&dispatcher, &store, doc.clone()).await;
-        let second = dispatch_idempotent(&dispatcher, &store, doc.clone()).await;
+        let first = dispatch_idempotent(&dispatcher, &store, None, doc.clone()).await;
+        let second = dispatch_idempotent(&dispatcher, &store, None, doc.clone()).await;
 
         assert_eq!(
             repo.created.lock().unwrap().len(),
@@ -773,10 +781,10 @@ mod tests {
         let mut second = first.clone();
         second.payload["record"]["entity_id"] = serde_json::json!("did:example:other");
 
-        dispatch_idempotent(&dispatcher, &store, first)
+        dispatch_idempotent(&dispatcher, &store, None, first)
             .await
             .expect("first write");
-        let err = dispatch_idempotent(&dispatcher, &store, second)
+        let err = dispatch_idempotent(&dispatcher, &store, None, second)
             .await
             .expect_err("the reused id is refused");
 
@@ -812,6 +820,7 @@ mod tests {
         let err = dispatch_idempotent(
             &dispatcher,
             &UnavailableStore,
+            None,
             create_doc("msg-1", "did:example:admin"),
         )
         .await
@@ -836,6 +845,7 @@ mod tests {
         dispatch_idempotent(
             &dispatcher,
             &store,
+            None,
             create_doc("msg-1", "did:example:admin"),
         )
         .await
@@ -843,6 +853,7 @@ mod tests {
         dispatch_idempotent(
             &dispatcher,
             &store,
+            None,
             create_doc("msg-2", "did:example:admin"),
         )
         .await
@@ -873,12 +884,12 @@ mod tests {
         );
 
         assert!(
-            dispatch_idempotent(&dispatcher, &store, read.clone())
+            dispatch_idempotent(&dispatcher, &store, None, read.clone())
                 .await
                 .is_ok()
         );
         assert!(
-            dispatch_idempotent(&dispatcher, &store, read.clone())
+            dispatch_idempotent(&dispatcher, &store, None, read.clone())
                 .await
                 .is_ok()
         );
