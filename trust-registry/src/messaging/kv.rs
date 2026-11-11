@@ -48,6 +48,20 @@ impl KvKeyspace {
             .map_err(|e| format!("fjall blocking task failed: {e}"))?
     }
 
+    /// Every key that starts with `prefix`, without reading the values.
+    pub async fn scan_keys_prefix(&self, prefix: Vec<u8>) -> Result<Vec<Vec<u8>>, String> {
+        let ks = self.ks.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for guard in ks.prefix(&prefix) {
+                out.push(guard.key().map_err(|e| e.to_string())?.to_vec());
+            }
+            Ok::<_, String>(out)
+        })
+        .await
+        .map_err(|e| format!("fjall blocking task failed: {e}"))?
+    }
+
     /// Every `(key, value)` whose key starts with `prefix`, decoded to owned
     /// bytes. Used by the relationship store's recovery sweep and the outbox's
     /// scanning reads.

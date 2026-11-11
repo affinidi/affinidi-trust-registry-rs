@@ -225,8 +225,12 @@ pub(crate) async fn start_one_did_listener(
     repository: Arc<dyn TrustRecordAdminRepository>,
     tasks: crate::trust_tasks::TaskHandler,
     source: DidCommSource,
+    health: Option<Arc<crate::health::RegistryHealth>>,
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
+    // Only the TSP relationship store reports to health.
+    #[cfg(not(feature = "tsp"))]
+    let _ = health;
     // Does the document peers actually resolve match what this binary serves?
     // Checked here, before any source-specific setup, because every source has
     // the same exposure — the published document is written by the provisioning
@@ -265,6 +269,7 @@ pub(crate) async fn start_one_did_listener(
                     config,
                     Arc::new(handler),
                     tasks,
+                    health,
                     shutdown,
                 )
                 .await;
@@ -338,6 +343,7 @@ pub(crate) async fn start_didcomm_listener(
     repository: Arc<dyn TrustRecordAdminRepository>,
     tasks: crate::trust_tasks::TaskHandler,
     source: DidCommSource,
+    health: Option<Arc<crate::health::RegistryHealth>>,
     shutdown: CancellationToken,
 ) -> Result<Result<(), DIDCommError>, JoinError> {
     let profile_config = config.profile_config.clone();
@@ -349,6 +355,7 @@ pub(crate) async fn start_didcomm_listener(
         repository,
         tasks,
         source,
+        health,
         shutdown,
     ));
 

@@ -33,6 +33,7 @@ use crate::configs::{DidcommConfig, ProfileConfig};
 use crate::didcomm::error::DIDCommError;
 use crate::didcomm::listener::MessageHandler;
 use crate::didcomm::listener::mediator_functions::{acl_failure_outcome, set_mediator_acl_mode};
+use crate::health::RegistryHealth;
 use crate::messaging::kv::{KvKeyspace, MessagingStore};
 use crate::messaging::outbox_store::FjallOutboxStore;
 use crate::messaging::relationship_store::{
@@ -40,6 +41,8 @@ use crate::messaging::relationship_store::{
 };
 use crate::messaging::tsp_inbound::{ControlDecision, decide_control};
 use crate::trust_tasks::TaskHandler;
+use affinidi_messaging_sdk::RelationshipStore as _;
+use affinidi_messaging_sdk::protocols::tsp::RelationshipState;
 
 /// Resolve the on-disk path for the messaging store, namespaced per profile so
 /// two DIDs never share one fjall database. `TR_MESSAGING_STORE_PATH` overrides
@@ -72,6 +75,7 @@ pub async fn start_managed_delivery<H: MessageHandler>(
     config: Arc<DidcommConfig>,
     handler: Arc<H>,
     tasks: TaskHandler,
+    health: Option<Arc<RegistryHealth>>,
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
     // A malformed bound stops the listener rather than running unbounded.
@@ -84,14 +88,25 @@ pub async fn start_managed_delivery<H: MessageHandler>(
     // whole life of the listener — bound here, dropped when the loop returns.
     let store = MessagingStore::open(path_str).map_err(DIDCommError::Messaging)?;
 
+    // Bounded: any VID TSP authenticates can form a relationship. Admins'
+    // relationships are kept out of the bound, so a full store never costs an
+    // admin its relationship.
+    let relationships = FjallRelationshipKv::open(
+        store.relationships.clone(),
+        limits.max_relationships,
+        config.admin_config.admin_dids.clone(),
+        health,
+    )
+    .await
+    .map_err(|e| DIDCommError::Messaging(format!("open the TSP relationship store: {e}")))?;
+
     let messaging = build_messaging(
         profile_config.secrets,
         &profile_config.did,
         &profile_config.alias,
         &config.mediator_did,
-        store.relationships.clone(),
+        relationships,
         store.outbox.clone(),
-        limits,
     )
     .await
     .map_err(DIDCommError::Messaging)?;
@@ -156,9 +171,8 @@ pub async fn build_messaging(
     did: &str,
     alias: &str,
     mediator_did: &str,
-    relationships_ks: KvKeyspace,
+    relationships: FjallRelationshipKv,
     outbox_ks: KvKeyspace,
-    limits: RelationshipLimits,
 ) -> Result<RegistryMessaging, String> {
     let tdk_config = TDKConfig::builder()
         .with_load_environment(false)
@@ -175,12 +189,7 @@ pub async fn build_messaging(
     // Persist TSP relationship state so it survives a restart. Without it, a
     // restarted registry forgets every peer and — by Rev 3 §7.2.2 — silently
     // drops their traffic until each re-handshakes.
-    // Bounded: any VID TSP authenticates can form a relationship.
-    let relationship_store = Arc::new(RegistryRelationshipStore::new(
-        FjallRelationshipKv::open(relationships_ks, limits.max_relationships)
-            .await
-            .map_err(|e| format!("open the TSP relationship store: {e}"))?,
-    ));
+    let relationship_store = Arc::new(RegistryRelationshipStore::new(relationships));
     let atm_config = ATMConfig::builder()
         .with_relationship_store(relationship_store.clone())
         .build()
@@ -425,22 +434,25 @@ async fn handle_tsp(
         ..
     } = inbound.kind
     {
-        let accepted = handle_tsp_control(
+        let decision = handle_tsp_control(
             atm,
             profile,
+            relationships,
             &sender_vid,
             request,
             thread_digest,
             reply_expected,
         )
         .await;
-        if accepted {
+        if shows_activity(Some(&decision)) {
             stamp(profile, relationships, &sender_vid).await;
         }
         return;
     }
 
-    stamp(profile, relationships, &sender_vid).await;
+    if shows_activity(None) {
+        stamp(profile, relationships, &sender_vid).await;
+    }
 
     // Application frame: the payload is the already-unpacked binding envelope.
     crate::tsp::dispatch_tsp_application(
@@ -453,6 +465,26 @@ async fn handle_tsp(
     .await;
 }
 
+/// Whether a TSP frame shows its sender's relationship in use: every
+/// application frame (`None`), and a relationship request the registry
+/// accepts. A cancellation or an unanswered request does not.
+fn shows_activity(control: Option<&ControlDecision>) -> bool {
+    matches!(control, None | Some(ControlDecision::Accept))
+}
+
+/// What to log when an accept could not be sent, given the relationship state
+/// the store holds afterwards: whether the relationship was recorded decides
+/// whether the peer's traffic still flows.
+fn accept_failure_note(recorded: RelationshipState) -> &'static str {
+    if recorded == RelationshipState::None {
+        "could not accept a TSP relationship, and it is not recorded (the relationship \
+         store refused or failed): the peer's messages are not admitted until it invites again"
+    } else {
+        "could not send a TSP relationship accept; the relationship stays recorded, so \
+         traffic still flows, but the peer sees no answer"
+    }
+}
+
 /// Stamp the relationship with `their_vid` as active now.
 async fn stamp(profile: &ATMProfile, relationships: &RegistryRelationshipStore, their_vid: &str) {
     match profile.dids() {
@@ -462,8 +494,7 @@ async fn stamp(profile: &ATMProfile, relationships: &RegistryRelationshipStore, 
 }
 
 /// Answer one inbound TSP relationship request (§7.2), or decline to. Returns
-/// whether the registry accepted the relationship, which the transport has
-/// recorded whether or not the accept could be sent.
+/// the decision made.
 ///
 /// The policy is [`decide_control`] — a pure function — and it performs no ACL
 /// check: the ACL gate lives at the Trust Task layer. Nothing here can fail the
@@ -473,32 +504,36 @@ async fn stamp(profile: &ATMProfile, relationships: &RegistryRelationshipStore, 
 async fn handle_tsp_control(
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
+    relationships: &RegistryRelationshipStore,
     sender_vid: &str,
     request: affinidi_messaging_core::RelationshipRequest,
     thread_digest: [u8; 32],
     reply_expected: bool,
-) -> bool {
-    match decide_control(request, reply_expected) {
+) -> ControlDecision {
+    let decision = decide_control(request, reply_expected);
+    match &decision {
         ControlDecision::Accept => {
             match atm
                 .tsp()
                 .accept_relationship(profile, sender_vid, thread_digest)
                 .await
             {
-                Ok(state) => {
-                    info!(
-                        sender = %sender_vid, ?request, ?state,
-                        "accepted an inbound TSP relationship request",
-                    );
-                    true
-                }
+                Ok(state) => info!(
+                    sender = %sender_vid, ?request, ?state,
+                    "accepted an inbound TSP relationship request",
+                ),
                 Err(e) => {
+                    let recorded = match profile.dids() {
+                        Ok((our_vid, _)) => relationships
+                            .get(our_vid, sender_vid)
+                            .await
+                            .unwrap_or(RelationshipState::None),
+                        Err(_) => RelationshipState::None,
+                    };
                     warn!(
-                        sender = %sender_vid, error = %e,
-                        "could not send a TSP relationship accept; the relationship stays \
-                         recorded, so traffic still flows, but the peer sees no answer",
+                        sender = %sender_vid, error = %e, ?recorded,
+                        "{}", accept_failure_note(recorded),
                     );
-                    true
                 }
             }
         }
@@ -520,14 +555,34 @@ async fn handle_tsp_control(
                     "could not send a TSP relationship cancellation",
                 ),
             }
-            false
         }
-        ControlDecision::Nothing => {
-            info!(
-                sender = %sender_vid, ?request,
-                "recorded an inbound TSP relationship request; no answer is due",
-            );
-            false
-        }
+        ControlDecision::Nothing => info!(
+            sender = %sender_vid, ?request,
+            "recorded an inbound TSP relationship request; no answer is due",
+        ),
+    }
+    decision
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Application frames and accepted requests keep a relationship alive;
+    /// cancellations and requests that need no answer do not.
+    #[test]
+    fn activity_is_stamped_for_application_frames_and_accepts_only() {
+        assert!(shows_activity(None));
+        assert!(shows_activity(Some(&ControlDecision::Accept)));
+        assert!(!shows_activity(Some(&ControlDecision::Cancel("x"))));
+        assert!(!shows_activity(Some(&ControlDecision::Nothing)));
+    }
+
+    /// A failed accept says whether the relationship was recorded, since
+    /// that decides whether the peer's traffic is admitted.
+    #[test]
+    fn a_failed_accept_says_whether_the_relationship_was_recorded() {
+        assert!(accept_failure_note(RelationshipState::None).contains("not recorded"));
+        assert!(accept_failure_note(RelationshipState::InviteReceived).contains("stays recorded"));
     }
 }

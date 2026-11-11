@@ -218,12 +218,13 @@ async fn start_didcomm_server(
     repository: Arc<dyn TrustRecordAdminRepository>,
     tasks: crate::trust_tasks::TaskHandler,
     source: crate::didcomm::listener::DidCommSource,
+    health: Arc<RegistryHealth>,
     shutdown: CancellationToken,
 ) -> Result<(), BoxError> {
     // `start_didcomm_listener` returns the listener task's own result nested
     // inside the join result. Both layers are propagated, so `/health` says
     // why the listener stopped instead of reporting a failure as a clean exit.
-    start_didcomm_listener(config, repository, tasks, source, shutdown).await??;
+    start_didcomm_listener(config, repository, tasks, source, Some(health), shutdown).await??;
     Ok(())
 }
 
@@ -320,6 +321,7 @@ pub(crate) async fn serve_registry(
             parts.repository.clone(),
             parts.task_handler(),
             source.clone(),
+            parts.health.clone(),
             parts.shutdown.clone(),
         ))),
     };

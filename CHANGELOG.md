@@ -51,17 +51,22 @@ release goes GA (`## 0.27.0 (date)`).
   `trust_tasks::verify_write_proof` take the capability set
   (`Option<&CapabilitySet>`) so they classify capability writes too.
 - **The TSP relationship store is bounded.** It holds at most
-  `TR_TSP_MAX_RELATIONSHIPS` relationships (default 10000); when full, a
-  relationship with a new peer is not recorded, while existing ones keep
-  working. Relationships are now stamped active when accepted and on every
-  application message, and evicted once idle for
-  `TR_TSP_RELATIONSHIP_IDLE_SECS` (default 7 days). Before, nothing stamped
-  them, so the idle sweep never evicted any. Relationships restored from an
-  existing store are stamped at startup and age from then. A malformed value
-  of either setting stops the TSP listener rather than lifting the bound.
-  `messaging::service::build_messaging` and `run_inbound_loop` take the new
-  limits and the relationship store; `FjallRelationshipKv::new` is replaced by
-  the async `FjallRelationshipKv::open`.
+  `TR_TSP_MAX_RELATIONSHIPS` relationships with non-admin peers (default
+  10000). Recording one more first forgets the least recently active one
+  (never-stamped ones first), so a new peer is always admitted; relationships
+  with `ADMIN_DIDS` are neither counted nor forgotten. While the store is at
+  its limit `/health` reports `"tspRelationships": "full"` and status
+  `degraded`; the field appears once a TSP listener runs. Relationships are
+  now stamped active when accepted and on every application message, and
+  evicted once idle for `TR_TSP_RELATIONSHIP_IDLE_SECS` (default 7 days).
+  Before, nothing stamped them, so the idle sweep never evicted any. Every
+  relationship restored without a stamp, in any state, is stamped at startup
+  and ages from then. A malformed value of either setting stops the TSP
+  listener rather than lifting the bound. A failed accept now logs whether the
+  relationship was recorded. `messaging::service::build_messaging` takes the
+  opened `FjallRelationshipKv`, `start_managed_delivery` the health handle and
+  `run_inbound_loop` the relationship store; `FjallRelationshipKv::new` is
+  replaced by the async `FjallRelationshipKv::open`.
 
 ## 0.31.0 (release/0.31)
 
