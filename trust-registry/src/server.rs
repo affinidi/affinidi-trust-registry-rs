@@ -267,7 +267,17 @@ pub(crate) async fn serve_registry(
 ) -> Result<ServerHandle, BoxError> {
     let parts = registry.into_parts();
 
-    debug!("CONFIGS: {:?}", &parts.config);
+    let config = &parts.config;
+    debug!(
+        listen_address = %config.server_config.listen_address,
+        storage_backend = ?config.storage_config.storage_backend,
+        didcomm_enabled = config.didcomm_config.is_enabled,
+        transport_flags = ?config.didcomm_config.transport_flags,
+        registry_did = %config.didcomm_config.profile_config.did,
+        mediator_did = %config.didcomm_config.mediator_did,
+        admin_dids = config.didcomm_config.admin_config.admin_dids.len(),
+        "configuration loaded"
+    );
 
     let (http_addr, http_task) = if parts.config.didcomm_config.transport_flags.rest {
         // Bind first so the caller (and the returned handle) learns the

@@ -917,7 +917,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .redis_url
             .as_ref()
             .ok_or("Error: --redis-url is required when using redis storage")?;
-        println!("✓ Redis URL: {}", redis_url);
+        println!(
+            "✓ Redis URL: {}",
+            trust_registry::configs::storage::redact_url_credentials(redis_url)
+        );
         // Insert into the env file
         server_vars.insert("REDIS_URL".to_string(), redis_url.clone());
     }
@@ -934,7 +937,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Display server configuration in JSON format
     println!();
     println!("Environment Configuration:");
-    let config_json = serde_json::to_value(&server_vars)?;
+    let mut config_json = serde_json::to_value(&server_vars)?;
+    if let Some(redis_url) = config_json.get_mut("REDIS_URL")
+        && let Some(raw) = redis_url.as_str()
+    {
+        *redis_url = Value::String(trust_registry::configs::storage::redact_url_credentials(
+            raw,
+        ));
+    }
     println!("{}", serde_json::to_string_pretty(&config_json)?);
     println!();
 
