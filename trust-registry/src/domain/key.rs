@@ -72,6 +72,22 @@ impl TrustRecordKey {
         (legacy != self.sk()).then_some(legacy)
     }
 
+    pub fn authority_id(&self) -> &AuthorityId {
+        &self.authority_id
+    }
+
+    pub fn action(&self) -> &Action {
+        &self.action
+    }
+
+    pub fn resource(&self) -> &Resource {
+        &self.resource
+    }
+
+    pub fn entity_id(&self) -> &EntityId {
+        &self.entity_id
+    }
+
     /// Whether `record` is the record this key names (all four identifiers
     /// equal).
     pub fn identifies(&self, record: &TrustRecord) -> bool {
@@ -122,15 +138,19 @@ pub fn verified_record(
     if key.identifies(&record) {
         return Some(record);
     }
-    if storage_key == key.sk() {
-        tracing::error!(
-            storage_key,
-            "stored record's identifiers do not match its key; treating it as absent"
-        );
-    } else {
+    let stored_under_its_earlier_key =
+        TrustRecordKey::from_record(&record).legacy_sk().as_deref() == Some(storage_key);
+    if stored_under_its_earlier_key {
+        // Expected while records migrate: the string is both this key and
+        // another record's earlier-format key.
         tracing::debug!(
             storage_key,
             "record under the earlier key format belongs to different identifiers"
+        );
+    } else {
+        tracing::error!(
+            storage_key,
+            "stored record's identifiers do not match its key; treating it as absent"
         );
     }
     None

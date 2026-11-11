@@ -125,14 +125,28 @@ release goes GA (`## 0.27.0 (date)`).
 
 ### Changed
 
-- **Existing records keep working without a migration.** A record whose
+- **Existing records keep working without a migration step.** A record whose
   identifiers contain neither `#` nor `%` has the same key as before. One that
-  does (a fragment-bearing DID URL, a percent-encoded `did:web` port) is still
-  read from its earlier key, checked against the query as above, until it is
-  next updated: an update writes it under the new key and then removes the old
-  one, and a delete removes both. Listings show such a record once, preferring
-  the copy under the new key. A lookup that misses for such identifiers costs
-  a second read.
+  does (a fragment-bearing DID URL, a percent-encoded `did:web` port such as
+  `did:web:host%3A8443`) is still read from its earlier key, checked against
+  the query as above. It moves to its new key the next time it is updated;
+  a delete removes every copy. An earlier-format key can be the same string
+  as another record's new key: a write never acts on a key without checking
+  whose record is there, and a record in the way is copied to its own new key
+  first. Each write is planned from what it read and applied as one atomic
+  unit that fails if any of those keys changed meanwhile, then re-planned: a
+  fjall batch under a write lock, a `WATCH`ed Redis `MULTI`/`EXEC`, a
+  DynamoDB `TransactWriteItems` with per-item conditions (its reads are now
+  strongly consistent). Listings show each record
+  once, preferring the copy under its new key. A lookup that misses for
+  identifiers containing `#` or `%` costs a second read.
+- **Upgrade every replica that shares a store together.** Once a record with
+  `#` or `%` in an identifier is written by this release it lives under its
+  new key, which an older release does not read: an older replica would
+  answer not-found for it, and a write from that replica could create a
+  stale second copy (for example one that still says `authorized: true` after
+  this release recorded a revocation). Do not run this release and an older
+  one against the same Redis, DynamoDB table or fjall directory.
 
 ## 0.31.0 (release/0.31)
 

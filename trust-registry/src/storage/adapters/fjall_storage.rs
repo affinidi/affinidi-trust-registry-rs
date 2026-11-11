@@ -11,8 +11,13 @@
 use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions};
 use tracing::{error, info};
 
-use crate::domain::key::{TR_SK_PREFIX, TrustRecordKey, dedupe_listing, verified_record};
+use std::sync::{Arc, Mutex};
+
+use crate::domain::key::{TR_SK_PREFIX, TrustRecordKey, dedupe_listing};
 use crate::domain::*;
+use crate::storage::keyed::{
+    Action as KeyedAction, KeyedReader, Op, lookup, plan_create, plan_delete, plan_update,
+};
 use crate::storage::repository::*;
 
 /// Keyspace (table) holding the trust records.
@@ -21,9 +26,10 @@ const KEYSPACE_NAME: &str = "trust_records";
 /// fjall-backed trust record store.
 pub struct FjallStorage {
     keyspace: Keyspace,
-    // Keep the database handle alive for the lifetime of the store (background
-    // compaction/flush threads).
-    _db: Database,
+    db: Database,
+    /// Held across each write's reads and its batch, so the keys a write
+    /// planned against cannot change before it lands.
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl FjallStorage {
@@ -32,7 +38,11 @@ impl FjallStorage {
         info!("Opening fjall storage at {path}");
         let db = Database::open(Config::new(std::path::Path::new(path)))?;
         let keyspace = db.keyspace(KEYSPACE_NAME, KeyspaceCreateOptions::default)?;
-        Ok(Self { keyspace, _db: db })
+        Ok(Self {
+            keyspace,
+            db,
+            write_lock: Arc::new(Mutex::new(())),
+        })
     }
 
     fn serialize(record: &TrustRecord) -> Result<Vec<u8>, RepositoryError> {
@@ -46,6 +56,57 @@ impl FjallStorage {
             RepositoryError::SerializationFailed(format!("Failed to deserialize record: {e}"))
         })
     }
+
+    /// Plan a write with `plan` and apply it as one batch, under the write
+    /// lock.
+    async fn write<F>(&self, plan: F) -> Result<(), RepositoryError>
+    where
+        F: for<'a> FnOnce(
+                &'a mut FjallReader,
+            )
+                -> futures::future::BoxFuture<'a, Result<Vec<Op>, RepositoryError>>
+            + Send
+            + 'static,
+    {
+        let keyspace = self.keyspace.clone();
+        let db = self.db.clone();
+        let write_lock = self.write_lock.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = write_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut reader = FjallReader(keyspace.clone());
+            let ops = futures::executor::block_on(plan(&mut reader))?;
+            let mut batch = db.batch();
+            for op in ops {
+                match op.action {
+                    KeyedAction::Put(record) => batch.insert(
+                        &keyspace,
+                        op.storage_key.as_bytes(),
+                        FjallStorage::serialize(&record)?,
+                    ),
+                    KeyedAction::Delete => batch.remove(&keyspace, op.storage_key.as_bytes()),
+                }
+            }
+            batch.commit().map_err(query_error)
+        })
+        .await
+        .map_err(join_error)?
+    }
+}
+
+/// Reads for the write planners.
+pub(crate) struct FjallReader(Keyspace);
+
+#[async_trait::async_trait]
+impl KeyedReader for FjallReader {
+    async fn read_at(&mut self, storage_key: &str) -> Result<Option<TrustRecord>, RepositoryError> {
+        self.0
+            .get(storage_key.as_bytes())
+            .map_err(query_error)?
+            .map(|value| FjallStorage::deserialize(&value))
+            .transpose()
+    }
 }
 
 fn query_error(e: impl std::fmt::Display) -> RepositoryError {
@@ -56,29 +117,6 @@ fn join_error(e: impl std::fmt::Display) -> RepositoryError {
     RepositoryError::QueryFailed(format!("fjall blocking task failed: {e}"))
 }
 
-/// Read the record `key` names, from its current storage key or, for a record
-/// an older release wrote, from the earlier unescaped key.
-///
-/// Returns the storage key it was found under together with the record.
-fn lookup(
-    ks: &Keyspace,
-    key: &TrustRecordKey,
-) -> Result<Option<(String, TrustRecord)>, RepositoryError> {
-    let current = key.sk();
-    let candidates = std::iter::once(current).chain(key.legacy_sk());
-    for storage_key in candidates {
-        let stored = ks
-            .get(storage_key.as_bytes())
-            .map_err(query_error)?
-            .map(|value| FjallStorage::deserialize(&value))
-            .transpose()?;
-        if let Some(record) = verified_record(key, &storage_key, stored) {
-            return Ok(Some((storage_key, record)));
-        }
-    }
-    Ok(None)
-}
-
 #[async_trait::async_trait]
 impl TrustRecordRepository for FjallStorage {
     async fn find_by_query(
@@ -86,104 +124,37 @@ impl TrustRecordRepository for FjallStorage {
         query: TrustRecordQuery,
     ) -> Result<Option<TrustRecord>, RepositoryError> {
         let key = TrustRecordKey::from_query(&query);
-        let ks = self.keyspace.clone();
-        tokio::task::spawn_blocking(move || Ok(lookup(&ks, &key)?.map(|(_, record)| record)))
-            .await
-            .map_err(join_error)?
+        let mut reader = FjallReader(self.keyspace.clone());
+        tokio::task::spawn_blocking(move || {
+            Ok(futures::executor::block_on(lookup(&mut reader, &key))?.map(|(_, record)| record))
+        })
+        .await
+        .map_err(join_error)?
     }
 }
 
 #[async_trait::async_trait]
 impl TrustRecordAdminRepository for FjallStorage {
     async fn create(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-        let key = TrustRecordKey::from_record(&record);
-        let value = Self::serialize(&record)?;
-        let ks = self.keyspace.clone();
-        tokio::task::spawn_blocking(move || {
-            let storage_key = key.sk();
-            if ks
-                .contains_key(storage_key.as_bytes())
-                .map_err(query_error)?
-                || lookup(&ks, &key)?.is_some()
-            {
-                return Err(RepositoryError::RecordAlreadyExists(storage_key));
-            }
-            ks.insert(storage_key.as_bytes(), value)
-                .map_err(query_error)?;
-            Ok(())
-        })
-        .await
-        .map_err(join_error)?
+        self.write(move |reader| Box::pin(async move { plan_create(reader, &record).await }))
+            .await
     }
 
     async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-        let key = TrustRecordKey::from_record(&record);
-        let value = Self::serialize(&record)?;
-        let ks = self.keyspace.clone();
-        tokio::task::spawn_blocking(move || {
-            let storage_key = key.sk();
-            let Some((found_under, _)) = lookup(&ks, &key)? else {
-                return Err(RepositoryError::RecordNotFound(storage_key));
-            };
-            // Write the current key first: if the process stops before the
-            // earlier key is removed, both copies exist and the current one
-            // wins on read and in listings.
-            ks.insert(storage_key.as_bytes(), value)
-                .map_err(query_error)?;
-            if found_under != storage_key {
-                ks.remove(found_under.as_bytes()).map_err(query_error)?;
-            }
-            Ok(())
-        })
-        .await
-        .map_err(join_error)?
+        self.write(move |reader| Box::pin(async move { plan_update(reader, &record).await }))
+            .await
     }
 
     async fn delete(&self, query: TrustRecordQuery) -> Result<(), RepositoryError> {
         let key = TrustRecordKey::from_query(&query);
-        let ks = self.keyspace.clone();
-        tokio::task::spawn_blocking(move || {
-            let storage_key = key.sk();
-            let legacy_copy = match key.legacy_sk() {
-                Some(legacy) => {
-                    let stored = ks
-                        .get(legacy.as_bytes())
-                        .map_err(query_error)?
-                        .map(|value| FjallStorage::deserialize(&value))
-                        .transpose()?;
-                    verified_record(&key, &legacy, stored).map(|_| legacy)
-                }
-                None => None,
-            };
-            let current_copy = ks
-                .contains_key(storage_key.as_bytes())
-                .map_err(query_error)?;
-            if legacy_copy.is_none() && !current_copy {
-                return Err(RepositoryError::RecordNotFound(storage_key));
-            }
-            // The earlier key goes first: if the process stops in between, the
-            // record is still present under its current key and a retried
-            // delete removes it. The other order would leave the old copy to
-            // be read back.
-            if let Some(legacy) = legacy_copy {
-                ks.remove(legacy.as_bytes()).map_err(query_error)?;
-            }
-            ks.remove(storage_key.as_bytes()).map_err(query_error)?;
-            Ok(())
-        })
-        .await
-        .map_err(join_error)?
+        self.write(move |reader| Box::pin(async move { plan_delete(reader, &key).await }))
+            .await
     }
 
     async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
-        let key = TrustRecordKey::from_query(&query);
-        let ks = self.keyspace.clone();
-        tokio::task::spawn_blocking(move || match lookup(&ks, &key)? {
-            Some((_, record)) => Ok(record),
-            None => Err(RepositoryError::RecordNotFound(key.sk())),
-        })
-        .await
-        .map_err(join_error)?
+        self.find_by_query(query.clone())
+            .await?
+            .ok_or_else(|| RepositoryError::RecordNotFound(TrustRecordKey::from_query(&query).sk()))
     }
 
     async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
@@ -468,5 +439,104 @@ mod tests {
                 .is_none()
         );
         assert!(fjall.list().await.expect("list").records().is_empty());
+    }
+
+    /// A's current key is the string B was stored under by an older release.
+    fn cross_pair() -> (TrustRecord, TrustRecord) {
+        let a = record_with("did:a", "act", "x#y", "did:e");
+        let b = record_with("did:a", "act", "x%23y", "did:e").with_authorized(false);
+        assert_eq!(
+            TrustRecordKey::from_record(&a).sk(),
+            TrustRecordKey::from_record(&b)
+                .legacy_sk()
+                .expect("differs")
+        );
+        (a, b)
+    }
+
+    #[tokio::test]
+    async fn deleting_a_missing_record_leaves_the_record_under_its_key_string() {
+        let (_dir, fjall) = open();
+        let (a, b) = cross_pair();
+        insert_under_earlier_key(&fjall, &b);
+
+        assert!(matches!(
+            fjall.delete(query_for(&a)).await,
+            Err(RepositoryError::RecordNotFound(_))
+        ));
+        assert_eq!(fjall.read(query_for(&b)).await.expect("read"), b);
+    }
+
+    #[tokio::test]
+    async fn updating_a_missing_record_leaves_the_record_under_its_key_string() {
+        let (_dir, fjall) = open();
+        let (a, b) = cross_pair();
+        insert_under_earlier_key(&fjall, &b);
+
+        assert!(matches!(
+            fjall.update(a.clone()).await,
+            Err(RepositoryError::RecordNotFound(_))
+        ));
+        assert_eq!(fjall.read(query_for(&b)).await.expect("read"), b);
+        assert!(
+            fjall
+                .find_by_query(query_for(&a))
+                .await
+                .expect("find")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn creating_a_record_moves_the_one_under_its_key_string_aside() {
+        let (_dir, fjall) = open();
+        let (a, b) = cross_pair();
+        insert_under_earlier_key(&fjall, &b);
+
+        fjall.create(a.clone()).await.expect("create");
+
+        assert_eq!(fjall.read(query_for(&a)).await.expect("read"), a);
+        assert_eq!(fjall.read(query_for(&b)).await.expect("read"), b);
+        let b_current = TrustRecordKey::from_record(&b).sk();
+        assert!(
+            fjall
+                .keyspace
+                .contains_key(b_current.as_bytes())
+                .expect("contains")
+        );
+        let mut listed = fjall.list().await.expect("list").into_records();
+        listed.sort_by(|x, y| x.resource().as_str().cmp(y.resource().as_str()));
+        assert_eq!(listed, vec![a.clone(), b.clone()]);
+
+        fjall.delete(query_for(&a)).await.expect("delete a");
+        assert_eq!(fjall.read(query_for(&b)).await.expect("read"), b);
+    }
+
+    #[tokio::test]
+    async fn moving_a_record_to_its_current_key_moves_the_occupant_aside() {
+        let (_dir, fjall) = open();
+        // Both under their earlier keys; A's current key is the occupant's
+        // earlier key.
+        let (a, occupant) = cross_pair();
+        let a_legacy = TrustRecordKey::from_record(&a)
+            .legacy_sk()
+            .expect("differs");
+        insert_under_earlier_key(&fjall, &a);
+        insert_under_earlier_key(&fjall, &occupant);
+
+        let updated = a.clone().with_authorized(false);
+        fjall.update(updated.clone()).await.expect("update");
+
+        assert!(
+            !fjall
+                .keyspace
+                .contains_key(a_legacy.as_bytes())
+                .expect("contains")
+        );
+        assert_eq!(fjall.read(query_for(&a)).await.expect("read"), updated);
+        assert_eq!(
+            fjall.read(query_for(&occupant)).await.expect("read"),
+            occupant
+        );
     }
 }

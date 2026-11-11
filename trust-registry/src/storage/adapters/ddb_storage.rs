@@ -2,7 +2,11 @@ use std::collections::HashMap;
 
 use anyhow::Result as AnyResult;
 use aws_config::BehaviorVersion;
-use aws_sdk_dynamodb::{Client, types::AttributeValue};
+use aws_sdk_dynamodb::{
+    Client,
+    error::{BuildError, DisplayErrorContext},
+    types::{AttributeValue, Delete, Put, TransactWriteItem},
+};
 use aws_types::region::Region;
 use tracing::debug;
 
@@ -10,7 +14,11 @@ use crate::{
     configs::DynamoDbStorageConfig,
     domain::{
         TrustRecord,
-        key::{TrustRecordKey, dedupe_listing, verified_record},
+        key::{TrustRecordKey, dedupe_listing},
+    },
+    storage::keyed::{
+        Action as KeyedAction, Expect, KeyedReader, Op, lookup, plan_create, plan_delete,
+        plan_update,
     },
     storage::repository::{
         RepositoryError, TrustRecordAdminRepository, TrustRecordList, TrustRecordQuery,
@@ -88,11 +96,13 @@ impl DynamoDbStorage {
             .get_item()
             .table_name(&self.table_name)
             .set_key(Some(Self::build_key(storage_key)))
+            .consistent_read(true)
             .send()
             .await
             .map_err(|err| {
                 RepositoryError::ConnectionFailed(format!(
-                    "Failed to fetch item from DynamoDB: {err}",
+                    "Failed to fetch item from DynamoDB: {}",
+                    DisplayErrorContext(err)
                 ))
             })?;
         response
@@ -104,50 +114,143 @@ impl DynamoDbStorage {
             .transpose()
     }
 
-    /// Read the record `key` names, from its current sort key or, for a record
-    /// an older release wrote, from the earlier unescaped sort key.
-    async fn lookup(&self, key: &TrustRecordKey) -> Result<Option<TrustRecord>, RepositoryError> {
-        let current = key.sk();
-        let stored = self.get_record(&current).await?;
-        if let Some(record) = verified_record(key, &current, stored) {
-            return Ok(Some(record));
-        }
-        self.lookup_earlier(key).await
+    async fn find(&self, key: &TrustRecordKey) -> Result<Option<TrustRecord>, RepositoryError> {
+        let mut reader = DdbReader(self);
+        Ok(lookup(&mut reader, key).await?.map(|(_, record)| record))
     }
 
-    /// The record `key` names if it is stored under the earlier unescaped sort
-    /// key, checked against `key`'s identifiers.
-    async fn lookup_earlier(
-        &self,
-        key: &TrustRecordKey,
-    ) -> Result<Option<TrustRecord>, RepositoryError> {
-        let Some(legacy) = key.legacy_sk() else {
-            return Ok(None);
-        };
-        let stored = self.get_record(&legacy).await?;
-        Ok(verified_record(key, &legacy, stored))
+    /// The condition that `op`'s key still holds what it was read as.
+    fn condition(
+        expect: &Expect,
+    ) -> (
+        String,
+        HashMap<String, String>,
+        HashMap<String, AttributeValue>,
+    ) {
+        match expect {
+            Expect::Absent => (
+                "attribute_not_exists(SK)".to_string(),
+                HashMap::new(),
+                HashMap::new(),
+            ),
+            Expect::Holds(key) => {
+                let names = HashMap::from([
+                    ("#authority".to_string(), "authority_id".to_string()),
+                    ("#action".to_string(), "action".to_string()),
+                    ("#resource".to_string(), "resource".to_string()),
+                    ("#entity".to_string(), "entity_id".to_string()),
+                ]);
+                let values = HashMap::from([
+                    (
+                        ":authority".to_string(),
+                        AttributeValue::S(key.authority_id().as_str().to_string()),
+                    ),
+                    (
+                        ":action".to_string(),
+                        AttributeValue::S(key.action().as_str().to_string()),
+                    ),
+                    (
+                        ":resource".to_string(),
+                        AttributeValue::S(key.resource().as_str().to_string()),
+                    ),
+                    (
+                        ":entity".to_string(),
+                        AttributeValue::S(key.entity_id().as_str().to_string()),
+                    ),
+                ]);
+                (
+                    "#authority = :authority AND #action = :action AND #resource = :resource \
+                     AND #entity = :entity"
+                        .to_string(),
+                    names,
+                    values,
+                )
+            }
+        }
     }
 
-    async fn delete_item(
-        &self,
-        storage_key: &str,
-        must_exist: bool,
-    ) -> Result<bool, RepositoryError> {
-        let mut request = self
-            .client
-            .delete_item()
-            .table_name(&self.table_name)
-            .set_key(Some(Self::build_key(storage_key)));
-        if must_exist {
-            request = request.condition_expression("attribute_exists(SK)");
+    fn transact_item(&self, op: &Op) -> Result<TransactWriteItem, RepositoryError> {
+        let (condition, names, values) = Self::condition(&op.expect);
+        let names = (!names.is_empty()).then_some(names);
+        let values = (!values.is_empty()).then_some(values);
+        let build_error = |e: BuildError| RepositoryError::QueryFailed(e.to_string());
+        Ok(match &op.action {
+            KeyedAction::Put(record) => TransactWriteItem::builder()
+                .put(
+                    Put::builder()
+                        .table_name(&self.table_name)
+                        .set_item(Some(Self::build_item(record, &op.storage_key)?))
+                        .condition_expression(condition)
+                        .set_expression_attribute_names(names)
+                        .set_expression_attribute_values(values)
+                        .build()
+                        .map_err(build_error)?,
+                )
+                .build(),
+            KeyedAction::Delete => TransactWriteItem::builder()
+                .delete(
+                    Delete::builder()
+                        .table_name(&self.table_name)
+                        .set_key(Some(Self::build_key(&op.storage_key)))
+                        .condition_expression(condition)
+                        .set_expression_attribute_names(names)
+                        .set_expression_attribute_values(values)
+                        .build()
+                        .map_err(build_error)?,
+                )
+                .build(),
+        })
+    }
+
+    /// Plan a write and apply it as one transaction whose conditions check
+    /// every key still holds what the plan read, re-planning when one does
+    /// not.
+    async fn write<F>(&self, plan: F) -> Result<(), RepositoryError>
+    where
+        F: for<'a, 'b> Fn(
+            &'a mut DdbReader<'b>,
+        )
+            -> futures::future::BoxFuture<'a, Result<Vec<Op>, RepositoryError>>,
+    {
+        for _ in 0..MAX_WRITE_ATTEMPTS {
+            let ops = {
+                let mut reader = DdbReader(self);
+                plan(&mut reader).await?
+            };
+            let items = ops
+                .iter()
+                .map(|op| self.transact_item(op))
+                .collect::<Result<Vec<_>, _>>()?;
+            match self
+                .client
+                .transact_write_items()
+                .set_transact_items(Some(items))
+                .send()
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(err)
+                    if err
+                        .as_service_error()
+                        .is_some_and(|e| e.is_transaction_canceled_exception()) =>
+                {
+                    debug!(
+                        "DynamoDB transaction cancelled, re-planning: {}",
+                        DisplayErrorContext(&err)
+                    );
+                }
+                Err(err) => {
+                    return Err(RepositoryError::QueryFailed(format!(
+                        "Failed to write records: {}",
+                        DisplayErrorContext(err)
+                    )));
+                }
+            }
         }
-        match request.send().await {
-            Ok(_) => Ok(true),
-            Err(err) if err.to_string().contains("ConditionalCheckFailed") => Ok(false),
-            Err(err) => Err(RepositoryError::QueryFailed(format!(
-                "Failed to delete record: {err}"
-            ))),
-        }
+        Err(RepositoryError::QueryFailed(format!(
+            "the items this write depends on kept changing; gave up after {MAX_WRITE_ATTEMPTS} \
+             attempts"
+        )))
     }
 
     pub fn client(&self) -> &Client {
@@ -171,6 +274,20 @@ fn not_found(key: &TrustRecordKey) -> RepositoryError {
     RepositoryError::RecordNotFound(format!("Record not found: {}", key.sk()))
 }
 
+/// How many times a write is re-planned when an item it read changed before
+/// its transaction ran.
+const MAX_WRITE_ATTEMPTS: usize = 5;
+
+/// Strongly consistent reads for the planners.
+pub(crate) struct DdbReader<'a>(&'a DynamoDbStorage);
+
+#[async_trait::async_trait]
+impl KeyedReader for DdbReader<'_> {
+    async fn read_at(&mut self, storage_key: &str) -> Result<Option<TrustRecord>, RepositoryError> {
+        self.0.get_record(storage_key).await
+    }
+}
+
 #[async_trait::async_trait]
 impl TrustRecordRepository for DynamoDbStorage {
     async fn find_by_query(
@@ -184,8 +301,7 @@ impl TrustRecordRepository for DynamoDbStorage {
             resource = query.resource.as_str(),
             "Querying trust record in DynamoDB"
         );
-
-        self.lookup(&TrustRecordKey::from_query(&query)).await
+        self.find(&TrustRecordKey::from_query(&query)).await
     }
 }
 
@@ -199,30 +315,11 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             resource = record.resource().as_str(),
             "Creating trust record in DynamoDB"
         );
-
-        let key = TrustRecordKey::from_record(&record);
-        let already_exists =
-            || RepositoryError::RecordAlreadyExists(format!("Record already exists: {}", key.sk()));
-        if self.lookup_earlier(&key).await?.is_some() {
-            return Err(already_exists());
-        }
-
-        self.client
-            .put_item()
-            .table_name(&self.table_name)
-            .set_item(Some(Self::build_item(&record, &key.sk())?))
-            .condition_expression("attribute_not_exists(SK)")
-            .send()
-            .await
-            .map_err(|err| {
-                if err.to_string().contains("ConditionalCheckFailed") {
-                    already_exists()
-                } else {
-                    RepositoryError::QueryFailed(format!("Failed to create record: {err}"))
-                }
-            })?;
-
-        Ok(())
+        self.write(|reader| {
+            let record = record.clone();
+            Box::pin(async move { plan_create(reader, &record).await })
+        })
+        .await
     }
 
     async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError> {
@@ -233,50 +330,11 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             resource = record.resource().as_str(),
             "Updating trust record in DynamoDB"
         );
-
-        let key = TrustRecordKey::from_record(&record);
-        let storage_key = key.sk();
-        let item = Self::build_item(&record, &storage_key)?;
-
-        let result = self
-            .client
-            .put_item()
-            .table_name(&self.table_name)
-            .set_item(Some(item.clone()))
-            .condition_expression("attribute_exists(SK)")
-            .send()
-            .await;
-        match result {
-            Ok(_) => return Ok(()),
-            Err(err) if err.to_string().contains("ConditionalCheckFailed") => {}
-            Err(err) => {
-                return Err(RepositoryError::QueryFailed(format!(
-                    "Failed to update record: {err}"
-                )));
-            }
-        }
-
-        // Not under the current key: it may still be under the earlier one.
-        if self.lookup_earlier(&key).await?.is_none() {
-            return Err(not_found(&key));
-        }
-        // Write the current key first: if the process stops before the earlier
-        // key is removed, both copies exist and the current one wins on read
-        // and in listings.
-        self.client
-            .put_item()
-            .table_name(&self.table_name)
-            .set_item(Some(item))
-            .send()
-            .await
-            .map_err(|err| {
-                RepositoryError::QueryFailed(format!("Failed to update record: {err}"))
-            })?;
-        if let Some(legacy) = key.legacy_sk() {
-            self.delete_item(&legacy, false).await?;
-        }
-
-        Ok(())
+        self.write(|reader| {
+            let record = record.clone();
+            Box::pin(async move { plan_update(reader, &record).await })
+        })
+        .await
     }
 
     async fn delete(&self, query: TrustRecordQuery) -> Result<(), RepositoryError> {
@@ -287,24 +345,12 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             resource = query.resource.as_str(),
             "Deleting trust record from DynamoDB"
         );
-
         let key = TrustRecordKey::from_query(&query);
-
-        // The earlier key goes first: if the process stops in between, the
-        // record is still present under its current key and a retried delete
-        // removes it. The other order would leave the old copy to be read back.
-        let mut deleted = false;
-        if self.lookup_earlier(&key).await?.is_some()
-            && let Some(legacy) = key.legacy_sk()
-        {
-            deleted |= self.delete_item(&legacy, true).await?;
-        }
-        deleted |= self.delete_item(&key.sk(), true).await?;
-
-        if !deleted {
-            return Err(not_found(&key));
-        }
-        Ok(())
+        self.write(|reader| {
+            let key = key.clone();
+            Box::pin(async move { plan_delete(reader, &key).await })
+        })
+        .await
     }
 
     async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
@@ -350,8 +396,7 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             resource = query.resource.as_str(),
             "Reading trust record from DynamoDB"
         );
-
         let key = TrustRecordKey::from_query(&query);
-        self.lookup(&key).await?.ok_or_else(|| not_found(&key))
+        self.find(&key).await?.ok_or_else(|| not_found(&key))
     }
 }
