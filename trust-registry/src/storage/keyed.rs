@@ -23,8 +23,11 @@ use crate::storage::repository::RepositoryError;
 /// The longest chain of records moved out of the way for one write.
 ///
 /// Each record in a chain has a longer key than the one before it, so a chain
-/// always ends; this bounds the work one write can cause.
-pub const MAX_DISPLACEMENT: usize = 16;
+/// always ends; this bounds the work one write can cause. It also keeps a
+/// write's atomic unit within DynamoDB's transaction limit: at most this many
+/// copies plus the record itself and the removal of its earlier copy, each
+/// item at most 400 KB, is under 4 MB.
+pub const MAX_DISPLACEMENT: usize = 8;
 
 /// What a key held when it was read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +56,19 @@ pub struct Op {
 #[async_trait::async_trait]
 pub trait KeyedReader: Send {
     async fn read_at(&mut self, storage_key: &str) -> Result<Option<TrustRecord>, RepositoryError>;
+
+    /// Read two keys as of one point in time, so a write that moves a record
+    /// from one to the other between two reads cannot make it look absent.
+    /// The default reads them one after the other; backends override it.
+    async fn read_pair(
+        &mut self,
+        first: &str,
+        second: &str,
+    ) -> Result<(Option<TrustRecord>, Option<TrustRecord>), RepositoryError> {
+        let first = self.read_at(first).await?;
+        let second = self.read_at(second).await?;
+        Ok((first, second))
+    }
 }
 
 fn expect_for(stored: &Option<TrustRecord>) -> Expect {
@@ -68,13 +84,16 @@ pub async fn lookup(
     reader: &mut impl KeyedReader,
     key: &TrustRecordKey,
 ) -> Result<Option<(String, TrustRecord)>, RepositoryError> {
-    for storage_key in std::iter::once(key.sk()).chain(key.legacy_sk()) {
-        let stored = reader.read_at(&storage_key).await?;
-        if let Some(record) = verified_record(key, &storage_key, stored) {
-            return Ok(Some((storage_key, record)));
-        }
+    let current = key.sk();
+    let Some(legacy) = key.legacy_sk() else {
+        let stored = reader.read_at(&current).await?;
+        return Ok(verified_record(key, &current, stored).map(|record| (current, record)));
+    };
+    let (at_current, at_legacy) = reader.read_pair(&current, &legacy).await?;
+    if let Some(record) = verified_record(key, &current, at_current) {
+        return Ok(Some((current, record)));
     }
-    Ok(None)
+    Ok(verified_record(key, &legacy, at_legacy).map(|record| (legacy, record)))
 }
 
 /// Clear `key`'s current key for its record.
@@ -86,7 +105,8 @@ async fn make_room(
     reader: &mut impl KeyedReader,
     key: &TrustRecordKey,
 ) -> Result<(Vec<Op>, Expect), RepositoryError> {
-    let first = reader.read_at(&key.sk()).await?;
+    let mut slot = key.sk();
+    let first = reader.read_at(&slot).await?;
     let slot_expect = expect_for(&first);
     let mut copies = Vec::new();
     let mut displaced = match first {
@@ -94,6 +114,19 @@ async fn make_room(
         _ => None,
     };
     while let Some(record) = displaced.take() {
+        // Only a record an older release stored under this exact string (its
+        // earlier key) is moved. Anything else is not where any release would
+        // have put it, and is left alone rather than moved or overwritten.
+        let own = TrustRecordKey::from_record(&record);
+        if own.legacy_sk().as_deref() != Some(slot.as_str()) {
+            tracing::error!(
+                storage_key = slot,
+                "stored record's identifiers match neither its key nor its earlier key format"
+            );
+            return Err(RepositoryError::QueryFailed(format!(
+                "the record stored under {slot} does not belong there; refusing to write over it"
+            )));
+        }
         if copies.len() == MAX_DISPLACEMENT {
             return Err(RepositoryError::ValidationError(format!(
                 "writing {} would move more than {MAX_DISPLACEMENT} records stored under the \
@@ -101,7 +134,6 @@ async fn make_room(
                 key.sk()
             )));
         }
-        let own = TrustRecordKey::from_record(&record);
         let target = own.sk();
         let stored = reader.read_at(&target).await?;
         match &stored {
@@ -109,11 +141,12 @@ async fn make_room(
             Some(existing) if own.identifies(existing) => {}
             _ => {
                 copies.push(Op {
-                    storage_key: target,
+                    storage_key: target.clone(),
                     expect: expect_for(&stored),
                     action: Action::Put(record),
                 });
                 displaced = stored;
+                slot = target;
             }
         }
     }
@@ -287,5 +320,19 @@ mod tests {
                 .expect("lookup");
             assert_eq!(found.map(|(_, record)| record).as_ref(), Some(wanted));
         }
+    }
+
+    #[tokio::test]
+    async fn a_record_that_belongs_under_neither_key_is_not_moved() {
+        let a = record("x#y");
+        let stray = record("unrelated");
+        let mut store = HashMap::new();
+        store.insert(TrustRecordKey::from_record(&a).sk(), stray);
+
+        let result = plan_create(&mut MapReader(&store), &a).await;
+        assert!(
+            matches!(result, Err(RepositoryError::QueryFailed(_))),
+            "{result:?}"
+        );
     }
 }

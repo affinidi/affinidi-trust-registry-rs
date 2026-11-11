@@ -16,6 +16,10 @@ use crate::storage::repository::*;
 /// Values are JSON-serialized TrustRecord objects
 #[derive(Clone)]
 pub struct RedisStorage {
+    /// One multiplexed connection. Every use must hold the write lock for the
+    /// whole operation: writes `WATCH` keys on this connection and then
+    /// `MULTI`/`EXEC`, and a command from another task in between would
+    /// change what is watched or land inside the transaction.
     connection: Arc<RwLock<MultiplexedConnection>>,
 }
 
@@ -73,6 +77,20 @@ impl KeyedReader for WatchingReader<'_> {
             .map_err(|e| RepositoryError::QueryFailed(format!("Redis WATCH failed: {e}")))?;
         RedisStorage::get_record(self.conn, storage_key).await
     }
+
+    async fn read_pair(
+        &mut self,
+        first: &str,
+        second: &str,
+    ) -> Result<(Option<TrustRecord>, Option<TrustRecord>), RepositoryError> {
+        redis::cmd("WATCH")
+            .arg(first)
+            .arg(second)
+            .exec_async(&mut *self.conn)
+            .await
+            .map_err(|e| RepositoryError::QueryFailed(format!("Redis WATCH failed: {e}")))?;
+        RedisStorage::get_pair(self.conn, first, second).await
+    }
 }
 
 /// Plain reads, for lookups.
@@ -84,6 +102,14 @@ struct PlainReader<'a> {
 impl KeyedReader for PlainReader<'_> {
     async fn read_at(&mut self, storage_key: &str) -> Result<Option<TrustRecord>, RepositoryError> {
         RedisStorage::get_record(self.conn, storage_key).await
+    }
+
+    async fn read_pair(
+        &mut self,
+        first: &str,
+        second: &str,
+    ) -> Result<(Option<TrustRecord>, Option<TrustRecord>), RepositoryError> {
+        RedisStorage::get_pair(self.conn, first, second).await
     }
 }
 
@@ -97,6 +123,29 @@ impl RedisStorage {
             .await
             .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {e}")))?;
         data.map(|data| Self::deserialize_record(&data)).transpose()
+    }
+
+    /// Both keys in one `MGET`, so they are read at one point in time.
+    async fn get_pair(
+        conn: &mut MultiplexedConnection,
+        first: &str,
+        second: &str,
+    ) -> Result<(Option<TrustRecord>, Option<TrustRecord>), RepositoryError> {
+        let values: Vec<Option<String>> = redis::cmd("MGET")
+            .arg(first)
+            .arg(second)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| RepositoryError::QueryFailed(format!("Redis MGET failed: {e}")))?;
+        let mut values = values.into_iter();
+        let mut next = || {
+            values
+                .next()
+                .flatten()
+                .map(|data| Self::deserialize_record(&data))
+                .transpose()
+        };
+        Ok((next()?, next()?))
     }
 
     async fn find(&self, key: &TrustRecordKey) -> Result<Option<TrustRecord>, RepositoryError> {
@@ -115,6 +164,12 @@ impl RedisStorage {
             -> futures::future::BoxFuture<'a, Result<Vec<Op>, RepositoryError>>,
     {
         let mut conn = self.connection.write().await;
+        // A write that was cancelled, or stopped on an error, after its
+        // WATCHes may have left keys watched; they would abort this EXEC.
+        redis::cmd("UNWATCH")
+            .exec_async(&mut *conn)
+            .await
+            .map_err(|e| RepositoryError::QueryFailed(format!("Redis UNWATCH failed: {e}")))?;
         for _ in 0..MAX_WRITE_ATTEMPTS {
             let planned = {
                 let mut reader = WatchingReader { conn: &mut conn };

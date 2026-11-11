@@ -8,7 +8,7 @@
 //! as JSON values. fjall is synchronous, so each operation runs on a blocking
 //! thread via [`tokio::task::spawn_blocking`].
 
-use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions};
+use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions, Readable};
 use tracing::{error, info};
 
 use std::sync::{Arc, Mutex};
@@ -75,7 +75,10 @@ impl FjallStorage {
             let _guard = write_lock
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let mut reader = FjallReader(keyspace.clone());
+            let mut reader = FjallReader {
+                keyspace: keyspace.clone(),
+                db: db.clone(),
+            };
             let ops = futures::executor::block_on(plan(&mut reader))?;
             let mut batch = db.batch();
             for op in ops {
@@ -95,17 +98,42 @@ impl FjallStorage {
     }
 }
 
-/// Reads for the write planners.
-pub(crate) struct FjallReader(Keyspace);
+/// Reads for lookups and the write planners.
+pub(crate) struct FjallReader {
+    keyspace: Keyspace,
+    db: Database,
+}
+
+fn decode(value: Option<fjall::UserValue>) -> Result<Option<TrustRecord>, RepositoryError> {
+    value
+        .map(|value| FjallStorage::deserialize(&value))
+        .transpose()
+}
 
 #[async_trait::async_trait]
 impl KeyedReader for FjallReader {
     async fn read_at(&mut self, storage_key: &str) -> Result<Option<TrustRecord>, RepositoryError> {
-        self.0
-            .get(storage_key.as_bytes())
-            .map_err(query_error)?
-            .map(|value| FjallStorage::deserialize(&value))
-            .transpose()
+        decode(
+            self.keyspace
+                .get(storage_key.as_bytes())
+                .map_err(query_error)?,
+        )
+    }
+
+    /// Both keys from one snapshot.
+    async fn read_pair(
+        &mut self,
+        first: &str,
+        second: &str,
+    ) -> Result<(Option<TrustRecord>, Option<TrustRecord>), RepositoryError> {
+        let snapshot = self.db.snapshot();
+        let first = snapshot
+            .get(&self.keyspace, first.as_bytes())
+            .map_err(query_error)?;
+        let second = snapshot
+            .get(&self.keyspace, second.as_bytes())
+            .map_err(query_error)?;
+        Ok((decode(first)?, decode(second)?))
     }
 }
 
@@ -124,7 +152,10 @@ impl TrustRecordRepository for FjallStorage {
         query: TrustRecordQuery,
     ) -> Result<Option<TrustRecord>, RepositoryError> {
         let key = TrustRecordKey::from_query(&query);
-        let mut reader = FjallReader(self.keyspace.clone());
+        let mut reader = FjallReader {
+            keyspace: self.keyspace.clone(),
+            db: self.db.clone(),
+        };
         tokio::task::spawn_blocking(move || {
             Ok(futures::executor::block_on(lookup(&mut reader, &key))?.map(|(_, record)| record))
         })

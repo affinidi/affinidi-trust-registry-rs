@@ -5,7 +5,7 @@ use aws_config::BehaviorVersion;
 use aws_sdk_dynamodb::{
     Client,
     error::{BuildError, DisplayErrorContext},
-    types::{AttributeValue, Delete, Put, TransactWriteItem},
+    types::{AttributeValue, Delete, Get, Put, TransactGetItem, TransactWriteItem},
 };
 use aws_types::region::Region;
 use tracing::debug;
@@ -212,7 +212,10 @@ impl DynamoDbStorage {
         )
             -> futures::future::BoxFuture<'a, Result<Vec<Op>, RepositoryError>>,
     {
-        for _ in 0..MAX_WRITE_ATTEMPTS {
+        for attempt in 0..MAX_WRITE_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(retry_delay(attempt)).await;
+            }
             let ops = {
                 let mut reader = DdbReader(self);
                 plan(&mut reader).await?
@@ -286,6 +289,65 @@ impl KeyedReader for DdbReader<'_> {
     async fn read_at(&mut self, storage_key: &str) -> Result<Option<TrustRecord>, RepositoryError> {
         self.0.get_record(storage_key).await
     }
+
+    /// Both items in one `TransactGetItems`, which reads them at one point in
+    /// time.
+    async fn read_pair(
+        &mut self,
+        first: &str,
+        second: &str,
+    ) -> Result<(Option<TrustRecord>, Option<TrustRecord>), RepositoryError> {
+        let get = |storage_key: &str| -> Result<TransactGetItem, RepositoryError> {
+            Ok(TransactGetItem::builder()
+                .get(
+                    Get::builder()
+                        .table_name(&self.0.table_name)
+                        .set_key(Some(DynamoDbStorage::build_key(storage_key)))
+                        .build()
+                        .map_err(|e| RepositoryError::QueryFailed(e.to_string()))?,
+                )
+                .build())
+        };
+        let response = self
+            .0
+            .client
+            .transact_get_items()
+            .transact_items(get(first)?)
+            .transact_items(get(second)?)
+            .send()
+            .await
+            .map_err(|err| {
+                RepositoryError::ConnectionFailed(format!(
+                    "Failed to fetch items from DynamoDB: {}",
+                    DisplayErrorContext(err)
+                ))
+            })?;
+        let mut items = response
+            .responses
+            .unwrap_or_default()
+            .into_iter()
+            .map(|response| response.item);
+        let mut next = || {
+            items
+                .next()
+                .flatten()
+                .map(|item| {
+                    serde_dynamo::from_item(item)
+                        .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))
+                })
+                .transpose()
+        };
+        Ok((next()?, next()?))
+    }
+}
+
+/// How long to wait before re-planning a cancelled transaction: an
+/// exponential base (20, 40, 80, 160 ms) plus up to as much again at random,
+/// so writers that collided do not collide again in step.
+fn retry_delay(attempt: usize) -> std::time::Duration {
+    let base_ms = 20u64 << attempt.saturating_sub(1).min(8);
+    let jitter_ms = (uuid::Uuid::new_v4().as_u128() % u128::from(base_ms)) as u64;
+    std::time::Duration::from_millis(base_ms + jitter_ms)
 }
 
 #[async_trait::async_trait]
@@ -398,5 +460,24 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
         );
         let key = TrustRecordKey::from_query(&query);
         self.find(&key).await?.ok_or_else(|| not_found(&key))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_delays_grow_and_stay_bounded() {
+        for attempt in 1..MAX_WRITE_ATTEMPTS {
+            let base = 20u64 << (attempt - 1);
+            for _ in 0..50 {
+                let delay = retry_delay(attempt).as_millis() as u64;
+                assert!(
+                    (base..2 * base).contains(&delay),
+                    "attempt {attempt}: {delay} ms"
+                );
+            }
+        }
     }
 }
