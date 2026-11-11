@@ -167,7 +167,7 @@ cargo --version
 
 To deploy and run a DIDComm mediator, see the [deployment options](https://docs.affinidi.com/products/affinidi-messaging/didcomm-mediator/deployment-options/) page in the documentation.
 
-**Mediator compatibility.** The Trust Registry sets its own access-list mode (`ACL_MODE`) at the mediator with the `messaging/account/get` and `messaging/account/update` Trust Tasks, so the mediator must answer them. affinidi-messaging-mediator 0.31.0 and later accepts only Trust Tasks for administration (the legacy `mediator/1.0` account and ACL protocols are removed). This release is checked against 0.33.1. Trust Registry releases before 0.19.0 use the legacy protocols and cannot set their mode on a 0.31.0 or later mediator. If the mediator refuses the update, a public registry (`ACL_MODE=ExplicitDeny`) logs `Failed to set ACL mode` and keeps running, since at worst it stays private: unreachable rather than exposed. A private registry (`ACL_MODE=ExplicitAllow`) fails closed. Its DIDComm listener does not start, so it never serves from an account that may still accept anyone. `/health` reports `"status": "degraded"` with the reason in `detail`, and REST reads keep answering.
+**Mediator compatibility.** The Trust Registry sets its own access-list mode (`ACL_MODE`) at the mediator with the `messaging/account/get` and `messaging/account/update` Trust Tasks, so the mediator must answer them. affinidi-messaging-mediator 0.31.0 and later accepts only Trust Tasks for administration (the legacy `mediator/1.0` account and ACL protocols are removed). This release is checked against 0.33.1. Trust Registry releases before 0.19.0 use the legacy protocols and cannot set their mode on a 0.31.0 or later mediator. If the mediator refuses the update, a public registry (`ACL_MODE=ExplicitDeny`) logs `Failed to set ACL mode` and keeps running, since at worst it stays private: unreachable rather than exposed. A private registry (`ACL_MODE=ExplicitAllow`) fails closed. Its DIDComm listener does not start, so it never serves from an account that may still accept anyone. `/health` reports `"status": "degraded"` with the failure class in `detail` (the error itself is in the log), and REST reads keep answering.
 
 `setup-trust-registry` and `generate-secrets` give the registry an Ed25519 signing key and an X25519 key-agreement key, the pair a mediator holds by default. A mediator with `security.trust_task_verification = "enforce"` (the default `mediator-setup` writes) accepts these Trust Tasks only when they carry a proof, and the messaging SDK signs them only with an **Ed25519** key. A registry DID whose keys are all P-256 (what those tools generated before this release) is affected twice. It cannot authenticate to a mediator that holds no P-256 key (`mediator-setup` adds one only with `--key-suite p256`). Even on one that does, it sends these Trust Tasks unsigned, so an enforcing mediator refuses them (`proof_required`) and the mode is not applied. A private registry then does not serve DIDComm at all (see above). Re-key such a registry, or run its mediator with a P-256 key and `trust_task_verification = "warn"`.
 
@@ -553,6 +553,11 @@ let app = host_router.nest("/registry", registry.router());
 `/health`** — both belong to the host, and applying ours would override or
 collide with theirs. Use `registry.health()` to fold the registry's health into
 the host's own endpoint, or `registry.health_router()` for a ready-made one.
+
+The routes are unauthenticated. `router()` applies the request body limit
+(`server_config.http_limits.max_body_bytes`); the host must bound request time,
+requests in flight and connections itself, as the standalone service does
+(`trust_registry::http::limits` has the pieces it uses).
 
 `/.well-known/did.json` is only meaningful at the server root, so a host nesting
 under a prefix should serve the registry's DID document itself, or mount at `/`.
@@ -955,6 +960,11 @@ See the list of environment variables and their usage.
 | `DDB_TABLE_NAME`        | DynamoDB table name for storing trust records when using DDB as the storage backend.                                                                                                      | Required when `TR_STORAGE_BACKEND` = `ddb`   |
 | `REDIS_URL`             | Redis connection URL when using Redis as the storage backend. Format: `redis://host:port` or `redis://username:password@host:port/db`.                                                    | Required when `TR_STORAGE_BACKEND` = `redis` |
 | `CORS_ALLOWED_ORIGINS`  | Comma-separated list of allowed URLs for CORS.                                                                                                                                            | Yes                                          |
+| `TR_HTTP_REQUEST_TIMEOUT_SECS` | The longest an HTTP request may take; a slower one is answered `503` with `Retry-After`. | default: `10` |
+| `TR_HTTP_IDLE_TIMEOUT_SECS` | An HTTP connection that sends and receives nothing for this long is closed. Must be longer than the request timeout. | default: `30` |
+| `TR_HTTP_MAX_BODY_BYTES` | The largest HTTP request body accepted; a larger one is answered `413`. Also applied by `TrustRegistry::router()`. | default: `65536` |
+| `TR_HTTP_MAX_CONCURRENT_REQUESTS` | The most HTTP requests answered at once; beyond it a request is answered `503` with `Retry-After` at once. | default: `256` |
+| `TR_HTTP_MAX_CONNECTIONS` | The most HTTP connections held open; beyond it new connections wait until one closes. | default: `1024` |
 | `AUDIT_LOG_FORMAT`      | Output format for audit logs. Options: `json` (default), `text` (`audit.<key>="<escaped value>"` pairs).                                                                                  | default: `json`                              |
 | `MEDIATOR_DID`          | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records.                                                                              | Required when DIDComm is enabled             |
 | `ADMIN_DIDS`            | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry.                                                                                                    | Required when DIDComm is enabled             |

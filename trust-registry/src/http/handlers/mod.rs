@@ -2,6 +2,7 @@ use crate::SharedData;
 use crate::storage::repository::TrustRecordRepository;
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     routing::{get, post},
 };
 
@@ -22,10 +23,13 @@ where
             get(wellknown::handle_wellknown_did_json::<R>),
         );
 
+    let max_body_bytes = shared_data.config.server_config.http_limits.max_body_bytes;
     let router = if api_prefix.is_empty() || api_prefix == "/" {
         Router::new().merge(all_handlers)
     } else {
         Router::new().nest(api_prefix, all_handlers)
     };
-    router.with_state(shared_data)
+    router
+        .layer(DefaultBodyLimit::max(max_body_bytes))
+        .with_state(shared_data)
 }

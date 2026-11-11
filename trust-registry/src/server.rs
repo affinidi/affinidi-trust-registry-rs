@@ -13,6 +13,7 @@ use crate::{
     didcomm::listener::start_didcomm_listener,
     health::RegistryHealth,
     http::application_routes,
+    http::limits::{BoundedListener, bound_requests},
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -149,13 +150,16 @@ impl ServerHandle {
     }
 }
 
-/// One-line reason a task ended, for the `/health` `detail` field.
+/// How a task ended, for the `/health` `detail` field. `/health` is public,
+/// so it carries the class of the failure only; the error itself is logged
+/// ([`log_task_exit`]).
 fn describe_task_exit(result: &Result<Result<(), BoxError>, tokio::task::JoinError>) -> String {
     match result {
-        Ok(Ok(())) => "didcomm listener exited cleanly".to_string(),
-        Ok(Err(e)) => format!("didcomm listener failed: {e}"),
-        Err(e) => format!("didcomm listener panicked: {e}"),
+        Ok(Ok(())) => "didcomm listener exited cleanly",
+        Ok(Err(_)) => "didcomm listener failed; see the registry's log",
+        Err(_) => "didcomm listener panicked; see the registry's log",
     }
+    .to_string()
 }
 
 fn log_task_exit(name: &str, result: &Result<Result<(), BoxError>, tokio::task::JoinError>) {
@@ -190,12 +194,14 @@ fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
         .allow_headers(tower_http::cors::Any)
 }
 
-/// Build the top-level HTTP router (health check + TRQP application routes + CORS).
+/// Build the top-level HTTP router (health check + TRQP application routes +
+/// request limits + CORS).
 ///
 /// The service form of the router. The application routes themselves are the
 /// same ones [`crate::TrustRegistry::router`] hands an embedding host; what the
-/// service adds on top is `/health` and the CORS layer, both of which a host
-/// owns for itself.
+/// service adds on top is `/health`, the request time and concurrency limits
+/// ([`crate::http::limits`]) and the CORS layer, all of which a host owns for
+/// itself.
 fn build_router(parts: &crate::embed::RegistryParts) -> Router {
     let cors = build_cors_layer(&parts.config.server_config.cors_allowed_origins);
 
@@ -208,9 +214,8 @@ fn build_router(parts: &crate::embed::RegistryParts) -> Router {
         }),
     );
 
-    health_route
-        .merge(application_routes("", parts.shared_data()))
-        .layer(cors)
+    let routes = health_route.merge(application_routes("", parts.shared_data()));
+    bound_requests(routes, &parts.config.server_config.http_limits).layer(cors)
 }
 
 async fn start_didcomm_server(
@@ -282,8 +287,9 @@ pub(crate) async fn serve_registry(
         info!("HTTP server is starting on {http_addr}...");
 
         let http_shutdown = parts.shutdown.clone();
+        let limits = parts.config.server_config.http_limits;
         let http_task = tokio::spawn(async move {
-            axum::serve(listener, router)
+            axum::serve(BoundedListener::new(listener, &limits), router)
                 .with_graceful_shutdown(async move { http_shutdown.cancelled().await })
                 .await
                 .map_err(BoxError::from)

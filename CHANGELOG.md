@@ -71,6 +71,20 @@ release goes GA (`## 0.27.0 (date)`).
   `FjallRelationshipKv`, `start_managed_delivery` the health handle and
   `run_inbound_loop` the relationship store; `FjallRelationshipKv::new` is
   replaced by the async `FjallRelationshipKv::open`.
+- **The HTTP server bounds requests and connections.** The standalone service
+  answers a request not ready within `TR_HTTP_REQUEST_TIMEOUT_SECS` (default
+  10) with `503` and `Retry-After`, answers at most
+  `TR_HTTP_MAX_CONCURRENT_REQUESTS` (default 256) at once (beyond that, `503`
+  at once), holds at most `TR_HTTP_MAX_CONNECTIONS` (default 1024) connections
+  and closes one idle for `TR_HTTP_IDLE_TIMEOUT_SECS` (default 30). Request
+  bodies are limited to `TR_HTTP_MAX_BODY_BYTES` (default 64 KiB, was axum's
+  2 MB), also on `TrustRegistry::router()`; a larger body is answered `413`. A
+  malformed value of any of these stops startup. Answers carry
+  `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`.
+  `ServerConfig` has a new `http_limits` member.
+- **`/health` names the failure class, not the error.** `detail` says whether
+  the DIDComm listener failed or panicked; the error itself is logged.
+- **4xx HTTP answers are logged at `debug`**, not `warn`; 5xx stay at `error`.
 
 ## 0.31.0 (release/0.31)
 

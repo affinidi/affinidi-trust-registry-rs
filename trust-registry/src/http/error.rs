@@ -14,7 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::{Map, Value};
-use tracing::{error, warn};
+use tracing::{debug, error};
 
 const LAST_WARNING_ERROR_CODE: u16 = 499;
 
@@ -109,7 +109,10 @@ impl IntoResponse for AppError {
         if status.as_u16() > LAST_WARNING_ERROR_CODE {
             error!(%internal_error, title, %detail, "HTTP request failed with error. details: {:?}", details);
         } else {
-            warn!(%internal_error, title, %detail, "HTTP request failed with exception. details: {:?}", details);
+            // A 4xx is an ordinary answer to the caller's request, such as a
+            // record that does not exist: logged for debugging, not as a
+            // warning, so callers do not decide the warning log's volume.
+            debug!(%internal_error, title, %detail, "HTTP request failed with exception. details: {:?}", details);
         }
 
         let mut payload = Map::new();

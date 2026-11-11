@@ -122,7 +122,13 @@ impl TrustRegistry {
     /// - a CORS layer — see [`crate::server`]'s standalone wiring for what the
     ///   service applies to itself;
     /// - `/health` — available separately as [`health_router`](Self::health_router),
-    ///   or fold [`health`](Self::health) into the host's own endpoint.
+    ///   or fold [`health`](Self::health) into the host's own endpoint;
+    /// - request time, concurrency and connection limits — every route here
+    ///   is unauthenticated, so a host exposing them must bound requests
+    ///   itself, as [`crate::http::limits`] does for the standalone service.
+    ///
+    /// The request body limit (`server_config.http_limits.max_body_bytes`) is
+    /// applied to these routes.
     ///
     /// Note `/.well-known/did.json` is only meaningful at the server root; a
     /// host nesting the registry under a prefix should serve the registry's DID

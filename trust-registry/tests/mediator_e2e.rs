@@ -256,11 +256,18 @@ async fn run_private_mode_refused() -> Result<(), String> {
         let health = registry
             .wait_for_health(REPLY_TIMEOUT, |h| h["status"] == "degraded")
             .await?;
+        // `/health` is public, so it names the failure class only; the
+        // refused mode itself is in the registry's log.
         expect(
             health["detail"]
                 .as_str()
-                .is_some_and(|d| d.contains("Failed to set ACL mode ExplicitAllow")),
-            "/health names the refused private mode",
+                .is_some_and(|d| d.contains("didcomm listener failed")),
+            "/health says the listener failed",
+            &health,
+        )?;
+        expect(
+            registry.log_contains("Failed to set ACL mode ExplicitAllow"),
+            "the log names the refused private mode",
             &health,
         )?;
         let recognition = post(
