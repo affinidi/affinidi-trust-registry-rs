@@ -20,13 +20,15 @@
 //! The store is bounded, since any VID TSP authenticates can form a
 //! relationship ([`super::tsp_inbound`]):
 //!
-//! - **by size**: [`FjallRelationshipKv`] holds at most
-//!   [`RelationshipLimits::max_relationships`] relationships. Recording one
-//!   more evicts the least recently active relationship first, so a new peer
-//!   is always admitted and the cost of a full store falls on the idlest peer,
-//!   which re-handshakes when it next writes. Relationships with an admin
-//!   (`ADMIN_DIDS`) neither count against the limit nor are evicted. While the
-//!   store is at its limit `/health` reports it (`tspRelationships: "full"`);
+//! - **by size and rate**: [`FjallRelationshipKv`] holds at most
+//!   [`RelationshipLimits::max_relationships`] relationships, recording at most
+//!   [`RelationshipLimits::max_new_per_minute`] new ones a minute. When full, a
+//!   new peer may only displace a relationship that never completed, or one
+//!   idle past a floor; an established relationship in use is never
+//!   displaced, and when nothing can be the new one is refused. Relationships
+//!   with an admin (`ADMIN_DIDS`) are exempt from both limits and never
+//!   displaced. While the store is at its limit `/health` reports it
+//!   (`tspRelationships: "full"`);
 //! - **by age**: every relationship is stamped active when it is accepted and
 //!   on each application message, and the maintenance loop evicts one idle for
 //!   [`RelationshipLimits::idle_ttl`]. A relationship restored with no stamp,
@@ -38,6 +40,7 @@ use std::time::Duration;
 
 use affinidi_did_common::scid::same_reference;
 use affinidi_messaging_sdk::errors::ATMError;
+use affinidi_messaging_sdk::protocols::tsp::RelationshipState;
 use affinidi_messaging_sdk::{EvictionPolicy, PersistentRelationshipStore, RelationshipKv};
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -66,7 +69,7 @@ const MIN_IDLE_TTL: Duration = Duration::from_secs(60);
 /// `protocols::tsp::rel_key`): `PREFIX ‖ facet ‖ len(our) u32-BE ‖ our ‖ their`.
 const REL_KEY_PREFIX: &[u8] = b"tsp-rel/v1/";
 /// The facets the SDK stores, `FACET_LAST_ACTIVE` last.
-const FACETS: [u8; RECORDS_PER_RELATIONSHIP] = [1, 2, 3, 4, FACET_LAST_ACTIVE];
+const FACETS: [u8; RECORDS_PER_RELATIONSHIP] = [FACET_STATE, 2, 3, 4, FACET_LAST_ACTIVE];
 const FACET_LAST_ACTIVE: u8 = 5;
 
 /// `(our_vid, their_vid)`.
@@ -93,39 +96,55 @@ fn encode_key(facet: u8, (our, their): &Pair) -> Vec<u8> {
     key
 }
 
-/// How large the TSP relationship store may grow and how long an idle
-/// relationship is kept.
+/// How large the TSP relationship store may grow, how fast, and how long an
+/// idle relationship is kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelationshipLimits {
     /// The most relationships with non-admin peers the store holds.
     pub max_relationships: usize,
     /// How long a relationship with no activity is kept.
     pub idle_ttl: Duration,
+    /// The most relationships with new non-admin peers recorded per minute.
+    pub max_new_per_minute: usize,
 }
+
+/// Default for [`RelationshipLimits::max_new_per_minute`].
+pub const DEFAULT_MAX_NEW_PER_MINUTE: usize = 60;
+
+/// The shortest time an established relationship must have been idle before a
+/// new peer may displace it from a full store.
+const MIN_DISPLACEMENT_IDLE: Duration = Duration::from_secs(60 * 60);
+
 impl Default for RelationshipLimits {
     fn default() -> Self {
         Self {
             max_relationships: DEFAULT_MAX_RELATIONSHIPS,
             idle_ttl: DEFAULT_IDLE_TTL,
+            max_new_per_minute: DEFAULT_MAX_NEW_PER_MINUTE,
         }
     }
 }
 
 impl RelationshipLimits {
-    /// Read `TR_TSP_MAX_RELATIONSHIPS` and `TR_TSP_RELATIONSHIP_IDLE_SECS`; each
-    /// takes its default when unset. A value that is not a positive whole
-    /// number, or an idle period under a minute, is an error rather than a
-    /// silent default, so a typo cannot lift the bound.
+    /// Read `TR_TSP_MAX_RELATIONSHIPS`, `TR_TSP_RELATIONSHIP_IDLE_SECS` and
+    /// `TR_TSP_MAX_NEW_RELATIONSHIPS_PER_MINUTE`; each takes its default when
+    /// unset. A value that is not a positive whole number, or an idle period
+    /// under a minute, is an error rather than a silent default, so a typo
+    /// cannot lift the bound.
     pub fn from_env() -> Result<Self, String> {
+        let read = |name: &str| std::env::var(name).ok();
         Self::parse(
-            std::env::var("TR_TSP_MAX_RELATIONSHIPS").ok().as_deref(),
-            std::env::var("TR_TSP_RELATIONSHIP_IDLE_SECS")
-                .ok()
-                .as_deref(),
+            read("TR_TSP_MAX_RELATIONSHIPS").as_deref(),
+            read("TR_TSP_RELATIONSHIP_IDLE_SECS").as_deref(),
+            read("TR_TSP_MAX_NEW_RELATIONSHIPS_PER_MINUTE").as_deref(),
         )
     }
 
-    fn parse(max_relationships: Option<&str>, idle_secs: Option<&str>) -> Result<Self, String> {
+    fn parse(
+        max_relationships: Option<&str>,
+        idle_secs: Option<&str>,
+        max_new_per_minute: Option<&str>,
+    ) -> Result<Self, String> {
         let positive = |name: &str, raw: &str| {
             raw.trim()
                 .parse::<u64>()
@@ -133,10 +152,16 @@ impl RelationshipLimits {
                 .filter(|value| *value > 0)
                 .ok_or_else(|| format!("{name} must be a positive whole number, not {raw:?}"))
         };
+        let count = |name: &str, raw: &str| {
+            usize::try_from(positive(name, raw)?)
+                .map_err(|_| format!("{name} is out of range: {raw}"))
+        };
         let mut limits = Self::default();
         if let Some(raw) = max_relationships {
-            limits.max_relationships = usize::try_from(positive("TR_TSP_MAX_RELATIONSHIPS", raw)?)
-                .map_err(|_| format!("TR_TSP_MAX_RELATIONSHIPS is out of range: {raw}"))?;
+            limits.max_relationships = count("TR_TSP_MAX_RELATIONSHIPS", raw)?;
+        }
+        if let Some(raw) = max_new_per_minute {
+            limits.max_new_per_minute = count("TR_TSP_MAX_NEW_RELATIONSHIPS_PER_MINUTE", raw)?;
         }
         if let Some(raw) = idle_secs {
             limits.idle_ttl = Duration::from_secs(positive("TR_TSP_RELATIONSHIP_IDLE_SECS", raw)?);
@@ -161,76 +186,169 @@ impl RelationshipLimits {
     pub fn sweep_interval(&self) -> Duration {
         (self.idle_ttl / 2).clamp(MIN_IDLE_TTL / 2, MAX_SWEEP_INTERVAL)
     }
+
+    /// How long an established relationship must have been idle before a new
+    /// peer may displace it from a full store: a quarter of the idle period,
+    /// at least an hour, and no more than the idle period itself.
+    pub fn displacement_idle(&self) -> Duration {
+        (self.idle_ttl / 4)
+            .max(MIN_DISPLACEMENT_IDLE)
+            .min(self.idle_ttl)
+    }
 }
 
 /// A [`RelationshipKv`] over the messaging store's `relationships` keyspace,
 /// bounded to [`RelationshipLimits::max_relationships`] relationships with
-/// non-admin peers.
+/// non-admin peers and to
+/// [`RelationshipLimits::max_new_per_minute`] new ones a minute.
 ///
-/// Keeps an index of the relationships it holds and when each was last
-/// active, built from the keyspace's keys (and the small last-activity
-/// records) on open. Recording a relationship beyond the limit first forgets
-/// the least recently active non-admin one, never-stamped ones first.
+/// Keeps an index of the relationships it holds — which records each has,
+/// its state and when it was last active — built from the keyspace's keys and
+/// the small state and last-activity records on open.
+///
+/// When the store is full, a relationship with a new peer displaces, oldest
+/// first, one that never completed (an invite received and not established),
+/// or failing that one idle for at least
+/// [`RelationshipLimits::displacement_idle`] (the registry's own pending
+/// invites are held to the same floor as established relationships). An
+/// established relationship in use is never displaced: when nothing can be,
+/// the new relationship is refused and `/health` reports the store full. A
+/// stream of new peers therefore churns only half-open relationships, and only
+/// as fast as the per-minute limit allows.
 pub struct FjallRelationshipKv {
     keyspace: KvKeyspace,
-    max_relationships: usize,
-    /// Peers whose relationships are neither counted nor evicted.
+    limits: RelationshipLimits,
+    /// Peers whose relationships are neither counted nor displaced.
     reserved: Vec<String>,
     health: Option<Arc<RegistryHealth>>,
     /// Held across each put and delete, so the index and the keyspace move
     /// together.
-    index: Mutex<BTreeMap<Pair, Held>>,
+    index: Mutex<Index>,
+}
+
+/// What the adapter knows about the relationships it holds.
+#[derive(Default)]
+struct Index {
+    pairs: BTreeMap<Pair, Held>,
+    /// Pairs that count against the limit (not reserved).
+    counted: usize,
+    /// The current one-minute window of new relationships: when it began and
+    /// how many were recorded in it.
+    window_started: Option<std::time::Instant>,
+    new_in_window: usize,
 }
 
 /// What the index knows about one relationship.
 #[derive(Debug, Clone, Copy, Default)]
 struct Held {
-    records: usize,
+    /// One bit per facet present.
+    facets: u8,
+    state: Option<RelationshipState>,
     /// When it was last stamped active, if ever.
     last_active: Option<u64>,
+    reserved: bool,
 }
+
+fn facet_bit(facet: u8) -> u8 {
+    1u8.checked_shl(u32::from(facet)).unwrap_or(0)
+}
+
+impl Index {
+    fn insert(&mut self, pair: Pair, held: Held) {
+        if !held.reserved {
+            self.counted += 1;
+        }
+        self.pairs.insert(pair, held);
+    }
+
+    fn remove(&mut self, pair: &Pair) {
+        if let Some(held) = self.pairs.remove(pair)
+            && !held.reserved
+        {
+            self.counted = self.counted.saturating_sub(1);
+        }
+    }
+
+    /// Clear `facet` of `pair`, forgetting the pair once it has none left.
+    fn clear_facet(&mut self, pair: &Pair, facet: u8) {
+        let empty = match self.pairs.get_mut(pair) {
+            Some(held) => {
+                held.facets &= !facet_bit(facet);
+                if facet == FACET_LAST_ACTIVE {
+                    held.last_active = None;
+                }
+                if facet == FACET_STATE {
+                    held.state = None;
+                }
+                held.facets == 0
+            }
+            None => false,
+        };
+        if empty {
+            self.remove(pair);
+        }
+    }
+}
+
+const FACET_STATE: u8 = 1;
 
 impl FjallRelationshipKv {
     /// Open the store over `keyspace`, indexing the relationships it already
     /// holds. Relationships with a peer in `reserved` (the admin DIDs) are not
-    /// counted against the limit and never evicted to make room. `health`, when
-    /// given, is told whether the store is at its limit.
+    /// counted against the limits and never displaced. `health`, when given,
+    /// is told whether the store is at its limit.
     pub async fn open(
         keyspace: KvKeyspace,
-        max_relationships: usize,
+        limits: RelationshipLimits,
         reserved: Vec<String>,
         health: Option<Arc<RegistryHealth>>,
     ) -> Result<Self, String> {
-        let mut index: BTreeMap<Pair, Held> = BTreeMap::new();
-        for key in keyspace.scan_keys_prefix(REL_KEY_PREFIX.to_vec()).await? {
-            if let Some((_, pair)) = decode_key(&key) {
-                index.entry(pair).or_default().records += 1;
-            }
-        }
-        let mut last_active_prefix = REL_KEY_PREFIX.to_vec();
-        last_active_prefix.push(FACET_LAST_ACTIVE);
-        for (key, value) in keyspace.scan_prefix(last_active_prefix).await? {
-            if let (Some((_, pair)), Ok(at)) = (decode_key(&key), serde_json::from_slice(&value)) {
-                index.entry(pair).or_default().last_active = Some(at);
-            }
-        }
         let kv = Self {
             keyspace,
-            max_relationships,
+            limits,
             reserved,
             health,
-            index: Mutex::new(index),
+            index: Mutex::new(Index::default()),
         };
-        let held = kv.counted(&*kv.index.lock().await);
-        if held >= max_relationships {
+        let mut index = Index::default();
+        let mut held: BTreeMap<Pair, Held> = BTreeMap::new();
+        for key in kv
+            .keyspace
+            .scan_keys_prefix(REL_KEY_PREFIX.to_vec())
+            .await?
+        {
+            if let Some((facet, pair)) = decode_key(&key) {
+                held.entry(pair).or_default().facets |= facet_bit(facet);
+            }
+        }
+        for facet in [FACET_STATE, FACET_LAST_ACTIVE] {
+            let mut prefix = REL_KEY_PREFIX.to_vec();
+            prefix.push(facet);
+            for (key, value) in kv.keyspace.scan_prefix(prefix).await? {
+                let Some((_, pair)) = decode_key(&key) else {
+                    continue;
+                };
+                let entry = held.entry(pair).or_default();
+                if facet == FACET_STATE {
+                    entry.state = serde_json::from_slice(&value).ok();
+                } else {
+                    entry.last_active = serde_json::from_slice(&value).ok();
+                }
+            }
+        }
+        for (pair, mut entry) in held {
+            entry.reserved = kv.is_reserved(&pair);
+            index.insert(pair, entry);
+        }
+        if index.counted >= limits.max_relationships {
             warn!(
-                held,
-                max_relationships,
-                "the TSP relationship store is full: a new peer replaces the least recently \
-                 active one"
+                held = index.counted,
+                max_relationships = limits.max_relationships,
+                "the TSP relationship store is full"
             );
         }
-        kv.report(held);
+        kv.report(&index);
+        *kv.index.lock().await = index;
         Ok(kv)
     }
 
@@ -240,14 +358,9 @@ impl FjallRelationshipKv {
             .any(|admin| same_reference(admin, their))
     }
 
-    /// Relationships that count against the limit.
-    fn counted(&self, index: &BTreeMap<Pair, Held>) -> usize {
-        index.keys().filter(|pair| !self.is_reserved(pair)).count()
-    }
-
-    fn report(&self, held: usize) {
+    fn report(&self, index: &Index) {
         if let Some(health) = &self.health {
-            health.set_tsp_relationships_full(held >= self.max_relationships);
+            health.set_tsp_relationships_full(index.counted >= self.limits.max_relationships);
         }
     }
 
@@ -256,33 +369,96 @@ impl FjallRelationshipKv {
         self.index
             .lock()
             .await
+            .pairs
             .iter()
             .filter(|(_, held)| held.last_active.is_none())
             .map(|(pair, _)| pair.clone())
             .collect()
     }
 
-    /// Forget the least recently active counted relationship, to make room.
-    async fn evict_one(&self, index: &mut BTreeMap<Pair, Held>) -> Result<(), ATMError> {
-        let Some(victim) = index
-            .iter()
-            .filter(|(pair, _)| !self.is_reserved(pair))
-            .min_by_key(|(_, held)| held.last_active.unwrap_or(0))
-            .map(|(pair, _)| pair.clone())
-        else {
-            return Ok(());
+    /// The relationship a new peer may displace from a full store, if any:
+    /// the oldest that never completed (an invite received, or state left
+    /// unset), else the oldest whose last activity is older than the
+    /// displacement floor. An established relationship or a pending invite of
+    /// our own that is in use is never chosen.
+    fn displaceable(&self, index: &Index, now_ms: u64) -> Option<Pair> {
+        let floor_ms =
+            u64::try_from(self.limits.displacement_idle().as_millis()).unwrap_or(u64::MAX);
+        let idle = |held: &Held| {
+            held.last_active
+                .is_none_or(|at| now_ms.saturating_sub(at) >= floor_ms)
         };
+        let half_open = |held: &Held| {
+            !matches!(
+                held.state,
+                Some(RelationshipState::Bidirectional | RelationshipState::Pending)
+            )
+        };
+        let oldest = |eligible: &dyn Fn(&Held) -> bool| {
+            index
+                .pairs
+                .iter()
+                .filter(|(_, held)| !held.reserved && eligible(held))
+                .min_by_key(|(_, held)| held.last_active.unwrap_or(0))
+                .map(|(pair, _)| pair.clone())
+        };
+        oldest(&half_open).or_else(|| oldest(&idle))
+    }
+
+    /// Forget `victim`'s records, keeping the index in step with each one.
+    async fn forget(&self, index: &mut Index, victim: &Pair) -> Result<(), ATMError> {
         for facet in FACETS {
             self.keyspace
-                .delete(encode_key(facet, &victim))
+                .delete(encode_key(facet, victim))
                 .await
                 .map_err(|e| ATMError::SDKError(format!("relationships keyspace delete: {e}")))?;
+            index.clear_facet(victim, facet);
         }
-        index.remove(&victim);
-        info!(
-            peer = %victim.1,
-            "the TSP relationship store is full; forgot the least recently active relationship"
-        );
+        Ok(())
+    }
+
+    /// Admit a relationship with a new, non-reserved peer: within the
+    /// per-minute limit, and into a full store only by displacing one that
+    /// may be ([`displaceable`](Self::displaceable)).
+    async fn admit(&self, index: &mut Index, their: &str) -> Result<(), ATMError> {
+        let now = std::time::Instant::now();
+        let window_open = index
+            .window_started
+            .is_some_and(|started| now.duration_since(started) < Duration::from_secs(60));
+        if !window_open {
+            index.window_started = Some(now);
+            index.new_in_window = 0;
+        }
+        if index.new_in_window >= self.limits.max_new_per_minute {
+            warn!(
+                peer = their,
+                max_new_per_minute = self.limits.max_new_per_minute,
+                "not recording a TSP relationship: too many new relationships this minute"
+            );
+            return Err(ATMError::SDKError(
+                "too many new TSP relationships this minute".to_string(),
+            ));
+        }
+        if index.counted >= self.limits.max_relationships {
+            let Some(victim) = self.displaceable(index, unix_millis().unwrap_or(0)) else {
+                warn!(
+                    peer = their,
+                    max_relationships = self.limits.max_relationships,
+                    "the TSP relationship store is full of relationships in use; not recording \
+                     a new one"
+                );
+                return Err(ATMError::SDKError(format!(
+                    "the TSP relationship store is full ({} relationships)",
+                    self.limits.max_relationships
+                )));
+            };
+            self.forget(index, &victim).await?;
+            info!(
+                peer = %victim.1,
+                "the TSP relationship store is full; displaced a half-open or idle relationship"
+            );
+        }
+        index.new_in_window += 1;
         Ok(())
     }
 
@@ -303,57 +479,64 @@ impl RelationshipKv for FjallRelationshipKv {
     async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), ATMError> {
         let mut index = self.index.lock().await;
         let decoded = decode_key(key);
-        if let Some((_, pair)) = &decoded
-            && !index.contains_key(pair)
-            && !self.is_reserved(pair)
+        if let Some((facet, pair)) = &decoded
+            && !index.pairs.contains_key(pair)
         {
-            while self.counted(&index) >= self.max_relationships {
-                let before = index.len();
-                self.evict_one(&mut index).await?;
-                if index.len() == before {
-                    break;
-                }
+            // An activity stamp for a relationship that is not held (one
+            // forgotten while the stamp was on its way) records nothing:
+            // it must not bring the relationship back, or displace another.
+            if *facet == FACET_LAST_ACTIVE {
+                return Ok(());
+            }
+            if !self.is_reserved(pair) {
+                let result = self.admit(&mut index, &pair.1).await;
+                self.report(&index);
+                result?;
             }
         }
-        let exists = self.raw_get(key).await?.is_some();
         self.keyspace
             .put(key.to_vec(), value.to_vec())
             .await
             .map_err(|e| ATMError::SDKError(format!("relationships keyspace put: {e}")))?;
         if let Some((facet, pair)) = decoded {
-            let held = index.entry(pair).or_default();
-            if !exists {
-                held.records += 1;
+            if !index.pairs.contains_key(&pair) {
+                let reserved = self.is_reserved(&pair);
+                index.insert(
+                    pair.clone(),
+                    Held {
+                        reserved,
+                        ..Held::default()
+                    },
+                );
             }
-            if facet == FACET_LAST_ACTIVE {
-                held.last_active = serde_json::from_slice(value).ok().or(held.last_active);
+            if let Some(held) = index.pairs.get_mut(&pair) {
+                held.facets |= facet_bit(facet);
+                match facet {
+                    FACET_LAST_ACTIVE => {
+                        held.last_active = serde_json::from_slice(value).ok().or(held.last_active);
+                    }
+                    FACET_STATE => held.state = serde_json::from_slice(value).ok(),
+                    _ => {}
+                }
             }
         }
-        self.report(self.counted(&index));
+        self.report(&index);
         Ok(())
     }
 
     async fn delete(&self, key: &[u8]) -> Result<(), ATMError> {
         let mut index = self.index.lock().await;
-        if self.raw_get(key).await?.is_none() {
-            return Ok(());
+        if self.raw_get(key).await?.is_some() {
+            self.keyspace
+                .delete(key.to_vec())
+                .await
+                .map_err(|e| ATMError::SDKError(format!("relationships keyspace delete: {e}")))?;
         }
-        self.keyspace
-            .delete(key.to_vec())
-            .await
-            .map_err(|e| ATMError::SDKError(format!("relationships keyspace delete: {e}")))?;
-        if let Some((facet, pair)) = decode_key(key)
-            && let Some(held) = index.get_mut(&pair)
-        {
-            held.records = held.records.saturating_sub(1);
-            if facet == FACET_LAST_ACTIVE {
-                held.last_active = None;
-            }
-            if held.records == 0 {
-                index.remove(&pair);
-            }
+        // Reconciled whether or not the record was there.
+        if let Some((facet, pair)) = decode_key(key) {
+            index.clear_facet(&pair, facet);
         }
-        self.report(self.counted(&index));
+        self.report(&index);
         Ok(())
     }
 
@@ -443,20 +626,27 @@ mod tests {
     use super::*;
     use crate::messaging::kv::MessagingStore;
     use affinidi_messaging_sdk::RelationshipStore;
-    use affinidi_messaging_sdk::protocols::tsp::RelationshipState;
     use tempfile::TempDir;
 
     const US: &str = "did:example:registry";
     const ADMIN: &str = "did:example:admin";
 
+    fn limits(max_relationships: usize, max_new_per_minute: usize) -> RelationshipLimits {
+        RelationshipLimits {
+            max_relationships,
+            max_new_per_minute,
+            ..RelationshipLimits::default()
+        }
+    }
+
     async fn open(
         messaging: &MessagingStore,
-        max_relationships: usize,
+        limits: RelationshipLimits,
         health: Option<Arc<RegistryHealth>>,
     ) -> RegistryRelationshipStore {
         let kv = FjallRelationshipKv::open(
             messaging.relationships.clone(),
-            max_relationships,
+            limits,
             vec![ADMIN.to_string()],
             health,
         )
@@ -466,11 +656,11 @@ mod tests {
     }
 
     async fn store(
-        max_relationships: usize,
+        limits: RelationshipLimits,
     ) -> (TempDir, MessagingStore, RegistryRelationshipStore) {
         let dir = tempfile::tempdir().unwrap();
         let messaging = MessagingStore::open(dir.path().to_str().unwrap()).unwrap();
-        let store = open(&messaging, max_relationships, None).await;
+        let store = open(&messaging, limits, None).await;
         (dir, messaging, store)
     }
 
@@ -478,13 +668,24 @@ mod tests {
         format!("did:example:peer-{n}")
     }
 
-    /// Record an inbound invite the way the transport does: the state alone,
-    /// before anything is stamped.
-    async fn invite(store: &RegistryRelationshipStore, their: &str) {
+    fn now_ms() -> u64 {
+        unix_millis().unwrap()
+    }
+
+    /// Record an inbound invite the way the transport does: the state alone.
+    async fn invite(store: &RegistryRelationshipStore, their: &str) -> Result<(), ATMError> {
         store
             .set(US, their, RelationshipState::InviteReceived)
             .await
+    }
+
+    /// An established relationship last active at `at`.
+    async fn establish(store: &RegistryRelationshipStore, their: &str, at: u64) {
+        store
+            .set(US, their, RelationshipState::Bidirectional)
+            .await
             .unwrap();
+        store.touch(US, their, at).await.unwrap();
     }
 
     async fn held(store: &RegistryRelationshipStore, their: &str) -> bool {
@@ -495,7 +696,7 @@ mod tests {
     /// writes, for every facet.
     #[tokio::test]
     async fn the_key_layout_matches_the_sdk() {
-        let (_dir, messaging, store) = store(10).await;
+        let (_dir, messaging, store) = store(limits(10, 10)).await;
         let their = peer(0);
         store
             .set(US, &their, RelationshipState::Bidirectional)
@@ -521,51 +722,128 @@ mod tests {
             assert_eq!(pair, (US.to_string(), their.clone()));
             assert_eq!(encode_key(facet, &pair), key);
         }
-        assert_eq!(
-            store.backend().index.lock().await[&(US.to_string(), their)].last_active,
-            Some(7)
-        );
+        let index = store.backend().index.lock().await;
+        let entry = index.pairs[&(US.to_string(), their)];
+        assert_eq!(entry.last_active, Some(7));
+        assert_eq!(entry.state, Some(RelationshipState::Bidirectional));
     }
 
-    /// A new peer is admitted into a full store by forgetting the least
-    /// recently active relationship, unstamped ones first.
+    /// A stream of invites from fresh VIDs churns only half-open
+    /// relationships: an established peer in use survives it.
     #[tokio::test]
-    async fn a_full_store_admits_a_new_peer_by_forgetting_the_idlest() {
-        let (_dir, _messaging, store) = store(2).await;
-        invite(&store, &peer(0)).await;
-        invite(&store, &peer(1)).await;
-        store.touch(US, &peer(0), 50).await.unwrap();
-        store.touch(US, &peer(1), 10).await.unwrap();
-
-        invite(&store, &peer(2)).await;
-        assert!(held(&store, &peer(0)).await);
-        assert!(!held(&store, &peer(1)).await, "the idlest is forgotten");
-        assert_eq!(store.last_active(US, &peer(1)).await.unwrap(), None);
-        assert!(held(&store, &peer(2)).await);
-
-        // peer-2 has no stamp yet, so it goes before peer-0.
-        invite(&store, &peer(3)).await;
-        assert!(held(&store, &peer(0)).await);
-        assert!(!held(&store, &peer(2)).await);
-        assert!(held(&store, &peer(3)).await);
+    async fn an_active_peer_survives_ten_thousand_fresh_invites() {
+        let (_dir, _messaging, store) = store(limits(100, usize::MAX)).await;
+        establish(&store, "did:example:member", now_ms()).await;
+        for n in 0..10_000 {
+            invite(&store, &peer(n)).await.unwrap();
+        }
+        assert!(held(&store, "did:example:member").await);
+        assert_eq!(store.backend().index.lock().await.counted, 100);
     }
 
-    /// Admin relationships are not counted and never forgotten to make room.
+    /// When nothing can be displaced the new relationship is refused, and the
+    /// store does not grow.
+    #[tokio::test]
+    async fn a_store_full_of_active_relationships_refuses_a_new_one() {
+        let (_dir, _messaging, store) = store(limits(2, usize::MAX)).await;
+        establish(&store, &peer(0), now_ms()).await;
+        establish(&store, &peer(1), now_ms()).await;
+
+        assert!(invite(&store, &peer(2)).await.is_err());
+        assert!(!held(&store, &peer(2)).await);
+        assert!(held(&store, &peer(0)).await);
+        assert!(held(&store, &peer(1)).await);
+    }
+
+    /// An established relationship idle past the floor may be displaced,
+    /// oldest first; one in use may not.
+    #[tokio::test]
+    async fn an_idle_established_relationship_may_be_displaced() {
+        let (_dir, _messaging, store) = store(limits(2, usize::MAX)).await;
+        establish(&store, &peer(0), now_ms()).await;
+        establish(&store, &peer(1), 1).await;
+
+        invite(&store, &peer(2)).await.unwrap();
+        assert!(held(&store, &peer(0)).await);
+        assert!(!held(&store, &peer(1)).await, "the idle one is displaced");
+        assert!(held(&store, &peer(2)).await);
+    }
+
+    /// No more than the per-minute number of new relationships are recorded,
+    /// whatever room there is; admins are not limited.
+    #[tokio::test]
+    async fn new_relationships_are_limited_per_minute() {
+        let (_dir, _messaging, store) = store(limits(100, 3)).await;
+        for n in 0..3 {
+            invite(&store, &peer(n)).await.unwrap();
+        }
+        assert!(invite(&store, &peer(3)).await.is_err());
+        invite(&store, ADMIN)
+            .await
+            .expect("an admin is not limited");
+        store
+            .set_reply_path(US, &peer(0), vec!["x".into()])
+            .await
+            .expect("a held relationship is not new");
+    }
+
+    /// Admin relationships are not counted and never displaced.
     #[tokio::test]
     async fn an_admin_relationship_is_kept_and_not_counted() {
-        let (_dir, _messaging, store) = store(1).await;
-        invite(&store, ADMIN).await;
-        invite(&store, &peer(0)).await;
+        let (_dir, _messaging, store) = store(limits(1, usize::MAX)).await;
+        invite(&store, ADMIN).await.unwrap();
+        invite(&store, &peer(0)).await.unwrap();
         assert!(held(&store, ADMIN).await);
         assert!(
             held(&store, &peer(0)).await,
             "the admin does not use the slot"
         );
 
-        invite(&store, &peer(1)).await;
+        invite(&store, &peer(1)).await.unwrap();
         assert!(held(&store, ADMIN).await);
         assert!(!held(&store, &peer(0)).await);
         assert!(held(&store, &peer(1)).await);
+    }
+
+    /// A stamp for a relationship no longer held records nothing, so it
+    /// cannot bring it back or displace another.
+    #[tokio::test]
+    async fn a_stamp_for_a_forgotten_relationship_records_nothing() {
+        let (_dir, messaging, store) = store(limits(1, usize::MAX)).await;
+        establish(&store, &peer(0), now_ms()).await;
+
+        mark_active(&store, US, &peer(1)).await;
+        store.touch(US, &peer(1), now_ms()).await.unwrap();
+
+        assert!(held(&store, &peer(0)).await);
+        assert_eq!(store.last_active(US, &peer(1)).await.unwrap(), None);
+        assert_eq!(
+            messaging
+                .relationships
+                .scan_keys_prefix(Vec::new())
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// Deleting a record that is already gone still brings the index in step.
+    #[tokio::test]
+    async fn deleting_an_absent_record_reconciles_the_index() {
+        let (_dir, messaging, store) = store(limits(10, 10)).await;
+        invite(&store, &peer(0)).await.unwrap();
+        messaging
+            .relationships
+            .delete(encode_key(FACET_STATE, &(US.to_string(), peer(0))))
+            .await
+            .unwrap();
+        assert_eq!(store.backend().index.lock().await.counted, 1);
+
+        store.forget(US, &peer(0)).await.unwrap();
+        let index = store.backend().index.lock().await;
+        assert!(index.pairs.is_empty());
+        assert_eq!(index.counted, 0);
     }
 
     /// The store tells health when it is at its limit, and stops once it is
@@ -575,45 +853,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let messaging = MessagingStore::open(dir.path().to_str().unwrap()).unwrap();
         let health = Arc::new(RegistryHealth::new(true));
-        let store = open(&messaging, 1, Some(health.clone())).await;
+        let store = open(&messaging, limits(1, usize::MAX), Some(health.clone())).await;
         assert_eq!(health.to_json()["tspRelationships"], "ok");
 
-        invite(&store, &peer(0)).await;
+        establish(&store, &peer(0), now_ms()).await;
         assert_eq!(health.to_json()["tspRelationships"], "full");
         assert_eq!(health.to_json()["status"], "degraded");
+        assert!(invite(&store, &peer(1)).await.is_err());
 
         store.forget(US, &peer(0)).await.unwrap();
         assert_eq!(health.to_json()["tspRelationships"], "ok");
         assert_eq!(health.to_json()["status"], "OK");
     }
 
-    /// The index survives a restart: a full store is still full after reopen.
+    /// The index survives a restart: state, activity and count.
     #[tokio::test]
-    async fn the_bound_holds_across_a_reopen() {
+    async fn the_index_survives_a_reopen() {
         let dir = tempfile::tempdir().unwrap();
         {
             let messaging = MessagingStore::open(dir.path().to_str().unwrap()).unwrap();
-            let store = open(&messaging, 1, None).await;
-            invite(&store, &peer(0)).await;
-            store.touch(US, &peer(0), 5).await.unwrap();
+            let store = open(&messaging, limits(1, usize::MAX), None).await;
+            establish(&store, &peer(0), now_ms()).await;
         }
         let messaging = MessagingStore::open(dir.path().to_str().unwrap()).unwrap();
-        let store = open(&messaging, 1, None).await;
-        invite(&store, &peer(1)).await;
-        assert!(!held(&store, &peer(0)).await);
-        assert!(held(&store, &peer(1)).await);
+        let store = open(&messaging, limits(1, usize::MAX), None).await;
+        assert!(
+            invite(&store, &peer(1)).await.is_err(),
+            "still full of a peer in use"
+        );
+        assert!(held(&store, &peer(0)).await);
     }
 
     /// Every relationship without a stamp is stamped at startup, whatever its
     /// state, so the sweep can age it out.
     #[tokio::test]
     async fn every_unstamped_relationship_is_stamped_and_then_ages_out() {
-        let (_dir, _messaging, store) = store(10).await;
+        let (_dir, _messaging, store) = store(limits(10, 10)).await;
         store
             .set(US, &peer(0), RelationshipState::Bidirectional)
             .await
             .unwrap();
-        invite(&store, &peer(1)).await;
+        invite(&store, &peer(1)).await.unwrap();
         // A cancelled relationship whose other records remain.
         store
             .set_reply_path(US, &peer(2), vec!["x".into()])
@@ -643,42 +923,50 @@ mod tests {
         let latest = stamps.into_iter().max().unwrap();
         let evicted = store.evict_idle(latest + 61_000, &policy).await.unwrap();
         assert_eq!(evicted.len(), 3);
-        assert!(store.backend().index.lock().await.is_empty());
+        assert!(store.backend().index.lock().await.pairs.is_empty());
     }
 
     #[test]
     fn limits_default_when_unset() {
         assert_eq!(
-            RelationshipLimits::parse(None, None).unwrap(),
+            RelationshipLimits::parse(None, None, None).unwrap(),
             RelationshipLimits::default()
         );
     }
 
     #[test]
     fn limits_are_read_from_their_settings() {
-        let limits = RelationshipLimits::parse(Some("50"), Some("3600")).unwrap();
+        let limits = RelationshipLimits::parse(Some("50"), Some("3600"), Some("5")).unwrap();
         assert_eq!(limits.max_relationships, 50);
         assert_eq!(limits.idle_ttl, Duration::from_secs(3600));
+        assert_eq!(limits.max_new_per_minute, 5);
         assert_eq!(limits.sweep_interval(), Duration::from_secs(1800));
+        assert_eq!(limits.displacement_idle(), Duration::from_secs(3600));
         assert_eq!(
             RelationshipLimits::default().sweep_interval(),
             MAX_SWEEP_INTERVAL
+        );
+        assert_eq!(
+            RelationshipLimits::default().displacement_idle(),
+            DEFAULT_IDLE_TTL / 4
         );
     }
 
     #[test]
     fn malformed_limits_are_an_error() {
-        for (max, idle) in [
-            (Some("0"), None),
-            (Some("many"), None),
-            (Some("-1"), None),
-            (None, Some("0")),
-            (None, Some("59")),
-            (None, Some("1h")),
+        for (max, idle, rate) in [
+            (Some("0"), None, None),
+            (Some("many"), None, None),
+            (Some("-1"), None, None),
+            (None, Some("0"), None),
+            (None, Some("59"), None),
+            (None, Some("1h"), None),
+            (None, None, Some("0")),
+            (None, None, Some("lots")),
         ] {
             assert!(
-                RelationshipLimits::parse(max, idle).is_err(),
-                "{max:?} / {idle:?} should be refused"
+                RelationshipLimits::parse(max, idle, rate).is_err(),
+                "{max:?} / {idle:?} / {rate:?} should be refused"
             );
         }
     }

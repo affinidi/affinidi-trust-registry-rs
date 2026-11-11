@@ -93,7 +93,7 @@ pub async fn start_managed_delivery<H: MessageHandler>(
     // admin its relationship.
     let relationships = FjallRelationshipKv::open(
         store.relationships.clone(),
-        limits.max_relationships,
+        limits,
         config.admin_config.admin_dids.clone(),
         health,
     )

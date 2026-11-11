@@ -965,7 +965,8 @@ See the list of environment variables and their usage.
 | `ENABLE_REST`           | Serve TRQP over REST and advertise `TRQPRest` (needs `TR_PUBLIC_URL` to be advertised).                                                                                                    | default: `true`                              |
 | `ENABLE_DIDCOMM`        | Run the DIDComm listener and advertise `DIDCommMessaging`.                                                                                                                                | default: `true`                              |
 | `ENABLE_TSP`            | Route multiplexed TSP frames and advertise `TSPTransport`. Requires `ENABLE_DIDCOMM=true` and a binary built with `--features tsp`.                                                        | default: `false`                             |
-| `TR_TSP_MAX_RELATIONSHIPS` | The most TSP relationships with non-admin peers the registry keeps. When the store is full, a new peer replaces the least recently active one, and `/health` reports `"tspRelationships": "full"` (status `degraded`). Relationships with `ADMIN_DIDS` are not counted and never replaced. A value that is not a positive whole number stops the listener. | default: `10000`                             |
+| `TR_TSP_MAX_RELATIONSHIPS` | The most TSP relationships with non-admin peers the registry keeps. When the store is full, a new peer may only displace a relationship that never completed, or one idle for a quarter of `TR_TSP_RELATIONSHIP_IDLE_SECS` (at least an hour); otherwise it is refused. `/health` reports `"tspRelationships": "full"` (status `degraded`) while the store is at its limit. Relationships with `ADMIN_DIDS` are not counted and never displaced. A value that is not a positive whole number stops the listener. | default: `10000`                             |
+| `TR_TSP_MAX_NEW_RELATIONSHIPS_PER_MINUTE` | The most TSP relationships with new non-admin peers recorded per minute; beyond it an invite is not recorded. | default: `60`                                |
 | `TR_TSP_RELATIONSHIP_IDLE_SECS` | How long a TSP relationship with no activity (no accepted invite, no application message) is kept before it is evicted. At least `60`. | default: `604800` (7 days)                   |
 
 ### Transport selection
@@ -987,9 +988,9 @@ DID document, which reads the same flags):
   a compiled-out binding; the build fails startup rather than advertise TSP.
 - **A TSP relationship is formed with any sender TSP authenticates**; what a
   sender may do is decided per Trust Task. The relationship store is therefore
-  bounded (`TR_TSP_MAX_RELATIONSHIPS`; a new peer replaces the least recently
-  active one, never an admin's) and evicts relationships idle for
-  `TR_TSP_RELATIONSHIP_IDLE_SECS`. With `ACL_MODE=ExplicitAllow` the mediator's
+  bounded (`TR_TSP_MAX_RELATIONSHIPS`, `TR_TSP_MAX_NEW_RELATIONSHIPS_PER_MINUTE`;
+  a new peer never displaces a relationship in use, nor an admin's) and evicts
+  relationships idle for `TR_TSP_RELATIONSHIP_IDLE_SECS`. With `ACL_MODE=ExplicitAllow` the mediator's
   allow list also limits who can reach the registry.
 - **`ENABLE_REST=false` binds no socket at all.** There is no HTTP listener —
   no TRQP routes and no `/health` — so `LISTEN_ADDRESS` is ignored and cannot

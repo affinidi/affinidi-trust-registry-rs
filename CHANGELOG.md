@@ -52,19 +52,23 @@ release goes GA (`## 0.27.0 (date)`).
   (`Option<&CapabilitySet>`) so they classify capability writes too.
 - **The TSP relationship store is bounded.** It holds at most
   `TR_TSP_MAX_RELATIONSHIPS` relationships with non-admin peers (default
-  10000). Recording one more first forgets the least recently active one
-  (never-stamped ones first), so a new peer is always admitted; relationships
-  with `ADMIN_DIDS` are neither counted nor forgotten. While the store is at
-  its limit `/health` reports `"tspRelationships": "full"` and status
-  `degraded`; the field appears once a TSP listener runs. Relationships are
-  now stamped active when accepted and on every application message, and
-  evicted once idle for `TR_TSP_RELATIONSHIP_IDLE_SECS` (default 7 days).
-  Before, nothing stamped them, so the idle sweep never evicted any. Every
-  relationship restored without a stamp, in any state, is stamped at startup
-  and ages from then. A malformed value of either setting stops the TSP
-  listener rather than lifting the bound. A failed accept now logs whether the
-  relationship was recorded. `messaging::service::build_messaging` takes the
-  opened `FjallRelationshipKv`, `start_managed_delivery` the health handle and
+  10000) and records at most `TR_TSP_MAX_NEW_RELATIONSHIPS_PER_MINUTE` new ones
+  a minute (default 60). When it is full, a new peer may only displace,
+  oldest first, a relationship that never completed, or one idle for a
+  quarter of the idle period (at least an hour); an established relationship
+  in use is never displaced, and when nothing can be the new relationship is
+  refused. Relationships with `ADMIN_DIDS` are exempt from both limits and
+  never displaced. While the store is at its limit `/health` reports
+  `"tspRelationships": "full"` and status `degraded`; the field appears once a
+  TSP listener runs. Relationships are now stamped active when accepted and on
+  every application message, and evicted once idle for
+  `TR_TSP_RELATIONSHIP_IDLE_SECS` (default 7 days). Before, nothing stamped
+  them, so the idle sweep never evicted any. Every relationship restored
+  without a stamp, in any state, is stamped at startup and ages from then. A
+  malformed value of any of these settings stops the TSP listener rather than
+  lifting the bound. A failed accept now logs whether the relationship was
+  recorded. `messaging::service::build_messaging` takes the opened
+  `FjallRelationshipKv`, `start_managed_delivery` the health handle and
   `run_inbound_loop` the relationship store; `FjallRelationshipKv::new` is
   replaced by the async `FjallRelationshipKv::open`.
 
