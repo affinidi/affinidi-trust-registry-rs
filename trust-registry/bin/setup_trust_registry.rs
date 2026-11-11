@@ -945,6 +945,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             raw,
         ));
     }
+    // The profile bundle carries the registry's private keys; it goes to the
+    // .env file only.
+    if let Some(profile_config) = config_json.get_mut("PROFILE_CONFIG") {
+        *profile_config = Value::String("<redacted: written to .env>".to_string());
+    }
     println!("{}", serde_json::to_string_pretty(&config_json)?);
     println!();
 

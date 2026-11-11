@@ -101,6 +101,10 @@ release goes GA (`## 0.27.0 (date)`).
   the setup tool writes still holds the real URL. A value that does not parse
   as a URL is shown as `<unparseable URL>`. New
   `configs::storage::redact_url_credentials`.
+- **`setup-trust-registry` no longer prints the registry's profile bundle.**
+  Its "Environment Configuration" output showed `PROFILE_CONFIG`, whose
+  secrets include the private keys; it now shows
+  `<redacted: written to .env>`. The `.env` file is unchanged.
 - **The debug-level configuration dump is a field list.** `serve` logged the
   whole `TrustRegistryConfig` with `{:?}`; it now logs the listen address,
   storage backend, transports, registry and mediator DIDs and the number of
