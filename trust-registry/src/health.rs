@@ -56,6 +56,10 @@ impl WriteStatus {
 #[derive(Debug)]
 pub struct RegistryHealth {
     writes: RwLock<WriteState>,
+    /// Whether the TSP relationship store is at its limit: `None` until a TSP
+    /// listener reports it, then updated on every change, so it reads `false`
+    /// again once room is made.
+    tsp_relationships_full: RwLock<Option<bool>>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +83,18 @@ impl RegistryHealth {
                 },
                 detail: None,
             }),
+            tsp_relationships_full: RwLock::new(None),
         }
+    }
+
+    /// Record whether the TSP relationship store is at its limit. While it is,
+    /// each new peer displaces the least recently active one, so health is
+    /// degraded and says why.
+    pub fn set_tsp_relationships_full(&self, full: bool) {
+        *self
+            .tsp_relationships_full
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(full);
     }
 
     /// Record that the DIDComm listener has stopped, with the reason.
@@ -103,10 +118,19 @@ impl RegistryHealth {
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
         let state = self.read_lock().clone();
+        let tsp_full = *self
+            .tsp_relationships_full
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let degraded = state.status.is_degraded() || tsp_full == Some(true);
         let mut body = serde_json::json!({
-            "status": if state.status.is_degraded() { "degraded" } else { "OK" },
+            "status": if degraded { "degraded" } else { "OK" },
             "writes": state.status.as_str(),
         });
+        if let Some(full) = tsp_full {
+            body["tspRelationships"] =
+                serde_json::Value::String(if full { "full" } else { "ok" }.to_string());
+        }
         if let Some(detail) = state.detail {
             body["detail"] = serde_json::Value::String(detail);
         }

@@ -43,6 +43,11 @@ pub enum ControlDecision {
 /// peer can act on. A relationship grants no authority on its own, every task
 /// behind it is still checked, and the sender VID is cryptographically proven,
 /// so there is no enumeration exposure.
+///
+/// Because any authenticated VID can form one, the store relationships are
+/// recorded in is bounded in size and evicts idle relationships
+/// ([`super::relationship_store`]). With `ACL_MODE=ExplicitAllow` the
+/// mediator's allow list also limits which VIDs can reach the registry at all.
 pub fn decide_control(request: RelationshipRequest, reply_expected: bool) -> ControlDecision {
     match request {
         // §7.2.5: an invite may introduce a VID, whose signature the transport
