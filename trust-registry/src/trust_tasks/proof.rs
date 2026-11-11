@@ -76,11 +76,15 @@ impl ProofPurposeResolver for AuthenticationKeyResolver {
     }
 }
 
-/// Slugs whose operations mutate the registry and therefore carry a required,
-/// verifiable proof plus the admin ACL. The single source of truth — the
-/// DIDComm and TSP bindings both gate on this list (they previously carried
-/// diverging local copies: `registry/did/rotate` was gated over DIDComm but
-/// not over TSP).
+/// The registry's own slugs whose operations mutate the registry and therefore
+/// carry a required, verifiable proof plus the admin ACL. The DIDComm and TSP
+/// bindings both gate on this list (they previously carried diverging local
+/// copies: `registry/did/rotate` was gated over DIDComm but not over TSP).
+///
+/// A capability's write tasks are not listed here: the
+/// [`CapabilitySet`](crate::capabilities::CapabilitySet) classifies them
+/// ([`CapabilitySet::is_write`](crate::capabilities::CapabilitySet::is_write)),
+/// and the [`TaskHandler`](crate::trust_tasks::TaskHandler) consults both.
 pub fn is_write_slug(slug: &str) -> bool {
     matches!(
         slug,
@@ -140,6 +144,16 @@ pub async fn verify_write_proof(
     if !requires_proof(doc.type_uri.slug()) {
         return Ok(());
     }
+    verify_proof(verifier, doc).await
+}
+
+/// [`verify_write_proof`] for a document the caller has already classified as
+/// a write, whatever its slug: a capability's write tasks are not in
+/// [`is_write_slug`], so this check does not consult it.
+pub async fn verify_proof(
+    verifier: &Arc<dyn DynProofVerifier>,
+    doc: &TrustTask<Value>,
+) -> Result<(), RejectReason> {
     if doc.proof.is_none() {
         return Err(RejectReason::ProofRequired);
     }

@@ -18,9 +18,13 @@
 //!    the controller of the proof's verification method, the `authentication`
 //!    proof purpose, and the admin-DID ACL ([`TaskHandler::authorize_write`]);
 //! 5. cryptographic Data-Integrity verification of the proof against a key the
-//!    issuer lists under `authentication` ([`verify_write_proof`]);
+//!    issuer lists under `authentication`
+//!    ([`verify_write_proof`](crate::trust_tasks::verify_write_proof));
 //! 6. the authority binding: a write acts only under an authority the issuer
-//!    may act for ([`TaskHandler::authorize_authority`]);
+//!    may act for ([`TaskHandler::authorize_authority`]). A write that acts on
+//!    the registry itself (`registry/did/rotate`, or a capability change with
+//!    no authority of its own) acts under the registry's own DID, so only an
+//!    admin `ADMIN_AUTHORITIES` lists for that DID may make it;
 //! 7. the replay record, shared by every binding: a document identifier is
 //!    executed at most once ([`execute_once`]);
 //! 8. dispatch — or, for `registry/did/rotate`, which acts on *our own* DID
@@ -57,7 +61,7 @@ use crate::dedup::{
     MessageIdStore, execute_once,
 };
 use crate::domain::{Action, AuthorityId, EntityId, Resource};
-use crate::trust_tasks::proof::{WRITE_PROOF_PURPOSE, requires_proof, verify_write_proof};
+use crate::trust_tasks::proof::{WRITE_PROOF_PURPOSE, requires_proof, verify_proof};
 use crate::trust_tasks::reply::ReplySigner;
 use crate::trust_tasks::{RegistryDispatcher, handle_document};
 
@@ -281,6 +285,17 @@ impl TaskHandler {
         self
     }
 
+    /// Whether `slug` is handled as a write: one of the registry's own writes
+    /// or `registry/record/query` ([`requires_proof`]), or a task a capability
+    /// does not declare as a read.
+    pub fn is_write(&self, slug: &str) -> bool {
+        requires_proof(slug)
+            || self
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.is_write(slug))
+    }
+
     /// Our own DID, as bindings need it to resolve parties.
     pub fn my_did(&self) -> &str {
         &self.my_did
@@ -342,7 +357,8 @@ impl TaskHandler {
     /// verification method must belong to the issuer (exact DID match) and
     /// carry the `authentication` purpose (VTI-KEY-106), and the issuer must be
     /// on the admin list. The signature, and that the key is listed under
-    /// `authentication`, are checked afterwards by [`verify_write_proof`].
+    /// `authentication`, are checked afterwards by
+    /// [`verify_write_proof`](crate::trust_tasks::verify_write_proof).
     ///
     /// `sender_did` is `None` for an unauthenticated caller. Such a caller can
     /// never satisfy these checks, so every write is denied — which is why a
@@ -353,7 +369,7 @@ impl TaskHandler {
         doc: &TrustTask<Value>,
         sender_did: Option<&str>,
     ) -> Result<(), RejectReason> {
-        if !requires_proof(doc.type_uri.slug()) {
+        if !self.is_write(doc.type_uri.slug()) {
             return Ok(());
         }
         let Some(proof) = doc.proof.as_ref() else {
@@ -406,13 +422,19 @@ impl TaskHandler {
         Ok(())
     }
 
-    /// The authority a write acts under, or `None` for one that acts under no
-    /// authority (`registry/did/rotate`, or enabling a capability that writes
-    /// no records).
+    /// The authority a write acts under.
     ///
     /// Record tasks name it in the payload. A capability task acts under the
     /// authority its capability was enabled with, and enabling or disabling a
-    /// capability acts under the authority its config names.
+    /// capability acts under the authority its config names. A write that acts
+    /// on the registry itself — `registry/did/rotate`, or enabling or
+    /// disabling a capability whose config names no authority, or a task of a
+    /// capability that writes no records — acts under the registry's own DID.
+    ///
+    /// `None` only for a capability task or disable whose capability is not
+    /// enabled, which changes nothing: the task is answered as unsupported
+    /// and the disable as `not_enabled`. A write slug with no rule here is
+    /// refused rather than run under no authority.
     pub async fn target_authority(
         &self,
         doc: &TrustTask<Value>,
@@ -481,29 +503,54 @@ impl TaskHandler {
                         ),
                     });
                 }
-                Ok((authority, None))
+                Ok((Some(authority.unwrap_or_else(|| self.my_did.clone())), None))
             }
             "governance/capability/disable" => {
                 let capability = named_capability()?;
-                let capabilities = self.capabilities()?;
-                let snapshot = capabilities.snapshot(capability).await;
-                if snapshot.enabled
-                    && snapshot.authority.is_none()
-                    && capabilities.requires_authority(capability)
-                {
-                    return Err(unbound_capability(capability));
-                }
-                Ok((snapshot.authority, Some(snapshot.dispatcher)))
+                self.capability_authority(self.capabilities()?, capability)
+                    .await
             }
             "git-trust/grant" | "git-trust/revoke" => {
-                let snapshot = self.capabilities()?.snapshot(GIT_TRUST).await;
-                if snapshot.enabled && snapshot.authority.is_none() {
-                    return Err(unbound_capability(GIT_TRUST));
-                }
-                Ok((snapshot.authority, Some(snapshot.dispatcher)))
+                self.capability_authority(self.capabilities()?, GIT_TRUST)
+                    .await
             }
-            _ => Ok((None, None)),
+            "registry/did/rotate" => Ok((Some(self.my_did.clone()), None)),
+            slug => match self
+                .capabilities
+                .as_deref()
+                .and_then(|capabilities| Some((capabilities, capabilities.write_owner(slug)?)))
+            {
+                Some((capabilities, capability)) => {
+                    self.capability_authority(capabilities, capability).await
+                }
+                None => Err(RejectReason::PermissionDenied {
+                    reason: format!("no authority is defined for {slug}, so it cannot be bound"),
+                }),
+            },
         }
+    }
+
+    /// The authority a task of `capability` acts under, and the dispatcher
+    /// read with it: the capability's configured authority, or the registry's
+    /// own DID for a capability that writes no records. `None` when the
+    /// capability is not enabled.
+    async fn capability_authority(
+        &self,
+        capabilities: &CapabilitySet,
+        capability: &str,
+    ) -> Result<(Option<String>, Option<Arc<RegistryDispatcher>>), RejectReason> {
+        let snapshot = capabilities.snapshot(capability).await;
+        if !snapshot.enabled {
+            return Ok((None, Some(snapshot.dispatcher)));
+        }
+        let authority = match snapshot.authority {
+            Some(authority) => authority,
+            None if capabilities.requires_authority(capability) => {
+                return Err(unbound_capability(capability));
+            }
+            None => self.my_did.clone(),
+        };
+        Ok((Some(authority), Some(snapshot.dispatcher)))
     }
 
     fn capabilities(&self) -> Result<&CapabilitySet, RejectReason> {
@@ -520,7 +567,9 @@ impl TaskHandler {
     /// An issuer may always act under its own DID, and additionally under any
     /// authority [`with_admin_authorities`](Self::with_admin_authorities) lists
     /// for it. A capability's config cannot widen this: enabling a capability
-    /// under an authority is itself a write under that authority.
+    /// under an authority is itself a write under that authority. A write on
+    /// the registry itself acts under the registry's DID, so it needs that DID
+    /// listed for the issuer.
     ///
     /// Call only after [`authorize_write`](Self::authorize_write) and
     /// [`verify_write_proof`] have established who the issuer is.
@@ -611,7 +660,7 @@ impl TaskHandler {
         doc: TrustTask<Value>,
         sender_did: Option<&str>,
     ) -> Result<TrustTask<Value>, ErrorResponse> {
-        if !requires_proof(doc.type_uri.slug()) {
+        if !self.is_write(doc.type_uri.slug()) {
             return self.handle_read(doc, sender_did).await;
         }
 
@@ -714,7 +763,7 @@ impl TaskHandler {
         if let Err(reason) = self.authorize_write(&doc, sender_did) {
             return Err(doc.reject_with(new_id(), reason));
         }
-        if let Err(reason) = verify_write_proof(&self.verifier, &doc).await {
+        if let Err(reason) = verify_proof(&self.verifier, &doc).await {
             return Err(doc.reject_with(new_id(), reason));
         }
         progress.proven_issuer = doc.issuer.clone();
@@ -900,11 +949,22 @@ mod tests {
     }
 
     fn fixture(admin_dids: Vec<String>) -> Fixture {
+        fixture_with(admin_dids, Vec::new())
+    }
+
+    /// [`fixture`], with `extra` capabilities available beside git-trust.
+    fn fixture_with(
+        admin_dids: Vec<String>,
+        extra: Vec<crate::capabilities::CapabilityDefinition>,
+    ) -> Fixture {
         let repo = Arc::new(LocalStorage::new());
         let base_repo = repo.clone();
         let query_repo = repo.clone();
+        let mut available =
+            vec![git_trust::definition(repo.clone()).expect("git-trust definition")];
+        available.extend(extra);
         let capabilities = CapabilitySet::new(
-            vec![git_trust::definition(repo.clone()).expect("git-trust definition")],
+            available,
             Box::new(MemoryCapabilityStore::default()),
             Box::new(move || build_dispatcher(base_repo.clone())),
             Box::new(move || build_query_dispatcher(query_repo.clone())),
@@ -1521,6 +1581,274 @@ mod tests {
 
         assert_eq!(code(&err), "malformedRequest");
         assert!(!f.capabilities.snapshot("git-trust").await.enabled);
+    }
+
+    // --- host-defined capability tasks ----------------------------------------
+
+    const BADGE_ISSUE: &str = "https://trusttasks.org/spec/badge/issue/0.1";
+    const ROTATE: &str = "https://trusttasks.org/spec/registry/did/rotate/0.2";
+
+    /// A host's own task that changes state, registered by a host capability
+    /// that declares no reads.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct BadgeIssue {
+        subject: String,
+    }
+
+    impl trust_tasks_rs::Payload for BadgeIssue {
+        const TYPE_URI: &'static str = BADGE_ISSUE;
+    }
+
+    /// The `badge` capability: one task, `badge/issue`, not declared as a
+    /// read. `runs` counts how often its handler executed.
+    fn badge_capability(
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> crate::capabilities::CapabilityDefinition {
+        crate::capabilities::CapabilityDefinition {
+            manifest: serde_json::from_value(json!({
+                "capability": "badge",
+                "version": "0.1",
+                "specs": ["badge/*"]
+            }))
+            .expect("manifest"),
+            register: Arc::new(
+                move |dispatcher: RegistryDispatcher, _: &crate::capabilities::CapabilityState| {
+                    let runs = runs.clone();
+                    dispatcher.on::<BadgeIssue, _>(move |doc| -> crate::trust_tasks::TaskFuture {
+                        runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Box::pin(async move { Ok(doc.respond_with(new_id(), json!({}))) })
+                    })
+                },
+            ),
+            register_reads: None,
+            validate_config: None,
+            requires_authority: false,
+        }
+    }
+
+    struct BadgeFixture {
+        f: Fixture,
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl BadgeFixture {
+        fn runs(&self) -> usize {
+            self.runs.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    async fn badge_fixture(admin_dids: Vec<String>, enabled: bool) -> BadgeFixture {
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let f = fixture_with(admin_dids, vec![badge_capability(runs.clone())]);
+        if enabled {
+            f.capabilities
+                .enable("badge", "0.1", None, None)
+                .await
+                .expect("badge enabled");
+        }
+        BadgeFixture { f, runs }
+    }
+
+    fn badge_payload() -> Value {
+        json!({ "subject": "did:example:member" })
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_capability_task_from_an_anonymous_caller_is_refused() {
+        let b = badge_fixture(Vec::new(), true).await;
+        let doc: TrustTask<Value> =
+            serde_json::from_value(unsigned(BADGE_ISSUE, None, badge_payload())).unwrap();
+
+        let err = b.f.handler.handle(doc, None).await.expect_err("refused");
+
+        assert_eq!(code(&err), "proofRequired");
+        assert_eq!(b.runs(), 0);
+        assert!(matches!(last_audit(&b.f).status, AuditStatus::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_capability_task_from_a_non_admin_is_refused() {
+        let (key, did) = did_key(60);
+        let b = badge_fixture(vec!["did:example:admin".to_string()], true).await;
+        let doc = signed(unsigned(BADGE_ISSUE, Some(&did), badge_payload()), &key).await;
+
+        let err =
+            b.f.handler
+                .handle(doc, Some(&did))
+                .await
+                .expect_err("refused");
+
+        assert_eq!(code(&err), "permissionDenied");
+        assert_eq!(b.runs(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_unsigned_capability_task_from_an_admin_is_refused() {
+        let (_, did) = did_key(61);
+        let b = badge_fixture(vec![did.clone()], true).await;
+        let doc: TrustTask<Value> =
+            serde_json::from_value(unsigned(BADGE_ISSUE, Some(&did), badge_payload())).unwrap();
+
+        let err =
+            b.f.handler
+                .handle(doc, Some(&did))
+                .await
+                .expect_err("refused");
+
+        assert_eq!(code(&err), "proofRequired");
+        assert_eq!(b.runs(), 0);
+    }
+
+    /// A capability that writes no records has no authority of its own, so
+    /// its tasks act on the registry itself: only an admin listed for the
+    /// registry's DID may run them.
+    #[tokio::test]
+    async fn a_capability_task_without_an_authority_needs_an_admin_of_the_registry_did() {
+        let (key, did) = did_key(62);
+        let b = badge_fixture(vec![did.clone()], true).await;
+
+        let doc = signed(unsigned(BADGE_ISSUE, Some(&did), badge_payload()), &key).await;
+        let err =
+            b.f.handler
+                .handle(doc, Some(&did))
+                .await
+                .expect_err("refused");
+        assert_eq!(code(&err), "permissionDenied");
+        assert_eq!(b.runs(), 0);
+
+        let operator =
+            b.f.handler
+                .clone()
+                .with_admin_authorities(HashMap::from([(did.clone(), vec![ME.to_string()])]));
+        let doc = signed(unsigned(BADGE_ISSUE, Some(&did), badge_payload()), &key).await;
+        operator
+            .handle(doc, Some(&did))
+            .await
+            .expect("accepted for an admin of the registry DID");
+        assert_eq!(b.runs(), 1);
+        let entry = last_audit(&b.f);
+        assert!(matches!(entry.status, AuditStatus::Success));
+        assert_eq!(
+            entry.resource.authority_id.as_ref().map(|a| a.as_str()),
+            Some(ME)
+        );
+    }
+
+    /// The read-only surface serves no capability task that is not a
+    /// declared read, so an unauthenticated caller cannot reach it there.
+    #[tokio::test]
+    async fn an_undeclared_capability_task_is_not_served_on_the_read_only_surface() {
+        let b = badge_fixture(Vec::new(), true).await;
+        let query = TaskHandler::new(
+            b.f.capabilities.query_dispatcher(),
+            ME,
+            Vec::new(),
+            trust_tasks_rs::erase_verifier(trust_tasks_proof::affinidi::Verifier::for_did_key()),
+        );
+        let doc: TrustTask<Value> =
+            serde_json::from_value(unsigned(BADGE_ISSUE, None, badge_payload())).unwrap();
+
+        query.handle(doc, None).await.expect_err("refused");
+
+        assert_eq!(b.runs(), 0);
+    }
+
+    #[tokio::test]
+    async fn enabling_a_capability_without_an_authority_needs_an_admin_of_the_registry_did() {
+        let (key, did) = did_key(63);
+        let b = badge_fixture(vec![did.clone()], false).await;
+        let enable = || {
+            unsigned(
+                ENABLE,
+                Some(&did),
+                json!({ "capability": "badge", "version": "0.1" }),
+            )
+        };
+
+        let err =
+            b.f.handler
+                .handle(signed(enable(), &key).await, Some(&did))
+                .await
+                .expect_err("refused");
+        assert_eq!(code(&err), "permissionDenied");
+        assert!(!b.f.capabilities.snapshot("badge").await.enabled);
+
+        let operator =
+            b.f.handler
+                .clone()
+                .with_admin_authorities(HashMap::from([(did.clone(), vec![ME.to_string()])]));
+        operator
+            .handle(signed(enable(), &key).await, Some(&did))
+            .await
+            .expect("accepted for an admin of the registry DID");
+        assert!(b.f.capabilities.snapshot("badge").await.enabled);
+    }
+
+    /// Disabling a capability that is not enabled changes nothing, and still
+    /// answers `not_enabled` (which a VTC projecting its state treats as
+    /// converged) rather than a permission error.
+    #[tokio::test]
+    async fn disabling_a_capability_that_is_not_enabled_answers_not_enabled() {
+        let (key, did) = did_key(64);
+        let b = badge_fixture(vec![did.clone()], false).await;
+        let doc = signed(
+            unsigned(DISABLE, Some(&did), json!({ "capability": "badge" })),
+            &key,
+        )
+        .await;
+
+        let err =
+            b.f.handler
+                .handle(doc, Some(&did))
+                .await
+                .expect_err("refused");
+
+        assert_eq!(code(&err), "taskFailed");
+        assert!(serde_json::to_string(&err).unwrap().contains("not_enabled"));
+    }
+
+    // --- registry/did/rotate acts on the registry itself --------------------
+
+    #[tokio::test]
+    async fn rotating_the_registry_did_needs_an_admin_of_the_registry_did() {
+        let (key, did) = did_key(65);
+        let f = fixture(vec![did.clone()]);
+        let doc = signed(unsigned(ROTATE, Some(&did), json!({})), &key).await;
+
+        let err = f
+            .handler
+            .handle(doc, Some(&did))
+            .await
+            .expect_err("refused");
+
+        assert_eq!(code(&err), "permissionDenied");
+        let entry = last_audit(&f);
+        assert!(matches!(entry.operation, AuditOperation::Rotate));
+        assert!(matches!(entry.status, AuditStatus::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn an_admin_of_the_registry_did_may_rotate_it() {
+        let (key, did) = did_key(66);
+        let f = fixture(vec![did.clone()]);
+        let operator = f
+            .handler
+            .clone()
+            .with_admin_authorities(HashMap::from([(did.clone(), vec![ME.to_string()])]));
+        let doc = signed(unsigned(ROTATE, Some(&did), json!({})), &key).await;
+
+        // Past the authority binding the rotation itself runs; with no VTA
+        // configured (or no `vta` feature) it fails as a task, not as a
+        // permission.
+        let err = operator.handle(doc, Some(&did)).await.expect_err("no VTA");
+
+        assert_eq!(code(&err), "taskFailed");
+        let entry = last_audit(&f);
+        assert_eq!(
+            entry.resource.authority_id.as_ref().map(|a| a.as_str()),
+            Some(ME)
+        );
     }
 
     // --- record/query is not public ------------------------------------------

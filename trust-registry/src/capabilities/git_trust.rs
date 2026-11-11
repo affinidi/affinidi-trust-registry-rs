@@ -78,6 +78,7 @@ pub fn definition(
                     })
             },
         ),
+        register_reads: None,
         validate_config: Some(Arc::new(|config: &Value| match config.get("authority") {
             Some(Value::String(did)) if did.starts_with("did:") => Ok(()),
             Some(_) => Err("`authority` must be a DID string".to_string()),
