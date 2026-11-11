@@ -21,18 +21,23 @@
 //!   the listener stops accepting until one closes;
 //! - **request headers** ([`HttpLimits::header_timeout`]): a request's headers
 //!   must be complete within this long of the connection opening, or of the
-//!   previous answer on a kept-alive connection. The deadline does not move as
-//!   bytes arrive, so a client cannot hold a connection by trickling them;
+//!   first byte of the next request on a kept-alive connection. The deadline
+//!   does not move as bytes arrive, so a client cannot hold a connection by
+//!   trickling them;
 //! - **idle connections** ([`HttpLimits::idle_timeout`]): a connection that
 //!   neither sends nor accepts a byte for this long is closed, which also
 //!   covers a client that reads its answer too slowly to make progress;
-//! - **connection age** ([`HttpLimits::max_connection_age`]): no connection
-//!   is kept longer, however busy.
+//! - **connection age** ([`HttpLimits::max_connection_age`]): once past it, a
+//!   connection is closed while it waits for a request's headers; a request
+//!   already being answered is let finish, up to twice the request timeout
+//!   beyond the age.
 //!
 //! All but the body limit are applied by the standalone service
 //! ([`crate::server`]); a host serving the router itself owns its server and
 //! applies its own. The header deadline reads HTTP/1.1 framing (the server
-//! speaks nothing else).
+//! speaks nothing else). Enabling axum's `http2` feature would need it
+//! revisited: the HTTP/2 connection preface (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`)
+//! contains a blank line, which would read as the end of a request's headers.
 
 use std::future::Future;
 use std::io;
@@ -44,7 +49,7 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::Request;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -229,12 +234,12 @@ async fn answer_bounded(
     }
     let bytes = match tokio::time::timeout(
         limits.request_timeout,
-        axum::body::to_bytes(body, limits.max_body_bytes),
+        read_capped(body, limits.max_body_bytes),
     )
     .await
     {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(e)) if is_length_limit(&e) => return too_large(&path, limits.max_body_bytes),
+        Ok(Ok(Some(bytes))) => bytes,
+        Ok(Ok(None)) => return too_large(&path, limits.max_body_bytes),
         Ok(Err(_)) => {
             return problem(
                 StatusCode::BAD_REQUEST,
@@ -267,16 +272,19 @@ async fn answer_bounded(
     }
 }
 
-/// Whether reading a body failed on its length limit.
-fn is_length_limit(error: &axum::Error) -> bool {
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
-    while let Some(e) = source {
-        if e.to_string() == "length limit exceeded" {
-            return true;
+/// Read `body` whole, or `None` once it exceeds `max_bytes`.
+async fn read_capped(body: Body, max_bytes: usize) -> Result<Option<Bytes>, axum::Error> {
+    use futures::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut collected = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if collected.len() + chunk.len() > max_bytes {
+            return Ok(None);
         }
-        source = e.source();
+        collected.extend_from_slice(&chunk);
     }
-    false
+    Ok(Some(Bytes::from(collected)))
 }
 
 /// A body over the limit, answered in the shape of the route's other errors:
@@ -374,10 +382,12 @@ impl axum::serve::Listener for BoundedListener {
 /// A connection that fails with [`io::ErrorKind::TimedOut`] once
 ///
 /// - a request's headers have not completed within the header timeout of the
-///   connection opening or of the previous answer (the deadline does not move
-///   as bytes arrive),
-/// - it has made no progress, reading or writing, for the idle timeout, or
-/// - it has been open for the maximum connection age,
+///   connection opening, or of the first byte read after the previous answer
+///   (the deadline does not move as bytes arrive),
+/// - it has made no progress, reading or writing, for the idle timeout,
+/// - it is past the maximum connection age while awaiting a request's
+///   headers, or
+/// - it is past the age by twice the request timeout, whatever it is doing,
 ///
 /// and that holds its listener's connection slot until dropped.
 pub struct ConnectionLimitsIo<S> {
@@ -385,29 +395,55 @@ pub struct ConnectionLimitsIo<S> {
     header_timeout: Duration,
     idle_timeout: Duration,
     idle_at: Instant,
-    /// While a request's headers are awaited: when they must be complete.
-    headers_due: Option<Instant>,
-    /// The last bytes read while awaiting headers, to find `\r\n\r\n` across
-    /// reads.
-    tail: Vec<u8>,
+    phase: Phase,
+    /// Past this, the connection closes while awaiting headers.
     close_at: Instant,
+    /// Past this, the connection closes whatever it is doing.
+    hard_close_at: Instant,
     timer: Pin<Box<Sleep>>,
     _slot: Option<OwnedSemaphorePermit>,
 }
 
-const END_OF_HEADERS: &[u8] = b"\r\n\r\n";
+/// Where a connection is in its request/answer cycle, as far as its bytes
+/// show.
+enum Phase {
+    /// Reading a request's headers, which must be complete by `due`.
+    /// `started` once a byte other than the CR/LF a parser skips before the
+    /// request line has arrived; `tail` keeps the last bytes, to find the
+    /// blank line that ends the headers across reads.
+    AwaitingHead {
+        due: Instant,
+        started: bool,
+        tail: Vec<u8>,
+    },
+    /// The headers are complete; the body and the answer are under way.
+    InRequest,
+    /// An answer has been written; the next byte read starts a request.
+    Answered,
+}
+
+/// The blank line that ends a request's headers, in the forms an HTTP/1.1
+/// parser accepts (`\r\n\r\n`, and bare-LF `\n\n` or `\r\n\n`).
+fn ends_headers(bytes: &[u8]) -> bool {
+    bytes.windows(2).any(|w| w == b"\n\n") || bytes.windows(3).any(|w| w == b"\n\r\n")
+}
 
 impl<S> ConnectionLimitsIo<S> {
     fn new(io: S, slot: Option<OwnedSemaphorePermit>, limits: &HttpLimits) -> Self {
         let now = Instant::now();
+        let close_at = now + limits.max_connection_age;
         let mut this = Self {
             io,
             header_timeout: limits.header_timeout,
             idle_timeout: limits.idle_timeout,
             idle_at: now + limits.idle_timeout,
-            headers_due: Some(now + limits.header_timeout),
-            tail: Vec::new(),
-            close_at: now + limits.max_connection_age,
+            phase: Phase::AwaitingHead {
+                due: now + limits.header_timeout,
+                started: false,
+                tail: Vec::new(),
+            },
+            close_at,
+            hard_close_at: close_at + limits.request_timeout * 2,
             timer: Box::pin(tokio::time::sleep_until(now)),
             _slot: slot,
         };
@@ -416,8 +452,11 @@ impl<S> ConnectionLimitsIo<S> {
     }
 
     fn next_deadline(&self) -> Instant {
-        let next = self.idle_at.min(self.close_at);
-        self.headers_due.map_or(next, |due| next.min(due))
+        let next = self.idle_at.min(self.hard_close_at);
+        match &self.phase {
+            Phase::AwaitingHead { due, .. } => next.min(*due).min(self.close_at),
+            Phase::InRequest | Phase::Answered => next,
+        }
     }
 
     fn rearm(&mut self) {
@@ -430,12 +469,18 @@ impl<S> ConnectionLimitsIo<S> {
     /// The deadline that has passed, if any.
     fn expired(&self) -> Option<io::Error> {
         let now = Instant::now();
-        let reason = if self.headers_due.is_some_and(|due| now >= due) {
+        let awaiting_due = match &self.phase {
+            Phase::AwaitingHead { due, .. } => Some(*due),
+            Phase::InRequest | Phase::Answered => None,
+        };
+        let reason = if awaiting_due.is_some_and(|due| now >= due) {
             "the request headers did not arrive in time"
+        } else if awaiting_due.is_some() && now >= self.close_at {
+            "the HTTP connection reached its maximum age"
         } else if now >= self.idle_at {
             "the HTTP connection was idle for too long"
-        } else if now >= self.close_at {
-            "the HTTP connection reached its maximum age"
+        } else if now >= self.hard_close_at {
+            "the HTTP connection outlived its maximum age"
         } else {
             return None;
         };
@@ -443,32 +488,44 @@ impl<S> ConnectionLimitsIo<S> {
     }
 
     fn read_progress(&mut self, bytes: &[u8]) {
-        self.idle_at = Instant::now() + self.idle_timeout;
-        if self.headers_due.is_some() {
-            self.tail.extend_from_slice(bytes);
-            if self
-                .tail
-                .windows(END_OF_HEADERS.len())
-                .any(|window| window == END_OF_HEADERS)
-            {
-                self.headers_due = None;
-                self.tail.clear();
+        let now = Instant::now();
+        self.idle_at = now + self.idle_timeout;
+        if matches!(self.phase, Phase::Answered) {
+            self.phase = Phase::AwaitingHead {
+                due: now + self.header_timeout,
+                started: false,
+                tail: Vec::new(),
+            };
+        }
+        if let Phase::AwaitingHead { started, tail, .. } = &mut self.phase {
+            let mut bytes = bytes;
+            if !*started {
+                bytes = match bytes.iter().position(|b| *b != b'\r' && *b != b'\n') {
+                    Some(first) => {
+                        *started = true;
+                        &bytes[first..]
+                    }
+                    None => &[],
+                };
+            }
+            tail.extend_from_slice(bytes);
+            if ends_headers(tail) {
+                self.phase = Phase::InRequest;
             } else {
-                let keep = self.tail.len().saturating_sub(END_OF_HEADERS.len() - 1);
-                self.tail.drain(..keep);
+                let keep = tail.len().saturating_sub(2);
+                tail.drain(..keep);
             }
         }
         self.rearm();
     }
 
     fn write_progress(&mut self, written: &[u8]) {
-        let now = Instant::now();
-        self.idle_at = now + self.idle_timeout;
-        // An answer (not an interim `1xx`) starts the wait for the next
-        // request's headers on a kept-alive connection.
-        if self.headers_due.is_none() && !written.starts_with(b"HTTP/1.1 1") {
-            self.headers_due = Some(now + self.header_timeout);
-            self.tail.clear();
+        self.idle_at = Instant::now() + self.idle_timeout;
+        // An answer (not an interim `1xx`) ends the request; the wait for the
+        // next one's headers starts when its first byte is read, so a slow
+        // reader of a long answer is not cut off.
+        if matches!(self.phase, Phase::InRequest) && !written.starts_with(b"HTTP/1.1 1") {
+            self.phase = Phase::Answered;
         }
         self.rearm();
     }
@@ -482,14 +539,12 @@ impl<S> ConnectionLimitsIo<S> {
             match self.timer.as_mut().poll(cx) {
                 Poll::Pending => return Poll::Pending,
                 // The deadline it slept to may since have moved: re-check.
-                Poll::Ready(()) => self.rearm_if_unexpired(),
+                Poll::Ready(()) => {
+                    let next = self.next_deadline();
+                    self.timer.as_mut().reset(next);
+                }
             }
         }
-    }
-
-    fn rearm_if_unexpired(&mut self) {
-        let next = self.next_deadline();
-        self.timer.as_mut().reset(next);
     }
 }
 
@@ -712,12 +767,147 @@ mod tests {
     }
 
     async fn serve_bounded(limits: HttpLimits) -> SocketAddr {
+        serve_bounded_with(limits, Router::new().route("/", get(|| async { "ok" }))).await
+    }
+
+    async fn serve_bounded_with(limits: HttpLimits, router: Router) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let listener = BoundedListener::new(listener, &limits);
         let addr = axum::serve::Listener::local_addr(&listener).unwrap();
-        let router = Router::new().route("/", get(|| async { "ok" }));
         tokio::spawn(async move { axum::serve(listener, router).await });
         addr
+    }
+
+    fn awaiting_head(io: &ConnectionLimitsIo<()>) -> bool {
+        matches!(io.phase, Phase::AwaitingHead { .. })
+    }
+
+    /// Blank lines before the request line, which a parser skips, do not
+    /// count as the end of the headers; the headers' own blank line does, in
+    /// every form a parser accepts.
+    #[tokio::test]
+    async fn the_end_of_headers_is_found_only_after_the_request_line() {
+        let limits = HttpLimits::default();
+        let mut io = ConnectionLimitsIo::new((), None, &limits);
+        io.read_progress(b"\r\n\r\n\n\n");
+        assert!(awaiting_head(&io), "leading blank lines end nothing");
+        io.read_progress(b"GET / HTTP/1.1\r\nHost: x\r");
+        assert!(awaiting_head(&io));
+        io.read_progress(b"\n\r\n");
+        assert!(!awaiting_head(&io), "split across reads");
+
+        for request in [
+            &b"GET / HTTP/1.1\nHost: x\n\n"[..],
+            &b"GET / HTTP/1.1\r\nHost: x\r\n\n"[..],
+            &b"\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+        ] {
+            let mut io = ConnectionLimitsIo::new((), None, &limits);
+            io.read_progress(request);
+            assert!(
+                !awaiting_head(&io),
+                "{:?}",
+                String::from_utf8_lossy(request)
+            );
+        }
+    }
+
+    /// The next request's header deadline starts at its first byte, not at
+    /// the answer, so a slow reader of an answer is not cut off; an interim
+    /// `1xx` does not end the request.
+    #[tokio::test]
+    async fn the_next_header_deadline_starts_at_the_next_request() {
+        let mut io = ConnectionLimitsIo::new((), None, &HttpLimits::default());
+        io.read_progress(b"POST / HTTP/1.1\r\nExpect: 100-continue\r\n\r\n");
+        io.write_progress(b"HTTP/1.1 100 Continue\r\n\r\n");
+        assert!(matches!(io.phase, Phase::InRequest));
+        io.read_progress(b"{\"body\":1}");
+        assert!(
+            matches!(io.phase, Phase::InRequest),
+            "body bytes are not a head"
+        );
+        io.write_progress(b"HTTP/1.1 200 OK\r\n");
+        assert!(matches!(io.phase, Phase::Answered));
+        io.write_progress(b"more of a long answer");
+        assert!(
+            matches!(io.phase, Phase::Answered),
+            "no deadline while answering"
+        );
+        io.read_progress(b"G");
+        assert!(awaiting_head(&io));
+    }
+
+    /// Blank lines sent ahead of trickled headers do not stop the header
+    /// deadline.
+    #[tokio::test]
+    async fn leading_blank_lines_do_not_lift_the_header_deadline() {
+        let addr = serve_bounded(HttpLimits {
+            request_timeout: Duration::from_millis(100),
+            header_timeout: Duration::from_millis(400),
+            idle_timeout: Duration::from_secs(5),
+            ..HttpLimits::default()
+        })
+        .await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(b"\r\n\r\n").await.unwrap();
+        let started = Instant::now();
+        let mut closed = false;
+        for byte in b"GET / HTTP/1.1\r\nHost: x\r\nX-Slow: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+            if stream.write_all(&[*byte]).await.is_err() {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut probe = [0u8; 1];
+            if let Ok(Ok(0) | Err(_)) =
+                tokio::time::timeout(Duration::from_millis(1), stream.read(&mut probe)).await
+            {
+                closed = true;
+                break;
+            }
+        }
+        assert!(closed, "the connection was closed");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// A request accepted just before the connection's maximum age is
+    /// answered in full; the age closes the connection only between
+    /// requests.
+    #[tokio::test]
+    async fn a_request_accepted_near_the_maximum_age_is_answered() {
+        let addr = serve_bounded_with(
+            HttpLimits {
+                request_timeout: Duration::from_millis(200),
+                header_timeout: Duration::from_secs(5),
+                idle_timeout: Duration::from_secs(5),
+                max_connection_age: Duration::from_millis(300),
+                ..HttpLimits::default()
+            },
+            Router::new().route(
+                "/",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    "ok"
+                }),
+            ),
+        )
+        .await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut answer = Vec::new();
+        while !answer.ends_with(b"\r\n\r\nok") {
+            let mut buf = [0u8; 256];
+            let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(read > 0, "the answer was cut off");
+            answer.extend_from_slice(&buf[..read]);
+        }
+        assert!(answer.starts_with(b"HTTP/1.1 200"));
     }
 
     /// A connection that sends nothing is closed after the idle timeout.

@@ -79,9 +79,11 @@ release goes GA (`## 0.27.0 (date)`).
   exempt from the slots. It holds at most `TR_HTTP_MAX_CONNECTIONS` (default
   1024) connections; a request's headers must be complete within
   `TR_HTTP_HEADER_TIMEOUT_SECS` (default 15) of the connection opening or of
-  the previous answer, whatever bytes trickle in; a connection idle for
-  `TR_HTTP_IDLE_TIMEOUT_SECS` (default 30) or open for
-  `TR_HTTP_MAX_CONNECTION_AGE_SECS` (default 300) is closed. Request bodies
+  the next request's first byte, whatever bytes trickle in; a connection idle
+  for `TR_HTTP_IDLE_TIMEOUT_SECS` (default 30) is closed, and one open for
+  `TR_HTTP_MAX_CONNECTION_AGE_SECS` (default 300) is closed between requests
+  (a request being answered may finish, up to twice the request timeout
+  later). Request bodies
   are limited to `TR_HTTP_MAX_BODY_BYTES` (default 64 KiB, was axum's 2 MB),
   also on `TrustRegistry::router()`; a larger body is answered `413` (was a
   `400` on the TRQP routes), as a problem document on the TRQP routes and as
