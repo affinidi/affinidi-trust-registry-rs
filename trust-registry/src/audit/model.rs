@@ -6,6 +6,7 @@ use std::fmt;
 pub const AUDIT_ROLE_ADMIN: &str = "ADMIN";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AuditLog {
     pub target: String,
     pub operation: AuditOperation,
@@ -30,6 +31,11 @@ pub struct AuditLog {
     /// unlike `actor` it does not mean the document's proof verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authenticated_sender: Option<String>,
+    /// The entry's position in this process's audit sequence, starting at 1.
+    /// Assigned by `BoundedAuditLogger` as it passes the entry on; `None`
+    /// before then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
     pub timestamp: chrono::DateTime<Utc>,
 }
 
@@ -70,6 +76,7 @@ impl AuditLogBuilder {
                 document_id: None,
                 claimed_actor: None,
                 authenticated_sender: None,
+                sequence: None,
                 timestamp: Utc::now(),
             },
         }

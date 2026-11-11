@@ -11,12 +11,17 @@ Some versions are omitted because certain CI/CD deployment iterations included m
 Missing versions simply reflect internal deployment‑related patches.
 
 From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
-`## Unreleased` on `main`, and the release tooling renames that section when a
-release goes GA (`## 0.27.0 (date)`).
+`## Unreleased
 
----
+### Breaking
 
-## Unreleased
+- **`AuditLog` and `EmitInput` are `#[non_exhaustive]`** and have new public
+  fields (`AuditLog::authenticated_sender` and `sequence`,
+  `EmitInput::authenticated_sender` and `sequence`). Code outside this crate
+  can no longer build them with struct literals or match them exhaustively;
+  build an `AuditLog` with `AuditLogBuilder`. Released as part of 0.32.0.
+- **`BaseAuditLogger` no longer numbers entries**; it renders the `sequence`
+  the entry carries, which `BoundedAuditLogger` assigns.
 
 ### Changed
 
@@ -113,28 +118,36 @@ release goes GA (`## 0.27.0 (date)`).
 
 - **`TrustRegistryBuilder::audit_logger`** lets a host send audit entries to
   its own store. The registry still applies its bound on unproven refusals in
-  front of it.
+  front of it, and still numbers the entries.
+- **`TrustRegistryBuilder::require_audit_sink`** makes `build()` fail, rather
+  than report, when the default audit logger's `tracing` target is not
+  recorded.
 - **Audit entries carry `seq`**, their position in the process's audit
-  sequence starting at 1, so a lost entry shows as a gap, and
+  sequence starting at 1, assigned by `BoundedAuditLogger` (so a host's own
+  logger gets it too); a lost entry shows as a gap. They also carry
   **`authenticated_sender`**, the sender the transport authenticated (DIDComm,
-  TSP) when the document's proof was not verified. `AuditLog` and `EmitInput`
-  have the new members; `AuditLogBuilder::authenticated_sender` sets it.
+  TSP) when the document's proof was not verified;
+  `AuditLogBuilder::authenticated_sender` sets it.
+- **`BoundedLimits`** and `BoundedAuditLogger::with_limits` configure the
+  budgets below.
 
 ### Changed
 
 - **`RUST_LOG` no longer controls the audit trail.** The standalone service
   writes the `audit` target through a layer of its own that is always on at
-  `INFO`; `RUST_LOG` still filters every other line (and no longer duplicates
-  or drops audit lines). `TrustRegistryBuilder::build` logs an error when the
-  default audit logger is in use and the current subscriber does not record
-  the `audit` target at `INFO`. New `audit::audit_logger::AUDIT_TARGET` and
-  `BaseAuditLogger::sink_enabled`.
-- **The bound on unproven refusals is per source.** Unauthenticated callers
-  (the HTTP surface, or a host transport that passes no sender) share one
-  budget of 60 entries a minute; each transport-authenticated sender has its
-  own (up to 1024 senders a window; senders beyond that share one more). The
-  summary of suppressed entries is recorded per source and names the reason
-  codes, task types and the first few claimed issuers it counted.
+  `INFO`; `RUST_LOG` still filters every other line. `TrustRegistryBuilder::build`
+  reports, to the log and to stderr, when the default audit logger is in use
+  and the current subscriber does not record the `audit` target at `INFO`.
+  New `audit::audit_logger::AUDIT_TARGET` and `BaseAuditLogger::sink_enabled`.
+- **The bound on unproven refusals is per source, with a ceiling.**
+  Unauthenticated callers (the HTTP surface, or a host transport that passes
+  no sender) share 60 entries a minute. Each transport-authenticated sender
+  has 16, for up to 64 senders a minute (senders beyond that share one more
+  16), and all authenticated senders together at most 600. The summary of
+  suppressed entries is recorded per source and names the reason codes, task
+  types and the first few claimed issuers it counted.
+- **A reason or error in an audit entry is capped at 1024 characters** (other
+  values stay at 256), so summaries are not cut short.
 
 ## 0.31.0 (release/0.31)
 

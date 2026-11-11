@@ -14,8 +14,6 @@ use crate::{
 };
 use chrono::Utc;
 use serde_json::{Value, json};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::info;
 
 pub use crate::audit::model::{AuditLogBuilder, AuditStatus};
@@ -36,6 +34,12 @@ pub const AUDIT_TARGET: &str = "audit";
 /// Longer values are cut and marked with `…`.
 pub const MAX_FIELD_CHARS: usize = 256;
 
+/// The longest reason or error an entry records, in characters. Longer than
+/// [`MAX_FIELD_CHARS`] so a summary of suppressed refusals (counts per reason,
+/// per task and the claimed issuers) fits.
+pub const MAX_REASON_CHARS: usize = 1024;
+
+#[non_exhaustive]
 pub struct EmitInput {
     pub target: String,
     pub operation: AuditOperation,
@@ -49,7 +53,7 @@ pub struct EmitInput {
     pub claimed_actor: Option<String>,
     pub authenticated_sender: Option<String>,
     /// The entry's position in this process's audit sequence, starting at 1. A
-    /// gap shows that an entry was lost.
+    /// gap shows that an entry was lost. Assigned by `BoundedAuditLogger`.
     pub sequence: Option<u64>,
     pub timestamp: chrono::DateTime<Utc>,
 }
@@ -86,12 +90,20 @@ fn is_disruptive(c: char) -> bool {
         )
 }
 
-/// Cap `value` at [`MAX_FIELD_CHARS`] and replace every disruptive character
+/// The cap for the field `key`.
+fn limit_for(key: &str) -> usize {
+    match key {
+        "reason" | "error" => MAX_REASON_CHARS,
+        _ => MAX_FIELD_CHARS,
+    }
+}
+
+/// Cap `value` at `limit` characters and replace every disruptive character
 /// with its `\u{…}` escape, for both formats alike.
-fn capped(value: &str) -> String {
+fn capped(value: &str, limit: usize) -> String {
     let mut out = String::new();
     for (index, c) in value.chars().enumerate() {
-        if index == MAX_FIELD_CHARS {
+        if index == limit {
             out.push('…');
             break;
         }
@@ -106,8 +118,8 @@ fn capped(value: &str) -> String {
 
 /// Cap `value` and quote it with every control character escaped, so it
 /// cannot break the line it is written on.
-fn quoted(value: &str) -> String {
-    format!("{:?}", capped(value))
+fn quoted(value: &str, limit: usize) -> String {
+    format!("{:?}", capped(value, limit))
 }
 
 impl EmitInput {
@@ -163,7 +175,7 @@ pub fn render_json(input: &EmitInput) -> String {
     let mut map = serde_json::Map::new();
     for (key, value) in input.fields() {
         let Some(value) = value else { continue };
-        let value = json!(capped(&value));
+        let value = json!(capped(&value, limit_for(key)));
         match key.split_once('.') {
             Some((outer, inner)) => {
                 let nested = map
@@ -186,25 +198,23 @@ pub fn render_text(input: &EmitInput) -> String {
     input
         .fields()
         .into_iter()
-        .filter_map(|(key, value)| value.map(|value| format!("audit.{key}={}", quoted(&value))))
+        .filter_map(|(key, value)| {
+            value.map(|value| format!("audit.{key}={}", quoted(&value, limit_for(key))))
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 /// Writes each entry as one line to the `tracing` target [`AUDIT_TARGET`] at
-/// `INFO`, numbered in sequence.
+/// `INFO`, with the sequence number the entry carries.
 #[derive(Clone)]
 pub struct BaseAuditLogger {
     config: AuditConfig,
-    sequence: Arc<AtomicU64>,
 }
 
 impl BaseAuditLogger {
     pub fn new(config: AuditConfig) -> Self {
-        Self {
-            config,
-            sequence: Arc::new(AtomicU64::new(0)),
-        }
+        Self { config }
     }
 
     /// Whether the current `tracing` subscriber records entries written to
@@ -229,7 +239,7 @@ impl AuditLogger for BaseAuditLogger {
             document_id: audit_log.document_id,
             claimed_actor: audit_log.claimed_actor,
             authenticated_sender: audit_log.authenticated_sender,
-            sequence: Some(self.sequence.fetch_add(1, Ordering::Relaxed) + 1),
+            sequence: audit_log.sequence,
             timestamp: audit_log.timestamp,
         };
 
@@ -466,60 +476,15 @@ mod tests {
         assert!(line.contains(r#"audit.authenticated_sender="did:example:peer""#));
     }
 
-    /// Captures what is written to the audit target.
-    #[derive(Clone, Default)]
-    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn sequence_numbers_increase_across_clones() {
-        use tracing_subscriber::{Layer, layer::SubscriberExt};
-
-        let captured = Captured::default();
-        let writer = captured.clone();
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(move || writer.clone())
-                .with_ansi(false)
-                .with_filter(
-                    tracing_subscriber::filter::Targets::new()
-                        .with_target(AUDIT_TARGET, tracing::Level::INFO),
-                ),
-        );
-        let _guard = tracing::subscriber::set_default(subscriber);
-        assert!(BaseAuditLogger::sink_enabled());
-
-        let logger = BaseAuditLogger::new(AuditConfig {
-            log_format: AuditLogFormat::Json,
-        });
-        let clone = logger.clone();
-        logger.log(AuditLogBuilder::new().build_success()).await;
-        clone.log(AuditLogBuilder::new().build_success()).await;
-        logger.log(AuditLogBuilder::new().build_success()).await;
-
-        let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
-        let sequence: Vec<u64> = output
-            .lines()
-            .map(|line| {
-                let json = &line[line.find('{').expect("a JSON entry")..];
-                let parsed: Value = serde_json::from_str(json).expect("json");
-                parsed["seq"]
-                    .as_str()
-                    .expect("seq")
-                    .parse()
-                    .expect("number")
-            })
-            .collect();
-        assert_eq!(sequence, vec![1, 2, 3]);
+    #[test]
+    fn a_reason_may_be_longer_than_other_fields() {
+        let mut input = hostile_input();
+        input.extra = Some(format!("audit.reason={}", "r".repeat(2000)));
+        let parsed: Value = serde_json::from_str(&render_json(&input)).expect("json");
+        let reason = parsed["reason"].as_str().expect("reason");
+        assert_eq!(reason.chars().count(), MAX_REASON_CHARS + 1);
+        let id = parsed["document_id"].as_str().expect("document id");
+        assert_eq!(id.chars().count(), MAX_FIELD_CHARS + 1);
     }
 
     #[test]

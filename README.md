@@ -774,25 +774,34 @@ logged. Every value is capped at 256 characters, and control characters, the
 line and paragraph separators and Unicode format characters (bidi overrides,
 zero-width characters) are escaped, in both formats, so an entry is always one
 line that reads as written. Each entry carries `seq`, its position in the
-process's audit sequence (from 1 at start-up), so a missing entry shows as a
+process's audit sequence (from 1 at start-up, assigned before the entry
+reaches the logger, including a host's own), so a missing entry shows as a
 gap, and `authenticated_sender` when the transport authenticated the sender
-(DIDComm, TSP) even though the document's proof was not verified.
+(DIDComm, TSP) even though the document's proof was not verified. A reason is
+capped at 1024 characters, every other value at 256.
 
 Refusals of documents whose issuer was never proven are recorded individually
-up to 60 a minute per source, where a source is either "unauthenticated
-callers" (the HTTP surface) or one transport-authenticated sender; beyond that
-they are counted, and each source's count is recorded as one entry every
-minute and at shutdown, with its reason codes, task types and the first few
-claimed issuers. Anonymous HTTP traffic therefore cannot use up the entries
-that refusals over DIDComm or TSP need.
+within per-minute budgets: 60 for unauthenticated callers (the HTTP surface)
+together; 16 for each transport-authenticated sender, for up to 64 senders a
+minute, with the senders beyond those sharing one further 16; and at most 600
+for all authenticated senders together, since new DIDs cost nothing to make.
+Beyond a budget the refusals are counted, and each source's count is recorded
+as one entry every minute and at shutdown, with its reason codes, task types
+and the first few claimed issuers. Anonymous HTTP traffic cannot use up the
+entries that refusals over DIDComm or TSP need, and however many identities a
+sender uses, unproven refusals add at most 660 individual entries and 66
+summaries a minute. A flood of authenticated identities can still use up the
+shared authenticated budget, after which a genuine peer's refusals in that
+minute are counted rather than recorded individually.
 
 Audit entries are written to the `tracing` target `audit` at `INFO`. The
 standalone service gives that target an output layer of its own that is always
 on, so `RUST_LOG` (which still controls every other log line) cannot switch
 the audit trail off. A host embedding the registry must keep the `audit`
 target enabled at `INFO` in its subscriber, or pass its own logger with
-`TrustRegistryBuilder::audit_logger`; `build()` logs an error when neither
-holds.
+`TrustRegistryBuilder::audit_logger`. When neither holds, `build()` reports it
+to the log and to stderr, or, with `TrustRegistryBuilder::require_audit_sink`,
+refuses to build.
 
 The record of accepted document identifiers is shared by the DIDComm and TSP
 bindings within one process. It keeps an identifier for seven minutes (the

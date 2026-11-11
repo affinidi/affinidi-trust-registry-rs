@@ -8,8 +8,16 @@
 //! unauthenticated caller" (the HTTP surface, or a host transport that passed
 //! no sender) or one transport-authenticated sender (a DIDComm authcrypt
 //! sender, a TSP VID), so anonymous traffic cannot use up the entries that
-//! refusals over an authenticated transport need, and one authenticated peer
-//! cannot use up another's.
+//! refusals over an authenticated transport need. Authenticated senders also
+//! share a ceiling across all of them, since new identities (`did:key`,
+//! `did:peer`) cost nothing: however many a sender uses, the log grows by at
+//! most [`BoundedLimits::unauthenticated`] plus
+//! [`BoundedLimits::authenticated_total`] entries a window, plus one summary
+//! per source.
+//!
+//! The logger also numbers every entry it passes on (`AuditLog::sequence`),
+//! so a gap in the numbers shows an entry was lost, whatever logger records
+//! them.
 //!
 //! The counts are recorded as one summary entry per source when the next
 //! window opens, on a timer ([`BoundedAuditLogger::spawn_flusher`]) and at
@@ -19,6 +27,7 @@
 //! always pass through.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,20 +36,53 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audit::model::{AuditLog, AuditLogBuilder, AuditLogger, AuditOperation, AuditResource};
 
-/// How many unproven entries are recorded individually per source per window.
+/// How many unproven entries from unauthenticated callers are recorded
+/// individually per window.
 pub const DEFAULT_UNPROVEN_PER_WINDOW: u32 = 60;
 
-/// The window [`DEFAULT_UNPROVEN_PER_WINDOW`] applies to.
+/// How many unproven entries one authenticated sender may have recorded
+/// individually per window.
+pub const DEFAULT_PER_SENDER_PER_WINDOW: u32 = 16;
+
+/// How many unproven entries all authenticated senders together may have
+/// recorded individually per window.
+pub const DEFAULT_AUTHENTICATED_PER_WINDOW: u32 = 600;
+
+/// The window the budgets apply to.
 pub const DEFAULT_UNPROVEN_WINDOW: Duration = Duration::from_secs(60);
 
 /// The most authenticated senders given a budget of their own in one window.
-/// Senders beyond this share one further budget, so memory stays bounded
-/// however many identities send.
-pub const MAX_TRACKED_SENDERS: usize = 1024;
+/// Senders beyond this share one further budget, so memory and the number of
+/// summaries stay bounded however many identities send.
+pub const MAX_TRACKED_SENDERS: usize = 64;
 
 /// The most distinct claimed issuers, reason codes or task types a summary
 /// names; the rest are counted under `other`.
 pub const MAX_SUMMARY_KEYS: usize = 8;
+
+/// The budgets of a [`BoundedAuditLogger`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundedLimits {
+    /// Entries recorded per window for unauthenticated callers together.
+    pub unauthenticated: u32,
+    /// Entries recorded per window for each authenticated sender (and for the
+    /// senders beyond [`MAX_TRACKED_SENDERS`] together).
+    pub per_sender: u32,
+    /// Entries recorded per window for all authenticated senders together.
+    pub authenticated_total: u32,
+    pub window: Duration,
+}
+
+impl Default for BoundedLimits {
+    fn default() -> Self {
+        Self {
+            unauthenticated: DEFAULT_UNPROVEN_PER_WINDOW,
+            per_sender: DEFAULT_PER_SENDER_PER_WINDOW,
+            authenticated_total: DEFAULT_AUTHENTICATED_PER_WINDOW,
+            window: DEFAULT_UNPROVEN_WINDOW,
+        }
+    }
+}
 
 /// Where an unproven entry came from, for budgeting.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -123,6 +165,7 @@ struct Budget {
     window_start: Instant,
     sources: HashMap<Source, SourceBudget>,
     tracked_senders: usize,
+    authenticated_recorded: u32,
 }
 
 impl Budget {
@@ -131,6 +174,7 @@ impl Budget {
             window_start: Instant::now(),
             sources: HashMap::new(),
             tracked_senders: 0,
+            authenticated_recorded: 0,
         }
     }
 
@@ -166,24 +210,43 @@ impl Budget {
 
 pub struct BoundedAuditLogger {
     inner: Arc<dyn AuditLogger>,
-    per_window: u32,
-    window: Duration,
+    limits: BoundedLimits,
     budget: Mutex<Budget>,
+    sequence: AtomicU64,
 }
 
 impl BoundedAuditLogger {
     pub fn new(inner: Arc<dyn AuditLogger>) -> Self {
-        Self::with_budget(inner, DEFAULT_UNPROVEN_PER_WINDOW, DEFAULT_UNPROVEN_WINDOW)
+        Self::with_limits(inner, BoundedLimits::default())
     }
 
-    /// `per_window` applies to each source separately.
+    /// `per_window` entries per window for unauthenticated callers and for
+    /// each authenticated sender, with no further ceiling across senders.
     pub fn with_budget(inner: Arc<dyn AuditLogger>, per_window: u32, window: Duration) -> Self {
+        Self::with_limits(
+            inner,
+            BoundedLimits {
+                unauthenticated: per_window,
+                per_sender: per_window,
+                authenticated_total: u32::MAX,
+                window,
+            },
+        )
+    }
+
+    pub fn with_limits(inner: Arc<dyn AuditLogger>, limits: BoundedLimits) -> Self {
         Self {
             inner,
-            per_window,
-            window,
+            limits,
             budget: Mutex::new(Budget::new()),
+            sequence: AtomicU64::new(0),
         }
+    }
+
+    /// Number `audit_log` and pass it on.
+    async fn forward(&self, mut audit_log: AuditLog) {
+        audit_log.sequence = Some(self.sequence.fetch_add(1, Ordering::Relaxed) + 1);
+        self.inner.log(audit_log).await;
     }
 
     /// Record the refusals counted since the last summary, if any.
@@ -202,7 +265,7 @@ impl BoundedAuditLogger {
     pub fn spawn_flusher(self: &Arc<Self>, shutdown: CancellationToken) -> JoinHandle<()> {
         let logger = self.clone();
         tokio::spawn(async move {
-            let mut ticks = tokio::time::interval(logger.window);
+            let mut ticks = tokio::time::interval(logger.limits.window);
             ticks.tick().await;
             loop {
                 tokio::select! {
@@ -227,8 +290,8 @@ impl BoundedAuditLogger {
                 ),
             };
             let mut summary = format!(
-                "{} further refusals of unproven documents from {from} were counted but not \
-                 recorded individually; reasons: {}; tasks: {}",
+                "{} further unproven refusals from {from} not recorded individually; \
+                 reasons: {}; tasks: {}",
                 suppressed.count,
                 suppressed.reasons.render(),
                 suppressed.tasks.render(),
@@ -244,15 +307,14 @@ impl BoundedAuditLogger {
                         .join(", "),
                 );
             }
-            self.inner
-                .log(
-                    AuditLogBuilder::new()
-                        .operation(AuditOperation::Update)
-                        .resource(AuditResource::empty())
-                        .authenticated_sender(authenticated_sender)
-                        .build_unauthorized(summary),
-                )
-                .await;
+            self.forward(
+                AuditLogBuilder::new()
+                    .operation(AuditOperation::Update)
+                    .resource(AuditResource::empty())
+                    .authenticated_sender(authenticated_sender)
+                    .build_unauthorized(summary),
+            )
+            .await;
         }
     }
 
@@ -264,7 +326,7 @@ impl BoundedAuditLogger {
             .budget
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let closed = if budget.window_start.elapsed() >= self.window {
+        let closed = if budget.window_start.elapsed() >= self.limits.window {
             budget.reset()
         } else {
             Vec::new()
@@ -273,9 +335,21 @@ impl BoundedAuditLogger {
             return (closed, true);
         }
         let source = budget.source_for(audit_log.authenticated_sender.as_deref());
+        let authenticated = source != Source::Unauthenticated;
+        let (limit, ceiling_left) = if authenticated {
+            (
+                self.limits.per_sender,
+                budget.authenticated_recorded < self.limits.authenticated_total,
+            )
+        } else {
+            (self.limits.unauthenticated, true)
+        };
         let source_budget = budget.sources.entry(source).or_default();
-        if source_budget.recorded < self.per_window {
+        if source_budget.recorded < limit && ceiling_left {
             source_budget.recorded += 1;
+            if authenticated {
+                budget.authenticated_recorded += 1;
+            }
             (closed, true)
         } else {
             source_budget.suppressed.add(audit_log);
@@ -290,7 +364,7 @@ impl AuditLogger for BoundedAuditLogger {
         let (suppressed, admitted) = self.admit(&audit_log);
         self.log_summaries(suppressed).await;
         if admitted {
-            self.inner.log(audit_log).await;
+            self.forward(audit_log).await;
         }
     }
 }
@@ -342,13 +416,11 @@ mod tests {
         let entries = recording.0.lock().unwrap();
         let summary = &entries[3];
         assert!(
-            summary
-                .extra
-                .as_deref()
-                .is_some_and(|extra| extra.contains("3 further refusals")
-                    && extra.contains("from unauthenticated callers")
-                    && extra.contains("proofRequired=3")
-                    && extra.contains("did:example:anyone")),
+            summary.extra.as_deref().is_some_and(|extra| extra
+                .contains("3 further unproven refusals")
+                && extra.contains("from unauthenticated callers")
+                && extra.contains("proofRequired=3")
+                && extra.contains("did:example:anyone")),
             "the suppressed count is recorded: {:?}",
             summary.extra
         );
@@ -385,7 +457,7 @@ mod tests {
             entries
                 .last()
                 .and_then(|entry| entry.extra.as_deref())
-                .is_some_and(|extra| extra.contains("1 further refusals")),
+                .is_some_and(|extra| extra.contains("1 further unproven refusals")),
             "the count is flushed at shutdown: {:?}",
             entries.last().map(|e| &e.extra)
         );
@@ -445,7 +517,7 @@ mod tests {
             Some("did:example:noisy")
         );
         let extra = summary.extra.as_deref().unwrap_or_default();
-        assert!(extra.contains("8 further refusals"), "{extra}");
+        assert!(extra.contains("8 further unproven refusals"), "{extra}");
         assert!(extra.contains("proofInvalid=8"), "{extra}");
         assert!(extra.contains("registry/record/put=8"), "{extra}");
     }
@@ -478,5 +550,68 @@ mod tests {
         }
         assert_eq!(tally.0.len(), MAX_SUMMARY_KEYS + 1);
         assert_eq!(tally.0.get("other"), Some(&(100 - MAX_SUMMARY_KEYS as u64)));
+    }
+
+    #[tokio::test]
+    async fn many_identities_cannot_grow_the_log_past_the_ceiling() {
+        let recording = Arc::new(Recording::default());
+        let limits = BoundedLimits {
+            window: Duration::from_secs(3600),
+            ..BoundedLimits::default()
+        };
+        let bounded = BoundedAuditLogger::with_limits(recording.clone(), limits);
+
+        for index in 0..2000 {
+            for _ in 0..20 {
+                bounded
+                    .log(unproven_over(&format!("did:key:z{index}")))
+                    .await;
+            }
+        }
+        assert_eq!(
+            recording.0.lock().unwrap().len(),
+            limits.authenticated_total as usize,
+            "authenticated senders together stop at the ceiling"
+        );
+
+        // Unauthenticated callers keep their own budget.
+        bounded.log(unproven()).await;
+        assert_eq!(
+            recording.0.lock().unwrap().len(),
+            limits.authenticated_total as usize + 1
+        );
+
+        bounded.flush().await;
+        let entries = recording.0.lock().unwrap();
+        let summaries = entries.len() - limits.authenticated_total as usize - 1;
+        assert!(
+            summaries <= MAX_TRACKED_SENDERS + 1,
+            "one summary per tracked sender and one for the rest, got {summaries}"
+        );
+        assert!(
+            bounded.budget.lock().unwrap().sources.is_empty(),
+            "a flush starts a new window"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_entry_passed_on_is_numbered_in_order() {
+        let recording = Arc::new(Recording::default());
+        let bounded =
+            BoundedAuditLogger::with_budget(recording.clone(), 1, Duration::from_secs(3600));
+        bounded.log(proven()).await;
+        bounded.log(unproven()).await;
+        bounded.log(unproven()).await;
+        bounded.flush().await;
+        bounded.log(proven()).await;
+
+        let sequence: Vec<Option<u64>> = recording
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect();
+        assert_eq!(sequence, vec![Some(1), Some(2), Some(3), Some(4)]);
     }
 }
