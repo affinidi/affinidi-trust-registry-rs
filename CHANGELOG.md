@@ -109,6 +109,30 @@ release goes GA (`## 0.27.0 (date)`).
   whole `TrustRegistryConfig` with `{:?}`; it now logs the listen address,
   storage backend, transports, registry and mediator DIDs and the number of
   admin DIDs.
+### Fixed
+
+- **Records whose identifiers contain `#` no longer share a storage key.** The
+  Redis, DynamoDB and fjall backends keyed a record by
+  `TR#{authority}#{action}#{resource}#{entity}` with the identifiers joined as
+  they were, so two records such as (`sign`, `repo#main`) and (`sign#repo`,
+  `main`) mapped to one key: writing one replaced the other and a query for
+  one could be answered with the other. Each identifier is now escaped before
+  joining (`%` → `%25`, `#` → `%23`), so distinct records always get distinct
+  keys. The CSV and in-memory backends were not affected.
+- **A lookup only answers with the record it asked for.** After reading a key,
+  the Redis, DynamoDB and fjall backends check that the stored record's four
+  identifiers are the ones queried; anything else is treated as not found.
+
+### Changed
+
+- **Existing records keep working without a migration.** A record whose
+  identifiers contain neither `#` nor `%` has the same key as before. One that
+  does (a fragment-bearing DID URL, a percent-encoded `did:web` port) is still
+  read from its earlier key, checked against the query as above, until it is
+  next updated: an update writes it under the new key and then removes the old
+  one, and a delete removes both. Listings show such a record once, preferring
+  the copy under the new key. A lookup that misses for such identifiers costs
+  a second read.
 
 ## 0.31.0 (release/0.31)
 

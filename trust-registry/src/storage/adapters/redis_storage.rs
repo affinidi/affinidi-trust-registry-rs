@@ -3,12 +3,13 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
-use crate::domain::key::{TR_SK_PREFIX, TrustRecordKey};
+use crate::domain::key::{TR_SK_PREFIX, TrustRecordKey, dedupe_listing, verified_record};
 use crate::domain::*;
 use crate::storage::repository::*;
 
 /// Redis storage adapter for Trust Registry
-/// Keys are formatted as: TR#{authority}#{action}#{resource}#{entity}
+/// Keys are formatted as: TR#{authority}#{action}#{resource}#{entity}, each
+/// identifier escaped (see `TrustRecordKey::sk`)
 /// Values are JSON-serialized TrustRecord objects
 #[derive(Clone)]
 pub struct RedisStorage {
@@ -42,116 +43,149 @@ impl RedisStorage {
     }
 }
 
+fn not_found(key: &TrustRecordKey) -> RepositoryError {
+    RepositoryError::RecordNotFound(format!("Record not found: {}", key.sk()))
+}
+
+impl RedisStorage {
+    async fn get_record(
+        conn: &mut MultiplexedConnection,
+        storage_key: &str,
+    ) -> Result<Option<TrustRecord>, RepositoryError> {
+        let data: Option<String> = conn
+            .get(storage_key)
+            .await
+            .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {e}")))?;
+        data.map(|data| Self::deserialize_record(&data)).transpose()
+    }
+
+    /// Read the record `key` names, from its current storage key or, for a
+    /// record an older release wrote, from the earlier unescaped key.
+    ///
+    /// Returns the storage key it was found under together with the record.
+    async fn lookup(
+        conn: &mut MultiplexedConnection,
+        key: &TrustRecordKey,
+    ) -> Result<Option<(String, TrustRecord)>, RepositoryError> {
+        let candidates = std::iter::once(key.sk()).chain(key.legacy_sk());
+        for storage_key in candidates {
+            let stored = Self::get_record(conn, &storage_key).await?;
+            if let Some(record) = verified_record(key, &storage_key, stored) {
+                return Ok(Some((storage_key, record)));
+            }
+        }
+        Ok(None)
+    }
+}
+
 #[async_trait::async_trait]
 impl TrustRecordRepository for RedisStorage {
     async fn find_by_query(
         &self,
         query: TrustRecordQuery,
     ) -> Result<Option<TrustRecord>, RepositoryError> {
-        let key = TrustRecordKey::from_query(&query).to_string();
+        let key = TrustRecordKey::from_query(&query);
         debug!("Finding record by key: {}", key);
 
         let mut conn = self.connection.write().await;
-        let result: Option<String> = conn
-            .get(&key)
-            .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {e}")))?;
-
-        match result {
-            Some(data) => {
-                let record = Self::deserialize_record(&data)?;
-                Ok(Some(record))
-            }
-            None => Ok(None),
-        }
+        Ok(Self::lookup(&mut conn, &key)
+            .await?
+            .map(|(_, record)| record))
     }
 }
 
 #[async_trait::async_trait]
 impl TrustRecordAdminRepository for RedisStorage {
     async fn create(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-        let key = TrustRecordKey::from_record(&record).to_string();
-        debug!("Creating record with key: {}", key);
+        let key = TrustRecordKey::from_record(&record);
+        let storage_key = key.sk();
+        debug!("Creating record with key: {}", storage_key);
 
         let mut conn = self.connection.write().await;
 
         let exists: bool = conn
-            .exists(&key)
+            .exists(&storage_key)
             .await
             .map_err(|e| RepositoryError::QueryFailed(format!("Redis EXISTS failed: {e}")))?;
 
-        if exists {
+        if exists || Self::lookup(&mut conn, &key).await?.is_some() {
             return Err(RepositoryError::RecordAlreadyExists(format!(
-                "Record already exists: {}#{}#{}#{}",
-                record.authority_id(),
-                record.action(),
-                record.resource(),
-                record.entity_id()
+                "Record already exists: {storage_key}"
             )));
         }
 
         let value = Self::serialize_record(&record)?;
 
         let _: () = conn
-            .set(&key, value)
+            .set(&storage_key, value)
             .await
             .map_err(|e| RepositoryError::QueryFailed(format!("Redis SET failed: {e}")))?;
 
-        info!("Record created successfully: {}", key);
+        info!("Record created successfully: {}", storage_key);
         Ok(())
     }
 
     async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-        let key = TrustRecordKey::from_record(&record).to_string();
-        debug!("Updating record with key: {}", key);
+        let key = TrustRecordKey::from_record(&record);
+        let storage_key = key.sk();
+        debug!("Updating record with key: {}", storage_key);
 
         let mut conn = self.connection.write().await;
 
-        let exists: bool = conn
-            .exists(&key)
-            .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis EXISTS failed: {e}")))?;
-
-        if !exists {
-            return Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}#{}#{}#{}",
-                record.authority_id(),
-                record.action(),
-                record.resource(),
-                record.entity_id()
-            )));
-        }
+        let Some((found_under, _)) = Self::lookup(&mut conn, &key).await? else {
+            return Err(not_found(&key));
+        };
 
         let value = Self::serialize_record(&record)?;
 
+        // Write the current key first: if the process stops before the
+        // earlier key is removed, both copies exist and the current one wins
+        // on read and in listings.
         let _: () = conn
-            .set(&key, value)
+            .set(&storage_key, value)
             .await
             .map_err(|e| RepositoryError::QueryFailed(format!("Redis SET failed: {e}")))?;
+        if found_under != storage_key {
+            let _: i32 = conn
+                .del(&found_under)
+                .await
+                .map_err(|e| RepositoryError::QueryFailed(format!("Redis DEL failed: {e}")))?;
+        }
 
-        info!("Record updated successfully: {}", key);
+        info!("Record updated successfully: {}", storage_key);
         Ok(())
     }
 
     async fn delete(&self, query: TrustRecordQuery) -> Result<(), RepositoryError> {
-        let key = TrustRecordKey::from_query(&query).to_string();
-        debug!("Deleting record with key: {}", key);
+        let key = TrustRecordKey::from_query(&query);
+        let storage_key = key.sk();
+        debug!("Deleting record with key: {}", storage_key);
 
         let mut conn = self.connection.write().await;
 
-        let deleted: i32 = conn
-            .del(&key)
+        // The earlier key goes first: if the process stops in between, the
+        // record is still present under its current key and a retried delete
+        // removes it. The other order would leave the old copy to be read back.
+        let mut deleted = 0;
+        if let Some(legacy) = key.legacy_sk() {
+            let stored = Self::get_record(&mut conn, &legacy).await?;
+            if verified_record(&key, &legacy, stored).is_some() {
+                deleted += conn
+                    .del::<_, i32>(&legacy)
+                    .await
+                    .map_err(|e| RepositoryError::QueryFailed(format!("Redis DEL failed: {e}")))?;
+            }
+        }
+        deleted += conn
+            .del::<_, i32>(&storage_key)
             .await
             .map_err(|e| RepositoryError::QueryFailed(format!("Redis DEL failed: {e}")))?;
 
         if deleted == 0 {
-            return Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}#{}#{}#{}",
-                query.authority_id, query.action, query.resource, query.entity_id
-            )));
+            return Err(not_found(&key));
         }
 
-        info!("Record deleted successfully: {}", key);
+        info!("Record deleted successfully: {}", storage_key);
         Ok(())
     }
 
@@ -159,7 +193,7 @@ impl TrustRecordAdminRepository for RedisStorage {
         debug!("Listing all records");
 
         let mut conn = self.connection.write().await;
-        let mut records = Vec::new();
+        let mut entries = Vec::new();
 
         // Use SCAN instead of KEYS to avoid blocking Redis
         // SCAN is O(1) per call and iterates incrementally
@@ -184,7 +218,7 @@ impl TrustRecordAdminRepository for RedisStorage {
 
                 if let Some(data) = data {
                     match Self::deserialize_record(&data) {
-                        Ok(record) => records.push(record),
+                        Ok(record) => entries.push((key, record)),
                         Err(e) => {
                             error!("Failed to deserialize record for key {}: {}", key, e);
                         }
@@ -198,30 +232,19 @@ impl TrustRecordAdminRepository for RedisStorage {
             cursor = new_cursor;
         }
 
+        let records = dedupe_listing(entries);
         info!("Listed {} records", records.len());
         Ok(TrustRecordList::new(records))
     }
 
     async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
-        let key = TrustRecordKey::from_query(&query).to_string();
+        let key = TrustRecordKey::from_query(&query);
         debug!("Reading record with key: {}", key);
 
         let mut conn = self.connection.write().await;
-
-        let data: Option<String> = conn
-            .get(&key)
-            .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {e}")))?;
-
-        match data {
-            Some(data) => {
-                let record = Self::deserialize_record(&data)?;
-                Ok(record)
-            }
-            None => Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}#{}#{}#{}",
-                query.authority_id, query.action, query.resource, query.entity_id
-            ))),
+        match Self::lookup(&mut conn, &key).await? {
+            Some((_, record)) => Ok(record),
+            None => Err(not_found(&key)),
         }
     }
 }
@@ -254,7 +277,9 @@ mod tests {
     }
 
     async fn get_test_storage() -> Option<RedisStorage> {
-        match RedisStorage::new("redis://127.0.0.1:6379").await {
+        let url = std::env::var("TR_TEST_REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        match RedisStorage::new(&url).await {
             Ok(storage) => Some(storage),
             Err(_) => {
                 println!("Redis not available, skipping test");
@@ -266,8 +291,11 @@ mod tests {
     async fn cleanup_test_data(storage: &RedisStorage, records: &[TrustRecord]) {
         let mut conn = storage.connection.write().await;
         for record in records {
-            let key = TrustRecordKey::from_record(record).to_string();
-            let _: Result<(), _> = conn.del(&key).await;
+            let key = TrustRecordKey::from_record(record);
+            let _: Result<(), _> = conn.del(key.sk()).await;
+            if let Some(legacy) = key.legacy_sk() {
+                let _: Result<(), _> = conn.del(&legacy).await;
+            }
         }
     }
 
@@ -484,5 +512,138 @@ mod tests {
         assert_eq!(result.unwrap().entity_id().as_str(), "did:example:entity1");
 
         cleanup_test_data(&storage, &[record]).await;
+    }
+
+    fn query_for(record: &TrustRecord) -> TrustRecordQuery {
+        TrustRecordQuery::new(
+            record.entity_id().clone(),
+            record.authority_id().clone(),
+            record.action().clone(),
+            record.resource().clone(),
+        )
+    }
+
+    /// Store `record` the way an older release did: under the unescaped key.
+    async fn insert_under_earlier_key(storage: &RedisStorage, record: &TrustRecord) -> String {
+        let legacy = TrustRecordKey::from_record(record)
+            .legacy_sk()
+            .expect("identifiers contain '#' or '%'");
+        let mut conn = storage.connection.write().await;
+        let _: () = conn
+            .set(&legacy, RedisStorage::serialize_record(record).unwrap())
+            .await
+            .unwrap();
+        legacy
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_records_with_separator_in_identifiers_stay_distinct() {
+        let Some(storage) = get_test_storage().await else {
+            return;
+        };
+        let first = create_test_record(
+            "did:example:e",
+            "did:example:a",
+            "sign",
+            "repo#main",
+            true,
+            true,
+            "authorization",
+        );
+        let second = create_test_record(
+            "did:example:e",
+            "did:example:a",
+            "sign#repo",
+            "main",
+            true,
+            false,
+            "authorization",
+        );
+        cleanup_test_data(&storage, &[first.clone(), second.clone()]).await;
+
+        storage.create(first.clone()).await.unwrap();
+        storage.create(second.clone()).await.unwrap();
+        assert_eq!(storage.read(query_for(&first)).await.unwrap(), first);
+        assert_eq!(storage.read(query_for(&second)).await.unwrap(), second);
+        storage.delete(query_for(&first)).await.unwrap();
+        assert!(
+            storage
+                .find_by_query(query_for(&first))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(storage.read(query_for(&second)).await.unwrap(), second);
+
+        cleanup_test_data(&storage, &[first, second]).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_record_under_earlier_key_is_read_updated_and_deleted() {
+        let Some(storage) = get_test_storage().await else {
+            return;
+        };
+        let stored = create_test_record(
+            "did:example:e",
+            "did:example:a",
+            "sign",
+            "repo#main",
+            true,
+            true,
+            "authorization",
+        );
+        let other = create_test_record(
+            "did:example:e",
+            "did:example:a",
+            "sign#repo",
+            "main",
+            true,
+            true,
+            "authorization",
+        );
+        cleanup_test_data(&storage, &[stored.clone(), other.clone()]).await;
+        let legacy = insert_under_earlier_key(&storage, &stored).await;
+
+        assert_eq!(storage.read(query_for(&stored)).await.unwrap(), stored);
+        assert!(
+            storage
+                .find_by_query(query_for(&other))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            storage.delete(query_for(&other)).await,
+            Err(RepositoryError::RecordNotFound(_))
+        ));
+        assert!(matches!(
+            storage.create(stored.clone()).await,
+            Err(RepositoryError::RecordAlreadyExists(_))
+        ));
+
+        let updated = stored.clone().with_authorized(false);
+        storage.update(updated.clone()).await.unwrap();
+        {
+            let mut conn = storage.connection.write().await;
+            let legacy_left: bool = conn.exists(&legacy).await.unwrap();
+            assert!(
+                !legacy_left,
+                "update leaves the record under its current key only"
+            );
+        }
+        assert_eq!(storage.read(query_for(&stored)).await.unwrap(), updated);
+
+        storage.delete(query_for(&stored)).await.unwrap();
+        assert!(
+            storage
+                .find_by_query(query_for(&stored))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        cleanup_test_data(&storage, &[stored, other]).await;
     }
 }
