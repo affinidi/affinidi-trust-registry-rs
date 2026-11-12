@@ -27,7 +27,20 @@ release goes GA (`## 0.27.0 (date)`).
   build an `AuditLog` with `AuditLogBuilder`. Released as part of 0.32.0.
 - **`BaseAuditLogger` no longer numbers entries**; it renders the `sequence`
   the entry carries, which `BoundedAuditLogger` assigns.
-
+- **`trql-client`: `HttpsTransportConfig` is `#[non_exhaustive]`** and has
+  new public fields (`allow_insecure_http`, `max_response_bytes`,
+  `allow_non_public_addresses`). Build it with `HttpsTransportConfig::new`
+  and set fields on the value; struct literals no longer compile.
+- **`trql-client`: `HttpsTransport` connects only to public addresses by
+  default.** It refuses loopback, private, link-local, shared, multicast and
+  other non-public addresses: an IP literal in the URL is refused by
+  `HttpsTransport::new`, and a host name is refused at connect time if any
+  address it resolves to is not public. It also connects directly, ignoring
+  proxy settings from the environment. **A client of a registry on a private
+  network, on this machine (`localhost`, `127.0.0.1`) or behind a proxy must
+  set `HttpsTransportConfig::allow_non_public_addresses = true`**; set it only
+  for a URL you configured, not one taken from a DID document you do not
+  control.
 
 ### Added
 
@@ -45,6 +58,9 @@ release goes GA (`## 0.27.0 (date)`).
   `AuditLogBuilder::authenticated_sender` sets it.
 - **`BoundedLimits`** and `BoundedAuditLogger::with_limits` configure the
   budgets below.
+- **`trql-client`: `HttpsTransportConfig::allow_non_public_addresses`**
+  opts out of the address check above (see Breaking). New constants
+  `DEFAULT_MAX_RESPONSE_BYTES` and `MAX_ERROR_DETAIL_CHARS`.
 
 ### Changed
 
@@ -193,6 +209,18 @@ release goes GA (`## 0.27.0 (date)`).
   whole `TrustRegistryConfig` with `{:?}`; it now logs the listen address,
   storage backend, transports, registry and mediator DIDs and the number of
   admin DIDs.
+- **`trql-client`'s `HttpsTransport` treats the registry URL as externally
+  supplied.** `HttpsTransport::new` refuses a scheme other than `https`, plain
+  `http` to a host other than `localhost` or a loopback address (set
+  `allow_insecure_http` to allow it), and a URL with a username or password
+  (`TrqlError::Config`). A redirect is no longer followed (reqwest followed
+  up to 10); a `3xx` answer is a `TrqlError::Transport`. A reply body larger
+  than `max_response_bytes` (default 64 KiB) is refused as a
+  `TrqlError::Transport` without reading the rest. When a non-2xx body is not
+  a Trust Task document, at most 256 characters of it are copied into the
+  error. The `Debug` output of `HttpsTransportConfig` shows the bearer token
+  as `***`, and `HttpsTransport` now implements `Debug` the same way. The
+  `https` feature now enables `tokio` (already a dependency of `reqwest`).
 
 ### Fixed
 

@@ -15,7 +15,8 @@ publish = true
 [features]
 default = ["https"]
 # HTTPS binding: POST /trust-tasks (trust-tasks-https wire contract).
-https = ["dep:reqwest"]
+# tokio resolves host names for the optional non-public address filter.
+https = ["dep:reqwest", "dep:tokio"]
 # DIDComm binding over the ATM mediator (trust-tasks-didcomm envelope).
 didcomm = ["dep:affinidi-tdk", "dep:trust-tasks-didcomm", "dep:tokio", "dep:uuid"]
 # TSP binding, multiplexed on the same mediator websocket (trust-tasks-tsp

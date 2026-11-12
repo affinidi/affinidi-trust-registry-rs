@@ -16,6 +16,16 @@
 //!   protocol is a typed [`TrqlError::NoMatchingTransport`], not a quiet
 //!   fallback to HTTPS.
 //!
+//! Endpoints are taken from the document as published, and whoever controls
+//! the DID document chooses them. Treat an endpoint from a DID you do not
+//! control as externally supplied input. By default `HttpsTransport` refuses
+//! plain `http` to a non-loopback host, follows no redirects, and does not
+//! connect to loopback, private, link-local or other non-public addresses.
+//! Keep those defaults for an endpoint taken from a DID document.
+//! `HttpsTransportConfig::allow_non_public_addresses` is the opt-out for a
+//! registry on a private network; set it only for a base URL you configured
+//! yourself, never for one chosen by a DID you do not control.
+//!
 //! Resolution itself is the caller's job: this module is pure logic over an
 //! already-resolved document, so it needs no resolver dependency and works
 //! under any feature combination.
