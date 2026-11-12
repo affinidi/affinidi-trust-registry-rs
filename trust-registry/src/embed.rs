@@ -55,9 +55,9 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{error, warn};
 
-use crate::audit::audit_logger::BaseAuditLogger;
+use crate::audit::audit_logger::{AUDIT_TARGET, BaseAuditLogger};
 use crate::audit::bounded::BoundedAuditLogger;
 use crate::audit::model::AuditLogger;
 use crate::capabilities::{
@@ -107,6 +107,8 @@ impl TrustRegistry {
             verifier: None,
             didcomm_source: None,
             shutdown: None,
+            audit_logger: None,
+            require_audit_sink: false,
         }
     }
 
@@ -378,6 +380,8 @@ pub struct TrustRegistryBuilder {
     verifier: Option<Arc<dyn trust_tasks_rs::DynProofVerifier>>,
     didcomm_source: Option<DidCommSource>,
     shutdown: Option<CancellationToken>,
+    audit_logger: Option<Arc<dyn AuditLogger>>,
+    require_audit_sink: bool,
 }
 
 impl TrustRegistryBuilder {
@@ -461,6 +465,32 @@ impl TrustRegistryBuilder {
         self
     }
 
+    /// Where audit entries are recorded.
+    ///
+    /// Defaults to [`BaseAuditLogger`], which writes each entry to the
+    /// `tracing` target [`AUDIT_TARGET`] at `INFO`, so the host's subscriber
+    /// decides whether entries are kept. A host with its own audit store passes
+    /// a logger that writes there. Either way the registry applies its bound on
+    /// unproven refusals in front of it.
+    pub fn audit_logger(mut self, audit_logger: Arc<dyn AuditLogger>) -> Self {
+        self.audit_logger = Some(audit_logger);
+        self
+    }
+
+    /// Refuse to build when audit entries would be lost.
+    ///
+    /// With the default [`BaseAuditLogger`], [`build`](Self::build) checks
+    /// that the current `tracing` subscriber records the [`AUDIT_TARGET`]
+    /// target at `INFO`. By default a failed check is reported (to the log and
+    /// to stderr) and the registry is built anyway; with this set, `build`
+    /// returns an error instead, so no write is ever accepted without an
+    /// audit trail. Has no effect with a logger passed to
+    /// [`audit_logger`](Self::audit_logger).
+    pub fn require_audit_sink(mut self, require: bool) -> Self {
+        self.require_audit_sink = require;
+        self
+    }
+
     /// Assemble the registry.
     ///
     /// Loads persisted capability state and composes the dispatchers, so an
@@ -520,12 +550,35 @@ impl TrustRegistryBuilder {
             Arc::new(MemoryMessageIdStore::default())
         });
 
-        // One logger for every surface, so the bound on unproven refusals
-        // applies to the registry as a whole rather than per binding. Its
-        // count of suppressed entries is flushed every window and at shutdown.
-        let audit = Arc::new(BoundedAuditLogger::new(Arc::new(BaseAuditLogger::new(
-            self.config.didcomm_config.admin_config.audit_config.clone(),
-        ))));
+        let audit_sink = match self.audit_logger {
+            Some(audit_logger) => audit_logger,
+            None => {
+                if !BaseAuditLogger::sink_enabled() {
+                    let message = format!(
+                        "audit entries are written to the tracing target `{AUDIT_TARGET}` at \
+                         INFO, which the current subscriber does not record: writes would leave \
+                         no audit trail. Enable that target, or pass a logger with \
+                         `TrustRegistryBuilder::audit_logger`."
+                    );
+                    if self.require_audit_sink {
+                        return Err(BoxError::from(message));
+                    }
+                    // The subscriber that drops audit entries may drop this
+                    // too, or there may be none.
+                    eprintln!("trust-registry: {message}");
+                    error!("{message}");
+                }
+                Arc::new(BaseAuditLogger::new(
+                    self.config.didcomm_config.admin_config.audit_config.clone(),
+                ))
+            }
+        };
+        // One logger for every surface. Its bound on unproven refusals keeps a
+        // separate budget for unauthenticated callers and for each
+        // transport-authenticated sender, so no one source can use up the
+        // entries another's refusals need. Its count of suppressed entries is
+        // flushed every window and at shutdown.
+        let audit = Arc::new(BoundedAuditLogger::new(audit_sink));
         let shutdown = self.shutdown.unwrap_or_default();
         audit.spawn_flusher(shutdown.clone());
 
@@ -803,5 +856,33 @@ mod tests {
             StatusCode::OK,
             "recognition route should answer at the host's chosen prefix"
         );
+    }
+
+    #[tokio::test]
+    async fn build_can_refuse_when_audit_entries_would_be_lost() {
+        let _guard = tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
+        let builder = || {
+            let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::new());
+            TrustRegistry::builder(TrustRegistryConfig::embedded("/tmp/tr-embed-test"))
+                .repository(repository)
+                .capability_store(Box::new(MemoryCapabilityStore::default()))
+        };
+
+        let Err(error) = builder().require_audit_sink(true).build().await else {
+            panic!("no subscriber records the audit target, so build must refuse");
+        };
+        assert!(error.to_string().contains(AUDIT_TARGET), "{error}");
+
+        builder()
+            .build()
+            .await
+            .expect("without the flag the gap is reported, not fatal");
+
+        builder()
+            .require_audit_sink(true)
+            .audit_logger(Arc::new(BaseAuditLogger::new(Default::default())))
+            .build()
+            .await
+            .expect("a host-provided logger is the host's responsibility");
     }
 }

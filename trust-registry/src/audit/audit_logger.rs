@@ -21,10 +21,25 @@ pub use crate::audit::model::{AuditLogBuilder, AuditStatus};
 pub const AUDIT_ROLE_ADMIN: &str = "ADMIN";
 pub const NA: &str = "N/A";
 
+/// The `tracing` target every audit entry is written under.
+///
+/// The standalone service gives this target its own output layer, enabled at
+/// `INFO` whatever `RUST_LOG` says, so lowering the diagnostic log level does
+/// not drop audit entries. A host embedding the registry must keep this target
+/// enabled at `INFO` in its own subscriber, or route entries elsewhere with
+/// `TrustRegistryBuilder::audit_logger`.
+pub const AUDIT_TARGET: &str = "audit";
+
 /// The longest value an audit entry records for any one field, in characters.
 /// Longer values are cut and marked with `…`.
 pub const MAX_FIELD_CHARS: usize = 256;
 
+/// The longest reason or error an entry records, in characters. Longer than
+/// [`MAX_FIELD_CHARS`] so a summary of suppressed refusals (counts per reason,
+/// per task and the claimed issuers) fits.
+pub const MAX_REASON_CHARS: usize = 1024;
+
+#[non_exhaustive]
 pub struct EmitInput {
     pub target: String,
     pub operation: AuditOperation,
@@ -36,6 +51,10 @@ pub struct EmitInput {
     pub task: Option<String>,
     pub document_id: Option<String>,
     pub claimed_actor: Option<String>,
+    pub authenticated_sender: Option<String>,
+    /// The entry's position in this process's audit sequence, starting at 1. A
+    /// gap shows that an entry was lost. Assigned by `BoundedAuditLogger`.
+    pub sequence: Option<u64>,
     pub timestamp: chrono::DateTime<Utc>,
 }
 
@@ -71,12 +90,20 @@ fn is_disruptive(c: char) -> bool {
         )
 }
 
-/// Cap `value` at [`MAX_FIELD_CHARS`] and replace every disruptive character
+/// The cap for the field `key`.
+fn limit_for(key: &str) -> usize {
+    match key {
+        "reason" | "error" => MAX_REASON_CHARS,
+        _ => MAX_FIELD_CHARS,
+    }
+}
+
+/// Cap `value` at `limit` characters and replace every disruptive character
 /// with its `\u{…}` escape, for both formats alike.
-fn capped(value: &str) -> String {
+fn capped(value: &str, limit: usize) -> String {
     let mut out = String::new();
     for (index, c) in value.chars().enumerate() {
-        if index == MAX_FIELD_CHARS {
+        if index == limit {
             out.push('…');
             break;
         }
@@ -91,8 +118,8 @@ fn capped(value: &str) -> String {
 
 /// Cap `value` and quote it with every control character escaped, so it
 /// cannot break the line it is written on.
-fn quoted(value: &str) -> String {
-    format!("{:?}", capped(value))
+fn quoted(value: &str, limit: usize) -> String {
+    format!("{:?}", capped(value, limit))
 }
 
 impl EmitInput {
@@ -108,9 +135,11 @@ impl EmitInput {
             None => ("reason", None),
         };
         vec![
+            ("seq", self.sequence.map(|sequence| sequence.to_string())),
             ("role", Some(AUDIT_ROLE_ADMIN.to_string())),
             ("actor", Some(self.actor.clone())),
             ("claimed_actor", self.claimed_actor.clone()),
+            ("authenticated_sender", self.authenticated_sender.clone()),
             ("operation", Some(self.operation.to_string())),
             ("task", self.task.clone()),
             ("status", Some(self.status.clone())),
@@ -146,7 +175,7 @@ pub fn render_json(input: &EmitInput) -> String {
     let mut map = serde_json::Map::new();
     for (key, value) in input.fields() {
         let Some(value) = value else { continue };
-        let value = json!(capped(&value));
+        let value = json!(capped(&value, limit_for(key)));
         match key.split_once('.') {
             Some((outer, inner)) => {
                 let nested = map
@@ -169,11 +198,15 @@ pub fn render_text(input: &EmitInput) -> String {
     input
         .fields()
         .into_iter()
-        .filter_map(|(key, value)| value.map(|value| format!("audit.{key}={}", quoted(&value))))
+        .filter_map(|(key, value)| {
+            value.map(|value| format!("audit.{key}={}", quoted(&value, limit_for(key))))
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
 
+/// Writes each entry as one line to the `tracing` target [`AUDIT_TARGET`] at
+/// `INFO`, with the sequence number the entry carries.
 #[derive(Clone)]
 pub struct BaseAuditLogger {
     config: AuditConfig,
@@ -182,6 +215,12 @@ pub struct BaseAuditLogger {
 impl BaseAuditLogger {
     pub fn new(config: AuditConfig) -> Self {
         Self { config }
+    }
+
+    /// Whether the current `tracing` subscriber records entries written to
+    /// [`AUDIT_TARGET`]. When it does not, this logger's entries are lost.
+    pub fn sink_enabled() -> bool {
+        tracing::enabled!(target: AUDIT_TARGET, tracing::Level::INFO)
     }
 }
 
@@ -199,15 +238,17 @@ impl AuditLogger for BaseAuditLogger {
             task: audit_log.task,
             document_id: audit_log.document_id,
             claimed_actor: audit_log.claimed_actor,
+            authenticated_sender: audit_log.authenticated_sender,
+            sequence: audit_log.sequence,
             timestamp: audit_log.timestamp,
         };
 
         match self.config.log_format {
             crate::configs::AuditLogFormat::Json => {
-                info!(target: "audit", "{}", render_json(&emit_input))
+                info!(target: AUDIT_TARGET, "{}", render_json(&emit_input))
             }
             crate::configs::AuditLogFormat::Text => {
-                info!(target: "audit", "{}", render_text(&emit_input))
+                info!(target: AUDIT_TARGET, "{}", render_text(&emit_input))
             }
         }
     }
@@ -370,6 +411,8 @@ mod tests {
             task: Some("registry/record/put".to_string()),
             document_id: Some("x".repeat(10_000)),
             claimed_actor: Some("did:example:anyone\n".to_string()),
+            authenticated_sender: None,
+            sequence: Some(7),
             timestamp: Utc::now(),
         }
     }
@@ -419,5 +462,41 @@ mod tests {
             }
             assert!(line.contains("u{2028}") && line.contains("u{202e}"));
         }
+    }
+
+    #[test]
+    fn entries_carry_their_sequence_number_and_authenticated_sender() {
+        let mut input = hostile_input();
+        input.authenticated_sender = Some("did:example:peer".to_string());
+        let parsed: Value = serde_json::from_str(&render_json(&input)).expect("json");
+        assert_eq!(parsed["seq"], "7");
+        assert_eq!(parsed["authenticated_sender"], "did:example:peer");
+        let line = render_text(&input);
+        assert!(line.starts_with(r#"audit.seq="7""#), "{line}");
+        assert!(line.contains(r#"audit.authenticated_sender="did:example:peer""#));
+    }
+
+    #[test]
+    fn a_reason_may_be_longer_than_other_fields() {
+        let mut input = hostile_input();
+        input.extra = Some(format!("audit.reason={}", "r".repeat(2000)));
+        let parsed: Value = serde_json::from_str(&render_json(&input)).expect("json");
+        let reason = parsed["reason"].as_str().expect("reason");
+        assert_eq!(reason.chars().count(), MAX_REASON_CHARS + 1);
+        let id = parsed["document_id"].as_str().expect("document id");
+        assert_eq!(id.chars().count(), MAX_FIELD_CHARS + 1);
+    }
+
+    #[test]
+    fn the_sink_is_reported_disabled_when_the_subscriber_filters_it_out() {
+        use tracing_subscriber::{Layer, layer::SubscriberExt};
+
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::sink)
+                .with_filter(tracing_subscriber::filter::LevelFilter::WARN),
+        );
+        let _guard = tracing::subscriber::set_default(subscriber);
+        assert!(!BaseAuditLogger::sink_enabled());
     }
 }
