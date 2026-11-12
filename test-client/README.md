@@ -18,8 +18,10 @@ When the test-client is executed, it performs the following steps:
 
 Before running the test client, ensure you have:
 
-1. **User Configuration**: A valid `conf/user_config.json` file with admin user profiles and their secrets.
-2. **Trust Registry Setup**: Ensure you have configured the Trust Registry with authorised admin DIDs using the `ADMIN_DIDS` environment variable.
+1. **Test client identity**: The test client keeps its admin identity (a `did:peer` and its private keys) in `conf/user_config.json`, or in the file `SERVICE_CONFIG_PATH` names. The repository ships no such file. On the first run, when the file does not exist, the test client generates a new identity, saves it there (readable by its owner only; the path is ignored by git), prints its DID and exits.
+2. **Trust Registry Setup**: Add that DID to the Trust Registry's `ADMIN_DIDS` environment variable, restart the registry, and run the test client again.
+
+The registry refuses to start when `ADMIN_DIDS` lists the sample DID earlier versions of this test client shipped with, because that DID's private keys are public.
 
 ## Configuration Variables
 
@@ -65,6 +67,6 @@ This approach is useful for:
 
 ## Troubleshooting
 
-- **Authorization errors**: Ensure the DID from `conf/user_config.json` is configured as an authorised admin in the Trust Registry's `ADMIN_DIDS` environment variable. A write under an `authority_id` other than the admin's own DID is refused unless the registry's `ADMIN_AUTHORITIES` lists that authority for the admin.
+- **Authorization errors**: Ensure the DID the test client printed on its first run (the key of `conf/user_config.json`) is configured as an authorised admin in the Trust Registry's `ADMIN_DIDS` environment variable. A write under an `authority_id` other than the admin's own DID is refused unless the registry's `ADMIN_AUTHORITIES` lists that authority for the admin.
 - **"TRUST_REGISTRY_DID environment variable is not set"**: Either set it at runtime or ensure `PROFILE_CONFIG` exists in your `.env` file.
-- **"Unable to find 'SampleTRAdmin' from the user_config.json"**: Check that `conf/user_config.json` contains a user with the alias "SampleTRAdmin".
+- **"Unable to find 'SampleTRAdmin' from the user_config.json"**: Check that `conf/user_config.json` contains a user with the alias "SampleTRAdmin", or delete the file to have a new identity generated.

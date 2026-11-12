@@ -124,15 +124,15 @@ jobs:
             --mediator-did="$MEDIATOR_DID" \
             --test-in-pipeline=true \
             --file-storage-path=trust-registry/tests/tmp/data.csv
-      - name: Setup environment
-        run: cp .env.pipeline .env.test
       - name: Prepare test data
         run: |
           mkdir -p trust-registry/tests/tmp
           cp sample-data/data.csv trust-registry/tests/tmp/data.csv
       - name: Run trust-registry server
         run: |
-          cp .env.pipeline .env
+          # setup-trust-registry wrote the generated keys to .env.test
+          # (from the tracked .env.pipeline template).
+          cp .env.test .env
           RUST_LOG=info nohup cargo run --bin trust-registry > server.log 2>&1 &
           echo $! > server.pid
       - name: Wait for server to be ready

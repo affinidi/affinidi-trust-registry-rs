@@ -18,8 +18,18 @@ release goes GA (`## 0.27.0 (date)`).
 
 ## Unreleased
 
+
 ### Breaking
 
+- **The registry refuses to start when `ADMIN_DIDS` lists the test client's
+  former sample DID** (`did:peer:2.Vz6Mkpun7x…`), whose private keys were
+  committed to this repository; anyone could make its proofs. `.env.example`
+  listed it, so a `.env` copied from it must drop it. New
+  `configs::didcomm::check_admin_dids_not_published` and
+  `PUBLISHED_SAMPLE_ADMIN_DIDS`.
+- **`setup-trust-registry --tr-did-secret <json>` is replaced by
+  `--tr-did-secret-file <path>`** (`-e`; `-` reads standard input), so the
+  keys stay out of shell history and the process list.
 - **`didcomm::handlers::HandlerContext` has no `sender_did`**, and its
   `authenticated_sender` is a `String`: protocol handlers are called only for
   a message whose sender the envelope authenticated, and answer that sender.
@@ -74,6 +84,31 @@ release goes GA (`## 0.27.0 (date)`).
 
 ### Changed
 
+- **The test client generates its own admin identity.** The repository no
+  longer ships `test-client/conf/user_config.json`. On its first run the test
+  client creates a new `did:peer` (Ed25519 signing, X25519 key agreement),
+  saves it there owner-only (the path is ignored by git), prints the DID to
+  add to `ADMIN_DIDS` and exits. `SERVICE_CONFIG_PATH` still points it at
+  another file. `.env.example` leaves `ADMIN_DIDS` empty.
+- **`setup-trust-registry` and `generate-secrets` write `.env` files
+  owner-only** (0600 on Unix, also narrowing an existing file), with the
+  variables sorted by name.
+- **`setup-trust-registry` no longer prints a generated profile.** With
+  `--profile file://<path>` it writes the profile there; with another
+  location, to `./trust-registry-profile.json` for the operator to store and
+  delete. Either file is created owner-only and never overwritten; the output
+  shows the DID and key ids. `CLIENT_SECRETS` is shown as `<redacted>` in the
+  "Environment Configuration" output.
+- **With a secret-store backend configured, `setup-trust-registry` keeps the
+  profile out of `.env`.** It writes the bundle to the backend and removes
+  `PROFILE_CONFIG` from `.env`; a failed write stops it with an error (it
+  used to warn and fall back to `.env`). Only a bundle the run has (generated,
+  or from `--tr-did`) is written; a `--profile` location is no longer written
+  to the backend as if it were the bundle.
+- **`--test-in-pipeline` writes `.env.test`**, built from the tracked
+  `.env.pipeline` template, instead of adding generated keys to
+  `.env.pipeline` itself (also `generate-secrets` with `IN_PIPELINE=true`).
+  CI copies `.env.test` to `.env`.
 - **The container image runs as an unprivileged user and reports its
   health.** The runtime stage runs the registry as `trustregistry`
   (UID/GID 10001) with `/app` as its working and only writable directory;
@@ -250,7 +285,6 @@ release goes GA (`## 0.27.0 (date)`).
   error. The `Debug` output of `HttpsTransportConfig` shows the bearer token
   as `***`, and `HttpsTransport` now implements `Debug` the same way. The
   `https` feature now enables `tokio` (already a dependency of `reqwest`).
-
 - **DIDComm messages without an authenticated sender are not answered.**
   The TRQP and Trust Task handlers addressed, resolved and encrypted their
   reply to the message's `from` header (or to `anon` when it had none), which

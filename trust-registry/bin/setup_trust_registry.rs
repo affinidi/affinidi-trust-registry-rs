@@ -33,12 +33,16 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     error::Error,
-    fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
-    path::Path,
+    fs::{self, File},
+    io::{Read, Write},
+    path::{Path, PathBuf},
     println,
     sync::Arc,
 };
+
+#[path = "env_file.rs"]
+mod env_file;
+use env_file::insert_env_vars;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfileConfig {
@@ -136,9 +140,12 @@ struct Args {
     #[arg(long, short = 'r')]
     tr_did: Option<String>,
 
-    /// Trust Registry DID secret (optional, used to set existing DID)
-    #[arg(long, short = 'e')]
-    tr_did_secret: Option<String>,
+    /// File holding the Trust Registry DID's secrets as a JSON array (optional,
+    /// used with --tr-did to set an existing DID). `-` reads them from stdin.
+    /// Read from a file rather than the command line so the keys stay out of
+    /// shell history and the process list.
+    #[arg(long, short = 'e', value_name = "PATH")]
+    tr_did_secret_file: Option<PathBuf>,
 
     /// Trust Registry test configuration
     #[arg(long, short = 'l', default_value = "false")]
@@ -160,49 +167,50 @@ struct Args {
     non_interactive: bool,
 }
 
-fn insert_env_vars(
-    file_path: &str,
-    new_vars: HashMap<String, String>,
-    example_file_path: Option<&str>,
-) -> std::io::Result<()> {
-    let path = Path::new(file_path);
-    let mut existing_vars = HashMap::new();
+/// Read the existing DID's secrets from `path`, or from stdin for `-`.
+fn read_secret_file(path: &Path) -> Result<String, Box<dyn Error>> {
+    if path == Path::new("-") {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        Ok(buf)
+    } else {
+        fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()).into())
+    }
+}
 
-    if !path.exists()
-        && let Some(example_path) = example_file_path
+/// What may be shown of a profile bundle: its DID and key ids, never the
+/// key material.
+fn profile_summary(did: &str, secrets: &[Secret]) -> String {
+    let mut out = format!("  DID: {did}");
+    for secret in secrets {
+        out.push_str(&format!("\n  key: {}", secret.id));
+    }
+    out
+}
+
+/// Write a generated profile bundle to `path`, owner-only, refusing to
+/// replace an existing file.
+fn write_profile_file(path: &Path, bundle: &str) -> std::io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
     {
-        let example = Path::new(example_path);
-        if example.exists() {
-            fs::copy(example, path)?;
-        }
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    let mut file = options.open(path)?;
+    file.write_all(bundle.as_bytes())?;
+    file.write_all(b"\n")
+}
 
-    if path.exists() {
-        let file = fs::File::open(path)?;
-        let reader = BufReader::new(file);
-        for line in reader.lines() {
-            let line = line?;
-            if let Some((key, value)) = line.split_once('=') {
-                existing_vars.insert(key.trim().to_string(), value.trim().to_string());
-            }
-        }
+/// Where to save a generated profile for `--profile <location>`: the path of
+/// a `file://` location, else a local file the operator uploads to it.
+fn profile_output_path(location: &str) -> PathBuf {
+    match location.strip_prefix("file://") {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => PathBuf::from("./trust-registry-profile.json"),
     }
-
-    for (key, value) in new_vars {
-        existing_vars.insert(key, value);
-    }
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-
-    for (key, value) in existing_vars {
-        writeln!(file, "{}={}", key, value)?;
-    }
-
-    Ok(())
 }
 
 pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Secret>) {
@@ -655,8 +663,10 @@ pub async fn setup_test_trust_registry(
             "PROFILE_CONFIG".to_string(),
             format!("'{}'", test_profile_configs_stringified),
         );
-        insert_env_vars("./.env.pipeline", vars, None)?;
-        println!("✓ Configured .env.pipeline file for testing.");
+        // `.env.pipeline` is a tracked template: the generated keys go to the
+        // untracked `.env.test`, built from it.
+        insert_env_vars("./.env.test", vars, &[], Some("./.env.pipeline"))?;
+        println!("✓ Configured .env.test file for the pipeline.");
     } else {
         let mut test_vars = HashMap::new();
         test_vars.insert("TRUST_REGISTRY_DID".to_string(), test_tr_did.0);
@@ -671,6 +681,7 @@ pub async fn setup_test_trust_registry(
         insert_env_vars(
             "./.env.test",
             test_vars,
+            &[],
             Some("./testing/.env.test.example"),
         )?;
         println!("✓ Configured .env.test file for testing.");
@@ -704,7 +715,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Existing DID profile
     let existing_tr_did = args.tr_did.unwrap_or("".to_string());
-    let existing_tr_did_secret = args.tr_did_secret.unwrap_or("".to_string());
+    let existing_tr_did_secret = match &args.tr_did_secret_file {
+        Some(path) => read_secret_file(path)?,
+        None => String::new(),
+    };
 
     // Testing in pipeline
     let test_in_pipeline = args.test_in_pipeline.unwrap_or(false);
@@ -730,6 +744,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     // The registry's DID, once known, for the operators' ADMIN_AUTHORITIES entry.
     let mut registry_did: Option<String> = None;
+    // The profile bundle (JSON) when this run has it in hand, for a
+    // secret-store backend.
+    let mut profile_bundle: Option<String> = None;
 
     // Skips DIDComm related tasks if no mediator details are provided
     let enable_didcomm = !mediator_did.is_empty();
@@ -749,7 +766,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // Parse the secret JSON string into Vec<Secret>
             let tr_secrets: Vec<Secret> = serde_json::from_str(&existing_tr_did_secret)
-                .map_err(|e| format!("Failed to parse existing_tr_did_secret as JSON: {}", e))?;
+                .map_err(|e| format!("Failed to parse --tr-did-secret-file as JSON: {}", e))?;
 
             registry_did = Some(existing_tr_did.clone());
             let profile_config = Some(ProfileConfig {
@@ -761,7 +778,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("✓ Profile configuration configured.");
             println!();
 
-            profile = format!("'{}'", serde_json::to_string(&profile_config)?);
+            let bundle = serde_json::to_string(&profile_config)?;
+            profile = format!("'{bundle}'");
+            profile_bundle = Some(bundle);
         } else if !did_method.is_empty() {
             // Mode 2: Generate new DID
 
@@ -801,19 +820,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 secrets: tr_secrets.clone(),
             });
 
+            let bundle = serde_json::to_string(&profile_config)?;
             if profile.is_empty() {
-                profile = format!("'{}'", serde_json::to_string(&profile_config)?);
+                profile = format!("'{bundle}'");
             } else {
-                // Display the generated profile configuration
+                // The bundle holds the private keys: write it to a file the
+                // operator alone can read, and show only the DID and key ids.
+                let out = profile_output_path(&profile);
+                write_profile_file(&out, &bundle).map_err(|e| {
+                    format!(
+                        "Failed to write the generated profile to {}: {e}",
+                        out.display()
+                    )
+                })?;
                 println!("Generated Profile Configuration:");
-                println!("{}", serde_json::to_string_pretty(&profile_config)?);
-                println!();
+                println!("{}", profile_summary(&tr_did, &tr_secrets));
                 println!(
-                    "Ensure to save the profile configuration to the specified location: {}.",
-                    profile
+                    "✓ Profile (with its private keys) written to {}",
+                    out.display()
                 );
+                if out != Path::new(profile.trim_start_matches("file://")) {
+                    println!(
+                        "Store it at the specified location ({}), then delete the local file.",
+                        profile
+                    );
+                }
                 println!();
             }
+            profile_bundle = Some(bundle);
         } else {
             // Mode 3: Use existing profile location
             println!("Mode: Using existing profile configuration.");
@@ -833,29 +867,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("No Mediator configuration specified. Skipping Trust Registry DID configuration.");
     }
 
-    // Set environment variables
-    // Expected to be empty if DIDComm mediator is not specified
-    server_vars.insert("PROFILE_CONFIG".to_string(), profile.clone());
-
     // If a secret-store backend is configured (TR_SECRETS_*), provision the
     // profile bundle into it so the running Trust Registry loads its identity
-    // from the backend (AWS/GCP/Azure/Vault/K8s/keyring/…) rather than the inline
-    // PROFILE_CONFIG. Non-fatal: the .env fallback is still written above.
-    {
-        let cfg = trust_registry::configs::secret_store::secrets_config_from_env();
-        if trust_registry::configs::secret_store::backend_selected(&cfg) {
-            // `profile` is the single-quoted JSON written to .env; the backend
-            // stores the raw bundle.
-            let bundle = profile.trim_matches('\'');
+    // from the backend (AWS/GCP/Azure/Vault/K8s/keyring/…), which it prefers to
+    // PROFILE_CONFIG. The bundle then stays out of .env: a plaintext copy there
+    // would defeat the store. A failed write stops the setup.
+    let mut env_remove: Vec<&str> = Vec::new();
+    let cfg = trust_registry::configs::secret_store::secrets_config_from_env();
+    match (
+        trust_registry::configs::secret_store::backend_selected(&cfg),
+        &profile_bundle,
+    ) {
+        (true, Some(bundle)) => {
             let dir = trust_registry::configs::secret_store::data_dir();
-            match trust_registry::configs::secret_store::write_profile(&cfg, &dir, bundle).await {
-                Ok(()) => {
-                    println!(
-                        "✓ Profile bundle provisioned into the configured secret-store backend"
-                    )
-                }
-                Err(e) => println!("⚠ Failed to write profile to secret store: {e}"),
-            }
+            trust_registry::configs::secret_store::write_profile(&cfg, &dir, bundle)
+                .await
+                .map_err(|e| format!("Failed to write the profile to the secret store: {e}"))?;
+            println!("✓ Profile bundle provisioned into the configured secret-store backend");
+            println!("  PROFILE_CONFIG is left out of .env; the registry loads the backend.");
+            env_remove.push("PROFILE_CONFIG");
+        }
+        (true, None) => {
+            println!(
+                "Note: a secret-store backend is configured but this run generated no profile \
+                 bundle, so nothing was written to it."
+            );
+            server_vars.insert("PROFILE_CONFIG".to_string(), profile.clone());
+        }
+        // Expected to be empty if DIDComm mediator is not specified
+        (false, _) => {
+            server_vars.insert("PROFILE_CONFIG".to_string(), profile.clone());
         }
     }
     server_vars.insert("MEDIATOR_DID".to_string(), mediator_did.clone());
@@ -952,11 +993,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Some(profile_config) = config_json.get_mut("PROFILE_CONFIG") {
         *profile_config = Value::String("<redacted: written to .env>".to_string());
     }
+    if let Some(client_secrets) = config_json.get_mut("CLIENT_SECRETS") {
+        *client_secrets = Value::String("<redacted>".to_string());
+    }
     println!("{}", serde_json::to_string_pretty(&config_json)?);
     println!();
 
     // Insert variables into .env file
-    insert_env_vars("./.env", server_vars, Some("./.env.example"))?;
+    insert_env_vars("./.env", server_vars, &env_remove, Some("./.env.example"))?;
     println!("✓ .env file updated with Trust Registry configuration");
     println!();
     println!("Start Trust Registry with the following command:");
@@ -969,4 +1013,89 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    #[test]
+    fn the_profile_summary_shows_ids_but_no_key_material() {
+        let (did, secrets) = create_did("did:example:mediator".to_string());
+        let bundle = serde_json::to_string(&ProfileConfig {
+            alias: "Trust Registry".to_string(),
+            did: did.clone(),
+            secrets: secrets.clone(),
+        })
+        .unwrap();
+        let private_d: Vec<String> = serde_json::from_str::<Value>(&bundle).unwrap()["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["privateKeyJwk"]["d"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(private_d.len(), 2);
+
+        let summary = profile_summary(&did, &secrets);
+        assert!(summary.contains(&did));
+        assert!(summary.contains("#key-1") && summary.contains("#key-2"));
+        for d in private_d {
+            assert!(!summary.contains(&d));
+        }
+        assert!(!summary.contains("privateKeyJwk"));
+    }
+
+    #[test]
+    fn a_generated_profile_goes_to_the_file_location_or_a_local_file() {
+        assert_eq!(
+            profile_output_path("file:///etc/tr/profile.json"),
+            PathBuf::from("/etc/tr/profile.json")
+        );
+        assert_eq!(
+            profile_output_path("aws_secrets://tr-profile"),
+            PathBuf::from("./trust-registry-profile.json")
+        );
+    }
+
+    #[test]
+    fn a_profile_file_is_never_overwritten_and_is_owner_only() {
+        let path = std::env::temp_dir().join(format!(
+            "tr-profile-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        write_profile_file(&path, "{}").unwrap();
+        assert!(write_profile_file(&path, "{\"other\":1}").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{}\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn the_existing_secret_is_read_from_a_file_not_the_command_line() {
+        let args = Args::try_parse_from([
+            "setup-trust-registry",
+            "--tr-did",
+            "did:example:tr",
+            "--tr-did-secret-file",
+            "/run/secrets/tr.json",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.tr_did_secret_file,
+            Some(PathBuf::from("/run/secrets/tr.json"))
+        );
+        assert!(Args::try_parse_from(["setup-trust-registry", "--tr-did-secret", "[]"]).is_err());
+    }
 }

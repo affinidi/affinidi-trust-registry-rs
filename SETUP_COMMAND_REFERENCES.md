@@ -84,6 +84,10 @@ Profile configuration location using URI schemes. This option serves dual purpos
 
 **Default:** Configures the Trust Registry profile in the `.env` file as direct value.
 
+A generated profile holds the registry's private keys, so the command does not print it. With a `file://` location it writes the profile to that path; with any other location it writes it to `./trust-registry-profile.json` for you to store there and then delete. Either file is created readable by its owner only and is never overwritten. The output shows only the DID and key ids.
+
+When a secret-store backend is configured (`TR_SECRETS_*`), the profile is written to the backend and left out of `.env`; if that write fails, the command stops with an error.
+
 ### Storage Backend Configuration
 
 #### `--storage-backend`, `-s`
@@ -139,11 +143,11 @@ Trust Registry DID. It is used to set an existing DID instead of generating a ne
 
 **Expected Value:** `did:peer:2.Vz6Mk...`
 
-#### `--tr-did-secret`, `-e`
+#### `--tr-did-secret-file`, `-e`
 
-Trust Registry DID secret. It is used with `--tr-did` to set existing DID credentials.
+File holding the Trust Registry DID's secrets as a JSON array. It is used with `--tr-did` to set existing DID credentials. `-` reads the secrets from standard input. (Replaces `--tr-did-secret`, which took the secrets on the command line, where shell history and the process list keep them.)
 
-**Expected Value:** `'[{"id":..., "privateKeyJwk":{...}}]'`
+**Expected Value:** a path, e.g. `./tr-secrets.json`, whose content is `[{"id":..., "privateKeyJwk":{...}}]`
 
 ### Additional Configuration
 
@@ -212,7 +216,7 @@ Set up Trust Registry using an existing DID and its secrets instead of generatin
 ```bash
 cargo run --bin setup-trust-registry --features="dev-tools" -- \
   --tr-did=did:peer:2.Vz6Mk... \
-  --tr-did-secret='[{"id":"did:peer:2.Vz6Mk...#key-1","privateKeyJwk":{"crv":"P-256","kty":"EC","x":"...","y":"..."},"type":"JsonWebKey2020"}]' \
+  --tr-did-secret-file=./tr-secrets.json \
   --mediator-did=did:web:mediator.goodcompany.com \
   --admin-dids=did:peer:2.Admin...
 ```
@@ -295,10 +299,9 @@ The setup command generates a `.env` file with the following variables:
 ## Test Environment Files
 
 For testing environments, the setup command also generates:
-- `.env.test` - Test environment configuration
-- `.env.pipeline` - CI/CD pipeline configuration
+- `.env.test` - Test environment configuration. With `--test-in-pipeline=true` it is built from the tracked `.env.pipeline` template, which the command does not modify.
 
-These files contain the same structure as `.env` but with test-specific values.
+It has the same structure as `.env` but with test-specific values. Every `.env*` file the command writes is readable by its owner only (0600).
 
 ## Additional Resources
 

@@ -175,7 +175,7 @@ To deploy and run a DIDComm mediator, see the [deployment options](https://docs.
 
 ## Set up Trust Registry
 
-Configure the environment to run Trust Registry. The setup command creates the `.env` file with default configurations. For testing environments, it generates `.env.test` or `.env.pipeline` files with the appropriate test configurations.
+Configure the environment to run Trust Registry. The setup command creates the `.env` file with default configurations. For testing environments, it generates a `.env.test` file with the appropriate test configurations (from the tracked `.env.pipeline` template with `--test-in-pipeline=true`). The files it writes are readable by their owner only, and it does not print private keys.
 
 ### Run with DIDComm Enabled
 
