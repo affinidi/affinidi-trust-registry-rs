@@ -4,6 +4,13 @@
 //! management is delegated to the SDK's `atm.tsp()` accessor; this module
 //! never touches raw VID keys.
 //!
+//! ### Sender binding
+//!
+//! A reply completes an exchange only if the sender VID that TSP verified
+//! when unsealing it is the VID the request was sent to (the document's
+//! `recipient`). A reply from any other VID is dropped and the exchange keeps
+//! waiting for the registry's own reply.
+//!
 //! ### Profile requirements
 //!
 //! The [`ATMProfile`] must have a mediator configured and websocket live
@@ -31,7 +38,7 @@ use trust_tasks_rs::TrustTask;
 use trust_tasks_tsp::ENVELOPE_TYPE;
 
 use crate::error::TrqlError;
-use crate::pending::PendingReplies;
+use crate::pending::{PendingReplies, RouteOutcome};
 use crate::transport::{TransportKind, TrqlTransport};
 
 /// How long each inbound pickup poll waits before looping.
@@ -112,7 +119,7 @@ impl TrqlTransport for TspTransport {
         let envelope = build_envelope(&request)?;
 
         // Register the waiter before sending so a fast reply cannot be lost.
-        let receiver = self.pending.register(&request_id);
+        let receiver = self.pending.register(&request_id, &dest);
 
         if let Err(e) = self.atm.tsp().send(&self.profile, &dest, &envelope).await {
             self.pending.abandon(&request_id);
@@ -167,6 +174,32 @@ fn parse_envelope(payload: &[u8]) -> Result<TrustTask<Value>, String> {
     serde_json::from_value(document).map_err(|e| format!("invalid Trust Task document: {e}"))
 }
 
+/// Route one unsealed TSP payload to its waiter, bound to `sender`, the VID
+/// TSP verified as the message's sender.
+fn route_payload(pending: &PendingReplies, payload: &[u8], sender: &str) -> RouteOutcome {
+    match parse_envelope(payload) {
+        Ok(document) => {
+            let outcome = pending.route(document, Some(sender));
+            match &outcome {
+                RouteOutcome::Delivered => {}
+                RouteOutcome::Unsolicited => {
+                    debug!("unsolicited TSP Trust Task from {sender} dropped");
+                }
+                RouteOutcome::WrongSender { expected } => warn!(
+                    expected,
+                    sender,
+                    "ignoring a TSP Trust Task reply from a VID other than the one addressed"
+                ),
+            }
+            outcome
+        }
+        Err(e) => {
+            warn!("dropping TSP message from {sender}: {e}");
+            RouteOutcome::Unsolicited
+        }
+    }
+}
+
 /// The single owner of the profile's inbound pickup stream. Unseals TSP
 /// frames via `atm.tsp()` and routes reply documents to waiters; survives
 /// transient stream errors.
@@ -185,14 +218,7 @@ async fn demux_loop(atm: ATM, profile: Arc<ATMProfile>, pending: PendingReplies)
                         continue;
                     }
                 };
-                match parse_envelope(&payload) {
-                    Ok(document) => {
-                        if !pending.route(document) {
-                            debug!("unsolicited TSP Trust Task from {sender} dropped");
-                        }
-                    }
-                    Err(e) => warn!("dropping TSP message from {sender}: {e}"),
-                }
+                route_payload(&pending, &payload, &sender);
             }
             // Other frame kinds (incl. DIDComm) are not this binding's; with a
             // dedicated profile there should be none.
@@ -225,6 +251,30 @@ mod tests {
         let parsed = parse_envelope(&bytes).unwrap();
         assert_eq!(parsed.id, "urn:uuid:1");
         assert_eq!(parsed.payload["entity_id"], "did:example:e");
+    }
+
+    /// Another VID that knows the request id and echoes the asked tuple does
+    /// not complete the exchange; the registry's reply still does.
+    #[test]
+    fn a_correlated_reply_from_another_vid_is_not_delivered() {
+        use crate::pending::tests::{OTHER, REGISTRY, reply_to};
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        let pending = PendingReplies::new();
+        let mut rx = pending.register("req-1", REGISTRY);
+        let payload = build_envelope(&reply_to("req-1")).unwrap();
+
+        assert!(matches!(
+            route_payload(&pending, &payload, OTHER),
+            RouteOutcome::WrongSender { .. }
+        ));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+
+        assert_eq!(
+            route_payload(&pending, &payload, REGISTRY),
+            RouteOutcome::Delivered
+        );
+        assert!(rx.try_recv().is_ok());
     }
 
     #[test]

@@ -17,9 +17,15 @@
 //! * `tsp` — [`TspTransport`]: the `trust-tasks-tsp` envelope sealed in a TSP
 //!   `Direct` message, multiplexed on the same mediator websocket.
 //!
-//! Every reply is correlated to its request (`threadId` == request `id`) and
-//! a reply that cannot be parsed is surfaced as a contract error, never as a
-//! transport failure. A registry rejection arrives as a typed
+//! Every reply is correlated to its request (`threadId` == request `id`),
+//! must echo the tuple that was asked, and must come from the registry the
+//! request was addressed to. Over HTTPS that is the server of the TLS
+//! connection the request went out on; over DIDComm the reply must be
+//! authcrypted by a key of the registry DID, and over TSP its verified sender
+//! VID must be the registry's. A correlated reply from any other party does
+//! not complete the query, which goes on waiting for the registry's answer
+//! (and times out if none comes). A reply that cannot be parsed is surfaced
+//! as a contract error, never as a transport failure. A registry rejection arrives as a typed
 //! [`TrqlError::Rejected`] carrying the machine-readable trust-task-error
 //! code.
 //!

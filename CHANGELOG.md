@@ -192,6 +192,22 @@ release goes GA (`## 0.27.0 (date)`).
 - **A lookup only answers with the record it asked for.** After reading a key,
   the Redis, DynamoDB and fjall backends check that the stored record's four
   identifiers are the ones queried; anything else is treated as not found.
+- **`trql-client`'s DIDComm and TSP transports only accept a reply from the
+  registry the query was sent to.** A reply was matched to its query by
+  `threadId` alone, whoever sent it. Each waiting query now records the DID it
+  was addressed to (the request's `recipient`), and a reply completes it only
+  if the transport authenticated that DID as the sender: over DIDComm the
+  envelope must be authcrypted by a key of that DID (and its `from`, if
+  present, must name the same DID); over TSP the verified sender VID must be
+  that DID (a `did:scid` `src` locator is ignored in both comparisons). An
+  anoncrypted, signed-only or plaintext DIDComm reply, or one from any other
+  party, is logged at `warn`, left in the mediator queue (DIDComm) and does
+  not complete or cancel the query, which keeps waiting for the registry's
+  reply until its timeout. A client whose `registry_did` names the registry
+  by a different DID than the one it replies from now times out instead of
+  accepting the reply. The `TrqlTransport` signature is unchanged; its
+  documentation now states that a transport returns only the addressed
+  party's reply.
 
 ## 0.31.0 (release/0.31)
 
