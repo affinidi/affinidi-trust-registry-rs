@@ -39,6 +39,10 @@ impl std::fmt::Display for TransportKind {
 ///
 /// * The request's `recipient` is the destination party; transports that
 ///   route by DID read it from there.
+/// * Only a reply from that party is returned. A transport that receives
+///   replies on a shared inbound stream must check the sender it
+///   authenticated against `recipient` and ignore a reply from anyone else;
+///   the `threadId` is chosen by the sender and does not prove who answered.
 /// * Every exchange has a finite wait: a peer that never answers is a
 ///   [`TrqlError::Timeout`], never a hang.
 /// * A reply body that is not a Trust Task document is a
