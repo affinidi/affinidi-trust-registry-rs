@@ -67,3 +67,6 @@ pubspec.lock
 
 # Python bytecode from scripts/
 __pycache__/
+
+# The test client's own identity (generated on first run)
+test-client/conf/user_config.json

@@ -20,7 +20,7 @@ use crate::{
         CommonCrudInput, create_record, delete_record, list_records, read_record, update_record,
     },
     receivers::users_listener::user_listener,
-    service_configs::load_user_config,
+    service_configs::{ADMIN_ALIAS, UserConfig, load_user_config},
 };
 
 pub mod admin_operations;
@@ -49,14 +49,6 @@ async fn set_public_acls_mode(atm: Arc<ATM>, profile: Arc<ATMProfile>) -> Result
 async fn main() -> Result<()> {
     dotenv().ok();
     let protocols = Arc::new(Protocols::new());
-    let user_configs = match load_user_config() {
-        Ok(uc) => uc,
-        Err(err) => {
-            println!("Failed to get user config: {err:#?}");
-            return Ok(());
-        }
-    };
-
     // Get Trust Registry DID: runtime env var or fallback to PROFILE_CONFIG from .env
     #[allow(clippy::expect_used)]
     let trust_registry_did = std::env::var("TRUST_REGISTRY_DID")
@@ -82,6 +74,27 @@ async fn main() -> Result<()> {
 
     println!("\nTrust Registry DID: {trust_registry_did}");
     println!("\nMediator DID: {mediator_did}");
+
+    let user_configs = match load_user_config(&mediator_did) {
+        Ok(UserConfig::Loaded(uc)) => uc,
+        Ok(UserConfig::Generated { did, path }) => {
+            println!(
+                "\nNo test client identity was found, so a new one was generated and saved to {} \
+                 (keep it private; it is not tracked by git).",
+                path.display()
+            );
+            println!("\nTest client admin DID: {did}");
+            println!(
+                "\nAdd this DID to the Trust Registry's ADMIN_DIDS, restart the registry, and run \
+                 the test client again."
+            );
+            return Ok(());
+        }
+        Err(err) => {
+            println!("Failed to get user config: {err:#?}");
+            return Ok(());
+        }
+    };
 
     // let mediator_did = mediator_did.clone();
     println!("\nLoading test user configurations...");
@@ -116,7 +129,7 @@ async fn main() -> Result<()> {
             .await?;
 
         // Ensure we only run admin operations for the admin DID
-        if did_config.alias.eq("SampleTRAdmin") {
+        if did_config.alias.eq(ADMIN_ALIAS) {
             println!("\nStarting Admin Operations Demo for SampleTRAdmin...\n");
             set_public_acls_mode(Arc::clone(&atm), Arc::clone(&profile)).await?;
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -259,7 +272,7 @@ async fn main() -> Result<()> {
             );
         }
 
-        if did_config.alias.eq("SampleTRAdmin") {
+        if did_config.alias.eq(ADMIN_ALIAS) {
             println!("\nStart listening to responses from the Trust Registry...\n");
             user_listener(did_config, &atm_clone, protocols_clone, &profile).await;
         }

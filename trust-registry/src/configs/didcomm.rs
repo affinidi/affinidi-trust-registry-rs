@@ -106,6 +106,29 @@ pub struct AdminConfig {
 /// An empty or absent value means no admin writes beyond its own DID. A
 /// malformed value is an error rather than being read as empty, so a typo
 /// cannot silently change who may write what.
+/// DIDs whose private keys have been published (in this repository's
+/// history, as the test client's former sample identity), so a proof made
+/// with them shows nothing about who sent it.
+pub const PUBLISHED_SAMPLE_ADMIN_DIDS: &[&str] = &[
+    "did:peer:2.Vz6Mkpun7xEJWBqwtaiHSqfjLe1ejqQ4PAUEas1gjH7VVNxjs.EzQ3shoprXELvJw9ou4VbfrFRx5FZQsP9EB1LMUJaPacDKtiZ8",
+];
+
+/// Refuse an admin list that names a DID whose private keys are public
+/// ([`PUBLISHED_SAMPLE_ADMIN_DIDS`]): anyone could make its proofs.
+pub fn check_admin_dids_not_published(admin_dids: &[String]) -> Result<(), String> {
+    match admin_dids
+        .iter()
+        .find(|did| PUBLISHED_SAMPLE_ADMIN_DIDS.contains(&did.as_str()))
+    {
+        Some(did) => Err(format!(
+            "ADMIN_DIDS lists {did}, the test client's former sample identity, whose private \
+             keys are published in this repository. Remove it; the test client now generates \
+             its own identity on first run."
+        )),
+        None => Ok(()),
+    }
+}
+
 pub fn parse_admin_authorities(
     raw: Option<&str>,
     admin_dids: &[String],
@@ -293,6 +316,7 @@ impl Configs for DidcommConfig {
             .split(',')
             .map(|e| strip_scid_src(e.trim()).into_owned())
             .collect();
+        check_admin_dids_not_published(&admin_dids)?;
 
         let log_format = env_or("AUDIT_LOG_FORMAT", "json")
             .parse::<AuditLogFormat>()
@@ -378,7 +402,31 @@ impl Configs for DidcommConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_admin_authorities;
+    use super::{
+        PUBLISHED_SAMPLE_ADMIN_DIDS, check_admin_dids_not_published, parse_admin_authorities,
+    };
+
+    #[test]
+    fn an_admin_list_naming_a_published_sample_identity_is_refused() {
+        let listed = vec![
+            ADMIN.to_string(),
+            PUBLISHED_SAMPLE_ADMIN_DIDS[0].to_string(),
+        ];
+        let err = check_admin_dids_not_published(&listed).unwrap_err();
+        assert!(err.contains(PUBLISHED_SAMPLE_ADMIN_DIDS[0]));
+        assert!(check_admin_dids_not_published(&admins()).is_ok());
+        assert!(check_admin_dids_not_published(&[]).is_ok());
+    }
+
+    /// The sample test-client identity is no longer shipped anywhere a
+    /// deployment could pick it up.
+    #[test]
+    fn the_env_example_names_no_published_sample_identity() {
+        let example = include_str!("../../../.env.example");
+        for did in PUBLISHED_SAMPLE_ADMIN_DIDS {
+            assert!(!example.contains(did));
+        }
+    }
 
     const ADMIN: &str = "did:example:admin";
 

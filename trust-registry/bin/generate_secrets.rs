@@ -10,59 +10,11 @@ use affinidi_tdk::{
     secrets_resolver::secrets::Secret,
 };
 use serde_json::json;
-use std::{
-    collections::HashMap,
-    error::Error,
-    fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::HashMap, error::Error, sync::Arc};
 
-fn insert_env_vars(
-    file_path: &str,
-    new_vars: HashMap<String, String>,
-    example_file_path: Option<&str>,
-) -> std::io::Result<()> {
-    let path = Path::new(file_path);
-    let mut existing_vars = HashMap::new();
-
-    if !path.exists()
-        && let Some(example_path) = example_file_path
-    {
-        let example = Path::new(example_path);
-        if example.exists() {
-            fs::copy(example, path)?;
-        }
-    }
-
-    if path.exists() {
-        let file = fs::File::open(path)?;
-        let reader = BufReader::new(file);
-        for line in reader.lines() {
-            let line = line?;
-            if let Some((key, value)) = line.split_once('=') {
-                existing_vars.insert(key.trim().to_string(), value.trim().to_string());
-            }
-        }
-    }
-
-    for (key, value) in new_vars {
-        existing_vars.insert(key, value);
-    }
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-
-    for (key, value) in existing_vars {
-        writeln!(file, "{}={}", key, value)?;
-    }
-
-    Ok(())
-}
+#[path = "env_file.rs"]
+mod env_file;
+use env_file::insert_env_vars;
 
 pub async fn set_acl(alias: &str, did: &str, mediator_did: &str, secrets: Vec<Secret>) {
     let profile = TDKProfile::new(alias, did, Some(mediator_did), secrets);
@@ -214,7 +166,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             format!("'{}'", test_profile_configs_stringified),
         );
 
-        insert_env_vars("./.env.pipeline", vars, None)?;
+        // `.env.pipeline` is a tracked template: the generated keys go to the
+        // untracked `.env.test`, built from it.
+        insert_env_vars("./.env.test", vars, &[], Some("./.env.pipeline"))?;
         Ok(())
     } else {
         let mut server_vars = HashMap::new();
@@ -223,7 +177,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             format!("'{}'", serde_json::to_string(&tr_profile_configs)?),
         );
         server_vars.insert("MEDIATOR_DID".to_string(), mediator_did.clone());
-        insert_env_vars("./.env", server_vars, Some("./.env.example"))?;
+        insert_env_vars("./.env", server_vars, &[], Some("./.env.example"))?;
         let mut test_vars = HashMap::new();
         test_vars.insert("TRUST_REGISTRY_DID".to_string(), test_tr_did.0);
         test_vars.insert("CLIENT_DID".to_string(), test_client_did.0.clone());
@@ -237,6 +191,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         insert_env_vars(
             "./.env.test",
             test_vars,
+            &[],
             Some("./testing/.env.test.example"),
         )?;
 
