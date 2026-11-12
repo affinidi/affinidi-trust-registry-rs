@@ -1,5 +1,7 @@
 version: "3.9"
 
+# Published ports are bound to the loopback interface. To reach the registry
+# from other machines, change "127.0.0.1:3232:3232" to "3232:3232" deliberately.
 services:
   trust-registry:
     platform: linux/arm64
@@ -15,16 +17,18 @@ services:
       LISTEN_ADDRESS: 0.0.0.0:3232
       FILE_STORAGE_PATH: /sample-data/data.csv
     ports:
-      - "3232:3232"
+      - "127.0.0.1:3232:3232"
     volumes:
       - ./sample-data:/sample-data
+  # A local DynamoDB for the dynamodb storage backend. Not started by a plain
+  # `docker compose up`; start it with `docker compose --profile dynamodb up`
+  # or `docker compose up localstack`.
   localstack:
     image: localstack/localstack:3.6.0
     container_name: localstack
-    restart: always
+    profiles: ["dynamodb"]
     ports:
-      - 4566:4566
+      - "127.0.0.1:4566:4566"
     environment:
-      - SERVICES=dynamodb,firehose,kms,secretsmanager,sqs,events,s3,eventbridge,iot
-      - DEBUG=1
+      - SERVICES=dynamodb
       - DEFAULT_REGION=ap-southeast-1

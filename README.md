@@ -258,6 +258,10 @@ The Trust Registry will be available at `http://localhost:3232`.
 
 **Note:** The `sample-data` folder is mounted as a volume to synchronise the changes from data.csv to the container automatically. If you have configured a different path for the data using CSV as the storage backend, configure the Docker settings accordingly.
 
+The registry's port is published on `127.0.0.1` only; change the `ports` entry in `docker-compose.yaml` to expose it on other interfaces. The LocalStack service used for the DynamoDB backend is not started by default: run `docker compose --profile dynamodb up` (or `docker compose up localstack`) when you need it.
+
+The image runs the registry as the unprivileged user `trustregistry` (UID/GID 10001), with `/app` as its working and data directory. A bind-mounted directory the registry writes to (the CSV file, a fjall store, `.trust-registry`) must be writable by that UID, for example `sudo chown -R 10001:10001 ./sample-data` on Linux, or run the container with `user: "<uid>:<gid>"` of the directory's owner. The image has a `HEALTHCHECK` that expects `GET /health` to answer `200` on `LISTEN_ADDRESS`; for a registry run with `ENABLE_REST=false`, disable it (`docker run --no-healthcheck`, or `healthcheck: {disable: true}` in compose).
+
 ## Using Redis as Storage Backend
 
 Redis is a high-performance, in-memory data store that can be used as a storage backend for Trust Registry. Redis provides fast read/write operations and is ideal for production deployments requiring low-latency access to trust records.
@@ -374,9 +378,12 @@ version: '3.8'
 services:
   redis:
     image: redis:7-alpine
+    # Replace your_password with a generated secret (e.g. `openssl rand -hex 32`).
     command: redis-server --requirepass your_password --appendonly yes
+    # Only needed to reach Redis from the host; the registry uses the compose
+    # network. Bound to loopback.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     restart: unless-stopped
@@ -390,7 +397,7 @@ services:
       - CORS_ALLOWED_ORIGINS=http://localhost:3000
       - AUDIT_LOG_FORMAT=json
     ports:
-      - "3232:3232"
+      - "127.0.0.1:3232:3232"
     depends_on:
       - redis
     restart: unless-stopped

@@ -64,6 +64,25 @@ release goes GA (`## 0.27.0 (date)`).
 
 ### Changed
 
+- **The container image runs as an unprivileged user and reports its
+  health.** The runtime stage runs the registry as `trustregistry`
+  (UID/GID 10001) with `/app` as its working and only writable directory;
+  the sample data moved from `/usr/local/bin/sample-data/` to
+  `/app/sample-data/`. A bind-mounted directory the registry writes to must be
+  writable by that UID. A `HEALTHCHECK` probes `GET /health` on the port in
+  `LISTEN_ADDRESS` (disable it for a registry run with `ENABLE_REST=false`).
+  Both base images are pinned by digest.
+- **`docker-compose.yaml` publishes ports on `127.0.0.1` only** (also
+  `docker-compose.test.yaml` and the README's Redis example). LocalStack is
+  in the `dynamodb` profile, so a plain `docker compose up` no longer starts
+  it; it emulates only DynamoDB, without `DEBUG=1` or `restart: always`.
+- **The dependency policy is enforced.** `deny.toml` now refuses crates from
+  any registry other than crates.io and any git dependency (`[sources]`),
+  refuses wildcard version requirements, reports duplicate crate versions as
+  warnings and denies yanked crates when advisories are checked. `Unicode-3.0`
+  is allowed outright instead of per crate. The root `audit.toml`, which
+  `cargo audit` does not read, is removed; advisory ignores are set through
+  the workflow's `auditIgnore` input.
 - **`RUST_LOG` no longer controls the audit trail.** The standalone service
   writes the `audit` target through a layer of its own that is always on at
   `INFO`; `RUST_LOG` still filters every other line. `TrustRegistryBuilder::build`
