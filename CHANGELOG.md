@@ -20,6 +20,9 @@ release goes GA (`## 0.27.0 (date)`).
 
 ### Breaking
 
+- **`didcomm::handlers::HandlerContext` has no `sender_did`**, and its
+  `authenticated_sender` is a `String`: protocol handlers are called only for
+  a message whose sender the envelope authenticated, and answer that sender.
 - **`AuditLog` and `EmitInput` are `#[non_exhaustive]`** and have new public
   fields (`AuditLog::authenticated_sender` and `sequence`,
   `EmitInput::authenticated_sender` and `sequence`). Code outside this crate
@@ -31,6 +34,13 @@ release goes GA (`## 0.27.0 (date)`).
 
 ### Added
 
+- **Audit entries for writes carry `document_digest`**, the SHA-256 (hex) of
+  the canonical JSON of the whole signed document, proof included, so an
+  archived copy of a request can be matched to its entry and its proof checked
+  again. Once the proof has verified they also carry `verification_method`,
+  the key that approved the write, and `proof_created`. New `AuditLog` fields
+  and `AuditLogBuilder::{document_digest, proof}`; a verification method may
+  run to 1024 characters.
 - **`TrustRegistryBuilder::audit_logger`** lets a host send audit entries to
   its own store. The registry still applies its bound on unproven refusals in
   front of it, and still numbers the entries.
@@ -178,6 +188,16 @@ release goes GA (`## 0.27.0 (date)`).
   whole `TrustRegistryConfig` with `{:?}`; it now logs the listen address,
   storage backend, transports, registry and mediator DIDs and the number of
   admin DIDs.
+
+- **DIDComm messages without an authenticated sender are not answered.**
+  The TRQP and Trust Task handlers addressed, resolved and encrypted their
+  reply to the message's `from` header (or to `anon` when it had none), which
+  an anoncrypt or plaintext envelope does not bind to a key. The listener now
+  drops such a message, at `debug`, before any handler runs, and replies go
+  only to the sender the envelope authenticated. With the default unpack
+  policy, which accepts authcrypt only, nothing changes; it matters for a host
+  that lends the registry an ATM with a wider policy. Queries without a
+  DIDComm identity use the REST TRQP endpoints.
 
 ### Fixed
 

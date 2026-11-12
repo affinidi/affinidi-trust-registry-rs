@@ -179,6 +179,8 @@ struct WriteProgress {
     proven_issuer: Option<String>,
     /// The authority the write acts under, once established.
     authority: Option<String>,
+    /// The verified proof's verification method and `created` time.
+    proof: Option<(String, chrono::DateTime<Utc>)>,
 }
 
 /// The registry's Trust Task application logic, independent of transport.
@@ -674,14 +676,20 @@ impl TaskHandler {
                     .or_else(|| sender_did.map(str::to_string)),
                 doc.clone(),
                 sender_did.map(str::to_string),
+                trust_tasks_rs::document_digest(&doc)
+                    .ok()
+                    .map(|digest| digest.to_string()),
             )
         });
         let mut progress = WriteProgress::default();
         let outcome = self.handle_write(doc, sender_did, &mut progress).await;
 
-        if let (Some(audit), Some((slug, id, thread_id, claimed, original, authenticated))) =
-            (&self.audit, audit_template)
+        if let (
+            Some(audit),
+            Some((slug, id, thread_id, claimed, original, authenticated, digest)),
+        ) = (&self.audit, audit_template)
         {
+            let (verification_method, proof_created) = progress.proof.clone().unzip();
             let builder = AuditLogBuilder::new()
                 .operation(audit_operation(&slug))
                 .actor(progress.proven_issuer.clone().unwrap_or_default())
@@ -696,6 +704,8 @@ impl TaskHandler {
                 .authenticated_sender(authenticated)
                 .task(slug)
                 .document_id(id)
+                .document_digest(digest)
+                .proof(verification_method, proof_created)
                 .thread_id(thread_id);
             let entry = match &outcome {
                 Ok(_) => builder.build_success(),
@@ -769,6 +779,10 @@ impl TaskHandler {
             return Err(doc.reject_with(new_id(), reason));
         }
         progress.proven_issuer = doc.issuer.clone();
+        progress.proof = doc
+            .proof
+            .as_ref()
+            .map(|proof| (proof.verification_method.clone(), proof.created));
 
         let (authority, snapshot_dispatcher) = match self.resolve_authority(&doc).await {
             Ok(resolved) => resolved,
@@ -1117,6 +1131,55 @@ mod tests {
             entry.resource.entity_id.as_ref().map(|e| e.as_str()),
             Some("did:example:member")
         );
+    }
+
+    /// The entry for an accepted write names the key that approved it and the
+    /// digest of the exact document, so an archived copy of the signed
+    /// document can be matched to it and checked.
+    #[tokio::test]
+    async fn an_accepted_write_records_its_digest_and_approving_key() {
+        let (key, did) = did_key(1);
+        let f = fixture(vec![did.clone()]);
+        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let digest = trust_tasks_rs::document_digest(&doc).unwrap().to_string();
+        let proof = doc.proof.clone().expect("signed");
+
+        f.handler
+            .handle(doc, Some(&did))
+            .await
+            .expect("write accepted");
+
+        let entry = last_audit(&f);
+        assert!(matches!(entry.status, AuditStatus::Success));
+        assert_eq!(entry.document_digest.as_deref(), Some(digest.as_str()));
+        assert_eq!(
+            entry.verification_method.as_deref(),
+            Some(proof.verification_method.as_str())
+        );
+        assert!(entry.verification_method.unwrap().starts_with(&did));
+        assert_eq!(entry.proof_created, Some(proof.created));
+    }
+
+    /// A refused write still carries the digest, but no key is named for a
+    /// proof that was never verified.
+    #[tokio::test]
+    async fn a_refused_write_names_no_approving_key() {
+        let (key, did) = did_key(1);
+        let (_, other) = did_key(2);
+        let f = fixture(vec![other]);
+        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let digest = trust_tasks_rs::document_digest(&doc).unwrap().to_string();
+
+        f.handler
+            .handle(doc, Some(&did))
+            .await
+            .expect_err("not an admin");
+
+        let entry = last_audit(&f);
+        assert!(!matches!(entry.status, AuditStatus::Success));
+        assert_eq!(entry.document_digest.as_deref(), Some(digest.as_str()));
+        assert_eq!(entry.verification_method, None);
+        assert_eq!(entry.proof_created, None);
     }
 
     const RECORD_PUT_0_3: &str = "https://trusttasks.org/spec/registry/record/put/0.3";

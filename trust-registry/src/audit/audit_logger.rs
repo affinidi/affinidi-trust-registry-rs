@@ -52,6 +52,9 @@ pub struct EmitInput {
     pub document_id: Option<String>,
     pub claimed_actor: Option<String>,
     pub authenticated_sender: Option<String>,
+    pub document_digest: Option<String>,
+    pub verification_method: Option<String>,
+    pub proof_created: Option<chrono::DateTime<Utc>>,
     /// The entry's position in this process's audit sequence, starting at 1. A
     /// gap shows that an entry was lost. Assigned by `BoundedAuditLogger`.
     pub sequence: Option<u64>,
@@ -93,7 +96,9 @@ fn is_disruptive(c: char) -> bool {
 /// The cap for the field `key`.
 fn limit_for(key: &str) -> usize {
     match key {
-        "reason" | "error" => MAX_REASON_CHARS,
+        // A verification method is a DID URL, and some DID methods (did:peer)
+        // are long; cutting it would lose which key approved the write.
+        "reason" | "error" | "verification_method" => MAX_REASON_CHARS,
         _ => MAX_FIELD_CHARS,
     }
 }
@@ -160,6 +165,12 @@ impl EmitInput {
                 resource(self.resource.resource.as_ref().map(|v| v.to_string())),
             ),
             ("document_id", self.document_id.clone()),
+            ("document_digest", self.document_digest.clone()),
+            ("verification_method", self.verification_method.clone()),
+            (
+                "proof_created",
+                self.proof_created.map(|created| created.to_rfc3339()),
+            ),
             (
                 "thread_id",
                 Some(self.thread_id.clone().unwrap_or_else(|| NA.to_string())),
@@ -239,6 +250,9 @@ impl AuditLogger for BaseAuditLogger {
             document_id: audit_log.document_id,
             claimed_actor: audit_log.claimed_actor,
             authenticated_sender: audit_log.authenticated_sender,
+            document_digest: audit_log.document_digest,
+            verification_method: audit_log.verification_method,
+            proof_created: audit_log.proof_created,
             sequence: audit_log.sequence,
             timestamp: audit_log.timestamp,
         };
@@ -412,6 +426,9 @@ mod tests {
             document_id: Some("x".repeat(10_000)),
             claimed_actor: Some("did:example:anyone\n".to_string()),
             authenticated_sender: None,
+            document_digest: None,
+            verification_method: None,
+            proof_created: None,
             sequence: Some(7),
             timestamp: Utc::now(),
         }
@@ -474,6 +491,27 @@ mod tests {
         let line = render_text(&input);
         assert!(line.starts_with(r#"audit.seq="7""#), "{line}");
         assert!(line.contains(r#"audit.authenticated_sender="did:example:peer""#));
+    }
+
+    #[test]
+    fn entries_carry_the_document_digest_and_the_approving_key() {
+        let mut input = hostile_input();
+        input.document_digest = Some("ab".repeat(32));
+        let long_vm = format!("did:peer:2.{}#key-1", "V".repeat(600));
+        input.verification_method = Some(long_vm.clone());
+        let created = chrono::DateTime::parse_from_rfc3339("2026-11-12T01:02:03Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        input.proof_created = Some(created);
+
+        let parsed: Value = serde_json::from_str(&render_json(&input)).expect("json");
+        assert_eq!(parsed["document_digest"], "ab".repeat(32));
+        // Not cut at the general field cap: the whole key is recorded.
+        assert_eq!(parsed["verification_method"], long_vm);
+        assert_eq!(parsed["proof_created"], created.to_rfc3339());
+        let line = render_text(&input);
+        assert!(line.contains(&format!(r#"audit.document_digest="{}""#, "ab".repeat(32))));
+        assert!(line.contains(&format!(r#"audit.verification_method="{long_vm}""#)));
     }
 
     #[test]

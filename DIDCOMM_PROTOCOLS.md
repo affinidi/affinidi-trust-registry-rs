@@ -94,6 +94,10 @@ There are two roles defined in querying trust records:
 ### Requirements
 
 - DIDComm v2.1 protocol.
+- An authenticated (authcrypt) message. The registry answers the sender the
+  envelope proves; a message without one (anoncrypt or plaintext) is not
+  answered. Use the REST TRQP endpoints for queries without a DIDComm
+  identity.
 
 ### Workflow
 

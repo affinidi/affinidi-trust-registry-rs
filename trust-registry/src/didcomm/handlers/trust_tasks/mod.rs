@@ -66,7 +66,10 @@ fn new_id() -> String {
 ///
 /// `sender_did` is the sender the unpack authenticated, or `None` for an
 /// anoncrypt or plaintext envelope; an unauthenticated sender can read but
-/// never write.
+/// never write. The registry's own listener calls this only for an
+/// authenticated sender, the one its reply is addressed to (a message with
+/// none is dropped before it gets here). A host calling it with `None` must
+/// not address the outcome to the envelope's claimed `from`.
 ///
 /// `None` means the body is not a usable Trust Task document: there is no
 /// thread or issuer to address a conformant error response to, so the caller
@@ -114,7 +117,7 @@ impl ProtocolHandler for TrustTasksHandler {
         let Some(outcome) = route_envelope_body(
             &self.tasks,
             message.body,
-            ctx.authenticated_sender.as_deref(),
+            Some(ctx.authenticated_sender.as_str()),
         )
         .await
         else {
@@ -139,7 +142,7 @@ impl TrustTasksHandler {
         if let Err(e) = self.try_send(ctx, doc).await {
             error!(
                 "[profile = {}] Failed to send Trust Task response to {}: {}",
-                ctx.profile.inner.alias, ctx.sender_did, e
+                ctx.profile.inner.alias, ctx.authenticated_sender, e
             );
         }
     }
@@ -161,7 +164,7 @@ impl TrustTasksHandler {
         let message_id = new_id();
         let mut builder = Message::build(message_id.clone(), ENVELOPE_TYPE.to_string(), body)
             .from(ctx.profile.inner.did.clone())
-            .to(ctx.sender_did.clone());
+            .to(ctx.authenticated_sender.clone());
         if let Some(thid) = thread_id {
             builder = builder.thid(thid);
         }
@@ -171,7 +174,7 @@ impl TrustTasksHandler {
             .atm
             .pack_encrypted(
                 &envelope,
-                &ctx.sender_did,
+                &ctx.authenticated_sender,
                 Some(&ctx.profile.inner.did),
                 Some(&ctx.profile.inner.did),
             )
@@ -191,7 +194,7 @@ impl TrustTasksHandler {
                 &packed.0,
                 Some(&message_id),
                 &mediator,
-                &ctx.sender_did,
+                &ctx.authenticated_sender,
                 None,
                 None,
                 false,
