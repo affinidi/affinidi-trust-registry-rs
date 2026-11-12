@@ -16,6 +16,14 @@ actions (`release-cut`, `release-prep`, `release-tag`, `release-publish`,
 `release-guards`), which carry the scripts. A maintainer may still cut with a
 local script as a fallback (see Cut below).
 
+Every `uses:` in `.github/workflows/` names a commit SHA, with the branch or
+tag it came from in a comment, so a change in `pipeline-rust` or a
+third-party action reaches this repository's release and publish jobs only
+through a PR here that moves the SHA. To pick up a `pipeline-rust` change,
+replace each `affinidi/pipeline-rust/...@<sha>` with the new commit in one PR.
+(The reusable `checks-no-test.yaml` still calls its own nested workflows by
+branch; that is pinned inside `pipeline-rust`.)
+
 ## Branches
 
 ```
