@@ -10,8 +10,8 @@ services:
       - .env.test
     environment:
       LISTEN_ADDRESS: 0.0.0.0:3232
-      FILE_STORAGE_PATH: /usr/local/bin/sample-data/data.csv
+      FILE_STORAGE_PATH: /app/sample-data/data.csv
     ports:
-      - "3232:3232"
+      - "127.0.0.1:3232:3232"
     volumes:
       - ./didcomm-server/tests/tmp:/tmp

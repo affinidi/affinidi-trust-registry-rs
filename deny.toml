@@ -1,11 +1,26 @@
+# CI runs `cargo deny check bans licenses sources`; advisories are checked by
+# cargo-audit, which takes its ignore list from the workflow's `auditIgnore`
+# input. This table applies when `cargo deny check advisories` is run.
 [advisories]
 version = 2
-# Empty by design: see audit.toml. The legacy hyper-0.14 client that used
-# to bring these in is no longer in the graph.
+yanked = "deny"
+# Any entry here must say why, and by when it is to be reviewed again.
 ignore = []
 
 [bans]
-multiple-versions = "allow"
+# Report duplicate versions so growth in the graph is visible in CI output.
+multiple-versions = "warn"
+# A dependency must name a version; workspace path dependencies are exempt.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Only crates.io. A git dependency or another registry must be added here
+# deliberately (`allow-git = ["https://github.com/<org>/<repo>"]`).
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
 
 [licenses]
 # We want really high confidence when inferring licenses from text
@@ -22,26 +37,8 @@ allow = [
     "MIT-0",
     "MIT",
     "Zlib",
+    "Unicode-3.0",
     "Unlicense",
-    # As stated here https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html#spdx-identifiers
-    # 3.11 versions of SPDX License List was used and below licenses are not included there.
-    # They are commented to avoid "[license-not-encountered]" warnings.
-    #    "Apache-1.1",
-    #    "WTFPL",
-    #    "Fair",
-    #    "Intel",
-    #    "MIT-Modern-Variant",
-    #    "MulanPSL-2.0",
-    #    "Multics",
-    #    "Naumen",
-    #    "PHP-3.01",
-    #    "PostgreSQL",
-    #    "Python-2.0",
-    #    "OFL-1.1",
-    #    "MirOS",
-    #    "UPL-1.0",
-    #    "Unicode-DFS-2016",
-    #    "AFL-2.1",
 ]
 
 exceptions = [
@@ -51,26 +48,6 @@ exceptions = [
     # file-level copyleft and we link it unmodified, so it does not reach our
     # own sources.
     { allow = ["MPL-2.0"], crate = "option-ext" },
-    # TODO: align
-    { allow = ["Unicode-3.0"], crate = "icu_collections" },
-    { allow = ["Unicode-3.0"], crate = "icu_locale_core" },
-    { allow = ["Unicode-3.0"], crate = "icu_normalizer" },
-    { allow = ["Unicode-3.0"], crate = "icu_normalizer_data" },
-    { allow = ["Unicode-3.0"], crate = "icu_properties" },
-    { allow = ["Unicode-3.0"], crate = "icu_properties_data" },
-    { allow = ["Unicode-3.0"], crate = "icu_provider" },
-    { allow = ["Unicode-3.0"], crate = "litemap" },
-    { allow = ["Unicode-3.0"], crate = "potential_utf" },
-    { allow = ["Unicode-3.0"], crate = "tinystr" },
-    { allow = ["Unicode-3.0"], crate = "unicode-ident" },
-    { allow = ["Unicode-3.0"], crate = "writeable" },
-    { allow = ["Unicode-3.0"], crate = "yoke" },
-    { allow = ["Unicode-3.0"], crate = "yoke-derive" },
-    { allow = ["Unicode-3.0"], crate = "zerofrom" },
-    { allow = ["Unicode-3.0"], crate = "zerofrom-derive" },
-    { allow = ["Unicode-3.0"], crate = "zerotrie" },
-    { allow = ["Unicode-3.0"], crate = "zerovec" },
-    { allow = ["Unicode-3.0"], crate = "zerovec-derive" },
 ]
 
 # Sigh
