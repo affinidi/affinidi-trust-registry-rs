@@ -15,10 +15,18 @@
 //! [`HttpsTransportConfig::allow_insecure_http`] is set), never follows a
 //! redirect, reads at most [`HttpsTransportConfig::max_response_bytes`] of a
 //! reply, and copies at most [`MAX_ERROR_DETAIL_CHARS`] characters of an
-//! unparseable error body into the returned error.
-//! [`HttpsTransportConfig::refuse_non_public_addresses`] additionally refuses
-//! to connect to loopback, private, link-local and other non-public
-//! addresses.
+//! unparseable error body into the returned error. It also refuses to
+//! connect to loopback, private, link-local and other non-public addresses
+//! unless [`HttpsTransportConfig::allow_non_public_addresses`] is set, which
+//! is how to reach a registry on a private network.
+//!
+//! The address check covers every connection: an IP literal in the base URL
+//! is checked when the transport is built (the endpoint is fixed for the
+//! transport's life and redirects are not followed, and the connector never
+//! passes a literal to the resolver), and a host name is resolved by
+//! the transport's own resolver for each new connection, which refuses the name
+//! if any address it resolves to is not public and hands the connector only
+//! the addresses it checked, so the connection is made to one of those.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -61,19 +69,21 @@ pub struct HttpsTransportConfig {
     /// Largest reply body read, in bytes; a larger reply is refused.
     /// Default [`DEFAULT_MAX_RESPONSE_BYTES`].
     pub max_response_bytes: usize,
-    /// Refuse to connect to loopback, private, link-local, shared, multicast
-    /// and other non-public addresses, checked on the IP literal in the URL
-    /// and on every address the host name resolves to. Off by default. Set it
-    /// when the base URL comes from a DID document you do not control. When
-    /// it is on, the transport connects directly and ignores proxy settings
-    /// from the environment, since a proxy would connect on its behalf.
-    pub refuse_non_public_addresses: bool,
+    /// Allow connecting to loopback, private, link-local, shared, multicast
+    /// and other non-public addresses. Off by default: the transport then
+    /// refuses an IP literal in the URL that is not public, and a host name
+    /// any of whose addresses is not public, and it connects directly,
+    /// ignoring proxy settings from the environment (a proxy would connect
+    /// on its behalf). Set it to reach a registry on a private network or on
+    /// this machine, or to go through a proxy, and only for a base URL you
+    /// trust, not one taken from a DID document you do not control.
+    pub allow_non_public_addresses: bool,
 }
 
 impl HttpsTransportConfig {
     /// Defaults: 30s request timeout, 10s connect timeout, no bearer token,
-    /// `https` required (except to loopback), 64 KiB reply cap, no address
-    /// filter.
+    /// `https` required (except to loopback), 64 KiB reply cap, non-public
+    /// addresses refused.
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
@@ -82,7 +92,7 @@ impl HttpsTransportConfig {
             bearer_token: None,
             allow_insecure_http: false,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
-            refuse_non_public_addresses: false,
+            allow_non_public_addresses: false,
         }
     }
 }
@@ -97,8 +107,8 @@ impl fmt::Debug for HttpsTransportConfig {
             .field("allow_insecure_http", &self.allow_insecure_http)
             .field("max_response_bytes", &self.max_response_bytes)
             .field(
-                "refuse_non_public_addresses",
-                &self.refuse_non_public_addresses,
+                "allow_non_public_addresses",
+                &self.allow_non_public_addresses,
             )
             .finish()
     }
@@ -134,8 +144,8 @@ impl HttpsTransport {
     /// Refused with [`TrqlError::Config`]: a URL that does not parse, a
     /// scheme other than `https` or `http`, `http` to a host that is not
     /// loopback (unless [`HttpsTransportConfig::allow_insecure_http`]), a URL
-    /// carrying a username or password, and, with
-    /// [`HttpsTransportConfig::refuse_non_public_addresses`], an IP literal
+    /// carrying a username or password, and, unless
+    /// [`HttpsTransportConfig::allow_non_public_addresses`], an IP literal
     /// that is not a public address.
     pub fn new(config: HttpsTransportConfig) -> Result<Self, TrqlError> {
         let endpoint: reqwest::Url =
@@ -183,7 +193,10 @@ impl HttpsTransport {
             .timeout(config.timeout)
             .connect_timeout(config.connect_timeout)
             .redirect(reqwest::redirect::Policy::none());
-        if config.refuse_non_public_addresses {
+        if !config.allow_non_public_addresses {
+            // Checked once: the endpoint never changes and no redirect is
+            // followed, and the connector connects to a literal without
+            // calling the resolver.
             if let Some(ip) = host_ip
                 && !is_public_address(ip)
             {
@@ -302,9 +315,11 @@ fn truncate_detail(text: &str) -> String {
     }
 }
 
-/// Resolver used with [`HttpsTransportConfig::refuse_non_public_addresses`]:
+/// Resolver used unless [`HttpsTransportConfig::allow_non_public_addresses`]:
 /// resolves with the system resolver and refuses the name if any address it
-/// resolves to is not public.
+/// resolves to is not public. The connector connects only to the addresses
+/// returned here (it does not resolve again), so what is checked is what is
+/// connected to.
 struct PublicAddressResolver;
 
 impl reqwest::dns::Resolve for PublicAddressResolver {

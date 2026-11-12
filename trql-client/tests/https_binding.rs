@@ -33,8 +33,16 @@ async fn serve(router: Router) -> String {
     format!("http://{addr}")
 }
 
+/// A config for a test server on this machine: loopback is not a public
+/// address, so these tests opt out of the address filter.
+fn local_config(base_url: impl Into<String>) -> HttpsTransportConfig {
+    let mut config = HttpsTransportConfig::new(base_url);
+    config.allow_non_public_addresses = true;
+    config
+}
+
 fn client_for(base_url: &str) -> TrqlClient {
-    let transport = HttpsTransport::new(HttpsTransportConfig::new(base_url)).unwrap();
+    let transport = HttpsTransport::new(local_config(base_url)).unwrap();
     TrqlClient::new(Arc::new(transport), "did:example:registry")
 }
 
@@ -127,7 +135,7 @@ async fn hung_server_times_out_instead_of_hanging() {
     );
     let base = serve(router).await;
 
-    let mut config = HttpsTransportConfig::new(&base);
+    let mut config = local_config(&base);
     config.timeout = Duration::from_millis(300);
     let transport = HttpsTransport::new(config).unwrap();
     let client = TrqlClient::new(Arc::new(transport), "did:example:registry");
@@ -220,7 +228,7 @@ async fn unconfirmed_referral_is_rejected_over_the_wire() {
         }),
     );
     let base = serve(router).await;
-    let transport = HttpsTransport::new(HttpsTransportConfig::new(&base)).unwrap();
+    let transport = HttpsTransport::new(local_config(&base)).unwrap();
     let client = TrqlClient::new(Arc::new(transport), "did:example:registry")
         .referred_by("did:example:referring-vtc");
 
@@ -241,7 +249,7 @@ async fn unconfirmed_referral_is_rejected_over_the_wire() {
 
     // ...and the same registry, asked about the authority that referred us,
     // closes the loop.
-    let transport = HttpsTransport::new(HttpsTransportConfig::new(&base)).unwrap();
+    let transport = HttpsTransport::new(local_config(&base)).unwrap();
     let response = TrqlClient::new(Arc::new(transport), "did:example:registry")
         .referred_by("did:example:referring-vtc")
         .authorization(TrqpQuery::new(
@@ -350,7 +358,7 @@ async fn oversized_chunked_reply_is_refused() {
         let _ = socket.write_all(b"0\r\n\r\n").await;
     });
 
-    let mut config = HttpsTransportConfig::new(format!("http://{addr}"));
+    let mut config = local_config(format!("http://{addr}"));
     config.max_response_bytes = 32 * 1024;
     let transport = HttpsTransport::new(config).unwrap();
     let err = TrqlClient::new(Arc::new(transport), "did:example:registry")
@@ -403,8 +411,7 @@ fn plain_http_is_refused_for_a_non_loopback_host() {
         "http://127.0.0.1:3232",
         "http://[::1]:3232",
     ] {
-        HttpsTransport::new(HttpsTransportConfig::new(url))
-            .unwrap_or_else(|e| panic!("{url}: {e}"));
+        HttpsTransport::new(local_config(url)).unwrap_or_else(|e| panic!("{url}: {e}"));
     }
     let mut config = HttpsTransportConfig::new("http://registry.example.com");
     config.allow_insecure_http = true;
@@ -433,26 +440,37 @@ fn debug_output_redacts_the_bearer_token() {
     assert!(!shown.contains("s3cr3t-token-value"), "{shown}");
 }
 
-/// With the address filter on, an IP literal that is not public is refused
-/// when the transport is built.
+/// The address filter is on unless the config opts out.
+#[test]
+fn address_filter_is_on_by_default() {
+    assert!(!HttpsTransportConfig::new("https://registry.example.com").allow_non_public_addresses);
+}
+
+/// By default an IP literal that is not public is refused when the
+/// transport is built (a literal is never passed to the resolver, and the
+/// endpoint is fixed for the transport's life with redirects off, so this
+/// one check covers every request); opting out accepts it.
 #[test]
 fn address_filter_refuses_a_non_public_ip_literal() {
     for url in [
         "https://127.0.0.1",
+        "http://127.0.0.1:3232",
         "https://10.1.2.3",
         "https://169.254.169.254",
+        "https://100.64.0.1",
         "https://[::1]",
         "https://[fe80::1]",
+        "https://[fd00::1]",
+        "https://[::ffff:169.254.169.254]",
     ] {
-        let mut config = HttpsTransportConfig::new(url);
-        config.refuse_non_public_addresses = true;
-        let err = HttpsTransport::new(config).unwrap_err();
+        let err = HttpsTransport::new(HttpsTransportConfig::new(url)).unwrap_err();
         assert!(matches!(err, TrqlError::Config(_)), "{url}: {err}");
+        HttpsTransport::new(local_config(url)).unwrap_or_else(|e| panic!("{url}: {e}"));
     }
 }
 
-/// With the address filter on, a host name that resolves to a loopback
-/// address is refused at connect time, and the server is never reached.
+/// By default a host name that resolves to a loopback address is refused at
+/// connect time, and the server is never reached.
 #[tokio::test]
 async fn address_filter_refuses_a_name_resolving_to_loopback() {
     let reached = Arc::new(AtomicBool::new(false));
@@ -470,9 +488,10 @@ async fn address_filter_refuses_a_name_resolving_to_loopback() {
     let base = serve(router).await;
     let port = base.rsplit(':').next().unwrap();
 
-    let mut config = HttpsTransportConfig::new(format!("http://localhost:{port}"));
-    config.refuse_non_public_addresses = true;
-    let transport = HttpsTransport::new(config).unwrap();
+    let transport = HttpsTransport::new(HttpsTransportConfig::new(format!(
+        "http://localhost:{port}"
+    )))
+    .unwrap();
     let err = TrqlClient::new(Arc::new(transport), "did:example:registry")
         .authorization(query())
         .await

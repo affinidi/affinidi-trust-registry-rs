@@ -12,8 +12,9 @@
 //!
 //! * `https` (default) — [`HttpsTransport`]: `POST <registry>/trust-tasks`,
 //!   the `trust-tasks-https` wire contract. It requires `https` (plain `http`
-//!   only to a loopback host unless opted in), follows no redirects and caps
-//!   the reply size; see [`HttpsTransportConfig`].
+//!   only to a loopback host unless opted in), follows no redirects, caps
+//!   the reply size and, unless opted out, connects only to public
+//!   addresses; see [`HttpsTransportConfig`].
 //! * `didcomm` — [`DidcommTransport`]: the `trust-tasks-didcomm` envelope over
 //!   an ATM mediator websocket.
 //! * `tsp` — [`TspTransport`]: the `trust-tasks-tsp` envelope sealed in a TSP

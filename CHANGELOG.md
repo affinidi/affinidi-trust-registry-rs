@@ -29,8 +29,18 @@ release goes GA (`## 0.27.0 (date)`).
   the entry carries, which `BoundedAuditLogger` assigns.
 - **`trql-client`: `HttpsTransportConfig` is `#[non_exhaustive]`** and has
   new public fields (`allow_insecure_http`, `max_response_bytes`,
-  `refuse_non_public_addresses`). Build it with `HttpsTransportConfig::new`
+  `allow_non_public_addresses`). Build it with `HttpsTransportConfig::new`
   and set fields on the value; struct literals no longer compile.
+- **`trql-client`: `HttpsTransport` connects only to public addresses by
+  default.** It refuses loopback, private, link-local, shared, multicast and
+  other non-public addresses: an IP literal in the URL is refused by
+  `HttpsTransport::new`, and a host name is refused at connect time if any
+  address it resolves to is not public. It also connects directly, ignoring
+  proxy settings from the environment. **A client of a registry on a private
+  network, on this machine (`localhost`, `127.0.0.1`) or behind a proxy must
+  set `HttpsTransportConfig::allow_non_public_addresses = true`**; set it only
+  for a URL you configured, not one taken from a DID document you do not
+  control.
 
 ### Added
 
@@ -48,14 +58,9 @@ release goes GA (`## 0.27.0 (date)`).
   `AuditLogBuilder::authenticated_sender` sets it.
 - **`BoundedLimits`** and `BoundedAuditLogger::with_limits` configure the
   budgets below.
-- **`trql-client`: `HttpsTransportConfig::refuse_non_public_addresses`**
-  (off by default) makes `HttpsTransport` refuse to connect to loopback,
-  private, link-local, shared, multicast and other non-public addresses: an
-  IP literal in the URL is refused by `HttpsTransport::new`, and a host name
-  is refused at connect time if any address it resolves to is not public.
-  With it on the transport ignores proxy settings from the environment. Set
-  it when the registry URL comes from a DID document you do not control. New
-  constants `DEFAULT_MAX_RESPONSE_BYTES` and `MAX_ERROR_DETAIL_CHARS`.
+- **`trql-client`: `HttpsTransportConfig::allow_non_public_addresses`**
+  opts out of the address check above (see Breaking). New constants
+  `DEFAULT_MAX_RESPONSE_BYTES` and `MAX_ERROR_DETAIL_CHARS`.
 
 ### Changed
 
