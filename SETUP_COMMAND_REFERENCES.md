@@ -285,13 +285,12 @@ The setup command generates a `.env` file with the following variables:
 | `FILE_STORAGE_PATH` | Path to CSV file (when using csv backend). |
 | `DDB_TABLE_NAME` | DynamoDB table name (when using ddb backend). |
 | `REDIS_URL`  | Redis connection URL when using Redis as the storage backend. Format: `redis://host:port` or `redis://username:password@host:port/db`. |
-| `CORS_ALLOWED_ORIGINS` | Allowed CORS origins. |
 | `AUDIT_LOG_FORMAT` | Audit log output format. |
 | `MEDIATOR_DID` | DIDComm mediator DID when DIDComm enabled. |
 | `ADMIN_DIDS` | Authorized admin DIDs when DIDComm enabled. |
 | `ADMIN_AUTHORITIES` | Optional JSON object: admin DID → extra authority DIDs it may write records under (default: its own DID only). |
 | `PROFILE_CONFIG` | Trust Registry profile configuration when DIDComm enabled. |
-| `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enabled. ExplicitDeny - public mode, ExplicitAllow - private mode |
+| `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enabled. ExplicitDeny - public mode, ExplicitAllow - private mode (`--acl-mode` accepts only these two values). |
 
 ## Test Environment Files
 

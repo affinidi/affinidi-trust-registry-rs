@@ -222,6 +222,26 @@ fn env_flag(name: &str, default: bool) -> Result<bool, String> {
     }
 }
 
+/// Parse `ACL_MODE`: `ExplicitDeny` (public: anyone may send to the registry
+/// through its mediator) or `ExplicitAllow` (private: only allow-listed DIDs
+/// may). Unset or empty means `ExplicitDeny`, as before. The two names match
+/// case-insensitively after trimming; anything else is an error, so a typo in
+/// a private registry's configuration cannot start it in public mode.
+pub(crate) fn parse_acl_mode(raw: Option<&str>) -> Result<AccessListModeType, String> {
+    let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(AccessListModeType::ExplicitDeny);
+    };
+    if raw.eq_ignore_ascii_case("ExplicitDeny") {
+        Ok(AccessListModeType::ExplicitDeny)
+    } else if raw.eq_ignore_ascii_case("ExplicitAllow") {
+        Ok(AccessListModeType::ExplicitAllow)
+    } else {
+        Err(format!(
+            "ACL_MODE must be 'ExplicitDeny' (public) or 'ExplicitAllow' (private) (got '{raw}')"
+        ))
+    }
+}
+
 /// Read [`TransportFlags`] from the environment and reject incoherent
 /// combinations.
 ///
@@ -261,12 +281,7 @@ impl Configs for DidcommConfig {
                 ..Default::default()
             });
         }
-        let acl_mode_raw = env_or("ACL_MODE", "ExplicitDeny");
-        let acl_mode = if acl_mode_raw == "ExplicitAllow" {
-            AccessListModeType::ExplicitAllow
-        } else {
-            AccessListModeType::ExplicitDeny
-        };
+        let acl_mode = parse_acl_mode(optional_env("ACL_MODE").as_deref())?;
 
         let admin_dids_str = optional_env("ADMIN_DIDS").unwrap_or_else(|| {
             warn!("Missing environment variable: ADMIN_DIDS. The admin list is empty");
@@ -424,5 +439,49 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod acl_mode_tests {
+    use super::parse_acl_mode;
+    use affinidi_tdk::messaging::protocols::mediator::acls::AccessListModeType;
+
+    #[test]
+    fn acl_mode_defaults_to_explicit_deny_when_unset_or_empty() {
+        assert_eq!(parse_acl_mode(None), Ok(AccessListModeType::ExplicitDeny));
+        assert_eq!(
+            parse_acl_mode(Some("  ")),
+            Ok(AccessListModeType::ExplicitDeny)
+        );
+    }
+
+    #[test]
+    fn acl_mode_accepts_either_name_in_any_case_with_surrounding_space() {
+        for raw in ["ExplicitAllow", "explicitallow", " EXPLICITALLOW "] {
+            assert_eq!(
+                parse_acl_mode(Some(raw)),
+                Ok(AccessListModeType::ExplicitAllow),
+                "{raw:?}"
+            );
+        }
+        for raw in ["ExplicitDeny", "explicitdeny\t"] {
+            assert_eq!(
+                parse_acl_mode(Some(raw)),
+                Ok(AccessListModeType::ExplicitDeny),
+                "{raw:?}"
+            );
+        }
+    }
+
+    /// A value that is neither name must stop startup rather than select the
+    /// public mode.
+    #[test]
+    fn acl_mode_rejects_any_other_value() {
+        for raw in ["private", "Explicit_Allow", "ExplicitAllowed", "allow"] {
+            let err = parse_acl_mode(Some(raw)).expect_err(raw);
+            assert!(err.contains("ACL_MODE"), "{err}");
+            assert!(err.contains(raw), "{err}");
+        }
     }
 }

@@ -159,6 +159,21 @@ release goes GA (`## 0.27.0 (date)`).
   `{"code": "malformedRequest", …}` on `/trust-tasks`. A malformed value of any
   of these stops startup. Answers carry `X-Content-Type-Options: nosniff` and
   `Cache-Control: no-store`. `ServerConfig` has a new `http_limits` member.
+- **CORS is off unless configured.** With `CORS_ALLOWED_ORIGINS` unset or
+  empty the standalone service applies no CORS layer, so browsers allow
+  same-origin requests only; before, it allowed every origin. Set
+  `CORS_ALLOWED_ORIGINS=*` to keep allowing every origin. Each listed entry
+  must be an origin exactly as a browser sends it (`https://app.example.com`,
+  no path or trailing `/`); an entry in another form, or `*` combined with
+  origins, stops startup with an error naming it, where before it was dropped
+  without notice. A listed origin may use `GET`, `POST` and `OPTIONS` with the
+  `content-type` header (was any method and header). `setup-trust-registry`
+  does not write the variable. New `configs::server::validate_cors_origins`.
+- **`ACL_MODE` is parsed strictly.** `ExplicitDeny` and `ExplicitAllow` are
+  matched case-insensitively after trimming; any other value stops startup,
+  naming the variable. Before, every value other than exactly `ExplicitAllow`
+  selected the public `ExplicitDeny`. Unset still means `ExplicitDeny`.
+  `setup-trust-registry --acl-mode` accepts only the two names.
 - **`/health` names the failure class, not the error.** `detail` says whether
   the DIDComm listener failed or panicked; the error itself is logged.
 - **4xx HTTP answers are logged at `debug`**, not `warn`; 5xx stay at `error`.
