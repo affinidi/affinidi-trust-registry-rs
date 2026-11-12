@@ -11,7 +11,9 @@
 //! Three bindings are provided behind features:
 //!
 //! * `https` (default) — [`HttpsTransport`]: `POST <registry>/trust-tasks`,
-//!   the `trust-tasks-https` wire contract.
+//!   the `trust-tasks-https` wire contract. It requires `https` (plain `http`
+//!   only to a loopback host unless opted in), follows no redirects and caps
+//!   the reply size; see [`HttpsTransportConfig`].
 //! * `didcomm` — [`DidcommTransport`]: the `trust-tasks-didcomm` envelope over
 //!   an ATM mediator websocket.
 //! * `tsp` — [`TspTransport`]: the `trust-tasks-tsp` envelope sealed in a TSP
@@ -27,7 +29,7 @@
 //! use std::sync::Arc;
 //! use trql_client::{HttpsTransport, HttpsTransportConfig, TrqlClient, TrqpQuery};
 //!
-//! let transport = HttpsTransport::new(HttpsTransportConfig::new("http://localhost:3232"))?;
+//! let transport = HttpsTransport::new(HttpsTransportConfig::new("https://registry.example.com"))?;
 //! let client = TrqlClient::new(Arc::new(transport), "did:webvh:...registry");
 //!
 //! let response = client
@@ -73,7 +75,9 @@ pub use transport::{TransportKind, TrqlTransport};
 #[cfg(feature = "didcomm")]
 pub use didcomm::{DidcommTransport, DidcommTransportConfig};
 #[cfg(feature = "https")]
-pub use https::{HttpsTransport, HttpsTransportConfig};
+pub use https::{
+    DEFAULT_MAX_RESPONSE_BYTES, HttpsTransport, HttpsTransportConfig, MAX_ERROR_DETAIL_CHARS,
+};
 #[cfg(feature = "tsp")]
 pub use tsp::{TspTransport, TspTransportConfig};
 
