@@ -62,7 +62,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: affinidi/pipeline-rust/.github/actions/release-publish@main
+      - uses: affinidi/pipeline-rust/.github/actions/release-publish@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
         with:
           toolchain: '1.96.0'
           # Deliberately without `-D warnings`: CI already holds the code to that,

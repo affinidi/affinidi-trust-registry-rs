@@ -21,10 +21,22 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Read-only unless a job asks for more.
+permissions:
+  contents: read
+
 jobs:
   rust-pipeline:
-    uses: affinidi/pipeline-rust/.github/workflows/checks-no-test.yaml@main
-    secrets: inherit
+    uses: affinidi/pipeline-rust/.github/workflows/checks-no-test.yaml@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
+    # The audit job files RustSec issues; nothing else here writes.
+    permissions:
+      contents: read
+      issues: write
+    # Only the secrets the reusable workflow declares, not every secret.
+    secrets:
+      SNYK_SCANNER_TOKEN: ${{ secrets.SNYK_SCANNER_TOKEN }}
+      SNYK_SCANNER_REGION: ${{ secrets.SNYK_SCANNER_REGION }}
+      SNYK_GLOBAL_POLICY: ${{ secrets.SNYK_GLOBAL_POLICY }}
     with:
       toolchain: '1.96.0'
       rustflags: '-D warnings --cfg tracing_unstable'
@@ -37,7 +49,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: affinidi/pipeline-rust/.github/actions/release-guards@main
+      - uses: affinidi/pipeline-rust/.github/actions/release-guards@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
   semver:
     # Patch releases must be semver-compatible. Every PR into a release branch
     # (a backport, a `release-direct` fix, a prep PR) is checked against the
@@ -55,15 +67,15 @@ jobs:
       RUSTFLAGS: '--cfg tracing_unstable'
       RUSTDOCFLAGS: '--cfg tracing_unstable'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           toolchain: '1.96.0'
           rustflags: '--cfg tracing_unstable'
-      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
@@ -78,23 +90,28 @@ jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
     env:
       IN_PIPELINE: 'true'
       MEDIATOR_DID: ${{ vars.MEDIATOR_DID }}
       MEDIATOR_URL: ${{ vars.MEDIATOR_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        # No `ref:`: a pull_request run tests the PR merged into its base
+        # (from a fork too); a push run tests the pushed commit.
         with:
           fetch-depth: 0
-          ref: ${{ github.head_ref }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           rustflags: ''
           toolchain: '1.96.0'
           override: true
-      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@main
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: 'rust-cache'
       - name: generate configs
@@ -122,7 +139,9 @@ jobs:
             exit 1
           )
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-llvm-cov
       - name: Generate code coverage
         run: |
           tail -n +1 -f server.log &

@@ -37,7 +37,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           permission-contents: write
           permission-actions: read
-      - uses: affinidi/pipeline-rust/.github/actions/release-nightly@main
+      - uses: affinidi/pipeline-rust/.github/actions/release-nightly@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
         with:
           token: ${{ steps.app.outputs.token }}
           workflow: checks.yaml
