@@ -148,8 +148,10 @@ struct Args {
     #[arg(long, short = 'o', default_value = "json")]
     audit_log_format: Option<String>,
 
-    /// Trust Registry only admin operations. use didcomm
-    #[arg(long, short = 'x', default_value = "ExplicitDeny")]
+    /// Mediator ACL mode for the registry's DID: ExplicitDeny (public: anyone
+    /// may send to it) or ExplicitAllow (private: only allow-listed DIDs may)
+    #[arg(long, short = 'x', default_value = "ExplicitDeny",
+          value_parser = ["ExplicitDeny", "ExplicitAllow"])]
     acl_mode: Option<String>,
 
     /// Run without interactive prompts (CI / container provisioning). Skips the

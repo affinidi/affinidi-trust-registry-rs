@@ -186,28 +186,48 @@ fn log_task_exit(name: &str, result: &Result<Result<(), BoxError>, tokio::task::
     }
 }
 
-fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
+/// The standalone service's CORS layer, from a list already checked by
+/// [`crate::configs::server::validate_cors_origins`] (checked again here, since
+/// a host may build `ServerConfig` itself):
+///
+/// - empty: no layer. Browsers then allow same-origin requests only.
+/// - `["*"]`: any origin, method and header.
+/// - origins: those origins, `GET`/`POST`/`OPTIONS` and the `content-type`
+///   header, which is all the registry's routes take.
+fn build_cors_layer(allowed_origins: &[String]) -> Result<Option<CorsLayer>, BoxError> {
+    crate::configs::server::validate_cors_origins(allowed_origins)
+        .map_err(|e| format!("CORS_ALLOWED_ORIGINS: {e}"))?;
+
     if allowed_origins.is_empty() {
-        info!("CORS: No allowed origins configured, allowing all origins");
-        return CorsLayer::permissive();
+        info!(
+            "CORS: no allowed origins configured; cross-origin browser requests are not \
+             allowed (set CORS_ALLOWED_ORIGINS, or '*' for any origin)"
+        );
+        return Ok(None);
     }
 
     if allowed_origins.len() == 1 && allowed_origins[0] == "*" {
-        info!("CORS: Wildcard configured, allowing all origins");
-        return CorsLayer::permissive();
+        info!("CORS: wildcard configured, allowing all origins");
+        return Ok(Some(CorsLayer::permissive()));
     }
 
-    info!("CORS: Configured allowed origins: {:?}", allowed_origins);
-
-    let origins: Vec<_> = allowed_origins
+    let origins = allowed_origins
         .iter()
-        .filter_map(|origin| origin.parse().ok())
-        .collect();
+        .map(|origin| origin.parse())
+        .collect::<Result<Vec<axum::http::HeaderValue>, _>>()
+        .map_err(|e| format!("CORS_ALLOWED_ORIGINS: {e}"))?;
+    info!("CORS: allowed origins: {:?}", allowed_origins);
 
-    CorsLayer::new()
-        .allow_origin(origins)
-        .allow_methods(tower_http::cors::Any)
-        .allow_headers(tower_http::cors::Any)
+    Ok(Some(
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::OPTIONS,
+            ])
+            .allow_headers([axum::http::header::CONTENT_TYPE]),
+    ))
 }
 
 /// Build the top-level HTTP router (health check + TRQP application routes +
@@ -218,8 +238,8 @@ fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
 /// service adds on top is `/health`, the request time and concurrency limits
 /// ([`crate::http::limits`]) and the CORS layer, all of which a host owns for
 /// itself.
-fn build_router(parts: &crate::embed::RegistryParts) -> Router {
-    let cors = build_cors_layer(&parts.config.server_config.cors_allowed_origins);
+fn build_router(parts: &crate::embed::RegistryParts) -> Result<Router, BoxError> {
+    let cors = build_cors_layer(&parts.config.server_config.cors_allowed_origins)?;
 
     let health = parts.health.clone();
     let health_route = Router::new().route(
@@ -231,7 +251,11 @@ fn build_router(parts: &crate::embed::RegistryParts) -> Router {
     );
 
     let routes = health_route.merge(application_routes("", parts.shared_data()));
-    bound_requests(routes, &parts.config.server_config.http_limits).layer(cors)
+    let router = bound_requests(routes, &parts.config.server_config.http_limits);
+    Ok(match cors {
+        Some(cors) => router.layer(cors),
+        None => router,
+    })
 }
 
 async fn start_didcomm_server(
@@ -308,7 +332,7 @@ pub(crate) async fn serve_registry(
             })?;
         let http_addr = listener.local_addr()?;
 
-        let router = build_router(&parts);
+        let router = build_router(&parts)?;
 
         info!("HTTP server is starting on {http_addr}...");
 
@@ -486,5 +510,83 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("LISTEN_ADDRESS"), "{err}");
+    }
+
+    fn origins(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Send a CORS preflight for `POST` from `origin` through `layer` and
+    /// return the `Access-Control-Allow-Origin` it answered, if any.
+    async fn preflight(layer: Option<CorsLayer>, origin: &str) -> Option<String> {
+        use axum::body::Body;
+        use axum::http::{Method, Request};
+        use tower::ServiceExt;
+
+        let router = Router::new().route("/x", axum::routing::post(|| async { "ok" }));
+        let router = match layer {
+            Some(layer) => router.layer(layer),
+            None => router,
+        };
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/x")
+                    .header("origin", origin)
+                    .header("access-control-request-method", "POST")
+                    .header("access-control-request-headers", "content-type")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap().to_string())
+    }
+
+    /// Unset means no cross-origin access, not every origin.
+    #[tokio::test]
+    async fn cors_unset_allows_no_cross_origin_requests() {
+        let layer = build_cors_layer(&[]).unwrap();
+        assert!(layer.is_none());
+        assert_eq!(preflight(layer, "https://any.example").await, None);
+    }
+
+    #[tokio::test]
+    async fn cors_wildcard_allows_any_origin() {
+        let layer = build_cors_layer(&origins(&["*"])).unwrap();
+        assert_eq!(
+            preflight(layer, "https://any.example").await.as_deref(),
+            Some("*")
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_list_allows_only_the_listed_origins() {
+        let list = origins(&["https://app.example.com", "http://localhost:3000"]);
+        assert_eq!(
+            preflight(build_cors_layer(&list).unwrap(), "http://localhost:3000")
+                .await
+                .as_deref(),
+            Some("http://localhost:3000")
+        );
+        assert_eq!(
+            preflight(build_cors_layer(&list).unwrap(), "https://other.example").await,
+            None
+        );
+    }
+
+    /// An entry that could never match is refused at startup, not dropped
+    /// while the log reports it as configured.
+    #[test]
+    fn cors_invalid_entry_is_an_error_naming_it() {
+        let err = build_cors_layer(&origins(&["https://app.example.com", "app.example.com"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("CORS_ALLOWED_ORIGINS"), "{err}");
+        assert!(err.contains("'app.example.com'"), "{err}");
     }
 }
