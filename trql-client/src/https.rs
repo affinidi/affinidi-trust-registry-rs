@@ -379,7 +379,10 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || (first & 0xffc0) == 0xfe80 // link-local (fe80::/10)
         || (first & 0xffc0) == 0xfec0 // site-local (fec0::/10, deprecated)
         || first == 0x2001 && ip.segments()[1] == 0x0db8 // documentation
-        || first == 0x0064 && ip.segments()[1] == 0xff9b // NAT64 (64:ff9b::/96)
+        || first == 0x0064 && ip.segments()[1] == 0xff9b // NAT64 (64:ff9b::/96, 64:ff9b:1::/48)
+        || first == 0x2001 && ip.segments()[1] == 0x0000 // Teredo (2001::/32), embeds an IPv4 address
+        || first == 0x2002 // 6to4 (2002::/16), embeds an IPv4 address
+        || ip.segments()[..4] == [0x0100, 0, 0, 0] // discard-only (100::/64)
         || ip.segments()[..6] == [0, 0, 0, 0, 0, 0]) // IPv4-compatible (deprecated)
 }
 
@@ -407,6 +410,10 @@ mod tests {
             "::ffff:127.0.0.1",
             "::ffff:169.254.169.254",
             "64:ff9b::a9fe:a9fe",
+            "2001::a9fe:a9fe",
+            "2002:a9fe:a9fe::1",
+            "100::1",
+            "2001:db8::1",
         ] {
             assert!(!is_public_address(ip.parse().unwrap()), "{ip}");
         }
