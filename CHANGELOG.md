@@ -93,6 +93,22 @@ release goes GA (`## 0.27.0 (date)`).
 - **`/health` names the failure class, not the error.** `detail` says whether
   the DIDComm listener failed or panicked; the error itself is logged.
 - **4xx HTTP answers are logged at `debug`**, not `warn`; 5xx stay at `error`.
+- **Connection URLs are logged without their credentials.** The Redis URL
+  (and a DynamoDB `AWS_ENDPOINT`) can carry a username and password; the
+  "Connecting to Redis" line, the `Debug` form of `RedisStorageConfig` and
+  `DynamoDbStorageConfig`, and `setup-trust-registry`'s output now show `***`
+  in their place (and for `user` / `pass` query parameters). The `.env` file
+  the setup tool writes still holds the real URL. A value that does not parse
+  as a URL is shown as `<unparseable URL>`. New
+  `configs::storage::redact_url_credentials`.
+- **`setup-trust-registry` no longer prints the registry's profile bundle.**
+  Its "Environment Configuration" output showed `PROFILE_CONFIG`, whose
+  secrets include the private keys; it now shows
+  `<redacted: written to .env>`. The `.env` file is unchanged.
+- **The debug-level configuration dump is a field list.** `serve` logged the
+  whole `TrustRegistryConfig` with `{:?}`; it now logs the listen address,
+  storage backend, transports, registry and mediator DIDs and the number of
+  admin DIDs.
 
 ## 0.31.0 (release/0.31)
 

@@ -17,7 +17,10 @@ pub struct RedisStorage {
 
 impl RedisStorage {
     pub async fn new(redis_url: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        info!("Connecting to Redis at {}", redis_url);
+        info!(
+            "Connecting to Redis at {}",
+            crate::configs::storage::redact_url_credentials(redis_url)
+        );
         let client = Client::open(redis_url)?;
         let connection = client.get_multiplexed_async_connection().await?;
 
