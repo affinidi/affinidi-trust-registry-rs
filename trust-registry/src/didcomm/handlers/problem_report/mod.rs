@@ -53,7 +53,7 @@ impl ProtocolHandler for ProblemReportHandler {
 
         info!(
             profile = %ctx.profile.inner.alias,
-            from = %ctx.sender_did,
+            from = %ctx.authenticated_sender,
             message_id = %message.id,
             code = %code,
             comment = %comment,

@@ -111,14 +111,14 @@ impl<R: ?Sized + TrustRecordRepository + 'static> ProtocolHandler for TRQPMessag
         let message_id = Uuid::new_v4().to_string();
         let output_message = Message::build(message_id.clone(), output_message_type, output_body)
             .from(ctx.profile.inner.did.clone())
-            .to(ctx.sender_did.clone())
+            .to(ctx.authenticated_sender.clone())
             .finalize();
 
         let packed_msg = ctx
             .atm
             .pack_encrypted(
                 &output_message,
-                &ctx.sender_did,
+                &ctx.authenticated_sender,
                 Some(&ctx.profile.inner.did),
                 Some(&ctx.profile.inner.did),
             )
@@ -136,7 +136,7 @@ impl<R: ?Sized + TrustRecordRepository + 'static> ProtocolHandler for TRQPMessag
                     .mediator
                     .as_ref()
                     .ok_or(DIDCommError::MissingMediator)?,
-                &ctx.sender_did,
+                &ctx.authenticated_sender,
                 None,
                 None,
                 false,

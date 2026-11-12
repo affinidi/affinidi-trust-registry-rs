@@ -394,7 +394,8 @@ async fn handle_didcomm<H: MessageHandler>(
         message.from = Some(sender.clone());
     }
     // Only `authenticated` and `anonymous_sender` are read downstream (the
-    // mediator-transport spoof guard); the rest default. `verified` means a
+    // mediator-transport spoof guard, and which sender a reply may go to: a
+    // message without a proven sender is not answered); the rest default. `verified` means a
     // cryptographically-bound sender, so it maps onto both flags. `UnpackMetadata`
     // is `#[non_exhaustive]`, so it is built from `default()` + field assignment
     // rather than a struct literal.

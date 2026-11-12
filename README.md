@@ -776,7 +776,12 @@ Every write and record query, accepted or refused, is recorded in the audit log
 (`AUDIT_LOG_FORMAT`, JSON by default): the operation and task type, the proven
 issuer (or, for one refused before its proof was checked, the DID it claimed),
 the authority and record key or capability, the result and reason, the
-document `id`, the thread and the time. Record contents and proofs are not
+document `id`, the thread and the time. Each write's entry also carries
+`document_digest`, the SHA-256 (hex) of the canonical JSON of the whole signed
+document, proof included, so an archived copy of the document can be matched
+to its entry and its proof checked again; once the proof has verified, it
+names the key that approved the write (`verification_method`) and the proof's
+`created` time (`proof_created`). Record contents and proof values are not
 logged. Every value is capped at 256 characters, and control characters, the
 line and paragraph separators and Unicode format characters (bidi overrides,
 zero-width characters) are escaped, in both formats, so an entry is always one
@@ -784,8 +789,8 @@ line that reads as written. Each entry carries `seq`, its position in the
 process's audit sequence (from 1 at start-up, assigned before the entry
 reaches the logger, including a host's own), so a missing entry shows as a
 gap, and `authenticated_sender` when the transport authenticated the sender
-(DIDComm, TSP) even though the document's proof was not verified. A reason is
-capped at 1024 characters, every other value at 256.
+(DIDComm, TSP) even though the document's proof was not verified. A reason or
+verification method is capped at 1024 characters, every other value at 256.
 
 Refusals of documents whose issuer was never proven are recorded individually
 within per-minute budgets: 60 for unauthenticated callers (the HTTP surface)

@@ -31,6 +31,18 @@ pub struct AuditLog {
     /// unlike `actor` it does not mean the document's proof verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authenticated_sender: Option<String>,
+    /// SHA-256 (hex) over the canonical JSON of the whole operation document,
+    /// proof included: the key the registry's replay record uses. An archived
+    /// copy of the signed document can be matched to this entry by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_digest: Option<String>,
+    /// The verification method of the document's proof, once the proof has
+    /// verified: which of the actor's keys approved the write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_method: Option<String>,
+    /// The proof's `created` time, once the proof has verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof_created: Option<chrono::DateTime<Utc>>,
     /// The entry's position in this process's audit sequence, starting at 1.
     /// Assigned by `BoundedAuditLogger` as it passes the entry on; `None`
     /// before then.
@@ -76,6 +88,9 @@ impl AuditLogBuilder {
                 document_id: None,
                 claimed_actor: None,
                 authenticated_sender: None,
+                document_digest: None,
+                verification_method: None,
+                proof_created: None,
                 sequence: None,
                 timestamp: Utc::now(),
             },
@@ -119,6 +134,23 @@ impl AuditLogBuilder {
 
     pub fn authenticated_sender(mut self, authenticated_sender: Option<String>) -> Self {
         self.audit_log.authenticated_sender = authenticated_sender;
+        self
+    }
+
+    pub fn document_digest(mut self, document_digest: Option<String>) -> Self {
+        self.audit_log.document_digest = document_digest;
+        self
+    }
+
+    /// The proof's verification method and `created` time. Set only for a
+    /// proof that verified.
+    pub fn proof(
+        mut self,
+        verification_method: Option<String>,
+        created: Option<chrono::DateTime<Utc>>,
+    ) -> Self {
+        self.audit_log.verification_method = verification_method;
+        self.audit_log.proof_created = created;
         self
     }
 
