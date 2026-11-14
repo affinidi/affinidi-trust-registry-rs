@@ -126,10 +126,6 @@ required-features = ["standalone"]
 name = "http_integration_test"
 required-features = ["standalone"]
 
-[[test]]
-name = "redis_integration_test"
-required-features = ["storage-redis"]
-
 [features]
 # Everything the standalone service needs. A host embedding the registry as a
 # library should build with `default-features = false` and add back only the

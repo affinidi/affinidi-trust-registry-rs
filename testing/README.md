@@ -13,7 +13,7 @@ them (`.github/workflows/checks.yaml`).
 | `test-trust-registry` smoke test | `cargo test -p test-trust-registry` | nothing (in-process registry) |
 | `trust-registry` `http_integration_test` | `cargo test -p trust-registry --test http_integration_test` | a running registry at `LISTEN_ADDRESS` from `.env.test` |
 | `trust-registry` `didcomm_integration_test`, `didcomm_server_test` | `cargo test -p trust-registry --test didcomm_integration_test --test didcomm_server_test` | `.env.test` from `setup-trust-registry … --with-test-identities`, a reachable mediator, and (for `didcomm_integration_test`) a running registry |
-| `trust-registry` `redis_integration_test` | `cargo test -p trust-registry --test redis_integration_test` | Redis on `redis://127.0.0.1:6379`; each test is skipped (passes) when Redis is not reachable |
+| `trust-registry` storage conformance (Redis, DynamoDB) | `TR_TEST_REDIS_URL=redis://127.0.0.1:6379/15 TR_TEST_DYNAMODB_ENDPOINT=http://127.0.0.1:4566 cargo test -p trust-registry --all-features --lib conformance` | Redis and/or LocalStack DynamoDB; a backend whose variable is unset is skipped (printed as SKIPPED), and `TR_TEST_REQUIRE_SERVICES=true` turns a skip into a failure |
 | `trust-registry` `mediator_e2e` | `cargo test -p trust-registry --test mediator_e2e -- --ignored --nocapture` | Docker (starts Redis and the mediator image); `#[ignore]`d by default, see the module docs for its environment variables |
 | `test-trust-registry` mediator tests | `cargo test -p test-trust-registry --features tsp -- --include-ignored` (`tsp` implies `mediator`) | Redis on `127.0.0.1:6379` for the in-process test mediator, and a heavy build; the routed round-trips are `#[ignore]`d |
 
