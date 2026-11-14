@@ -1,16 +1,19 @@
 //! Trust Task payload types for the Trust Registry (`registry/*` family).
 //!
-//! These are the **published** specs: the types are re-exported from
-//! [`crate::specs::registry`], which `build.rs` generates with
-//! `trust-tasks-build` from the bundles pinned in `trust-tasks.lock`. Nothing
-//! here is hand-written — the generated types are the single source of truth
-//! for field names, the `TYPE_URI`s, and the proof/`issuedAt`/recipient policy,
-//! so the wire format cannot drift from the spec.
+//! The request and response types are the **published** specs, re-exported
+//! from [`crate::specs::registry`], which `build.rs` generates with
+//! `trust-tasks-build` from the bundles pinned in `trust-tasks.lock`. They are
+//! the source of truth for member names and the `TYPE_URI`s, so the wire
+//! format cannot drift from the spec. (The registry's own proof policy is in
+//! [`super::descriptor`]: it is stricter than the specs' for
+//! `registry/record/query`.)
 //!
-//! Each generated module exposes a `Payload` (request) and a `Response`. We
-//! alias them to request/response names for readability at the call sites and
-//! add the small glue that bridges the spec payloads to the Trust Registry's
-//! own [`crate::domain`] types (query construction + record conversion).
+//! Each generated module exposes a `Payload` (request) and a `Response`. They
+//! are aliased to request/response names here: the snake_case versions at the
+//! top level, the lowerCamelCase ones in [`camel`]. The hand-written part is
+//! the bridge between the two record wire forms and the registry's own
+//! [`crate::domain`] types (`record_to_v1`, `record_from_v2`, ...) and the
+//! repository query built from a record key (`query_of`).
 
 // The 0.1 `registry/*` versions are superseded (the generated types are
 // `#[deprecated]`), and this registry still answers them on purpose: peers that
@@ -43,17 +46,10 @@ pub use registry::recognition::v0_1::{
 pub use registry::record::delete::v0_1::{
     Payload as RecordDeleteRequest, Response as RecordDeleteResponse,
 };
-pub use registry::record::put::v0_1::{
-    Payload as RecordPutRequest, Response as RecordPutResponse,
-    ResponseMessage as RecordPutResponseMessage,
-};
+pub use registry::record::put::v0_1::{Payload as RecordPutRequest, Response as RecordPutResponse};
 pub use registry::record::query::v0_1::{
     Payload as RecordQueryRequest, Response as RecordQueryResponse,
 };
-
-/// The spec-side `TrustRecord` wire shape (verbatim TRQP field names), as
-/// `registry/record/put/0.1` carries it.
-pub use registry::record::put::v0_1::TrustRecord as SpecTrustRecord;
 
 /// Canonical Type URIs for the `registry/*` Trust Task family.
 ///
@@ -87,8 +83,9 @@ pub mod type_uris {
 // on records, the optional `validFrom`/`validUntil` window. Served alongside
 // the versions above, which keep their snake_case wire form.
 
-/// Generated types for the lowerCamelCase `registry/*` versions.
-pub mod v2 {
+/// Generated types for the lowerCamelCase `registry/*` versions: 0.2 of most
+/// tasks, 0.3 of `registry/record/put` and `registry/record/query`.
+pub mod camel {
     pub use crate::specs::registry::authorization::v0_2::{
         Payload as AuthorizationRequest, Response as AuthorizationResponse,
         ResponseMessage as AuthorizationResponseMessage,
@@ -280,16 +277,13 @@ pub(crate) fn query_of(
     )
 }
 
-/// Convert between two structurally-identical types by re-serialising through
-/// JSON.
+/// Convert between two types with the same JSON shape by re-serialising
+/// through JSON.
 ///
-/// The generated `specs::registry` `TrustRecord` and the Trust Registry's
-/// [`crate::domain::TrustRecord`] share a byte-for-byte wire shape (verbatim
-/// TRQP field names, `record_type` lower-cased, `recognized`/`authorized`
-/// omitted when absent), so a serialise→deserialise round-trip *is* the
-/// conversion. Keeping it in one place means the spec↔domain bridge has a
-/// single, obvious failure mode (a genuinely malformed record) rather than a
-/// hand-written field-by-field mapping that could silently diverge.
+/// Used only between a generated spec record and the hand-written wire record
+/// that mirrors it ([`WireRecordV1`] / [`WireRecordV2`]). The mapping that
+/// decides anything — between a wire record and the domain record — is the
+/// explicit one above.
 pub(crate) fn reserialize<A, B>(value: &A) -> Result<B, String>
 where
     A: Serialize,
@@ -301,6 +295,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
     use crate::domain::{Action, AuthorityId, EntityId, RecordType, Resource, TrustRecordBuilder};
     use trust_tasks_rs::Payload;
@@ -332,8 +328,12 @@ mod tests {
         );
     }
 
+    /// The specs' own policy flag. The registry is stricter: it also requires
+    /// a proof for `registry/record/query`, whose answers carry whole records
+    /// (`descriptor::tests::the_registry_requires_a_proof_for_record_queries`).
+    #[allow(clippy::assertions_on_constants)]
     #[test]
-    fn writes_require_proof_reads_do_not() {
+    fn the_spec_flags_writes_but_not_queries_as_needing_a_proof() {
         assert!(RecordPutRequest::IS_PROOF_REQUIRED);
         assert!(RecordDeleteRequest::IS_PROOF_REQUIRED);
         assert!(DidRotateRequest::IS_PROOF_REQUIRED);
@@ -399,7 +399,8 @@ mod tests {
             .expect("valid record");
 
         // domain -> spec -> domain must be lossless.
-        let spec: SpecTrustRecord = reserialize(&domain).expect("domain -> spec");
+        let spec: registry::record::put::v0_1::TrustRecord =
+            reserialize(&domain).expect("domain -> spec");
         assert_eq!(spec.entity_id, "did:example:entity");
         assert_eq!(spec.record_type.to_string(), "authorization");
 

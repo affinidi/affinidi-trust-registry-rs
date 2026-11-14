@@ -1,4 +1,4 @@
-//! Message-id deduplication for write-path Trust Tasks (R1.4).
+//! Message-id deduplication for the Trust Tasks executed at most once (R1.4).
 //!
 //! DIDComm and TSP are at-least-once: the mediator redelivers anything it has
 //! not seen acked, and the offline-sync poller re-fetches and re-dispatches a
@@ -9,9 +9,13 @@
 //!
 //! ## What is deduplicated
 //!
-//! Writes only — the slugs [`is_write_slug`](crate::trust_tasks::proof::is_write_slug)
-//! names. Reads are naturally idempotent, and putting them through the store
-//! would cost a round trip and unbounded storage for no correctness gain.
+//! Every task whose [`descriptor`](crate::trust_tasks::descriptor) gives it a
+//! replay record, and every capability write: the writes go through the one
+//! store shared by every binding, and `registry/record/query` through a
+//! separate store of its own, so queries cannot use up the capacity writes
+//! need. The [`TaskHandler`](crate::trust_tasks::TaskHandler) picks the store
+//! and calls [`execute_once`]. The public TRQP queries are naturally
+//! idempotent and do not go through a store.
 //!
 //! ## Claim protocol
 //!
@@ -28,6 +32,10 @@
 //!                                       document: reject as `idConflict`
 //! ```
 //!
+//! [`execute_once`] reports which of these happened ([`Disposition`]) beside
+//! the outcome, so the audit entry of a replayed or in-flight duplicate does
+//! not read as a second execution.
+//!
 //! ## The record of accepted identifiers (VTI-OPS-025..027)
 //!
 //! This store is the registry's record of accepted document identifiers. One
@@ -42,6 +50,10 @@
 //! A write is refused rather than executed when the store cannot be
 //! consulted: without the record there is no replay protection.
 //!
+//! [`MemoryMessageIdStore`] is the only implementation: it is per process and
+//! lost on restart. [`MessageIdStore`] is the seam a shared, durable store
+//! would implement.
+//!
 //! A duplicate that arrives after completion replays the **stored response**
 //! rather than being silently dropped. At-least-once exists because responses
 //! get lost too; a sender whose response vanished needs the answer on retry, not
@@ -55,8 +67,11 @@
 //! `ConnectionFailed` / `QueryFailed` / `LockPoisoned` lands via
 //! `trust_tasks::router::map_repo_err`. Caching one would answer every
 //! redelivery with a stale database error for the whole TTL. Deterministic
-//! rejections — malformed, expired, proof invalid, permission denied — are
-//! properties of the document itself and replay correctly.
+//! rejections by the task itself (a malformed record, a strict create of a key
+//! that exists) are properties of the document and replay correctly. The
+//! checks that decide whether a document may run at all (freshness, proof,
+//! admin, authority) are made before the claim, so their refusals never reach
+//! the store.
 
 // `TaskOutcome`'s error is a whole `trust-task-error` document, which is large
 // by design; boxing it would only move the allocation onto every caller. The
@@ -74,8 +89,7 @@ use serde_json::Value;
 use trust_tasks_rs::{ErrorResponse, RejectReason, TrustTask, document_digest};
 use uuid::Uuid;
 
-use crate::capabilities::CapabilitySet;
-use crate::trust_tasks::{RegistryDispatcher, TaskOutcome, handle_document, proof::is_write_slug};
+use crate::trust_tasks::TaskOutcome;
 
 /// How long a completed outcome stays replayable: the write acceptance window
 /// (five minutes of age, one of future skew) plus a minute of margin.
@@ -175,8 +189,8 @@ pub trait MessageIdStore: Send + Sync {
     /// A key already held for a different `digest` MUST yield
     /// [`Claim::Conflict`], never a replay of the other document's outcome.
     ///
-    /// Implementations MUST make this atomic against concurrent callers —
-    /// `SET NX` for Redis, a conditional put for DynamoDB. The check-then-set
+    /// Implementations MUST make this atomic against concurrent callers (for
+    /// a shared store, a conditional put such as `SET NX`). The check-then-set
     /// pattern the record backends use for `create` is **not** sufficient here.
     async fn claim(&self, key: &str, digest: &str) -> Result<Claim, DedupError>;
 
@@ -271,11 +285,10 @@ impl Inner {
 
 /// In-memory store: correct dedup semantics, no durability.
 ///
-/// Used with the CSV backend, whose writes rewrite the whole records file and
-/// so cannot absorb per-message inserts. Dedup state is lost on restart, which
-/// is acceptable for the local-development posture CSV serves — the server warns
-/// at startup so this is never a silent property of a deployment. It is also
-/// local to one process: replicas of a registry do not share it.
+/// The only [`MessageIdStore`] implementation, used whatever the record
+/// backend. Its state is lost on restart, which the acceptance window bounds:
+/// a document older than [`DEFAULT_TTL`] is refused on its time of issue. It
+/// is also local to one process: replicas of a registry do not share it.
 ///
 /// Bounded: at [`DEFAULT_MAX_ENTRIES`] in total, or
 /// [`DEFAULT_MAX_ENTRIES_PER_ISSUER`] for one issuer, a new claim is refused
@@ -413,40 +426,46 @@ fn is_cacheable(outcome: &TaskOutcome) -> bool {
     }
 }
 
-/// Dispatch `doc`, applying write-path dedup.
-///
-/// Reads bypass the store entirely. Writes claim their message id first, so a
-/// redelivery either replays the original response or is told to retry, but
-/// never mutates the registry twice. A different document reusing an accepted
-/// id is refused as `idConflict`, and a write is refused as `unavailable`
-/// when the store cannot be consulted.
-///
-/// A write is one of the registry's own ([`is_write_slug`]) or, given the
-/// `capabilities` the dispatcher serves, a capability's write task. Pass the
-/// capability set whenever `dispatcher` serves capabilities; without it their
-/// writes are dispatched without the replay record.
-pub async fn dispatch_idempotent(
-    dispatcher: &RegistryDispatcher,
-    store: &dyn MessageIdStore,
-    capabilities: Option<&CapabilitySet>,
-    doc: TrustTask<Value>,
-) -> TaskOutcome {
-    let slug = doc.type_uri.slug();
-    if !is_write_slug(slug) && !capabilities.is_some_and(|c| c.is_write(slug)) {
-        return handle_document(dispatcher, doc).await;
-    }
-    execute_once(store, doc, |doc| handle_document(dispatcher, doc)).await
+/// What [`execute_once`] did with a document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// The document was claimed and executed: the outcome is its own.
+    Executed,
+    /// The document had already been executed: the outcome is the stored one,
+    /// and nothing was executed again.
+    Replayed,
+    /// An identical document was being executed: nothing was executed, and
+    /// the outcome is a retryable refusal.
+    InFlight,
+    /// The document was refused before it could be claimed: its identifier
+    /// was accepted for a different document, the store could not be
+    /// consulted, or the document could not be canonicalised.
+    NotClaimed,
 }
 
-/// Run `execute` on `doc` at most once per accepted document identifier.
-///
-/// The claim/replay protocol of [`dispatch_idempotent`], for a write that is
-/// not executed by the dispatcher (`registry/did/rotate`).
+/// The outcome of [`execute_once`], and how it was reached.
+#[derive(Debug)]
+pub struct Once {
+    pub outcome: TaskOutcome,
+    pub disposition: Disposition,
+}
+
+impl Once {
+    fn new(disposition: Disposition, outcome: TaskOutcome) -> Self {
+        Self {
+            outcome,
+            disposition,
+        }
+    }
+}
+
+/// Run `execute` on `doc` at most once per accepted document identifier, by
+/// the claim/replay protocol above.
 pub async fn execute_once<F, Fut>(
     store: &dyn MessageIdStore,
     doc: TrustTask<Value>,
     execute: F,
-) -> TaskOutcome
+) -> Once
 where
     F: FnOnce(TrustTask<Value>) -> Fut,
     Fut: std::future::Future<Output = TaskOutcome>,
@@ -455,19 +474,22 @@ where
     let digest = match document_digest(&doc) {
         Ok(digest) => digest,
         Err(e) => {
-            return Err(doc.reject_with(
-                Uuid::new_v4().to_string(),
-                RejectReason::MalformedRequest {
-                    reason: format!("the document cannot be canonicalised: {e}"),
-                },
-            ));
+            return Once::new(
+                Disposition::NotClaimed,
+                Err(doc.reject_with(
+                    Uuid::new_v4().to_string(),
+                    RejectReason::MalformedRequest {
+                        reason: format!("the document cannot be canonicalised: {e}"),
+                    },
+                )),
+            );
         }
     };
 
     match store.claim(&key, digest.as_str()).await {
         Ok(Claim::Replay(stored)) => {
             tracing::info!("Replaying stored outcome for duplicate write {key}");
-            return stored.into_outcome();
+            return Once::new(Disposition::Replayed, stored.into_outcome());
         }
         Ok(Claim::InFlight) => {
             tracing::warn!("Duplicate write {key} arrived while the original is in flight");
@@ -482,21 +504,27 @@ where
             // mediator redelivery is — so this is genuinely retryable, and the
             // retry will find the completed outcome to replay.
             rejection.payload = rejection.payload.with_retryable(true);
-            return Err(rejection);
+            return Once::new(Disposition::InFlight, Err(rejection));
         }
         Ok(Claim::Conflict) => {
             tracing::warn!("Write {key} reuses an accepted id for a different document");
-            return Err(doc.reject_with(Uuid::new_v4().to_string(), RejectReason::IdConflict));
+            return Once::new(
+                Disposition::NotClaimed,
+                Err(doc.reject_with(Uuid::new_v4().to_string(), RejectReason::IdConflict)),
+            );
         }
         Ok(Claim::Acquired) => {}
         Err(e) => {
             // Fail closed: without the record of accepted identifiers a
             // replayed write cannot be told from a fresh one.
             tracing::error!("Dedup store unavailable, refusing write {key}: {e}");
-            return Err(doc.reject_with(
-                Uuid::new_v4().to_string(),
-                RejectReason::Unavailable { retry_after: None },
-            ));
+            return Once::new(
+                Disposition::NotClaimed,
+                Err(doc.reject_with(
+                    Uuid::new_v4().to_string(),
+                    RejectReason::Unavailable { retry_after: None },
+                )),
+            );
         }
     }
 
@@ -516,11 +544,35 @@ where
         tracing::error!("Failed to resolve dedup claim {key}: {e}");
     }
 
-    outcome
+    Once::new(Disposition::Executed, outcome)
+}
+
+/// Dispatch `doc`, executing the registry's own writes and the capability
+/// writes of `capabilities` at most once. Test-only: production goes through
+/// the [`TaskHandler`](crate::trust_tasks::TaskHandler), which also checks the
+/// document before calling [`execute_once`].
+#[cfg(test)]
+pub(crate) async fn dispatch_idempotent(
+    dispatcher: &crate::trust_tasks::RegistryDispatcher,
+    store: &dyn MessageIdStore,
+    capabilities: Option<&crate::capabilities::CapabilitySet>,
+    doc: TrustTask<Value>,
+) -> TaskOutcome {
+    use crate::trust_tasks::{handle_document, proof::is_write_slug};
+
+    let slug = doc.type_uri.slug();
+    if !is_write_slug(slug) && !capabilities.is_some_and(|c| c.is_write(slug)) {
+        return handle_document(dispatcher, doc).await;
+    }
+    execute_once(store, doc, |doc| handle_document(dispatcher, doc))
+        .await
+        .outcome
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
     use trust_tasks_rs::TrustTask;
 
@@ -568,6 +620,33 @@ mod tests {
             store.claim("MID#a#1", "digest").await.unwrap(),
             Claim::InFlight
         ));
+    }
+
+    #[tokio::test]
+    async fn execute_once_reports_how_each_copy_was_answered() {
+        let store = store();
+        let doc = write_doc("disposition", Some("did:example:alice"));
+        let first = execute_once(&store, doc.clone(), |doc| async move { ok_outcome(&doc) }).await;
+        assert_eq!(first.disposition, Disposition::Executed);
+        let again = execute_once(&store, doc.clone(), |_| async {
+            unreachable!("a duplicate is not executed")
+        })
+        .await;
+        assert_eq!(again.disposition, Disposition::Replayed);
+        assert_eq!(again.outcome.ok(), first.outcome.ok());
+
+        let held = write_doc("held", Some("did:example:alice"));
+        let digest = document_digest(&held).unwrap();
+        store
+            .claim(&message_key(&held), digest.as_str())
+            .await
+            .unwrap();
+        let in_flight = execute_once(&store, held, |_| async {
+            unreachable!("an in-flight duplicate is not executed")
+        })
+        .await;
+        assert_eq!(in_flight.disposition, Disposition::InFlight);
+        assert!(in_flight.outcome.is_err());
     }
 
     #[tokio::test]

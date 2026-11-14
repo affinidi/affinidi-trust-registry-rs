@@ -21,10 +21,10 @@ use crate::specs::git_trust::grant::v0_1 as grant_spec;
 use crate::specs::git_trust::revoke::v0_1 as revoke_spec;
 use serde_json::Value;
 use trust_tasks_rs::{RejectReason, TrustTask};
-use uuid::Uuid;
 
 use crate::domain::{Action, AuthorityId, Context, EntityId, RecordType, Resource, TrustRecord};
 use crate::storage::repository::{RepositoryError, TrustRecordAdminRepository, TrustRecordQuery};
+use crate::trust_tasks::router::{new_id, reject_build_err, respond};
 use crate::trust_tasks::{RegistryDispatcher, TaskFuture, TaskOutcome};
 
 use super::{CapabilityDefinition, CapabilityState};
@@ -103,10 +103,6 @@ fn authority_of(state: &CapabilityState) -> Option<String> {
         .map(str::to_string)
 }
 
-fn new_id() -> String {
-    Uuid::new_v4().to_string()
-}
-
 #[allow(clippy::result_large_err)]
 fn require_authority<P>(
     authority: &Option<String>,
@@ -142,10 +138,14 @@ async fn handle_grant(
         RecordType::Authorization,
     );
     match repository.create(record).await {
-        Ok(()) => respond(
-            &doc,
-            serde_json::json!({ "subject": subject, "resource": resource, "granted": true }),
-        ),
+        Ok(()) => {
+            let response: Result<grant_spec::Response, _> = grant_spec::Response::builder()
+                .subject(subject)
+                .resource(resource)
+                .granted(true)
+                .try_into();
+            respond(&doc, response.map_err(|e| reject_build_err(&doc, e))?)
+        }
         Err(RepositoryError::RecordAlreadyExists(_)) => Err(doc.reject_with(
             new_id(),
             RejectReason::TaskFailed {
@@ -212,10 +212,14 @@ async fn handle_revoke(
         RecordType::Authorization,
     );
     match repository.update(revoked).await {
-        Ok(()) => respond(
-            &doc,
-            serde_json::json!({ "subject": subject, "resource": resource, "revoked": true }),
-        ),
+        Ok(()) => {
+            let response: Result<revoke_spec::Response, _> = revoke_spec::Response::builder()
+                .subject(subject)
+                .resource(resource)
+                .revoked(true)
+                .try_into();
+            respond(&doc, response.map_err(|e| reject_build_err(&doc, e))?)
+        }
         Err(e) => Err(doc.reject_with(
             new_id(),
             RejectReason::InternalError {
@@ -223,11 +227,6 @@ async fn handle_revoke(
             },
         )),
     }
-}
-
-#[allow(clippy::result_large_err)]
-fn respond<P>(doc: &TrustTask<P>, payload: Value) -> TaskOutcome {
-    Ok(doc.respond_with(new_id(), payload))
 }
 
 #[cfg(test)]

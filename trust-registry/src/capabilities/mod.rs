@@ -31,9 +31,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
 use trust_tasks_rs::{Dispatcher, Payload as _, RejectReason, TrustTask, TypeUri};
-use uuid::Uuid;
 
+use crate::trust_tasks::payloads::reserialize;
 use crate::trust_tasks::proof::requires_proof;
+use crate::trust_tasks::router::{new_id, reject_build_err, respond};
 use crate::trust_tasks::{RegistryDispatcher, TaskFuture, TaskOutcome};
 
 pub use enable_spec::CapabilityManifest;
@@ -172,8 +173,9 @@ impl CapabilityStateStore for MemoryCapabilityStore {
 /// A live, swappable dispatcher the transport bindings read through.
 pub type DispatcherHandle = Arc<RwLock<Arc<RegistryDispatcher>>>;
 
-/// Errors from enable/disable, mapped to the spec's extension error codes by
-/// the transport handlers.
+/// Errors from enable/disable. The governance handlers below answer each as
+/// a framework rejection whose message starts with the spec's extension
+/// error code (`unknown_capability: ...`).
 #[derive(Debug, PartialEq)]
 pub enum CapabilityError {
     UnknownCapability,
@@ -587,10 +589,6 @@ fn compose(
 
 // --- governance wire handlers -------------------------------------------------
 
-fn new_id() -> String {
-    Uuid::new_v4().to_string()
-}
-
 fn upgraded(set: &std::sync::Weak<CapabilitySet>) -> Result<Arc<CapabilitySet>, RejectReason> {
     set.upgrade().ok_or(RejectReason::InternalError {
         reason: "capability set is shutting down".to_string(),
@@ -624,21 +622,6 @@ fn reject_of(
     doc_reject(reason)
 }
 
-// TaskOutcome's Err is intentionally large (a full trust-task-error document);
-// matching the module-wide allowance in trust_tasks/router.rs.
-#[allow(clippy::result_large_err)]
-fn respond_json<P, T: Serialize>(doc: &TrustTask<P>, payload: T) -> TaskOutcome {
-    match serde_json::to_value(payload) {
-        Ok(value) => Ok(doc.respond_with(new_id(), value)),
-        Err(e) => Err(doc.reject_with(
-            new_id(),
-            RejectReason::InternalError {
-                reason: e.to_string(),
-            },
-        )),
-    }
-}
-
 async fn handle_enable(
     set: std::sync::Weak<CapabilitySet>,
     doc: TrustTask<enable_spec::Payload>,
@@ -654,15 +637,15 @@ async fn handle_enable(
         .then(|| serde_json::Value::Object(doc.payload.config.clone().into_iter().collect()));
     let delegate = doc.payload.delegate.clone();
     match set.enable(&capability, &version, config, delegate).await {
-        Ok(entry) => respond_json(
-            &doc,
-            serde_json::json!({
-                "capability": capability,
-                "version": entry.version,
-                "enabled": true,
-                "enabledAt": entry.enabled_at,
-            }),
-        ),
+        Ok(entry) => {
+            let response: Result<enable_spec::Response, _> = enable_spec::Response::builder()
+                .capability(capability)
+                .version(Some(entry.version))
+                .enabled(true)
+                .enabled_at(Some(entry.enabled_at))
+                .try_into();
+            respond(&doc, response.map_err(|e| reject_build_err(&doc, e))?)
+        }
         Err(e) => Err(reject_of(|r| doc.reject_with(new_id(), r), e)),
     }
 }
@@ -677,10 +660,13 @@ async fn handle_disable(
     };
     let capability = doc.payload.capability.to_string();
     match set.disable(&capability).await {
-        Ok(()) => respond_json(
-            &doc,
-            serde_json::json!({ "capability": capability, "enabled": false }),
-        ),
+        Ok(()) => {
+            let response: Result<disable_spec::Response, _> = disable_spec::Response::builder()
+                .capability(capability)
+                .enabled(false)
+                .try_into();
+            respond(&doc, response.map_err(|e| reject_build_err(&doc, e))?)
+        }
         Err(e) => Err(reject_of(|r| doc.reject_with(new_id(), r), e)),
     }
 }
@@ -701,32 +687,30 @@ async fn handle_list(
         .map(|s| format!("{s:?}").to_ascii_lowercase())
         .unwrap_or_else(|| "enabled".to_string());
     let include_available = status != "enabled";
-    let entries: Vec<serde_json::Value> = set
-        .list(include_available)
-        .await
-        .into_iter()
-        .filter(|(_, s)| match status.as_str() {
-            "available" => !s.as_ref().is_some_and(|s| s.enabled),
-            _ => true,
-        })
-        .map(|(manifest, s)| {
-            let enabled = s.as_ref().is_some_and(|s| s.enabled);
-            let mut entry = serde_json::json!({
-                "manifest": manifest,
-                "enabled": enabled,
-            });
-            if let Some(state) = s {
-                if enabled {
-                    entry["enabledAt"] = serde_json::json!(state.enabled_at);
-                }
-                if let Some(delegate) = state.delegate {
-                    entry["delegate"] = serde_json::json!(delegate);
-                }
-            }
-            entry
-        })
-        .collect();
-    respond_json(&doc, serde_json::json!({ "capabilities": entries }))
+    let mut entries: Vec<list_spec::ResponseCapabilitiesItem> = Vec::new();
+    for (manifest, s) in set.list(include_available).await {
+        let enabled = s.as_ref().is_some_and(|s| s.enabled);
+        if status == "available" && enabled {
+            continue;
+        }
+        // The list spec carries its own copy of the shared manifest type.
+        let manifest: list_spec::CapabilityManifest =
+            reserialize(&manifest).map_err(|e| reject_build_err(&doc, e))?;
+        let enabled_at = s.as_ref().filter(|_| enabled).map(|s| s.enabled_at);
+        let delegate = s.and_then(|s| s.delegate);
+        let entry: Result<list_spec::ResponseCapabilitiesItem, _> =
+            list_spec::ResponseCapabilitiesItem::builder()
+                .manifest(manifest)
+                .enabled(enabled)
+                .enabled_at(enabled_at)
+                .delegate(delegate)
+                .try_into();
+        entries.push(entry.map_err(|e| reject_build_err(&doc, e))?);
+    }
+    let response: Result<list_spec::Response, _> = list_spec::Response::builder()
+        .capabilities(entries)
+        .try_into();
+    respond(&doc, response.map_err(|e| reject_build_err(&doc, e))?)
 }
 
 pub mod git_trust;

@@ -3,17 +3,28 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// The rendered `role` of an entry whose actor is a proven admin.
 pub const AUDIT_ROLE_ADMIN: &str = "ADMIN";
+/// The rendered `role` of an entry with no proven actor: a refusal before the
+/// issuer's proof verified, or a summary of such refusals.
+pub const AUDIT_ROLE_UNPROVEN: &str = "UNPROVEN";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AuditLog {
-    pub target: String,
     pub operation: AuditOperation,
+    /// The proven issuer, or empty. It only ever names a DID whose proof
+    /// verified.
     pub actor: String,
+    /// What the actor was proven to be.
+    #[serde(default)]
+    pub role: AuditRole,
     pub status: AuditStatus,
     pub resource: AuditResource,
-    pub extra: Option<String>,
+    /// Why a write failed or was refused: the error document's code and
+    /// message. `None` for a success, a replay or an in-flight duplicate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<AuditReason>,
     pub thread_id: Option<String>,
     /// The Trust Task type slug the entry is about, e.g. `registry/record/put`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,12 +62,47 @@ pub struct AuditLog {
     pub timestamp: chrono::DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// What the entry's actor was proven to be.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
+pub enum AuditRole {
+    /// The actor's proof verified and it is on the admin list.
+    Admin,
+    /// No actor was proven.
+    #[default]
+    Unproven,
+}
+
+impl fmt::Display for AuditRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admin => f.write_str(AUDIT_ROLE_ADMIN),
+            Self::Unproven => f.write_str(AUDIT_ROLE_UNPROVEN),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum AuditStatus {
+    /// The document was executed and succeeded.
     Success,
+    /// The document was executed, or refused after its issuer was proven, and
+    /// failed.
     Failure,
+    /// The document was refused: its issuer was not proven, or may not do
+    /// this.
     Unauthorized,
+    /// The document had already been executed. Its stored outcome was
+    /// returned and nothing was executed again; the entry of the execution
+    /// has the same `document_digest`.
+    Replayed,
+    /// An identical document was being executed when this copy arrived. Nothing
+    /// was executed for this copy, which was answered with a retryable
+    /// refusal; the entry of the execution records the outcome.
+    DuplicateInFlight,
 }
 
 impl fmt::Display for AuditStatus {
@@ -65,24 +111,82 @@ impl fmt::Display for AuditStatus {
             Self::Success => write!(f, "SUCCESS"),
             Self::Failure => write!(f, "FAILURE"),
             Self::Unauthorized => write!(f, "UNAUTHORIZED"),
+            Self::Replayed => write!(f, "REPLAYED"),
+            Self::DuplicateInFlight => write!(f, "DUPLICATE_IN_FLIGHT"),
         }
     }
 }
 
+/// Why an entry failed or was refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditReason {
+    /// The error code (`permissionDenied`, `proofInvalid`, ...), when there is
+    /// one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// The human-readable detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl AuditReason {
+    /// A reason with an error code and, optionally, a message.
+    pub fn coded(code: impl Into<String>, message: Option<String>) -> Self {
+        Self {
+            code: Some(code.into()),
+            message,
+        }
+    }
+
+    /// A reason that is only text.
+    pub fn text(message: impl Into<String>) -> Self {
+        Self {
+            code: None,
+            message: Some(message.into()),
+        }
+    }
+}
+
+/// `code: message`, or whichever of the two there is.
+impl fmt::Display for AuditReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.code, &self.message) {
+            (Some(code), Some(message)) => write!(f, "{code}: {message}"),
+            (Some(text), None) | (None, Some(text)) => f.write_str(text),
+            (None, None) => Ok(()),
+        }
+    }
+}
+
+impl From<String> for AuditReason {
+    fn from(message: String) -> Self {
+        Self::text(message)
+    }
+}
+
+impl From<&str> for AuditReason {
+    fn from(message: &str) -> Self {
+        Self::text(message)
+    }
+}
+
+/// Builds an [`AuditLog`]. The operation is given up front and the status by
+/// the `build_*` method that finishes the entry, so neither has a default.
 pub struct AuditLogBuilder {
     audit_log: AuditLog,
 }
 
 impl AuditLogBuilder {
-    pub fn new() -> Self {
+    pub fn new(operation: AuditOperation) -> Self {
         Self {
             audit_log: AuditLog {
-                target: AUDIT_ROLE_ADMIN.to_string(),
-                operation: AuditOperation::Read,
+                operation,
                 actor: String::new(),
-                status: AuditStatus::Success,
+                role: AuditRole::Unproven,
+                // Overwritten by every `build_*`.
+                status: AuditStatus::Failure,
                 resource: AuditResource::empty(),
-                extra: None,
+                reason: None,
                 thread_id: None,
                 task: None,
                 document_id: None,
@@ -97,13 +201,14 @@ impl AuditLogBuilder {
         }
     }
 
-    pub fn operation(mut self, operation: AuditOperation) -> Self {
-        self.audit_log.operation = operation;
+    /// The proven issuer. Its [`role`](Self::role) is set separately.
+    pub fn actor(mut self, actor: impl Into<String>) -> Self {
+        self.audit_log.actor = actor.into();
         self
     }
 
-    pub fn actor(mut self, actor: impl Into<String>) -> Self {
-        self.audit_log.actor = actor.into();
+    pub fn role(mut self, role: AuditRole) -> Self {
+        self.audit_log.role = role;
         self
     }
 
@@ -154,30 +259,34 @@ impl AuditLogBuilder {
         self
     }
 
-    pub fn build_success(mut self) -> AuditLog {
-        self.audit_log.status = AuditStatus::Success;
+    fn finish(mut self, status: AuditStatus, reason: Option<AuditReason>) -> AuditLog {
+        self.audit_log.status = status;
+        self.audit_log.reason = reason;
         self.audit_log.timestamp = Utc::now();
         self.audit_log
     }
 
-    pub fn build_failure(mut self, error_message: impl Into<String>) -> AuditLog {
-        self.audit_log.status = AuditStatus::Failure;
-        self.audit_log.extra = Some(format!("audit.error={}", error_message.into()));
-        self.audit_log.timestamp = Utc::now();
-        self.audit_log
+    pub fn build_success(self) -> AuditLog {
+        self.finish(AuditStatus::Success, None)
     }
 
-    pub fn build_unauthorized(mut self, reason: impl Into<String>) -> AuditLog {
-        self.audit_log.status = AuditStatus::Unauthorized;
-        self.audit_log.extra = Some(format!("audit.reason={}", reason.into()));
-        self.audit_log.timestamp = Utc::now();
-        self.audit_log
+    pub fn build_failure(self, error: impl Into<AuditReason>) -> AuditLog {
+        self.finish(AuditStatus::Failure, Some(error.into()))
     }
-}
 
-impl Default for AuditLogBuilder {
-    fn default() -> Self {
-        Self::new()
+    pub fn build_unauthorized(self, reason: impl Into<AuditReason>) -> AuditLog {
+        self.finish(AuditStatus::Unauthorized, Some(reason.into()))
+    }
+
+    /// A duplicate answered from the replay record: nothing was executed.
+    pub fn build_replayed(self) -> AuditLog {
+        self.finish(AuditStatus::Replayed, None)
+    }
+
+    /// A duplicate that arrived while the original was being executed:
+    /// nothing was executed for it.
+    pub fn build_duplicate_in_flight(self) -> AuditLog {
+        self.finish(AuditStatus::DuplicateInFlight, None)
     }
 }
 
@@ -186,8 +295,9 @@ pub trait AuditLogger: Send + Sync {
     async fn log(&self, audit_log: AuditLog);
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum AuditOperation {
     Create,
     Update,
@@ -200,6 +310,9 @@ pub enum AuditOperation {
     Enable,
     Disable,
     Rotate,
+    /// Not an operation on the registry: a count of refusals that were not
+    /// recorded individually (`BoundedAuditLogger`).
+    Summary,
 }
 
 impl fmt::Display for AuditOperation {
@@ -216,6 +329,7 @@ impl fmt::Display for AuditOperation {
             Self::Enable => write!(f, "ENABLE"),
             Self::Disable => write!(f, "DISABLE"),
             Self::Rotate => write!(f, "ROTATE"),
+            Self::Summary => write!(f, "SUMMARY"),
         }
     }
 }
@@ -268,6 +382,8 @@ impl AuditResource {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use crate::domain::RecordType;
 
     use super::*;

@@ -40,6 +40,28 @@ release goes GA (`## 0.27.0 (date)`).
   build an `AuditLog` with `AuditLogBuilder`. Released as part of 0.32.0.
 - **`BaseAuditLogger` no longer numbers entries**; it renders the `sequence`
   the entry carries, which `BoundedAuditLogger` assigns.
+- **The audit entry model is typed** (#248). `AuditLogBuilder::new` takes the
+  `AuditOperation` (there is no `Default` and no `.operation()`), so an entry
+  can no longer default to a successful `READ`. `AuditLog::extra` /
+  `EmitInput::extra` (a string carrying an `audit.error=` / `audit.reason=`
+  prefix) is replaced by `reason: Option<AuditReason>` (`code`, `message`),
+  rendered as `error` for a `FAILURE` and as `reason` otherwise;
+  `build_failure` / `build_unauthorized` take `impl Into<AuditReason>` (a
+  string still works). The unrendered `target` field is gone from `AuditLog`
+  and `EmitInput`. New `AuditLog::role` / `EmitInput::role` (`AuditRole`) and
+  `AuditLogBuilder::role`; `EmitInput::status` is an `AuditStatus`, not a
+  string. `AUDIT_ROLE_ADMIN` is defined once (in `audit::model`, re-exported
+  from `audit::audit_logger`), with a new `AUDIT_ROLE_UNPROVEN`.
+  `AuditOperation`, `AuditStatus` and `AuditRole` are `#[non_exhaustive]`,
+  and gain `AuditOperation::Summary` and `AuditStatus::{Replayed,
+  DuplicateInFlight}`.
+- **`dedup::execute_once` returns `dedup::Once`** (`outcome` plus a
+  `Disposition`: `Executed`, `Replayed`, `InFlight`, `NotClaimed`) instead of
+  the bare outcome (#241). `dedup::dispatch_idempotent`, which production
+  never called, is now test-only.
+- **`trust_tasks::payloads::v2` is renamed `camel`** (it holds 0.2 of some
+  tasks and 0.3 of others), and the unused re-exports
+  `RecordPutResponseMessage` and `SpecTrustRecord` are removed (#238).
 - **`trql-client`: `HttpsTransportConfig` is `#[non_exhaustive]`** and has
   new public fields (`allow_insecure_http`, `max_response_bytes`,
   `allow_non_public_addresses`). Build it with `HttpsTransportConfig::new`
@@ -176,6 +198,12 @@ release goes GA (`## 0.27.0 (date)`).
   `AuditLogBuilder::authenticated_sender` sets it.
 - **`BoundedLimits`** and `BoundedAuditLogger::with_limits` configure the
   budgets below.
+- **`trust_tasks::descriptor`**: one table (`DESCRIPTORS`) of what the
+  registry decides per task — write or not, proof required, replay record,
+  execution, audit operation, payload spelling per version, where the record
+  key and the authority are — which the handler, `is_write_slug` and
+  `requires_proof` now read instead of separate matches on the slug (#237). A
+  test holds it to the dispatchers both ways.
 - **`trql-client`: `HttpsTransportConfig::allow_non_public_addresses`**
   opts out of the address check above (see Breaking). New constants
   `DEFAULT_MAX_RESPONSE_BYTES` and `MAX_ERROR_DETAIL_CHARS`.
@@ -199,6 +227,14 @@ release goes GA (`## 0.27.0 (date)`).
   (`didcomm::PROFILE_ADD_TIMEOUT`, 10 s; `prepare_atm_and_profile` used 5 s).
   The listener uses the SDK's `atm.message_pickup()` accessor and no longer
   silences deprecation warnings.
+- **`trust_tasks` has one implementation per task** (#238, #239). The record
+  put, delete and query handlers are written once over a small per-version
+  trait instead of once per version; `build_dispatcher` extends
+  `build_query_dispatcher`; `new_id` and the reply helper are shared by the
+  router and the capability handlers; and the capability and git-trust
+  responses are built with their generated spec types (the JSON is
+  unchanged). Module and item documentation in `trust_tasks`, `dedup` and
+  `capabilities` describes the current pipeline.
 - **The test client generates its own admin identity.** The repository no
   longer ships `test-client/conf/user_config.json`. On its first run the test
   client creates a new `did:peer` (Ed25519 signing, X25519 key agreement),
@@ -454,6 +490,27 @@ release goes GA (`## 0.27.0 (date)`).
   problem codes the registry sends and when, and what happens to an
   unauthenticated or unsupported message. A unit test now parses every
   example as a DIDComm message.
+- **Audit entries say what happened** (#241, #248). Rendered audit lines
+  change as follows:
+  - `role` is `ADMIN` only when the `actor` is a proven admin; every other
+    entry (a refusal before the issuer's proof verified, a summary) has
+    `role: "UNPROVEN"`. Before, every entry said `ADMIN`.
+  - A duplicate answered from the replay record is recorded with status
+    `REPLAYED` (no `error`/`reason`), not as a second `SUCCESS` (or a second
+    copy of the original refusal).
+  - A duplicate that arrives while the original is still running is recorded
+    with status `DUPLICATE_IN_FLIGHT` (no `error`), not as a `FAILURE` with
+    `taskFailed: an identical document is currently being processed`. Its
+    reply is unchanged: a retryable `taskFailed`.
+  - The summary of refusals not recorded individually has the operation
+    `SUMMARY`, not `UPDATE`.
+  - Whether a reason is keyed `error` or `reason` now follows the status
+    (`error` for `FAILURE`), instead of a prefix in the stored string.
+- **A `registry/*` or `governance/*` task the registry does not describe is
+  never served.** Before, a task in those families that a dispatcher
+  registered but no rule named was served as an unauthenticated read; now it
+  is answered `unsupportedType` without being dispatched, as an unregistered
+  type always was.
 - **Records whose identifiers contain `#` no longer share a storage key.** The
   Redis, DynamoDB and fjall backends keyed a record by
   `TR#{authority}#{action}#{resource}#{entity}` with the identifiers joined as

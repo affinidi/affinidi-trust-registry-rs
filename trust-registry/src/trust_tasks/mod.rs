@@ -1,14 +1,18 @@
 //! Trust Task support for the Trust Registry.
 //!
-//! Models every Trust Registry protocol operation as a versioned Trust Task
-//! (the `registry/*` family) and routes them through a single transport-
-//! agnostic [`router::RegistryDispatcher`]. This module is the shared core;
-//! DIDComm, HTTP, and TSP bindings (added in later changes) all decode their
-//! wire format into a `TrustTask<serde_json::Value>` and feed it here.
-//!
-//! See `docs/design/vta-tsp-didcomm-trust-tasks.md` for the design and the
-//! mapping from the legacy `trqp/1.0` and `tr-admin/1.0` DIDComm protocols.
+//! Every Trust Registry protocol operation is a versioned Trust Task (the
+//! `registry/*` family, plus the `governance/capability/*` surface and the
+//! tasks of enabled capabilities). Every transport binding — DIDComm, TSP,
+//! HTTP, or a host driving an embedded registry — decodes its wire format into
+//! a `TrustTask<serde_json::Value>`, establishes which sender it
+//! authenticated, and hands both to one [`TaskHandler`]. The handler applies
+//! the checks every transport shares (party resolution, freshness, proofs, the
+//! admin list, the authority binding, the replay record, the audit entry; see
+//! [`handler`]) and routes the document to a [`RegistryDispatcher`]
+//! ([`router`]). What each task needs of that pipeline is in one table,
+//! [`descriptor`].
 
+pub mod descriptor;
 pub mod handler;
 pub mod payloads;
 pub mod proof;

@@ -29,7 +29,18 @@
 //!    executed at most once ([`execute_once`]);
 //! 8. dispatch — or, for `registry/did/rotate`, which acts on *our own* DID
 //!    via the VTA, the rotation itself;
-//! 9. an audit entry for the outcome, refusals included.
+//! 9. an audit entry for the outcome, refusals included. A duplicate answered
+//!    from the replay record is recorded as `REPLAYED`, and one that arrived
+//!    while the original was running as `DUPLICATE_IN_FLIGHT`: neither was
+//!    executed.
+//!
+//! Which of these steps a task goes through, and where in its payload its
+//! authority and record key are, comes from its [`TaskDescriptor`] (or, for a
+//! capability's write, from the [`CapabilitySet`]). A slug in one of the
+//! registry's own families with no descriptor is not dispatched at all: it is
+//! answered as an unsupported type, never served as a read by default.
+//! `registry/record/query` goes through steps 3–9 like a write, with a replay
+//! record of its own.
 //!
 //! What stays in the bindings is only what is genuinely transport-specific:
 //! establishing which sender the transport authenticated, and packing the
@@ -52,17 +63,21 @@ use serde_json::Value;
 use trust_tasks_rs::{
     ConsistencyError, DynProofVerifier, ErrorResponse, FreshnessPolicy, RejectReason, TrustTask,
 };
-use uuid::Uuid;
 
-use crate::audit::model::{AuditLogBuilder, AuditLogger, AuditOperation, AuditResource};
+use crate::audit::model::{AuditLogBuilder, AuditLogger, AuditReason, AuditResource, AuditRole};
 use crate::capabilities::{CONFIG_AUTHORITY, CapabilitySet, DispatcherHandle};
 use crate::dedup::{
-    DEFAULT_QUERY_MAX_ENTRIES, DEFAULT_QUERY_MAX_ENTRIES_PER_ISSUER, MemoryMessageIdStore,
-    MessageIdStore, execute_once,
+    DEFAULT_QUERY_MAX_ENTRIES, DEFAULT_QUERY_MAX_ENTRIES_PER_ISSUER, Disposition,
+    MemoryMessageIdStore, MessageIdStore, execute_once,
 };
 use crate::domain::{Action, AuthorityId, EntityId, Resource};
-use crate::trust_tasks::proof::{WRITE_PROOF_PURPOSE, requires_proof, verify_proof};
+use crate::trust_tasks::descriptor::{
+    AuthorityRule, CAPABILITY_WRITE, Execution, Field, Replay, TaskDescriptor, descriptor,
+    is_reserved,
+};
+use crate::trust_tasks::proof::{WRITE_PROOF_PURPOSE, verify_proof};
 use crate::trust_tasks::reply::ReplySigner;
+use crate::trust_tasks::router::new_id;
 use crate::trust_tasks::{RegistryDispatcher, handle_document};
 
 /// How old a write's time of issue may be (VTI-OPS-024). The replay record's
@@ -70,13 +85,6 @@ use crate::trust_tasks::{RegistryDispatcher, handle_document};
 /// minute of margin, so every document
 /// inside the window is remembered for as long as it could be accepted.
 pub const WRITE_ACCEPTANCE_WINDOW: chrono::TimeDelta = trust_tasks_rs::DEFAULT_MAX_AGE;
-
-/// The capability the `git-trust/*` tasks belong to.
-const GIT_TRUST: &str = "git-trust";
-
-fn new_id() -> String {
-    Uuid::new_v4().to_string()
-}
 
 fn write_freshness() -> FreshnessPolicy {
     FreshnessPolicy::consequential().with_max_age(WRITE_ACCEPTANCE_WINDOW)
@@ -99,77 +107,140 @@ fn unbound_capability(capability: &str) -> RejectReason {
     }
 }
 
-fn audit_operation(slug: &str) -> AuditOperation {
-    match slug {
-        "registry/record/put" => AuditOperation::Put,
-        "registry/record/delete" => AuditOperation::Delete,
-        "registry/record/query" => AuditOperation::Read,
-        "git-trust/grant" => AuditOperation::Grant,
-        "git-trust/revoke" => AuditOperation::Revoke,
-        "governance/capability/enable" => AuditOperation::Enable,
-        "governance/capability/disable" => AuditOperation::Disable,
-        "registry/did/rotate" => AuditOperation::Rotate,
-        _ => AuditOperation::Update,
+/// The refusal of a write slug with no authority rule: it is never run under
+/// no authority.
+fn no_authority(slug: &str) -> RejectReason {
+    RejectReason::PermissionDenied {
+        reason: format!("no authority is defined for {slug}, so it cannot be bound"),
     }
 }
 
-/// Whether a `registry/*` document spells its members in lowerCamelCase:
-/// `registry/record/put` and `registry/record/query` from 0.3, every other
-/// `registry/*` task from 0.2. Earlier versions are snake_case.
-fn camel_case(doc: &TrustTask<Value>) -> bool {
-    let first = match doc.type_uri.slug() {
-        "registry/record/put" | "registry/record/query" => 3,
-        _ => 2,
-    };
-    (doc.type_uri.major(), doc.type_uri.minor()) >= (0, first)
+/// How the handler treats a slug.
+#[derive(Clone, Copy)]
+enum Route {
+    /// A public read: dispatched with the framework checks only.
+    Read,
+    /// Needs a proof, an admin and an authority, is executed at most once and
+    /// is audited, by this rule.
+    Proven(&'static TaskDescriptor),
+    /// In one of the registry's own families, with no descriptor: not served.
+    Unserved,
 }
 
-/// `snake` or `camel`, whichever spelling this document's version uses.
-fn member<'a>(doc: &TrustTask<Value>, snake: &'a str, camel: &'a str) -> &'a str {
-    if camel_case(doc) { camel } else { snake }
+/// Where in `doc` one part of the record key is, read as a string.
+fn field(rule: &TaskDescriptor, doc: &TrustTask<Value>, field: Field) -> Option<String> {
+    match field {
+        Field::Absent => None,
+        Field::Fixed(value) => Some(value.to_string()),
+        Field::At(member) => doc
+            .payload
+            .pointer(member.pointer(rule.camel_case(&doc.type_uri)))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
 }
 
-fn text(payload: &Value, pointer: &str) -> Option<String> {
-    payload
-        .pointer(pointer)
-        .and_then(Value::as_str)
-        .map(str::to_string)
+/// What a write's audit entry needs from the document, taken before the
+/// document is handed on.
+struct AuditContext {
+    rule: &'static TaskDescriptor,
+    slug: String,
+    id: String,
+    thread_id: Option<String>,
+    claimed: Option<String>,
+    authenticated: Option<String>,
+    digest: Option<String>,
+    /// The record key (or capability): entity, action, resource. Identifiers
+    /// only: never record contents, context or proofs.
+    key: (Option<String>, Option<String>, Option<String>),
 }
 
-/// The record key (or capability) a write acts on, for its audit entry.
-/// Identifiers only: never record contents, context or proofs.
-fn audit_resource(doc: &TrustTask<Value>, authority: Option<&str>) -> AuditResource {
-    let payload = &doc.payload;
-    let (entity, action, resource) = match doc.type_uri.slug() {
-        "registry/record/put" => (
-            text(
-                payload,
-                member(doc, "/record/entity_id", "/record/entityId"),
+impl AuditContext {
+    fn of(rule: &'static TaskDescriptor, doc: &TrustTask<Value>, sender_did: Option<&str>) -> Self {
+        Self {
+            rule,
+            slug: doc.type_uri.slug().to_string(),
+            id: doc.id.clone(),
+            thread_id: doc.thread_id.clone(),
+            claimed: doc
+                .issuer
+                .clone()
+                .or_else(|| sender_did.map(str::to_string)),
+            authenticated: sender_did.map(str::to_string),
+            digest: trust_tasks_rs::document_digest(doc)
+                .ok()
+                .map(|digest| digest.to_string()),
+            key: (
+                field(rule, doc, rule.resource.entity),
+                field(rule, doc, rule.resource.action),
+                field(rule, doc, rule.resource.resource),
             ),
-            text(payload, "/record/action"),
-            text(payload, "/record/resource"),
-        ),
-        "registry/record/delete" | "registry/record/query" => (
-            text(payload, member(doc, "/entity_id", "/entityId")),
-            text(payload, "/action"),
-            text(payload, "/resource"),
-        ),
-        "git-trust/grant" | "git-trust/revoke" => (
-            text(payload, "/subject"),
-            Some(crate::capabilities::git_trust::ACTION.to_string()),
-            text(payload, "/resource"),
-        ),
-        "governance/capability/enable" | "governance/capability/disable" => {
-            (None, None, text(payload, "/capability"))
         }
-        _ => (None, None, None),
-    };
-    AuditResource::new(
-        entity.map(|e| EntityId::new(&e)),
-        authority.map(AuthorityId::new),
-        action.map(|a| Action::new(&a)),
-        resource.map(|r| Resource::new(&r)),
-    )
+    }
+
+    /// The entry for `outcome`, given what the write established.
+    fn entry(
+        self,
+        outcome: &Result<TrustTask<Value>, ErrorResponse>,
+        progress: WriteProgress,
+    ) -> crate::audit::model::AuditLog {
+        let (entity, action, resource) = self.key;
+        let proven = progress.proven_issuer.is_some();
+        let (verification_method, proof_created) = progress.proof.unzip();
+        let builder = AuditLogBuilder::new(self.rule.audit)
+            // Only a proven issuer is named as the actor, and it is proven
+            // only after the admin check (`authorize_write`) has passed.
+            .role(if proven {
+                AuditRole::Admin
+            } else {
+                AuditRole::Unproven
+            })
+            .actor(progress.proven_issuer.unwrap_or_default())
+            .claimed_actor((!proven).then_some(self.claimed).flatten())
+            .resource(AuditResource::new(
+                entity.map(|e| EntityId::new(&e)),
+                progress.authority.as_deref().map(AuthorityId::new),
+                action.map(|a| Action::new(&a)),
+                resource.map(|r| Resource::new(&r)),
+            ))
+            .authenticated_sender(self.authenticated)
+            .task(self.slug)
+            .document_id(self.id)
+            .document_digest(self.digest)
+            .proof(verification_method, proof_created)
+            .thread_id(self.thread_id);
+        match (progress.disposition, outcome) {
+            // Nothing was executed for either: the entry of the execution
+            // records what happened.
+            (Some(Disposition::Replayed), _) => builder.build_replayed(),
+            (Some(Disposition::InFlight), _) => builder.build_duplicate_in_flight(),
+            (_, Ok(_)) => builder.build_success(),
+            (_, Err(error)) => {
+                let code = serde_json::to_value(&error.payload.code)
+                    .ok()
+                    .and_then(|code| code.as_str().map(str::to_string))
+                    .filter(|code| !code.is_empty());
+                let unauthorized = !proven
+                    || matches!(
+                        code.as_deref(),
+                        Some("permissionDenied" | "identityMismatch")
+                    );
+                let message = error.payload.message.clone();
+                let reason = match code {
+                    Some(code) => AuditReason::coded(code, message),
+                    None => AuditReason {
+                        code: None,
+                        message,
+                    },
+                };
+                if unauthorized {
+                    builder.build_unauthorized(reason)
+                } else {
+                    builder.build_failure(reason)
+                }
+            }
+        }
+    }
 }
 
 /// What a write established before it finished, for its audit entry.
@@ -181,6 +252,8 @@ struct WriteProgress {
     authority: Option<String>,
     /// The verified proof's verification method and `created` time.
     proof: Option<(String, chrono::DateTime<Utc>)>,
+    /// What the replay record did with the document, once consulted.
+    disposition: Option<Disposition>,
 }
 
 /// The registry's Trust Task application logic, independent of transport.
@@ -203,7 +276,8 @@ pub struct TaskHandler {
     dedup: Option<Arc<dyn MessageIdStore>>,
     /// The record of accepted `registry/record/query` documents, kept apart
     /// from `dedup` so that queries cannot use up the capacity writes need.
-    /// Shared by every clone of this handler, and so by every binding.
+    /// Shared by the clones of this handler; a handler built separately (by
+    /// [`new`](Self::new)) has its own.
     query_replay: Arc<dyn MessageIdStore>,
     /// Where capability tasks learn the authority they act under.
     capabilities: Option<Arc<CapabilitySet>>,
@@ -301,14 +375,31 @@ impl TaskHandler {
     }
 
     /// Whether `slug` is handled as a write: one of the registry's own writes
-    /// or `registry/record/query` ([`requires_proof`]), or a task a capability
-    /// does not declare as a read.
+    /// or `registry/record/query` (its descriptor
+    /// [requires a proof](TaskDescriptor::requires_proof)), or a task a
+    /// capability does not declare as a read.
     pub fn is_write(&self, slug: &str) -> bool {
-        requires_proof(slug)
-            || self
+        matches!(self.route(slug), Route::Proven(_))
+    }
+
+    /// How `slug` is handled. A capability's write is a write even where the
+    /// registry describes the slug as a read; a slug the registry describes
+    /// as needing a proof keeps its own rule whatever a capability registers.
+    fn route(&self, slug: &str) -> Route {
+        let described = descriptor(slug);
+        match described {
+            Some(rule) if rule.requires_proof() => Route::Proven(rule),
+            _ if self
                 .capabilities
                 .as_ref()
-                .is_some_and(|capabilities| capabilities.is_write(slug))
+                .is_some_and(|capabilities| capabilities.is_write(slug)) =>
+            {
+                Route::Proven(&CAPABILITY_WRITE)
+            }
+            Some(_) => Route::Read,
+            None if is_reserved(slug) => Route::Unserved,
+            None => Route::Read,
+        }
     }
 
     /// Our own DID, as bindings need it to resolve parties.
@@ -466,6 +557,10 @@ impl TaskHandler {
         &self,
         doc: &TrustTask<Value>,
     ) -> Result<(Option<String>, Option<Arc<RegistryDispatcher>>), RejectReason> {
+        let slug = doc.type_uri.slug();
+        let Route::Proven(rule) = self.route(slug) else {
+            return Err(no_authority(slug));
+        };
         let payload = &doc.payload;
         let named_capability = || {
             payload
@@ -475,32 +570,19 @@ impl TaskHandler {
                     reason: "a capability change must name its capability".to_string(),
                 })
         };
-        match doc.type_uri.slug() {
+        match rule.authority {
+            AuthorityRule::NotApplicable => Err(no_authority(slug)),
             // The member is read in the spelling the document's version
             // uses. A document carrying the other spelling has no authority
             // here and is refused, before its payload is ever parsed.
-            "registry/record/put" => Ok((
+            AuthorityRule::Member { at, what } => Ok((
                 required_authority(
-                    payload.pointer(member(doc, "/record/authority_id", "/record/authorityId")),
-                    "a record mutation",
+                    payload.pointer(at.pointer(rule.camel_case(&doc.type_uri))),
+                    what,
                 )?,
                 None,
             )),
-            "registry/record/delete" => Ok((
-                required_authority(
-                    payload.get(member(doc, "authority_id", "authorityId")),
-                    "a record mutation",
-                )?,
-                None,
-            )),
-            "registry/record/query" => Ok((
-                required_authority(
-                    payload.get(member(doc, "authority_id", "authorityId")),
-                    "a record query",
-                )?,
-                None,
-            )),
-            "governance/capability/enable" => {
+            AuthorityRule::EnableConfig => {
                 let capability = named_capability()?;
                 let authority = match payload.pointer(&format!("/config/{CONFIG_AUTHORITY}")) {
                     None => None,
@@ -520,17 +602,17 @@ impl TaskHandler {
                 }
                 Ok((Some(authority.unwrap_or_else(|| self.my_did.clone())), None))
             }
-            "governance/capability/disable" => {
+            AuthorityRule::NamedCapability => {
                 let capability = named_capability()?;
                 self.capability_authority(self.capabilities()?, capability)
                     .await
             }
-            "git-trust/grant" | "git-trust/revoke" => {
-                self.capability_authority(self.capabilities()?, GIT_TRUST)
+            AuthorityRule::Capability(capability) => {
+                self.capability_authority(self.capabilities()?, capability)
                     .await
             }
-            "registry/did/rotate" => Ok((Some(self.my_did.clone()), None)),
-            slug => match self
+            AuthorityRule::Registry => Ok((Some(self.my_did.clone()), None)),
+            AuthorityRule::OwningCapability => match self
                 .capabilities
                 .as_deref()
                 .and_then(|capabilities| Some((capabilities, capabilities.write_owner(slug)?)))
@@ -538,9 +620,7 @@ impl TaskHandler {
                 Some((capabilities, capability)) => {
                     self.capability_authority(capabilities, capability).await
                 }
-                None => Err(RejectReason::PermissionDenied {
-                    reason: format!("no authority is defined for {slug}, so it cannot be bound"),
-                }),
+                None => Err(no_authority(slug)),
             },
         }
     }
@@ -587,7 +667,8 @@ impl TaskHandler {
     /// listed for the issuer.
     ///
     /// Call only after [`authorize_write`](Self::authorize_write) and
-    /// [`verify_write_proof`] have established who the issuer is.
+    /// [`verify_write_proof`](crate::trust_tasks::verify_write_proof) have
+    /// established who the issuer is.
     pub fn authorize_authority(
         &self,
         doc: &TrustTask<Value>,
@@ -675,80 +756,33 @@ impl TaskHandler {
         doc: TrustTask<Value>,
         sender_did: Option<&str>,
     ) -> Result<TrustTask<Value>, ErrorResponse> {
-        if !self.is_write(doc.type_uri.slug()) {
-            return self.handle_read(doc, sender_did).await;
-        }
+        let rule = match self.route(doc.type_uri.slug()) {
+            Route::Proven(rule) => rule,
+            Route::Read => return self.handle_read(doc, sender_did, true).await,
+            Route::Unserved => return self.handle_read(doc, sender_did, false).await,
+        };
 
-        let audit_template = self.audit.as_ref().map(|_| {
-            (
-                doc.type_uri.slug().to_string(),
-                doc.id.clone(),
-                doc.thread_id.clone(),
-                doc.issuer
-                    .clone()
-                    .or_else(|| sender_did.map(str::to_string)),
-                doc.clone(),
-                sender_did.map(str::to_string),
-                trust_tasks_rs::document_digest(&doc)
-                    .ok()
-                    .map(|digest| digest.to_string()),
-            )
-        });
+        let audit = self
+            .audit
+            .as_ref()
+            .map(|logger| (logger, AuditContext::of(rule, &doc, sender_did)));
         let mut progress = WriteProgress::default();
-        let outcome = self.handle_write(doc, sender_did, &mut progress).await;
-
-        if let (
-            Some(audit),
-            Some((slug, id, thread_id, claimed, original, authenticated, digest)),
-        ) = (&self.audit, audit_template)
-        {
-            let (verification_method, proof_created) = progress.proof.clone().unzip();
-            let builder = AuditLogBuilder::new()
-                .operation(audit_operation(&slug))
-                .actor(progress.proven_issuer.clone().unwrap_or_default())
-                .claimed_actor(
-                    progress
-                        .proven_issuer
-                        .is_none()
-                        .then_some(claimed)
-                        .flatten(),
-                )
-                .resource(audit_resource(&original, progress.authority.as_deref()))
-                .authenticated_sender(authenticated)
-                .task(slug)
-                .document_id(id)
-                .document_digest(digest)
-                .proof(verification_method, proof_created)
-                .thread_id(thread_id);
-            let entry = match &outcome {
-                Ok(_) => builder.build_success(),
-                Err(error) => {
-                    let code = serde_json::to_value(&error.payload.code)
-                        .ok()
-                        .and_then(|code| code.as_str().map(str::to_string))
-                        .unwrap_or_default();
-                    let reason = match error.payload.message.as_deref() {
-                        Some(message) => format!("{code}: {message}"),
-                        None => code.clone(),
-                    };
-                    if progress.proven_issuer.is_none()
-                        || matches!(code.as_str(), "permissionDenied" | "identityMismatch")
-                    {
-                        builder.build_unauthorized(reason)
-                    } else {
-                        builder.build_failure(reason)
-                    }
-                }
-            };
-            audit.log(entry).await;
+        let outcome = self
+            .handle_write(rule, doc, sender_did, &mut progress)
+            .await;
+        if let Some((logger, context)) = audit {
+            logger.log(context.entry(&outcome, progress)).await;
         }
         outcome
     }
 
+    /// A public read, after the framework checks: dispatched when `served`,
+    /// answered as an unsupported type otherwise.
     async fn handle_read(
         &self,
         doc: TrustTask<Value>,
         sender_did: Option<&str>,
+        served: bool,
     ) -> Result<TrustTask<Value>, ErrorResponse> {
         if let Err(consistency) = Self::resolve_issuer(&doc, sender_did) {
             return Err(doc.reject_with_recipient(
@@ -760,12 +794,18 @@ impl TaskHandler {
         if let Err(reason) = doc.validate_basic(Utc::now(), &self.my_did) {
             return Err(doc.reject_with(new_id(), reason));
         }
+        if !served {
+            // The same answer as for any type nothing registers, from a
+            // dispatcher that registers nothing.
+            return handle_document(&RegistryDispatcher::new(), doc).await;
+        }
         let dispatcher = self.dispatcher.read().await.clone();
         handle_document(&dispatcher, doc).await
     }
 
     async fn handle_write(
         &self,
+        rule: &'static TaskDescriptor,
         doc: TrustTask<Value>,
         sender_did: Option<&str>,
         progress: &mut WriteProgress,
@@ -806,34 +846,35 @@ impl TaskHandler {
             return Err(doc.reject_with(new_id(), reason));
         }
 
-        let dedup = if doc.type_uri.slug() == "registry/record/query" {
-            &self.query_replay
-        } else {
-            match &self.dedup {
-                Some(dedup) => dedup,
-                None => {
-                    return Err(
-                        doc.reject_with(new_id(), RejectReason::Unavailable { retry_after: None })
-                    );
-                }
+        let dedup = match (rule.replay(), &self.dedup) {
+            (Replay::Queries, _) => &self.query_replay,
+            (Replay::Writes, Some(dedup)) => dedup,
+            // A write without the record of accepted identifiers, or a rule
+            // that names none, is refused rather than run unrecorded.
+            (Replay::Writes | Replay::None, _) => {
+                return Err(
+                    doc.reject_with(new_id(), RejectReason::Unavailable { retry_after: None })
+                );
             }
         };
 
-        // `registry/did/rotate` rotates *our own* DID's keys through the VTA, so
-        // it is handled here rather than by the repository dispatcher (which has
-        // no registration for it).
-        if doc.type_uri.slug() == "registry/did/rotate" {
-            return execute_once(dedup.as_ref(), doc, |doc| async move {
-                self.handle_did_rotate(&doc).await
-            })
-            .await;
-        }
-
-        let dispatcher = match snapshot_dispatcher {
-            Some(dispatcher) => dispatcher,
-            None => self.dispatcher.read().await.clone(),
+        let once = match rule.execution {
+            Execution::DidRotate => {
+                execute_once(dedup.as_ref(), doc, |doc| async move {
+                    self.handle_did_rotate(rule, &doc).await
+                })
+                .await
+            }
+            Execution::Dispatcher => {
+                let dispatcher = match snapshot_dispatcher {
+                    Some(dispatcher) => dispatcher,
+                    None => self.dispatcher.read().await.clone(),
+                };
+                execute_once(dedup.as_ref(), doc, |doc| handle_document(&dispatcher, doc)).await
+            }
         };
-        execute_once(dedup.as_ref(), doc, |doc| handle_document(&dispatcher, doc)).await
+        progress.disposition = Some(once.disposition);
+        once.outcome
     }
 
     /// Rotate the registry's own VTA-managed `did:webvh` keys. Requires the
@@ -843,83 +884,67 @@ impl TaskHandler {
     #[allow(deprecated)]
     async fn handle_did_rotate(
         &self,
+        rule: &TaskDescriptor,
         doc: &TrustTask<Value>,
     ) -> Result<TrustTask<Value>, ErrorResponse> {
         #[cfg(feature = "vta")]
         {
-            use crate::trust_tasks::payloads::{DidRotateRequest, DidRotateResponse, v2};
+            use crate::trust_tasks::payloads::{DidRotateRequest, DidRotateResponse, camel};
+            use crate::trust_tasks::router::reject_build_err;
 
             let malformed = |reason: String| {
                 doc.reject_with(new_id(), RejectReason::MalformedRequest { reason })
             };
-            // 0.1 is snake_case, 0.2 lowerCamelCase. Both carry the same two
-            // optional members.
-            let (pre_rotation_count, label) = if camel_case(doc) {
-                let req: v2::DidRotateRequest = serde_json::from_value(doc.payload.clone())
-                    .map_err(|e| malformed(e.to_string()))?;
-                (req.pre_rotation_count, req.label.map(|l| l.to_string()))
-            } else {
-                let req: DidRotateRequest = serde_json::from_value(doc.payload.clone())
-                    .map_err(|e| malformed(e.to_string()))?;
-                (req.pre_rotation_count, req.label.map(|l| l.to_string()))
-            };
-            let pre_rotation_count = pre_rotation_count
-                .map(u32::try_from)
-                .transpose()
-                .map_err(|_| malformed("the pre-rotation count is out of range".to_string()))?;
-            match crate::configs::vta::rotate_did(
-                self.vta.as_deref(),
-                &self.my_did,
-                pre_rotation_count,
-                label,
-            )
-            .await
-            {
-                Ok((did, new_scid, new_version_id)) => {
-                    let value = if camel_case(doc) {
-                        let response: v2::DidRotateResponse = v2::DidRotateResponse::builder()
-                            .did(did)
-                            .new_scid(new_scid)
-                            .new_version_id(new_version_id)
-                            .try_into()
-                            .map_err(|e: crate::specs::registry::did::rotate::v0_2::error::ConversionError| {
-                                doc.reject_with(
-                                    new_id(),
-                                    RejectReason::InternalError {
-                                        reason: format!("could not build response payload: {e}"),
-                                    },
-                                )
-                            })?;
-                        serde_json::to_value(response).unwrap_or(Value::Null)
-                    } else {
-                        let response: DidRotateResponse = DidRotateResponse::builder()
-                            .did(did)
-                            .new_scid(new_scid)
-                            .new_version_id(new_version_id)
-                            .try_into()
-                            .map_err(|e: crate::specs::registry::did::rotate::v0_1::error::ConversionError| {
-                                doc.reject_with(
-                                    new_id(),
-                                    RejectReason::InternalError {
-                                        reason: format!("could not build response payload: {e}"),
-                                    },
-                                )
-                            })?;
-                        serde_json::to_value(response).unwrap_or(Value::Null)
-                    };
-                    Ok(doc.respond_with(new_id(), value))
-                }
-                Err(reason) => Err(doc.reject_with(
-                    new_id(),
-                    RejectReason::TaskFailed {
-                        reason,
-                        details: None,
-                    },
-                )),
+            // One version: parse its request, rotate, build its response.
+            // 0.1 is snake_case, 0.2 lowerCamelCase; both carry the same two
+            // optional members and answer the same three.
+            macro_rules! rotate {
+                ($req:ty, $resp:ty) => {{
+                    let req: $req = serde_json::from_value(doc.payload.clone())
+                        .map_err(|e| malformed(e.to_string()))?;
+                    let pre_rotation_count = req
+                        .pre_rotation_count
+                        .map(u32::try_from)
+                        .transpose()
+                        .map_err(|_| {
+                            malformed("the pre-rotation count is out of range".to_string())
+                        })?;
+                    let label = req.label.map(|l| l.to_string());
+                    let (did, new_scid, new_version_id) = crate::configs::vta::rotate_did(
+                        self.vta.as_deref(),
+                        &self.my_did,
+                        pre_rotation_count,
+                        label,
+                    )
+                    .await
+                    .map_err(|reason| {
+                        doc.reject_with(
+                            new_id(),
+                            RejectReason::TaskFailed {
+                                reason,
+                                details: None,
+                            },
+                        )
+                    })?;
+                    let response: Result<$resp, _> = <$resp>::builder()
+                        .did(did)
+                        .new_scid(new_scid)
+                        .new_version_id(new_version_id)
+                        .try_into();
+                    let response = response.map_err(|e| reject_build_err(doc, e))?;
+                    serde_json::to_value(response).unwrap_or(Value::Null)
+                }};
             }
+            let value = if rule.camel_case(&doc.type_uri) {
+                rotate!(camel::DidRotateRequest, camel::DidRotateResponse)
+            } else {
+                rotate!(DidRotateRequest, DidRotateResponse)
+            };
+            Ok(doc.respond_with(new_id(), value))
         }
         #[cfg(not(feature = "vta"))]
         {
+            let _ = rule;
             Err(doc.reject_with(
                 new_id(),
                 RejectReason::TaskFailed {
@@ -933,8 +958,10 @@ impl TaskHandler {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
-    use crate::audit::model::{AuditLog, AuditStatus};
+    use crate::audit::model::{AuditLog, AuditOperation, AuditRole, AuditStatus};
     use crate::capabilities::{MemoryCapabilityStore, git_trust};
     use crate::dedup::MemoryMessageIdStore;
     use crate::domain::{Action, AuthorityId, EntityId, Resource};
@@ -945,6 +972,7 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
     use trust_tasks_proof::affinidi::{SignOptions, sign_trust_task};
+    use uuid::Uuid;
 
     const ME: &str = "did:example:registry";
     const RECORD_PUT: &str = "https://trusttasks.org/spec/registry/record/put/0.1";
@@ -2357,6 +2385,149 @@ mod tests {
         let reuse = signed(reuse, &key).await;
         let err = tsp.handle(reuse, Some(&did)).await.expect_err("refused");
         assert_eq!(code(&err), "idConflict");
+    }
+
+    /// At-least-once delivery makes duplicates routine: the audit trail
+    /// records one write and one replay, not two writes.
+    #[tokio::test]
+    async fn a_replayed_duplicate_is_audited_as_a_replay() {
+        let (key, did) = did_key(33);
+        let f = fixture(vec![did.clone()]);
+        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+
+        f.handler
+            .handle(doc.clone(), Some(&did))
+            .await
+            .expect("first accepted");
+        f.handler
+            .handle(doc.clone(), Some(&did))
+            .await
+            .expect("the duplicate is answered");
+
+        let entries = f.audit.entries.lock().unwrap().clone();
+        let statuses: Vec<AuditStatus> = entries.iter().map(|e| e.status).collect();
+        assert_eq!(statuses, vec![AuditStatus::Success, AuditStatus::Replayed]);
+        let (first, replay) = (&entries[0], &entries[1]);
+        assert_eq!(replay.document_digest, first.document_digest);
+        assert_eq!(replay.document_id, first.document_id);
+        assert_eq!(replay.actor, did);
+        assert!(replay.reason.is_none());
+    }
+
+    /// A store that reports every claim as held by another copy.
+    struct AlwaysInFlight;
+
+    #[async_trait::async_trait]
+    impl MessageIdStore for AlwaysInFlight {
+        async fn claim(
+            &self,
+            _key: &str,
+            _digest: &str,
+        ) -> Result<crate::dedup::Claim, crate::dedup::DedupError> {
+            Ok(crate::dedup::Claim::InFlight)
+        }
+        async fn complete(
+            &self,
+            _key: &str,
+            _outcome: &crate::dedup::StoredOutcome,
+        ) -> Result<(), crate::dedup::DedupError> {
+            Ok(())
+        }
+        async fn release(&self, _key: &str) -> Result<(), crate::dedup::DedupError> {
+            Ok(())
+        }
+    }
+
+    /// A copy that arrives while the original runs is told to retry; it is
+    /// not recorded as a failed write by the issuer.
+    #[tokio::test]
+    async fn an_in_flight_duplicate_is_not_audited_as_a_failure() {
+        let (key, did) = did_key(34);
+        let f = fixture(vec![did.clone()]);
+        let handler = f.handler.clone().with_dedup(Arc::new(AlwaysInFlight));
+        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+
+        let err = handler
+            .handle(doc, Some(&did))
+            .await
+            .expect_err("told to retry");
+        assert_eq!(code(&err), "taskFailed");
+        assert!(err.payload.retryable);
+        assert!(!stored(&f.repo, &did).await);
+
+        let entry = last_audit(&f);
+        assert_eq!(entry.status, AuditStatus::DuplicateInFlight);
+        assert_eq!(entry.actor, did);
+        assert!(entry.reason.is_none());
+    }
+
+    /// `role` says what the actor was proven to be: an admin only once its
+    /// proof verified.
+    #[tokio::test]
+    async fn only_a_proven_admin_is_audited_as_one() {
+        let (key, did) = did_key(35);
+        let f = fixture(vec![did.clone()]);
+        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        f.handler.handle(doc, Some(&did)).await.expect("accepted");
+        let entry = last_audit(&f);
+        assert_eq!(entry.role, AuditRole::Admin);
+
+        let (outsider_key, outsider) = did_key(36);
+        let doc = signed(
+            unsigned(RECORD_PUT, Some(&outsider), put_payload(&outsider)),
+            &outsider_key,
+        )
+        .await;
+        f.handler
+            .handle(doc, Some(&outsider))
+            .await
+            .expect_err("not an admin");
+        let entry = last_audit(&f);
+        assert_eq!(entry.status, AuditStatus::Unauthorized);
+        assert_eq!(entry.role, AuditRole::Unproven);
+        assert_eq!(entry.actor, "");
+        let reason = entry.reason.expect("a reason");
+        assert_eq!(reason.code.as_deref(), Some("permissionDenied"));
+        assert!(
+            reason
+                .message
+                .is_some_and(|message| message.contains("not authorised"))
+        );
+    }
+
+    /// A task in one of the registry's own families that the descriptor
+    /// table does not describe is never served, even if a dispatcher
+    /// registers it: nothing says whether it needs a proof.
+    #[tokio::test]
+    async fn an_undescribed_registry_task_is_not_served() {
+        const SHADOW: &str = "https://trusttasks.org/spec/registry/shadow/0.1";
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Shadow {}
+        impl trust_tasks_rs::Payload for Shadow {
+            const TYPE_URI: &'static str = SHADOW;
+        }
+
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = runs.clone();
+        let dispatcher = build_dispatcher(Arc::new(LocalStorage::new())).on::<Shadow, _>(
+            move |doc| -> crate::trust_tasks::TaskFuture {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move { Ok(doc.respond_with(new_id(), json!({}))) })
+            },
+        );
+        let handler = TaskHandler::new(
+            Arc::new(tokio::sync::RwLock::new(Arc::new(dispatcher))),
+            ME,
+            Vec::new(),
+            trust_tasks_rs::erase_verifier(trust_tasks_proof::affinidi::Verifier::for_did_key()),
+        );
+        assert!(!handler.is_write("registry/shadow"));
+
+        let doc: TrustTask<Value> =
+            serde_json::from_value(unsigned(SHADOW, None, json!({}))).expect("document");
+        let err = handler.handle(doc, None).await.expect_err("not served");
+        assert_eq!(code(&err), "unsupportedType");
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// Without the record a replay cannot be told from a fresh write.

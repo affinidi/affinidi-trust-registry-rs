@@ -1,11 +1,14 @@
-//! Data Integrity proof verification for the write-path Trust Tasks.
+//! Data Integrity proof verification for the Trust Tasks that need a proof.
 //!
-//! The record-mutation tasks (`registry/record/{put,delete}`) declare
-//! `IS_PROOF_REQUIRED`. This module performs the cryptographic step —
-//! verifying the Data Integrity proof against the issuer's resolved key — so a
-//! forged or tampered write is rejected, not merely a proofless one. A write
-//! with no proof, or with no in-band `issuer` for the proof to be bound to, is
-//! refused outright rather than left to the verifier.
+//! Which tasks need one is the registry's policy, in
+//! [`descriptor`](crate::trust_tasks::descriptor): every write (record put and
+//! delete, `registry/did/rotate`, capability enable and disable, and the
+//! capabilities' write tasks) and `registry/record/query`. This module
+//! performs the cryptographic step — verifying the Data Integrity proof
+//! against the issuer's resolved key — so a forged or tampered document is
+//! rejected, not merely a proofless one. A document with no proof, or with no
+//! in-band `issuer` for the proof to be bound to, is refused outright rather
+//! than left to the verifier.
 //!
 //! Verification is backed by [`trust_tasks_proof`]'s Affinidi verifier over the
 //! shared DID-resolver cache; `did:key` issuers verify offline, `did:web` /
@@ -29,6 +32,8 @@ use trust_tasks_proof::affinidi::{
     CachedDidResolver, ProofPurpose, ProofPurposeResolver, Verifier,
 };
 use trust_tasks_rs::{DynProofVerifier, RejectReason, TrustTask, erase_verifier};
+
+use crate::trust_tasks::descriptor::descriptor;
 
 /// The only `proofPurpose` a registry write may carry (VTI-KEY-106).
 pub const WRITE_PROOF_PURPOSE: &str = "authentication";
@@ -76,34 +81,25 @@ impl ProofPurposeResolver for AuthenticationKeyResolver {
     }
 }
 
-/// The registry's own slugs whose operations mutate the registry and therefore
-/// carry a required, verifiable proof plus the admin ACL. The DIDComm and TSP
-/// bindings both gate on this list (they previously carried diverging local
-/// copies: `registry/did/rotate` was gated over DIDComm but not over TSP).
+/// Whether `slug` is one of the registry's own tasks that changes the
+/// registry, and so needs a verifiable proof from an admin: the writes in
+/// [`descriptor::DESCRIPTORS`](crate::trust_tasks::descriptor::DESCRIPTORS).
 ///
-/// A capability's write tasks are not listed here: the
+/// A capability's write tasks are not described there: the
 /// [`CapabilitySet`](crate::capabilities::CapabilitySet) classifies them
 /// ([`CapabilitySet::is_write`](crate::capabilities::CapabilitySet::is_write)),
 /// and the [`TaskHandler`](crate::trust_tasks::TaskHandler) consults both.
 pub fn is_write_slug(slug: &str) -> bool {
-    matches!(
-        slug,
-        "registry/record/put"
-            | "registry/record/delete"
-            | "registry/did/rotate"
-            | "governance/capability/enable"
-            | "governance/capability/disable"
-            | "git-trust/grant"
-            | "git-trust/revoke"
-    )
+    descriptor(slug).is_some_and(|d| d.is_write())
 }
 
 /// Slugs a caller may only use with a proof bound to its sender, under the
 /// same rules as a write: the writes, plus `registry/record/query`, whose
 /// answers carry whole records (context included) rather than the yes/no of
-/// the public TRQP queries.
+/// the public TRQP queries. Derived from
+/// [`descriptor::DESCRIPTORS`](crate::trust_tasks::descriptor::DESCRIPTORS).
 pub fn requires_proof(slug: &str) -> bool {
-    is_write_slug(slug) || slug == "registry/record/query"
+    descriptor(slug).is_some_and(|d| d.requires_proof())
 }
 
 /// Build a Data Integrity proof verifier backed by the Affinidi DID-resolver
@@ -129,16 +125,17 @@ pub async fn build_verifier() -> Arc<dyn DynProofVerifier> {
     }
 }
 
-/// Cryptographically verify the Data Integrity proof on a **write** document.
+/// Cryptographically verify the Data Integrity proof on a document that needs
+/// one: a write, or a `registry/record/query` ([`requires_proof`]).
 ///
-/// Reads pass through unchanged. A write must carry a proof
+/// Public reads pass through unchanged. Such a document must carry a proof
 /// ([`RejectReason::ProofRequired`]) and an in-band `issuer` the proof is bound
 /// to ([`RejectReason::MalformedRequest`]); both are refused here as well as by
 /// [`TaskHandler::authorize_write`](crate::trust_tasks::TaskHandler::authorize_write),
 /// so this check is safe to call on its own. A present proof that fails
 /// verification is [`RejectReason::ProofInvalid`].
 ///
-/// A write is one of the registry's own ([`requires_proof`]) or, given the
+/// It is one of the registry's own ([`requires_proof`]) or, given the
 /// `capabilities` being served, a capability's write task. Pass the capability
 /// set whenever capabilities are served; without it their writes pass through
 /// unverified.
@@ -179,6 +176,8 @@ pub async fn verify_proof(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
 
     fn doc_with_dummy_proof(type_uri: &str) -> TrustTask<Value> {

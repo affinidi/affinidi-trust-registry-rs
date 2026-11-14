@@ -758,7 +758,9 @@ that `ADMIN_AUTHORITIES` lists for the registry's DID may make one, e.g.
 `{"did:web:ops.example": ["<the registry's DID>"]}`. With no such entry no admin
 can, so in a registry shared by several communities one community's admin
 cannot rotate the registry's keys. A write task with no authority rule is
-refused.
+refused, and a task in the registry's own `registry/` or `governance/`
+families that it does not describe is answered as an unsupported type, never
+served as a read.
 
 A capability's tasks are writes unless the capability declares them as reads
 (`CapabilityDefinition::register_reads`): every task its `register` adds needs
@@ -793,6 +795,19 @@ gap, and `authenticated_sender` when the transport authenticated the sender
 (DIDComm, TSP) even though the document's proof was not verified. A reason or
 verification method is capped at 1024 characters, every other value at 256.
 
+An entry's `role` is `ADMIN` only when its `actor` is a proven admin (the
+document's proof verified and its issuer is on the admin list); every other
+entry, including a refusal of an unknown or anonymous caller, has `role`
+`UNPROVEN` and an empty `actor`. `status` is `SUCCESS`, `FAILURE` (with
+`error`), `UNAUTHORIZED` (with `reason`), `REPLAYED` or `DUPLICATE_IN_FLIGHT`.
+The last two mark a duplicate of a document that was executed once: `REPLAYED`
+when it was answered from the record of accepted documents after the original
+finished, `DUPLICATE_IN_FLIGHT` when it arrived while the original was still
+running and was told to retry. Nothing was executed for either; the entry of
+the execution, with the same `document_id` and `document_digest`, records the
+outcome. An `error` or `reason` reads `<code>: <message>`, the code being the
+Trust Task error code.
+
 Refusals of documents whose issuer was never proven are recorded individually
 within per-minute budgets: 60 for unauthenticated callers (the HTTP surface)
 together; 16 for each transport-authenticated sender, for up to 64 senders a
@@ -800,7 +815,9 @@ minute, with the senders beyond those sharing one further 16; and at most 600
 for all authenticated senders together, since new DIDs cost nothing to make.
 Beyond a budget the refusals are counted, and each source's count is recorded
 as one entry every minute and at shutdown, with its reason codes, task types
-and the first few claimed issuers. Anonymous HTTP traffic cannot use up the
+and the first few claimed issuers. Such a summary has the operation `SUMMARY`
+(status `UNAUTHORIZED`, role `UNPROVEN`), so it is not counted among the
+refused operations on the registry. Anonymous HTTP traffic cannot use up the
 entries that refusals over DIDComm or TSP need, and however many identities a
 sender uses, unproven refusals add at most 660 individual entries and 66
 summaries a minute. A flood of authenticated identities can still use up the
