@@ -4,12 +4,12 @@ name: ignored tests
 # so they run nightly and on demand instead (testing/README.md). Not a PR gate,
 # which is why they live outside checks.yaml.
 #
-# Both start everything they need themselves, so no mediator variables or
-# secrets are involved:
+# Neither needs mediator variables, secrets or a .env:
 # - `mediator_e2e` starts Redis and the published mediator image with Docker
 #   and spawns the `trust-registry` binary against it;
-# - the `test-trust-registry` routed round-trips run an in-process
-#   `affinidi-messaging-test-mediator`.
+# - the `test-trust-registry` mediator tests run an in-process
+#   `affinidi-messaging-test-mediator`, which needs Redis on 127.0.0.1:6379
+#   (the job's `redis` service).
 on:
   schedule:
     # Daily at 01:00 UTC, before nightly.yml (02:00) advances `nightly`.
@@ -46,11 +46,21 @@ jobs:
       - name: cargo test --test mediator_e2e -- --ignored
         run: cargo test --locked -p trust-registry --test mediator_e2e -- --ignored --nocapture
   routed-round-trips:
-    name: test-trust-registry routed round-trips
+    name: test-trust-registry mediator tests
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
       contents: read
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -64,5 +74,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: 'rust-cache-ignored'
-      - name: cargo test -p test-trust-registry --features mediator,tsp -- --ignored
-        run: cargo test --locked -p test-trust-registry --features mediator,tsp --test mediator -- --ignored --nocapture
+      # `--include-ignored`: the mediator tests that are not ignored need Redis
+      # too, so the PR gate only builds them. `tsp` implies `mediator`.
+      - name: cargo test -p test-trust-registry --features tsp -- --include-ignored
+        run: cargo test --locked -p test-trust-registry --features tsp -- --include-ignored --nocapture

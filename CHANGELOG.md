@@ -386,8 +386,9 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   the unit tests of each `trql-client` transport alone and of `trust-registry`
   without defaults and with each opt-in feature (`test-features`), and runs
   the `test-trust-registry` smoke test and builds its mediator tests. A new
-  `ignored-tests.yml` runs the `#[ignore]`d suites (`mediator_e2e`, the
-  `test-trust-registry` routed round-trips) daily and on demand.
+  `ignored-tests.yml` runs the `#[ignore]`d suites daily and on demand:
+  `mediator_e2e`, and every `test-trust-registry` mediator test
+  (`--include-ignored`, against a Redis service).
 - **`setup-trust-registry` and `generate-secrets` return errors instead of
   panicking** when key generation, the TDK or a did:webvh log entry fails.
   Failing to reach the mediator while opening a test DID's account is still

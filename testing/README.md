@@ -15,7 +15,7 @@ them (`.github/workflows/checks.yaml`).
 | `trust-registry` `didcomm_integration_test`, `didcomm_server_test` | `cargo test -p trust-registry --test didcomm_integration_test --test didcomm_server_test` | `.env.test` from `setup-trust-registry --mediator-did …`, a reachable mediator, and (for `didcomm_integration_test`) a running registry |
 | `trust-registry` `redis_integration_test` | `cargo test -p trust-registry --test redis_integration_test` | Redis on `redis://127.0.0.1:6379`; each test is skipped (passes) when Redis is not reachable |
 | `trust-registry` `mediator_e2e` | `cargo test -p trust-registry --test mediator_e2e -- --ignored --nocapture` | Docker (starts Redis and the mediator image); `#[ignore]`d by default, see the module docs for its environment variables |
-| `test-trust-registry` mediator round-trips | `cargo test -p test-trust-registry --features mediator --test mediator -- --ignored` (add `tsp` for the TSP one) | nothing external (in-process test mediator), but a heavy build; the routed round-trips are `#[ignore]`d |
+| `test-trust-registry` mediator tests | `cargo test -p test-trust-registry --features tsp -- --include-ignored` (`tsp` implies `mediator`) | Redis on `127.0.0.1:6379` for the in-process test mediator, and a heavy build; the routed round-trips are `#[ignore]`d |
 
 `cargo test -p trust-registry` with no `--test` runs the unit tests and every
 integration test above that is not ignored, so it needs a running registry and
@@ -102,8 +102,8 @@ file instead of HTML.
 - the test suite: the registry is started against the CI mediator, then
   coverage of `trust-registry` (all its non-ignored tests), the `trql-client`
   and `trqp` tests, the `test-trust-registry` smoke test, and a build
-  (`--no-run`) of the `test-trust-registry` mediator tests.
+  (`--no-run`) of the `test-trust-registry` mediator tests (they need Redis).
 
-The `#[ignore]`d suites (`mediator_e2e`, the `test-trust-registry` routed
-round-trips) run in `ignored-tests.yml`, daily and on demand (Actions → ignored
+The `#[ignore]`d suites (`mediator_e2e`, and every `test-trust-registry`
+mediator test, which need Redis) run in `ignored-tests.yml`, daily and on demand (Actions → ignored
 tests → Run workflow). It is not a PR gate.
