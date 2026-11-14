@@ -29,6 +29,13 @@
 //! frames back still packed, where relationship-control frames cannot be
 //! recorded.
 //!
+//! Acks are normally handed to the SDK's background deletion handler, which
+//! deletes at the mediator shortly after. That queue does not survive
+//! `ATM::graceful_shutdown`, so from the moment shutdown begins the loop holds
+//! acks back and, once its handlers have finished, deletes them — and the
+//! acks queued in the last minute — directly at the mediator,
+//! waiting for its answer, before the caller shuts the ATM down.
+//!
 //! Replies are sent once, synchronously, from the handler (`atm.tsp().send`,
 //! `atm.forward_and_send_message`); a reply that cannot be sent is logged. A
 //! client that retries a write with the same document id gets the recorded
@@ -38,7 +45,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use affinidi_messaging_core::{Inbound, InboundAck, InboundKind, MessageTransport, Protocol};
+use std::collections::{HashSet, VecDeque};
+
+use affinidi_messaging_core::{Inbound, InboundKind, MessageTransport, Protocol};
+use affinidi_messaging_sdk::messages::DeleteMessageRequest;
 use affinidi_tdk::common::TDKSharedState;
 use affinidi_tdk::common::config::TDKConfig;
 use affinidi_tdk::didcomm::Message;
@@ -172,8 +182,13 @@ pub async fn start_managed_delivery<H: MessageHandler>(
         handler,
         tasks,
     });
+    let acker = Arc::new(AtmAcker {
+        atm: messaging.atm.clone(),
+        profile: messaging.profile.clone(),
+    });
     let end = InboundLoop::new(
         messaging.transport.clone(),
+        acker,
         sink,
         &profile_config.alias,
         shutdown,
@@ -182,9 +197,10 @@ pub async fn start_managed_delivery<H: MessageHandler>(
     .await;
 
     // Teardown, in order: nothing may still use the store when it closes.
-    // `run` has waited for the handlers; the sweep is stopped here; the ATM
-    // (which holds the relationship store) is shut down and every handle on
-    // it dropped before the store is.
+    // `run` has waited for the handlers and deleted their messages directly
+    // at the mediator (the background deletion queue dies with the ATM); the
+    // sweep is stopped here; the ATM (which holds the relationship store) is
+    // shut down and every handle on it dropped before the store is.
     stop_maintenance.cancel();
     if let Err(e) = maintenance.await {
         warn!(error = %e, "the TSP relationship maintenance task did not stop cleanly");
@@ -240,6 +256,10 @@ pub async fn start_shared_delivery<H: MessageHandler>(
         &profile.inner.alias
     );
     let alias = profile.inner.alias.clone();
+    let acker = Arc::new(AtmAcker {
+        atm: atm.clone(),
+        profile: profile.clone(),
+    });
     let sink = Arc::new(RegistryInbound {
         atm,
         profile,
@@ -247,7 +267,7 @@ pub async fn start_shared_delivery<H: MessageHandler>(
         handler,
         tasks,
     });
-    InboundLoop::new(transport, sink, &alias, shutdown)
+    InboundLoop::new(transport, acker, sink, &alias, shutdown)
         .run()
         .await
         .into_result()
@@ -367,6 +387,110 @@ async fn connect_transport(
     ))
 }
 
+/// How long an ack handed to the SDK's background deletion handler is
+/// remembered, so that shutdown can delete it again directly in case the
+/// queue had not reached it. A repeated delete of a message already gone is
+/// harmless.
+pub(crate) const RECENT_ACK_WINDOW: Duration = Duration::from_secs(60);
+/// Most recently queued acks remembered for that.
+const RECENT_ACK_CAPACITY: usize = 1_024;
+/// Most ids the mediator deletes in one direct request.
+const DIRECT_DELETE_BATCH: usize = 100;
+/// Attempts at each direct delete batch on shutdown.
+const DIRECT_DELETE_ATTEMPTS: u32 = 2;
+
+/// Deletes messages at the mediator for [`InboundLoop`].
+#[async_trait]
+pub(crate) trait Acker: Send + Sync + 'static {
+    /// Hand `id`'s delete to the SDK's background deletion handler. Returns
+    /// once it is queued, not once it is deleted.
+    async fn queue(&self, id: &str) -> Result<(), String>;
+
+    /// Delete `ids` (at most [`DIRECT_DELETE_BATCH`]) at the mediator now,
+    /// waiting for its answer.
+    async fn delete_now(&self, ids: &[String]) -> Result<(), String>;
+}
+
+/// The [`Acker`] over the registry's ATM and profile.
+struct AtmAcker {
+    atm: Arc<ATM>,
+    profile: Arc<ATMProfile>,
+}
+
+#[async_trait]
+impl Acker for AtmAcker {
+    async fn queue(&self, id: &str) -> Result<(), String> {
+        self.atm
+            .delete_message_background(&self.profile, id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn delete_now(&self, ids: &[String]) -> Result<(), String> {
+        let request = DeleteMessageRequest {
+            message_ids: ids.to_vec(),
+        };
+        let response = self
+            .atm
+            .delete_messages_direct(&self.profile, &request)
+            .await
+            .map_err(|e| e.to_string())?;
+        // An id the mediator names as an error is one it no longer holds —
+        // typically one the background queue already deleted.
+        for (id, error) in &response.errors {
+            debug!("direct delete of message {id} reported: {error}");
+        }
+        Ok(())
+    }
+}
+
+/// Where the loop's acks go: queued in the background while it runs, held
+/// for a direct delete once shutdown has begun.
+#[derive(Debug, Default)]
+struct AckState {
+    /// Shutdown has begun: hold acks for [`InboundLoop::flush_acks`].
+    draining: bool,
+    held: Vec<String>,
+    /// Acks queued in the background lately, for a direct delete at
+    /// shutdown in case the queue did not reach them.
+    recent: VecDeque<(String, Instant)>,
+}
+
+impl AckState {
+    /// Whether to queue `id` now (`true`), or hold it for the shutdown flush.
+    fn take(&mut self, id: &str, now: Instant) -> bool {
+        if self.draining {
+            self.held.push(id.to_string());
+            return false;
+        }
+        self.recent.push_back((id.to_string(), now));
+        while self.recent.len() > RECENT_ACK_CAPACITY
+            || self
+                .recent
+                .front()
+                .is_some_and(|(_, at)| now.saturating_duration_since(*at) > RECENT_ACK_WINDOW)
+        {
+            self.recent.pop_front();
+        }
+        true
+    }
+
+    /// Every id to delete directly at shutdown, each once.
+    fn take_flush(&mut self, now: Instant) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let recent = self
+            .recent
+            .drain(..)
+            .filter(|(_, at)| now.saturating_duration_since(*at) <= RECENT_ACK_WINDOW)
+            .map(|(id, _)| id);
+        let held = std::mem::take(&mut self.held);
+        held.into_iter()
+            .chain(recent)
+            .filter(|id| seen.insert(id.clone()))
+            .collect()
+    }
+}
+
 /// Handles one inbound message for [`InboundLoop`], and says how it ended.
 #[async_trait]
 pub(crate) trait InboundSink: Send + Sync + 'static {
@@ -398,11 +522,14 @@ impl LoopEnd {
 /// has been handled (R1.6), at most [`MAX_INFLIGHT_HANDLERS`] at a time.
 ///
 /// The loop takes the next message off the transport only once a handler
-/// slot is free, so a burst waits at the mediator rather than in memory, and
-/// nothing is lost while it waits: no message has been acked before its
-/// handler returns.
+/// slot is free, so a burst waits at the mediator (beyond the few frames the
+/// SDK's websocket task caches ahead of the stream, up to its fetch cache
+/// limit), and nothing is lost while it waits: no message has
+/// been acked before its handler returns.
 pub(crate) struct InboundLoop<S: InboundSink> {
     transport: Arc<dyn MessageTransport>,
+    acker: Arc<dyn Acker>,
+    acks: Arc<std::sync::Mutex<AckState>>,
     sink: Arc<S>,
     ledger: Arc<std::sync::Mutex<DeliveryLedger>>,
     permits: Arc<Semaphore>,
@@ -415,12 +542,15 @@ pub(crate) struct InboundLoop<S: InboundSink> {
 impl<S: InboundSink> InboundLoop<S> {
     pub(crate) fn new(
         transport: Arc<dyn MessageTransport>,
+        acker: Arc<dyn Acker>,
         sink: Arc<S>,
         alias: &str,
         shutdown: CancellationToken,
     ) -> Self {
         Self {
             transport,
+            acker,
+            acks: Arc::default(),
             sink,
             ledger: Arc::default(),
             permits: Arc::new(Semaphore::new(MAX_INFLIGHT_HANDLERS)),
@@ -441,7 +571,8 @@ impl<S: InboundSink> InboundLoop<S> {
     }
 
     /// Receive until shutdown or until the inbound stream ends, then give
-    /// running handlers time to finish and ack.
+    /// running handlers time to finish, and delete what they and the recent
+    /// background acks handled directly at the mediator.
     pub(crate) async fn run(&self) -> LoopEnd {
         use futures::StreamExt;
 
@@ -483,7 +614,11 @@ impl<S: InboundSink> InboundLoop<S> {
                 self.alias
             );
         }
+        // From here acks are held, not queued: the background queue may not
+        // be served again before the caller shuts the ATM down.
+        lock_acks(&self.acks).draining = true;
         self.drain().await;
+        self.flush_acks().await;
         end
     }
 
@@ -492,7 +627,8 @@ impl<S: InboundSink> InboundLoop<S> {
     fn dispatch(&self, inbound: Inbound, permit: tokio::sync::OwnedSemaphorePermit) {
         let id = inbound.ack.0.clone();
         let claim = lock_ledger(&self.ledger).claim(&id, Instant::now());
-        let transport = self.transport.clone();
+        let acker = self.acker.clone();
+        let acks = self.acks.clone();
         let alias = self.alias.clone();
         match claim {
             Claim::Dispatch => {}
@@ -508,7 +644,7 @@ impl<S: InboundSink> InboundLoop<S> {
                 debug!("[profile = {alias}] message {id} was already handled; acking it again");
                 tokio::spawn(async move {
                     let _permit = permit;
-                    ack(transport.as_ref(), &alias, &id).await;
+                    ack(acker.as_ref(), &acks, &alias, &id).await;
                 });
                 return;
             }
@@ -526,7 +662,7 @@ impl<S: InboundSink> InboundLoop<S> {
                 .unwrap_or(Outcome::Retry);
             let decision = lock_ledger(&ledger).finish(&id, outcome, Instant::now());
             match decision {
-                Ack::Now => ack(transport.as_ref(), &alias, &id).await,
+                Ack::Now => ack(acker.as_ref(), &acks, &alias, &id).await,
                 Ack::Retain => warn!(
                     "[profile = {alias}] message {id} not handled; left queued at the mediator, \
                      to be offered again when the mediator next pushes the inbox"
@@ -537,14 +673,14 @@ impl<S: InboundSink> InboundLoop<S> {
                          {GIVE_UP_ATTEMPTS} attempts over at least {GIVE_UP_MIN_AGE:?}; \
                          deleting it from the mediator as undeliverable"
                     );
-                    ack(transport.as_ref(), &alias, &id).await;
+                    ack(acker.as_ref(), &acks, &alias, &id).await;
                 }
             }
         });
     }
 
-    /// Wait for running handlers (each bounded by the handler timeout) so
-    /// their acks are sent before the loop reports that it has stopped.
+    /// Wait for running handlers (each bounded by the handler timeout) to
+    /// finish and record their acks.
     async fn drain(&self) {
         let all = u32::try_from(self.max_inflight).unwrap_or(u32::MAX);
         let limit = self.handler_timeout + ACK_TIMEOUT;
@@ -559,14 +695,75 @@ impl<S: InboundSink> InboundLoop<S> {
             );
         }
     }
+
+    /// Delete, directly and waiting for the mediator's answer, every ack held
+    /// since shutdown began and every ack queued in the background within
+    /// [`RECENT_ACK_WINDOW`]. A batch that fails stays queued at the
+    /// mediator: it is pushed again after a restart, re-handled, and a write
+    /// replayed rather than re-applied while the dedup store remembers it.
+    async fn flush_acks(&self) {
+        let ids = lock_acks(&self.acks).take_flush(Instant::now());
+        if ids.is_empty() {
+            return;
+        }
+        let mut deleted = 0usize;
+        for batch in ids.chunks(DIRECT_DELETE_BATCH) {
+            // Twice: the first request can land on a pooled connection the
+            // mediator has since closed.
+            let mut last_error = String::new();
+            for attempt in 1..=DIRECT_DELETE_ATTEMPTS {
+                match tokio::time::timeout(ACK_TIMEOUT, self.acker.delete_now(batch)).await {
+                    Ok(Ok(())) => {
+                        deleted += batch.len();
+                        last_error.clear();
+                        break;
+                    }
+                    Ok(Err(e)) => last_error = e,
+                    Err(_) => last_error = format!("timed out after {ACK_TIMEOUT:?}"),
+                }
+                if attempt < DIRECT_DELETE_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+            if !last_error.is_empty() {
+                warn!(
+                    "[profile = {}] could not delete {} handled message(s) at the mediator on \
+                     shutdown; they stay queued and are handled again after a restart: \
+                     {last_error}",
+                    self.alias,
+                    batch.len()
+                );
+            }
+        }
+        info!(
+            "[profile = {}] deleted {deleted} of {} handled message(s) directly at the mediator \
+             on shutdown",
+            self.alias,
+            ids.len()
+        );
+    }
 }
 
-/// Delete message `id` at the mediator. A failure is not lost: the message
-/// stays queued, is pushed again, and the ledger acks it again without
-/// handling it again.
-async fn ack(transport: &dyn MessageTransport, alias: &str, id: &str) {
-    match tokio::time::timeout(ACK_TIMEOUT, transport.ack(InboundAck(id.to_string()))).await {
-        Ok(Ok(())) => debug!("[profile = {alias}] message {id} acked"),
+fn lock_acks(acks: &std::sync::Mutex<AckState>) -> std::sync::MutexGuard<'_, AckState> {
+    // Short, non-panicking critical sections only; a poisoned lock still
+    // holds consistent state.
+    acks.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Ack message `id`: queue its delete in the background while the loop runs,
+/// or hold it for the direct delete at shutdown. A failure is not lost: the
+/// message stays queued, is pushed again, and the ledger acks it again
+/// without handling it again.
+async fn ack(acker: &dyn Acker, acks: &std::sync::Mutex<AckState>, alias: &str, id: &str) {
+    if !lock_acks(acks).take(id, Instant::now()) {
+        debug!(
+            "[profile = {alias}] message {id} handled during shutdown; held for a direct delete"
+        );
+        return;
+    }
+    match tokio::time::timeout(ACK_TIMEOUT, acker.queue(id)).await {
+        Ok(Ok(())) => debug!("[profile = {alias}] message {id} queued for deletion"),
         Ok(Err(e)) => warn!(
             "[profile = {alias}] could not ack message {id} (it will be redelivered and acked \
              again): {e}"
@@ -742,7 +939,10 @@ async fn handle_tsp(
     )
     .await
     {
-        Ok(()) => Outcome::Handled,
+        Ok(crate::tsp::TspDispatch::Answered) => Outcome::Handled,
+        // The refusal sent was `retryable` (storage unavailable, an internal
+        // error): leave the frame queued so it is tried again (R1.6).
+        Ok(crate::tsp::TspDispatch::Retryable) => Outcome::Retry,
         // Decrypted cleanly but is not a Trust Task envelope.
         Err(_) => Outcome::Poison,
     }

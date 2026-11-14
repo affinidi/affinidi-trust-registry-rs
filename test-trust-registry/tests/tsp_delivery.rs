@@ -87,6 +87,39 @@ async fn spawn_tsp_registry(
         .expect("serve the registry")
 }
 
+/// How many messages the mediator holds in `identity`'s inbox, read over REST
+/// (no websocket, so it does not compete with a running registry).
+async fn inbox_len(env: &TestEnvironment, identity: &TestMediatorUser) -> usize {
+    use affinidi_messaging_sdk::messages::Folder;
+    use affinidi_tdk::messaging::profiles::ATMProfile;
+    use affinidi_tdk::secrets_resolver::SecretsResolver;
+
+    for secret in identity.secrets.clone() {
+        env.tdk.secrets_resolver().insert(secret).await;
+    }
+    let alias = "registry-inbox-check";
+    let profile = ATMProfile::new(
+        &env.atm,
+        Some(alias.to_string()),
+        identity.did.clone(),
+        Some(env.mediator.did().to_string()),
+    )
+    .await
+    .expect("registry profile");
+    let profile = env
+        .atm
+        .profile_add(&profile, false)
+        .await
+        .expect("register profile");
+    let listed = env
+        .atm
+        .list_messages(&profile, Folder::Inbox)
+        .await
+        .expect("list the registry's inbox");
+    env.atm.profile_remove(alias).await.ok();
+    listed.len()
+}
+
 /// Send a `trqp` recognition query over DIDComm and wait for the reply on its
 /// thread.
 async fn recognition_over_didcomm(env: &TestEnvironment, client: &TestUser, tr_did: &str) -> Value {
@@ -173,6 +206,23 @@ async fn a_tsp_enabled_registry_answers_didcomm_and_can_be_rebuilt() {
     let reply = recognition_over_didcomm(&env, &client, &identity.did).await;
     assert_eq!(reply["recognized"], json!(true), "first instance");
     first.shutdown().await;
+    // The SDK's background delete queue is dropped when the ATM shuts down,
+    // so the registry deletes what it handled directly before it stops: the
+    // mediator holds nothing for it to handle a second time. Polled, because
+    // with REST enabled `ServerHandle::shutdown` does not yet wait for the
+    // listener's teardown.
+    let mut left = usize::MAX;
+    for _ in 0..20 {
+        left = inbox_len(&env, &identity).await;
+        if left == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(
+        left, 0,
+        "a handled message was left at the mediator by the shutdown"
+    );
 
     let second = spawn_tsp_registry(&env, &identity, &store).await;
     let reply = recognition_over_didcomm(&env, &client, &identity.did).await;

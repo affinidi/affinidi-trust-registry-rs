@@ -26,15 +26,23 @@ Rules that bite hardest here:
   drives the SDK's `DidCommTransport` itself — the delivery crate's
   `MessagingService` acks at broadcast handoff and is not used). The rules
   live in `didcomm/listener/delivery.rs`: poison is acked, a handler error,
-  panic or timeout is not, and a message that keeps failing is deleted
-  (logged at `error`) only after 5 failures over at least 10 minutes. An
-  offline-sync `(None, id)` frame (the SDK could not unpack it and does not
-  say why) is treated as transient under that same bound. Any new ack-first
-  must be poison defense, said so in a comment at the call site.
+  panic or timeout is not, a Trust Task refused as `retryable` (storage
+  unavailable, internal error) is not, and a message that keeps failing is
+  deleted (logged at `error`) only after 5 failures over at least 10
+  minutes. In a `--features tsp` build, an offline-sync `(None, id)` frame
+  (the SDK could not unpack it and does not say why) is treated as transient
+  under that same bound. On shutdown the delivery-layer loop deletes what it
+  handled directly (`delete_messages_direct`), because the SDK's background
+  deletion queue dies with `graceful_shutdown`. Any new ack-first must be
+  poison defense, said so in a comment at the call site.
   Still open: an unacked message on the delivery-layer path is offered again
   only when the mediator next pushes the inbox (a reconnect or restart), not
-  every 30 s; and the SDK's `DidCommTransport` deletes a TSP frame whose
-  unpack still fails after 3 in-process attempts.
+  every 30 s. And the SDK deletes some frames itself, before the registry
+  sees them: its unpack deletes what it classifies as poison (a bad
+  signature, bad encoding, a policy rejection — on the live stream and the
+  DIDComm-only offline fetch), and `DidCommTransport` deletes a TSP frame
+  whose unpack still fails after 3 in-process attempts, as well as padding,
+  upper-layer control frames and control frames it refuses to record.
 - **R1.4 — at-least-once redelivery needs message-id dedup.** Redelivery is
   real: the offline sync and the live stream drain the same queue, and the
   mediator pushes the stored inbox again on every reconnect. Both paths keep

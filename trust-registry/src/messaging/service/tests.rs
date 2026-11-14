@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use affinidi_messaging_core::{
-    ConnState, MessagingError, ReceivedMessage, SendReceipt, TransportKind,
+    ConnState, InboundAck, MessagingError, ReceivedMessage, SendReceipt, TransportKind,
 };
 use futures::stream::BoxStream;
 use tokio::sync::{Notify, mpsc, watch};
@@ -15,12 +15,14 @@ use tokio::sync::{Notify, mpsc, watch};
 use super::*;
 
 /// A transport whose inbound stream yields what the test sends it, and which
-/// records every ack.
+/// (as the loop's [`Acker`]) records every ack: queued in the background, or
+/// deleted directly.
 struct MockTransport {
     inbound: Mutex<Option<mpsc::UnboundedReceiver<Inbound>>>,
     /// Messages taken off the inbound stream.
     taken: Arc<AtomicUsize>,
     acked: Mutex<Vec<String>>,
+    direct: Mutex<Vec<Vec<String>>>,
     conn: watch::Sender<ConnState>,
 }
 
@@ -32,13 +34,20 @@ impl MockTransport {
             inbound: Mutex::new(Some(rx)),
             taken: Arc::default(),
             acked: Mutex::default(),
+            direct: Mutex::default(),
             conn,
         });
         (transport, tx)
     }
 
+    /// Acks queued in the background.
     fn acked(&self) -> Vec<String> {
         self.acked.lock().unwrap().clone()
+    }
+
+    /// Batches deleted directly.
+    fn direct(&self) -> Vec<Vec<String>> {
+        self.direct.lock().unwrap().clone()
     }
 
     fn taken(&self) -> usize {
@@ -80,8 +89,20 @@ impl MessageTransport for MockTransport {
         }))
     }
 
-    async fn ack(&self, ack: InboundAck) -> Result<(), MessagingError> {
-        self.acked.lock().unwrap().push(ack.0);
+    async fn ack(&self, _ack: InboundAck) -> Result<(), MessagingError> {
+        panic!("the loop acks through its Acker, not the transport");
+    }
+}
+
+#[async_trait]
+impl Acker for MockTransport {
+    async fn queue(&self, id: &str) -> Result<(), String> {
+        self.acked.lock().unwrap().push(id.to_string());
+        Ok(())
+    }
+
+    async fn delete_now(&self, ids: &[String]) -> Result<(), String> {
+        self.direct.lock().unwrap().push(ids.to_vec());
         Ok(())
     }
 }
@@ -162,8 +183,14 @@ fn start_with(
     let sink = FakeSink::new();
     let shutdown = CancellationToken::new();
     let task = tokio::spawn({
-        let inbound_loop = InboundLoop::new(transport.clone(), sink.clone(), "t", shutdown.clone())
-            .with_limits(max, timeout);
+        let inbound_loop = InboundLoop::new(
+            transport.clone(),
+            transport.clone(),
+            sink.clone(),
+            "t",
+            shutdown.clone(),
+        )
+        .with_limits(max, timeout);
         async move { inbound_loop.run().await }
     });
     Running {
@@ -322,7 +349,10 @@ async fn a_failed_message_is_handled_again_when_pushed_again() {
     running.task.await.unwrap();
 }
 
-/// Shutdown waits for running handlers, so their acks are sent.
+/// Shutdown waits for running handlers, and a message one finishes after
+/// shutdown began is deleted directly — the SDK's background deletion queue
+/// is dropped when the ATM shuts down, so queueing it there would lose the
+/// ack and have the message re-handled after a restart.
 #[tokio::test]
 async fn shutdown_waits_for_running_handlers_to_ack() {
     let running = start(4);
@@ -339,7 +369,50 @@ async fn shutdown_waits_for_running_handlers_to_ack() {
     );
     running.sink.release.notify_waiters();
     assert_eq!(running.task.await.unwrap(), LoopEnd::Shutdown);
-    assert_eq!(running.transport.acked(), ["m1"]);
+    assert!(
+        running.transport.acked().is_empty(),
+        "an ack made during shutdown went to the background queue"
+    );
+    assert_eq!(running.transport.direct(), [vec!["m1".to_string()]]);
+}
+
+/// An ack queued in the background shortly before shutdown may not have been
+/// served when the ATM shuts down, so shutdown deletes it again directly.
+#[tokio::test]
+async fn recent_background_acks_are_deleted_directly_at_shutdown() {
+    let running = start(4);
+    running.tx.send(message("m1", "ok")).unwrap();
+    running.tx.send(message("m2", "retry")).unwrap();
+    until("the ack", || running.transport.acked() == ["m1"]).await;
+    until("both handled", || running.sink.calls() == 2).await;
+    running.shutdown.cancel();
+    assert_eq!(running.task.await.unwrap(), LoopEnd::Shutdown);
+    // The failed message is not acked either way.
+    assert_eq!(running.transport.direct(), [vec!["m1".to_string()]]);
+}
+
+/// Nothing handled, nothing to delete at shutdown.
+#[tokio::test]
+async fn an_idle_shutdown_deletes_nothing() {
+    let running = start(4);
+    running.shutdown.cancel();
+    running.task.await.unwrap();
+    assert!(running.transport.direct().is_empty());
+}
+
+/// The shutdown flush sends each id once, in batches the mediator accepts.
+#[test]
+fn the_shutdown_flush_is_deduplicated_and_windowed() {
+    let start = Instant::now();
+    let mut state = AckState::default();
+    assert!(state.take("old", start));
+    let now = start + RECENT_ACK_WINDOW + Duration::from_secs(1);
+    assert!(state.take("a", now));
+    state.draining = true;
+    assert!(!state.take("a", now), "held once shutdown has begun");
+    assert!(!state.take("b", now));
+    assert_eq!(state.take_flush(now), ["a", "b"]);
+    assert!(state.take_flush(now).is_empty());
 }
 
 /// A stream that ends (the profile's websocket is gone) ends the loop with an

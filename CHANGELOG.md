@@ -54,8 +54,9 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   loop. New `messaging::service::start_shared_delivery`.
 - **`tsp::process_tsp_frame` and `tsp::FrameOutcome` are removed**: TSP is
   received only on the delivery-layer path now, which unpacks in the SDK.
-  `tsp::dispatch_tsp_application` returns `Result<(), String>` (`Err`: not a
-  Trust Task envelope).
+  `tsp::dispatch_tsp_application` returns `Result<tsp::TspDispatch, String>`
+  (`Err`: not a Trust Task envelope; `TspDispatch::Retryable`: the refusal
+  sent was `retryable`).
 - **`DIDCommError::UnreachableDidDocument` carries the URL that was tried**
   (`https://{domain}/.well-known/did.json`, or `https://{domain}/{path}/did.json`
   for a `did:web` with a path).
@@ -668,10 +669,17 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   ledger: ack after handling, poison acked, a handler error, panic or 30 s
   timeout left queued, a message pushed again (on a reconnect) handled once,
   at most 32 handlers, and the next message taken off the socket only when a
-  handler slot is free. A message left queued is offered again when the
-  mediator next pushes the inbox.
+  handler slot is free (beyond the frames the SDK caches ahead of the
+  stream). A TSP Trust Task the registry refused as `retryable` (storage
+  unavailable, an internal error) is answered and left queued, not acked. A
+  message left queued is offered again when the mediator next pushes the
+  inbox.
 - **The TSP-enabled receive path stops cleanly** (#200). On shutdown it
-  waits for running handlers, stops the relationship-maintenance sweep,
+  waits for running handlers, deletes what they handled — and what it acked
+  in the last minute — directly at the mediator (the SDK's background
+  deletion queue is dropped by `graceful_shutdown`, so those acks were lost
+  and the messages handled again after a restart), stops the
+  relationship-maintenance sweep,
   shuts the ATM down (freeing the mediator's one-socket-per-DID slot) and
   closes the messaging store, so a registry rebuilt in the same process can
   connect and reopen it. If the mediator stream ends by itself it returns an
