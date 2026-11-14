@@ -16,6 +16,9 @@ use crate::didcomm::listener::delivery::{ACK_TIMEOUT, Ack, Claim, HANDLER_TIMEOU
 use crate::didcomm::listener::*;
 
 pub const OFFLINE_SYNC_INTERVAL_SECS: u64 = 30;
+/// Why a TSP frame on the pickup socket is acked without being handled.
+const TSP_UNSERVABLE: &str = "a TSP frame, and this listener does not serve TSP (a \
+    TSP-enabled registry receives on the delivery-layer path)";
 pub const MESSAGE_WAIT_DURATION_SECS: u64 = 5;
 /// Most queued messages one offline-sync cycle fetches.
 const OFFLINE_BATCH_LIMIT: usize = 100;
@@ -63,11 +66,9 @@ pub(crate) fn acl_failure_outcome(
 /// One message taken off the mediator queue, ready to be handled.
 pub(crate) enum Work {
     DidComm(Box<Message>, Box<UnpackMetadata>),
-    /// A TSP frame, for a listener with TSP enabled.
-    #[cfg(feature = "tsp")]
-    Tsp(String),
-    /// A frame this listener can never handle as configured: a TSP frame when
-    /// TSP is not enabled (or not built). Acked like poison — see
+    /// A frame this listener can never handle: a TSP frame (a TSP-enabled
+    /// registry receives on the delivery-layer path, not here), or a frame
+    /// kind this SDK version added. Acked like poison — see
     /// [`Listener::dispatch`].
     Unservable(&'static str),
 }
@@ -157,8 +158,6 @@ impl<H: MessageHandler> Listener<H> {
         let atm = self.atm.clone();
         let profile = self.profile.clone();
         let handler = self.handler.clone();
-        #[cfg(feature = "tsp")]
-        let tsp = self.tsp.as_ref().map(|t| t.tasks.clone());
         async move {
             let alias = profile.inner.alias.clone();
             match work {
@@ -172,30 +171,9 @@ impl<H: MessageHandler> Listener<H> {
                     })
                     .await
                 }
-                #[cfg(feature = "tsp")]
-                Work::Tsp(packed) => {
-                    let Some(tasks) = tsp else {
-                        return Outcome::Poison;
-                    };
-                    let task = async move {
-                        Ok::<_, String>(
-                            Box::pin(crate::tsp::process_tsp_frame(
-                                &atm, &profile, &tasks, &packed,
-                            ))
-                            .await,
-                        )
-                    };
-                    match bounded_value(&alias, "TSP frame", task).await {
-                        Some(crate::tsp::FrameOutcome::Handled) => Outcome::Handled,
-                        // Poison (it can never unpack, or its contents are not
-                        // a Trust Task): acked so it stops being redelivered.
-                        Some(crate::tsp::FrameOutcome::Poison) => Outcome::Poison,
-                        Some(crate::tsp::FrameOutcome::Transient) | None => Outcome::Retry,
-                    }
-                }
                 Work::Unservable(why) => {
                     // R1.6, deliberate ack without handling: nothing in this
-                    // process will ever be able to handle it, so leaving it
+                    // listener will ever be able to handle it, so leaving it
                     // queued would only have it redelivered until the
                     // mediator's expiry. The SDK's DIDComm-only drain purges
                     // the same frames for the same reason.
@@ -214,8 +192,8 @@ impl<H: MessageHandler> Listener<H> {
         // failure and deletes a permanent one itself.
         //
         // `live_stream_next_frame` pulls DIDComm *and* TSP frames off the single
-        // pickup socket (the mediator allows one websocket per DID), so both
-        // transports are multiplexed here instead of on a second TSP socket.
+        // pickup socket (the mediator allows one websocket per DID). This
+        // listener runs only with TSP disabled, so a TSP frame is unservable.
         let frame = self
             .atm
             .message_pickup()
@@ -232,7 +210,7 @@ impl<H: MessageHandler> Listener<H> {
                 // for a TSP frame is sha256 of the stored frame, which is what
                 // the SDK deletes by too.
                 let id = sha256::digest(packed.as_str());
-                self.dispatch(id, self.tsp_work(*packed)).await;
+                self.dispatch(id, Work::Unservable(TSP_UNSERVABLE)).await;
             }
             Some(_) => {
                 // A frame kind this SDK version added: no id to ack it by, so
@@ -245,20 +223,6 @@ impl<H: MessageHandler> Listener<H> {
             None => {}
         }
         Ok(())
-    }
-
-    #[cfg(feature = "tsp")]
-    fn tsp_work(&self, packed: String) -> Work {
-        if self.tsp.is_some() {
-            Work::Tsp(packed)
-        } else {
-            Work::Unservable("a TSP frame, and TSP is not enabled (ENABLE_TSP is not 'true')")
-        }
-    }
-
-    #[cfg(not(feature = "tsp"))]
-    fn tsp_work(&self, _packed: String) -> Work {
-        Work::Unservable("a TSP frame, and this build has no `tsp` feature")
     }
 
     /// An idle registry polls the mediator every 30s and almost always finds
@@ -289,21 +253,56 @@ impl<H: MessageHandler> Listener<H> {
     /// asking for a queue-depth status: a status reply that goes astray — it is
     /// answered on the same socket the live-delivery loop is draining — is
     /// indistinguishable from a genuine zero.
+    ///
+    /// With the `tsp` feature the drain asks for classified frames whatever
+    /// `ENABLE_TSP` says: that call keeps each message's own `id` (which a
+    /// reply to a request without a `thid` is threaded on), where the
+    /// DIDComm-only call replaces it with the mediator's id.
+    #[cfg(feature = "tsp")]
     pub(crate) async fn sync_and_process_offline_messages(&self) -> Result<(), ATMError> {
-        #[cfg(feature = "tsp")]
-        if self.tsp.is_some() {
-            return self.sync_offline_frames().await;
+        let frames = self
+            .atm
+            .message_pickup()
+            .send_delivery_request_frames(&self.profile, Some(OFFLINE_BATCH_LIMIT), true)
+            .await?;
+        self.log_offline_batch(frames.len());
+        for (frame, id) in frames {
+            if self.shutdown.is_cancelled() {
+                break;
+            }
+            match frame {
+                Some(InboundFrame::DidComm(message, meta)) => {
+                    self.dispatch(id, Work::DidComm(message, meta)).await
+                }
+                Some(InboundFrame::Tsp(_)) => {
+                    self.dispatch(id, Work::Unservable(TSP_UNSERVABLE)).await
+                }
+                Some(_) => {
+                    self.dispatch(id, Work::Unservable("an inbound frame of an unknown kind"))
+                        .await
+                }
+                None => {
+                    self.undeliverable_at(&id, Instant::now()).await;
+                }
+            }
         }
+        Ok(())
+    }
 
-        // DIDComm only. The SDK unpacks each queued message and classifies a
-        // failure itself: poison (bad encoding, a bad signature, a policy
-        // rejection) is deleted, a transient failure (a resolver hiccup) is
-        // left queued for the next sync. A TSP frame cannot be served here and
-        // is purged by the SDK.
-        //
-        // The SDK replaces each message's `id` with the mediator's id for it,
-        // which is the id to ack it by — and, for a request without a `thid`,
-        // also the thread a reply falls back to.
+    /// The DIDComm-only drain, for a build without the `tsp` feature (the
+    /// SDK's frame call needs it).
+    ///
+    /// The SDK unpacks each queued message and classifies a failure itself:
+    /// poison (bad encoding, a bad signature, a policy rejection) is deleted,
+    /// a transient failure (a resolver hiccup) is left queued for the next
+    /// sync. A TSP frame cannot be served here and is purged by the SDK.
+    ///
+    /// The SDK replaces each message's `id` with the mediator's id for it,
+    /// which is the id to ack it by. A request without a `thid` fetched here
+    /// therefore gets its reply threaded on the mediator's id rather than on
+    /// its own; clients should set `thid`.
+    #[cfg(not(feature = "tsp"))]
+    pub(crate) async fn sync_and_process_offline_messages(&self) -> Result<(), ATMError> {
         let messages = self
             .atm
             .message_pickup()
@@ -321,36 +320,9 @@ impl<H: MessageHandler> Listener<H> {
         Ok(())
     }
 
-    /// The TSP-aware drain: queued messages come back as classified frames, so
-    /// a TSP frame is routed to the TSP handler instead of being purged.
-    #[cfg(feature = "tsp")]
-    async fn sync_offline_frames(&self) -> Result<(), ATMError> {
-        let frames = self
-            .atm
-            .message_pickup()
-            .send_delivery_request_frames(&self.profile, Some(OFFLINE_BATCH_LIMIT), true)
-            .await?;
-        self.log_offline_batch(frames.len());
-        for (frame, id) in frames {
-            if self.shutdown.is_cancelled() {
-                break;
-            }
-            match frame {
-                Some(InboundFrame::DidComm(message, meta)) => {
-                    self.dispatch(id, Work::DidComm(message, meta)).await
-                }
-                Some(InboundFrame::Tsp(packed)) => self.dispatch(id, self.tsp_work(*packed)).await,
-                Some(_) => {
-                    self.dispatch(id, Work::Unservable("an inbound frame of an unknown kind"))
-                        .await
-                }
-                None => self.undeliverable(id).await,
-            }
-        }
-        Ok(())
-    }
-
-    /// A queued message the SDK could not decode or unpack (`(None, id)`).
+    /// A queued message the SDK could not decode or unpack (`(None, id)`),
+    /// seen at `now`. Returns what was done about it at the mediator (`None`
+    /// when another copy is being handled).
     ///
     /// The SDK does not say why, so a transient failure (the sender's DID
     /// briefly unresolvable) cannot be told from poison here. Acking it at
@@ -360,14 +332,13 @@ impl<H: MessageHandler> Listener<H> {
     /// failed [`delivery::GIVE_UP_ATTEMPTS`] times over
     /// [`delivery::GIVE_UP_MIN_AGE`].
     #[cfg(feature = "tsp")]
-    async fn undeliverable(&self, id: String) {
-        let now = Instant::now();
+    pub(crate) async fn undeliverable_at(&self, id: &str, now: Instant) -> Option<Ack> {
         let decision = {
             let mut ledger = self.ledger();
-            match ledger.claim(&id, now) {
-                Claim::InFlight => return,
+            match ledger.claim(id, now) {
+                Claim::InFlight => return None,
                 Claim::AlreadyHandled => Ack::Now,
-                Claim::Dispatch => ledger.finish(&id, Outcome::Retry, now),
+                Claim::Dispatch => ledger.finish(id, Outcome::Retry, now),
             }
         };
         match decision {
@@ -376,7 +347,7 @@ impl<H: MessageHandler> Listener<H> {
                  retry on the next sync",
                 self.profile.inner.alias
             ),
-            Ack::Now => ack(&self.atm, &self.profile, &id).await,
+            Ack::Now => ack(&self.atm, &self.profile, id).await,
             Ack::GiveUp => {
                 error!(
                     "[profile = {}] queued message {id} still cannot be unpacked after {} \
@@ -385,17 +356,20 @@ impl<H: MessageHandler> Listener<H> {
                     delivery::GIVE_UP_ATTEMPTS,
                     delivery::GIVE_UP_MIN_AGE
                 );
-                ack(&self.atm, &self.profile, &id).await;
+                ack(&self.atm, &self.profile, id).await;
             }
         }
+        Some(decision)
     }
 
     /// Drain the mediator's queued backlog once at start, then every
     /// [`OFFLINE_SYNC_INTERVAL_SECS`] until shutdown.
     ///
-    /// The periodic drain is also the redelivery path: the live stream pushes
-    /// a message once, so a message left queued after a failed attempt is
-    /// offered again only by this sync.
+    /// The periodic drain is also the redelivery path. The live stream offers
+    /// queued messages again only when live delivery is switched on — on each
+    /// websocket (re)connect the mediator pushes the stored inbox again — so
+    /// on a steady connection a message left queued after a failed attempt is
+    /// offered again by this sync.
     pub(crate) async fn run_offline_sync(self: Arc<Self>) {
         let interval = Duration::from_secs(OFFLINE_SYNC_INTERVAL_SECS);
         loop {

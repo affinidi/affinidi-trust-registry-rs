@@ -244,3 +244,50 @@ async fn a_profile_without_a_live_transport_ends_the_receive_loop_with_an_error(
         .expect("a dead profile ends the receive loop instead of spinning");
     assert!(result.is_err());
 }
+
+/// A queued message the SDK could not unpack (`(None, id)`) is not acked at
+/// once: the SDK does not say whether the failure was transient (R1.6). It is
+/// kept for the next sync until it has failed often enough, for long enough,
+/// and then deleted as undeliverable.
+#[cfg(feature = "tsp")]
+#[tokio::test]
+async fn an_unpackable_queued_message_is_kept_then_given_up_on() {
+    use super::delivery::{Ack, GIVE_UP_ATTEMPTS, GIVE_UP_MIN_AGE};
+
+    let (listener, fake) = listener(Behaviour::Succeed, 1).await;
+    let start = Instant::now();
+    let mut now = start;
+    for _ in 0..GIVE_UP_ATTEMPTS {
+        assert_eq!(
+            listener.undeliverable_at("bad", now).await,
+            Some(Ack::Retain),
+            "kept before the age bound"
+        );
+        now += Duration::from_secs(30);
+    }
+    // Failed often enough; once it has also been failing long enough, it goes.
+    let late = start + GIVE_UP_MIN_AGE;
+    assert_eq!(
+        listener.undeliverable_at("bad", late).await,
+        Some(Ack::GiveUp)
+    );
+    // A copy still queued (the delete did not land) is deleted again.
+    assert_eq!(listener.undeliverable_at("bad", late).await, Some(Ack::Now));
+    // Nothing reached a handler.
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+}
+
+/// An undecodable copy of a message another copy of which is being handled
+/// is left to that handler.
+#[cfg(feature = "tsp")]
+#[tokio::test]
+async fn an_unpackable_copy_of_an_in_flight_message_is_left_alone() {
+    let (listener, fake) = listener(Behaviour::Block, 1).await;
+    listener.dispatch("m1".into(), work()).await;
+    until("the handler to start", || {
+        fake.running.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    assert_eq!(listener.undeliverable_at("m1", Instant::now()).await, None);
+    fake.release.notify_waiters();
+}

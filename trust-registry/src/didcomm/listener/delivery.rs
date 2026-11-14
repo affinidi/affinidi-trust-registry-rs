@@ -1,24 +1,28 @@
-//! Delivery semantics for the pickup listener: when a message is acked
-//! (deleted at the mediator), when it is left queued for redelivery, and how a
-//! message seen on both the live stream and the offline sync is dispatched only
-//! once.
+//! Delivery semantics for the pickup listener and the delivery-layer receive
+//! loop ([`crate::messaging::service`]): when a message is acked (deleted at
+//! the mediator), when it is left queued for redelivery, and how a message
+//! received more than once is dispatched only once.
 //!
 //! # The contract
 //!
-//! - **Ack after handling (R1.6).** Both the live stream and the offline sync
-//!   pull with `auto_delete = false`. A message is deleted at the mediator only
+//! - **Ack after handling (R1.6).** Every receive (the live stream, the
+//!   offline sync, the SDK's `DidCommTransport`) pulls with
+//!   `auto_delete = false`. A message is deleted at the mediator only
 //!   once its handler has returned — for a registry write, once the
 //!   [`TaskHandler`](crate::trust_tasks::TaskHandler) has applied it and
 //!   recorded the outcome in its dedup store.
 //! - **Poison is acked, transient is not.** A failure that is a property of the
 //!   bytes is acked at once so it does not stall the queue. Anything else — a
 //!   handler error, a timeout, a panic, an unpack failure whose class the SDK
-//!   does not report — leaves the message queued, so the offline sync offers
-//!   it again. That redelivery is bounded: after [`GIVE_UP_ATTEMPTS`] failures
+//!   does not report — leaves the message queued, so it is offered again: by
+//!   the next offline sync on the pickup path, or when the mediator next
+//!   pushes the inbox on the delivery-layer path. That redelivery is bounded: after [`GIVE_UP_ATTEMPTS`] failures
 //!   spread over at least [`GIVE_UP_MIN_AGE`] the message is acked as poison
 //!   and logged at `error`, so one bad message cannot loop forever.
-//! - **Dispatched once (R1.4).** The live stream and the offline sync drain the
-//!   same mediator queue, and a message stays queued until its ack lands. The
+//! - **Dispatched once (R1.4).** A message stays queued until its ack lands,
+//!   so it can arrive again: the live stream and the offline sync drain the
+//!   same mediator queue, and the mediator pushes the queued inbox again
+//!   whenever live delivery is switched on (every websocket (re)connect). The
 //!   [`DeliveryLedger`] remembers, by mediator message id, what is in flight
 //!   and what has been handled: a message already in flight is skipped, and a
 //!   message already handled whose ack did not land is acked again rather than
@@ -37,10 +41,10 @@ use std::time::Duration;
 use affinidi_tdk::messaging::errors::ATMError;
 use tokio::time::Instant;
 
-/// Handlers allowed to run at once on the pickup path. The receive loop waits
-/// for a permit before taking the next message off the socket, so a burst
-/// queues at the mediator instead of in this process. The same bound as the
-/// delivery-layer path (`messaging::service`).
+/// Handlers allowed to run at once, on the pickup path and on the
+/// delivery-layer path (`messaging::service`). Each receive loop waits for a
+/// permit before taking the next message off the socket, so a burst queues at
+/// the mediator instead of in this process.
 pub(crate) const MAX_INFLIGHT_HANDLERS: usize = 32;
 
 /// Longest a single handler may run (DID resolution, the repository, packing
@@ -118,6 +122,9 @@ enum Phase {
 
 #[derive(Debug, Clone, Copy)]
 struct Entry {
+    /// Which insertion of the id this is, matched against `order` so a stale
+    /// position left by an earlier insertion never evicts this one.
+    generation: u64,
     phase: Phase,
     /// Failed attempts so far; kept while a retried message is in flight again.
     attempts: u32,
@@ -130,9 +137,12 @@ struct Entry {
 #[derive(Debug)]
 pub(crate) struct DeliveryLedger {
     entries: HashMap<String, Entry>,
-    /// Insertion order, for capacity eviction. May hold ids already removed;
-    /// eviction skips those.
-    order: VecDeque<String>,
+    /// Insertion order, for capacity eviction, as `(id, generation)`. May hold
+    /// positions of ids since removed (expired) or re-inserted; eviction
+    /// skips any position whose generation is not the live entry's.
+    order: VecDeque<(String, u64)>,
+    /// Generation of the next insertion.
+    next_generation: u64,
     capacity: usize,
     ttl: Duration,
 }
@@ -148,6 +158,7 @@ impl DeliveryLedger {
         Self {
             entries: HashMap::new(),
             order: VecDeque::new(),
+            next_generation: 0,
             capacity: capacity.max(1),
             ttl,
         }
@@ -161,6 +172,7 @@ impl DeliveryLedger {
             self.insert(
                 id,
                 Entry {
+                    generation: 0,
                     phase: Phase::InFlight,
                     attempts: 0,
                     first_failed: None,
@@ -188,6 +200,7 @@ impl DeliveryLedger {
             self.insert(
                 id,
                 Entry {
+                    generation: 0,
                     phase: Phase::InFlight,
                     attempts: 0,
                     first_failed: None,
@@ -245,21 +258,35 @@ impl DeliveryLedger {
         self.entries.len()
     }
 
-    fn insert(&mut self, id: &str, entry: Entry) {
+    fn insert(&mut self, id: &str, mut entry: Entry) {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
+        entry.generation = generation;
         self.entries.insert(id.to_string(), entry);
-        self.order.push_back(id.to_string());
+        self.order.push_back((id.to_string(), generation));
         while self.entries.len() > self.capacity {
-            let Some(oldest) = self.order.pop_front() else {
+            let Some((oldest, generation)) = self.order.pop_front() else {
                 break;
             };
-            self.entries.remove(&oldest);
+            // Only the position recorded by the live entry's own insertion
+            // evicts it. An id that expired and came back has an older
+            // position too; popping that one must not remove the new entry.
+            if self
+                .entries
+                .get(&oldest)
+                .is_some_and(|entry| entry.generation == generation)
+            {
+                self.entries.remove(&oldest);
+            }
         }
-        // Keep `order` from growing without bound on ids already removed.
+        // Keep `order` from growing without bound on stale positions.
         if self.order.len() > self.capacity.saturating_mul(2) {
             let entries = &self.entries;
-            let mut seen = std::collections::HashSet::new();
-            self.order
-                .retain(|id| entries.contains_key(id) && seen.insert(id.clone()));
+            self.order.retain(|(id, generation)| {
+                entries
+                    .get(id)
+                    .is_some_and(|entry| entry.generation == *generation)
+            });
         }
     }
 
@@ -438,6 +465,35 @@ mod tests {
         // The oldest was forgotten.
         assert_eq!(ledger.claim("a", now), Claim::Dispatch);
         assert_eq!(ledger.claim("d", now), Claim::AlreadyHandled);
+    }
+
+    /// An id that expires and comes back has two positions in the eviction
+    /// order. Popping the stale one must not evict the live entry.
+    #[test]
+    fn an_expired_id_that_returns_is_not_evicted_by_its_stale_position() {
+        let ttl = Duration::from_secs(60);
+        let mut ledger = DeliveryLedger::new(2, ttl);
+        let start = t0();
+        ledger.claim("a", start);
+        ledger.finish("a", Outcome::Handled, start);
+        let b_at = start + Duration::from_secs(50);
+        ledger.claim("b", b_at);
+        ledger.finish("b", Outcome::Handled, b_at);
+        // "a" expires (b does not), then is delivered and handled again: it is
+        // now the newest entry, with a stale position at the front.
+        let later = start + ttl + Duration::from_secs(1);
+        assert_eq!(ledger.claim("a", later), Claim::Dispatch);
+        ledger.finish("a", Outcome::Handled, later);
+        // A third id overflows the capacity of 2. The oldest live entry is
+        // "b", so "b" is the one forgotten, not the live "a".
+        ledger.claim("c", later);
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(
+            ledger.claim("a", later),
+            Claim::AlreadyHandled,
+            "the live entry was evicted through its stale position"
+        );
+        assert_eq!(ledger.claim("b", later), Claim::Dispatch);
     }
 
     #[test]

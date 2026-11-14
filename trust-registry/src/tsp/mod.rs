@@ -2,10 +2,19 @@
 //!
 //! Feature-gated behind `tsp` (off by default — `affinidi-tsp` is a moving 0.x
 //! dependency). TSP frames arrive **multiplexed on the same mediator websocket**
-//! as DIDComm (the DIDComm listener pulls both via `live_stream_next_frame` and
-//! routes `InboundFrame::Tsp` frames here) and feed the same
-//! [`RegistryDispatcher`](crate::trust_tasks::RegistryDispatcher). The registry
-//! must not open a second websocket: the mediator allows only one per DID.
+//! as DIDComm: the mediator allows one websocket per DID, so the registry never
+//! opens a second one for TSP.
+//!
+//! ## Receive path
+//!
+//! With `ENABLE_TSP=true` the registry receives through the SDK's
+//! `DidCommTransport` ([`crate::messaging::service`]) for both
+//! `DidCommSource::Managed` and `DidCommSource::SharedAtm`. The transport
+//! unpacks each TSP frame, records relationship-control frames (Rev 3
+//! §7.2.2) and hands application frames to [`dispatch_tsp_application`],
+//! which feeds the same [`TaskHandler`] as DIDComm. With TSP disabled the
+//! DIDComm pickup listener ([`crate::didcomm::listener`]) receives instead and
+//! drops any TSP frame it sees.
 //!
 //! ## Wire format
 //!
@@ -27,97 +36,14 @@
 //! — is unit-tested here; the websocket transport is not.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use affinidi_tdk::messaging::{ATM, errors::ATMError, profiles::ATMProfile};
+use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
 use serde_json::Value;
 use tracing::{error, info, warn};
 use trust_tasks_rs::TrustTask;
 use trust_tasks_tsp::ENVELOPE_TYPE;
 
 use crate::trust_tasks::TaskHandler;
-
-/// Attempts (including the first) for an unpack whose failure looks transient.
-const UNPACK_MAX_ATTEMPTS: u32 = 3;
-/// Backoff before the second attempt; doubles up to [`UNPACK_MAX_BACKOFF`].
-const UNPACK_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
-/// Ceiling on the backoff. The receive loop has already moved on (each frame is
-/// handled on its own task), but a stuck resolver should not pin a task for long.
-const UNPACK_MAX_BACKOFF: Duration = Duration::from_millis(1_000);
-
-/// Is this unpack failure worth retrying, or is the frame poison?
-///
-/// The distinction decides whether the frame is acked (R1.6): poison is
-/// deleted at the mediator so it stops being redelivered, while a transient
-/// failure leaves it queued. Acking a transient failure would let a momentary
-/// resolver outage discard a valid signed registry write, so anything
-/// resolution- or network-shaped is treated as transient, and only failures
-/// that are deterministic properties of the bytes are treated as poison.
-///
-/// Mapping (see `affinidi-messaging-sdk` `protocols/tsp.rs`):
-///
-/// - [`ATMError::DIDError`] — resolving the sender's VID or our own DID failed.
-///   The overwhelmingly common transient case.
-/// - [`ATMError::TransportError`] / [`ATMError::Disconnected`] /
-///   [`ATMError::TDKError`] — network or resolver-cache trouble underneath.
-/// - [`ATMError::MsgReceiveError`] — envelope parse failure, a message addressed
-///   to another DID, or decrypt/verify failure. Retrying identical bytes cannot
-///   change any of these.
-/// - [`ATMError::SecretsError`] — our own key material is missing. Not
-///   retried in-process, but not poison either: [`process_tsp_frame`] leaves
-///   the frame queued, as the SDK's receive leg does.
-/// - Everything else is treated as a property of the bytes.
-///
-/// `DIDError` does conflate "the resolver is briefly unreachable" with "this DID
-/// does not exist", and the SDK gives us only a string to go on. Treating both
-/// as transient is the deliberate choice: a genuinely bad DID is redelivered a
-/// bounded number of times before the listener gives up on it, while dropping
-/// a good one loses a signed write permanently.
-fn is_transient_unpack_error(err: &ATMError) -> bool {
-    matches!(
-        err,
-        ATMError::DIDError(_)
-            | ATMError::TransportError(_)
-            | ATMError::Disconnected(_)
-            | ATMError::TDKError(_)
-    )
-}
-
-/// Run `op`, retrying with exponential backoff while it fails transiently.
-///
-/// Returns the first success, or the final error once attempts are exhausted or
-/// a non-transient error is seen. Generic over the operation so the retry policy
-/// is testable without a live mediator.
-async fn retry_transient<T, F, Fut>(
-    attempts: u32,
-    initial_backoff: Duration,
-    max_backoff: Duration,
-    mut op: F,
-) -> Result<T, ATMError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, ATMError>>,
-{
-    let mut backoff = initial_backoff;
-    let mut attempt = 1;
-    loop {
-        match op().await {
-            Ok(value) => return Ok(value),
-            Err(err) => {
-                if attempt >= attempts || !is_transient_unpack_error(&err) {
-                    return Err(err);
-                }
-                warn!(
-                    "TSP unpack failed transiently (attempt {attempt}/{attempts}), \
-                     retrying in {backoff:?}: {err}"
-                );
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(max_backoff);
-                attempt += 1;
-            }
-        }
-    }
-}
 
 /// Parse a `trust-tasks-tsp` binding envelope (`{type, document}`) into a
 /// framework document. Rejects a wrong or missing envelope type.
@@ -156,127 +82,31 @@ async fn handle_inbound(tasks: &TaskHandler, sender_did: &str, doc: TrustTask<Va
     }
 }
 
-/// How [`process_tsp_frame`] ended, which decides whether the pickup listener
-/// acks the frame at the mediator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameOutcome {
-    /// Unpacked and routed; the reply was attempted. Ack it.
-    Handled,
-    /// It can never be handled: it does not unpack for a reason that is a
-    /// property of its bytes, or it decrypted to something that is not a Trust
-    /// Task. Ack it so it stops being redelivered.
-    Poison,
-    /// Unpacking still failed transiently (a resolver hiccup) after the
-    /// in-process retries. Leave it queued: the offline sync offers it again.
-    Transient,
-}
-
-/// Process one inbound TSP frame delivered on the **shared** mediator pickup
-/// socket (the same websocket the DIDComm listener drives via
-/// `live_stream_next_frame`). Decrypts it via `atm.tsp()`, routes it through the
-/// shared dispatcher (proof-verifying writes), and seals the response back to the
-/// sender.
+/// Dispatch one **already-unpacked** inbound TSP application frame, and seal
+/// the reply back to the sender over the shared mediator socket.
 ///
-/// `packed` is the CESR/qb64 stored string carried by `InboundFrame::Tsp` — so we
-/// unpack with `atm.tsp().unpack` (which base64url-decodes first), **not**
-/// `unpack_bytes` (that is for the raw `connect_websocket` path, which yields
-/// already-decoded qb2). The mediator permits only one websocket per DID, so the
-/// registry must never open a second TSP socket — TSP frames arrive multiplexed
-/// on the DIDComm pickup stream.
+/// The SDK's `DidCommTransport` unpacked the frame (and retried a transient
+/// unpack failure) before it reached here, so only the envelope parse, the
+/// dispatch and the reply remain.
 ///
-/// The frame is still queued at the mediator while this runs (the listener
-/// pulls with `auto_delete = false`); the returned [`FrameOutcome`] decides
-/// whether the listener acks it (R1.6).
-pub async fn process_tsp_frame(
-    atm: &Arc<ATM>,
-    profile: &Arc<ATMProfile>,
-    tasks: &TaskHandler,
-    packed: &str,
-) -> FrameOutcome {
-    let alias = &profile.inner.alias;
-
-    // A resolver hiccup is retried in-process first, while the bytes are in
-    // hand; only if it persists is the frame left for redelivery.
-    let unpacked = retry_transient(
-        UNPACK_MAX_ATTEMPTS,
-        UNPACK_INITIAL_BACKOFF,
-        UNPACK_MAX_BACKOFF,
-        // `atm.tsp()` returns a temporary, so build the future inside the async
-        // block where that temporary outlives the borrow.
-        || async { atm.tsp().unpack(profile, packed).await },
-    )
-    .await;
-
-    let (payload, sender_did) = match unpacked {
-        Ok(v) => v,
-        Err(e) if is_transient_unpack_error(&e) => {
-            // Not acked: the frame stays queued and the offline sync offers it
-            // again, a bounded number of times.
-            warn!(
-                "[profile = {alias}] TSP unpack still failing after {UNPACK_MAX_ATTEMPTS} \
-                 attempts; leaving the frame queued for redelivery: {e}"
-            );
-            return FrameOutcome::Transient;
-        }
-        Err(e @ ATMError::SecretsError(_)) => {
-            // Our own key material is missing: local configuration, not a
-            // property of the frame (the SDK's receive leg never deletes on it
-            // either). Left queued, so it is not lost while the operator fixes
-            // the keys; the listener bounds the redelivery.
-            error!(
-                "[profile = {alias}] cannot unpack a TSP frame with this registry's keys; \
-                 leaving it queued: {e}"
-            );
-            return FrameOutcome::Transient;
-        }
-        Err(e) => {
-            // Poison: retrying identical bytes cannot succeed.
-            warn!("[profile = {alias}] Dropping unusable TSP frame: {e}");
-            return FrameOutcome::Poison;
-        }
-    };
-    let doc = match parse_envelope(&payload) {
-        Ok(doc) => doc,
-        Err(e) => {
-            // Also poison — it decrypted cleanly and the contents are wrong.
-            warn!("[profile = {alias}] Dropping TSP message from {sender_did}: {e}");
-            return FrameOutcome::Poison;
-        }
-    };
-    info!(
-        "[profile = {alias}, type = {}, from = {sender_did}] Trust Task (TSP)",
-        doc.type_uri.slug()
-    );
-    let reply = handle_inbound(tasks, &sender_did, doc).await;
-    if let Err(e) = atm.tsp().send(profile, &sender_did, &reply).await {
-        error!("[profile = {alias}] Failed to send TSP response to {sender_did}: {e}");
-    }
-    FrameOutcome::Handled
-}
-
-/// Dispatch one **already-unpacked** inbound TSP application frame delivered by
-/// the delivery layer ([`crate::messaging::service`]), and seal the reply back
-/// to the sender over the shared mediator socket.
-///
-/// This is the delivery-layer counterpart to [`process_tsp_frame`]: with the
-/// `MessagingService` receive path the frame is unpacked — and the relationship
-/// recorded — inside `DidCommTransport` before it reaches here, so there is no
-/// `unpack`/retry (that whole machinery moves into the transport). Only the
-/// envelope parse, the shared-spine dispatch, and the reply remain, identical to
-/// [`process_tsp_frame`]'s tail.
+/// Returns `Err` when the payload is not a Trust Task envelope: a property of
+/// the frame, which the receive loop acks as poison. A reply that cannot be
+/// sent is logged and the frame still counts as handled: the request (a write
+/// included) has been applied, and a client that retries with the same
+/// document id gets the recorded outcome replayed.
 pub async fn dispatch_tsp_application(
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
     tasks: &TaskHandler,
     payload: &[u8],
     sender_did: &str,
-) {
+) -> Result<(), String> {
     let alias = &profile.inner.alias;
     let doc = match parse_envelope(payload) {
         Ok(doc) => doc,
         Err(e) => {
             warn!("[profile = {alias}] Dropping TSP message from {sender_did}: {e}");
-            return;
+            return Err(e);
         }
     };
     info!(
@@ -287,9 +117,11 @@ pub async fn dispatch_tsp_application(
     if let Err(e) = atm.tsp().send(profile, sender_did, &reply).await {
         error!("[profile = {alias}] Failed to send TSP response to {sender_did}: {e}");
     }
+    Ok(())
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -356,116 +188,6 @@ mod tests {
         let bytes = build_envelope(&doc);
         let parsed = parse_envelope(&bytes).expect("round-trips");
         assert_eq!(parsed.type_uri.slug(), "registry/recognition");
-    }
-
-    // --- R1.6 transient/poison classification --------------------------
-
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    /// Fast backoffs so the retry tests do not sleep for real.
-    const TEST_BACKOFF: Duration = Duration::from_millis(1);
-
-    #[test]
-    fn resolver_failures_are_transient() {
-        // The case R1.6 exists for: a momentary resolver outage must not be
-        // mistaken for a bad message.
-        assert!(is_transient_unpack_error(&ATMError::DIDError(
-            "couldn't resolve TSP VID did:web:peer".into()
-        )));
-        assert!(is_transient_unpack_error(&ATMError::TransportError(
-            "connection reset".into()
-        )));
-        assert!(is_transient_unpack_error(&ATMError::TDKError(
-            "resolver cache miss".into()
-        )));
-    }
-
-    /// Bytes that cannot decrypt or parse will never succeed, however often we
-    /// try — retrying them would just delay the drop.
-    #[test]
-    fn crypto_and_parse_failures_are_poison() {
-        assert!(!is_transient_unpack_error(&ATMError::MsgReceiveError(
-            "couldn't unpack TSP message: bad signature".into()
-        )));
-        assert!(!is_transient_unpack_error(&ATMError::MsgReceiveError(
-            "couldn't parse TSP envelope: truncated".into()
-        )));
-        // Our own key material missing is a local misconfiguration.
-        assert!(!is_transient_unpack_error(&ATMError::SecretsError(
-            "no Ed25519 authentication key".into()
-        )));
-    }
-
-    #[tokio::test]
-    async fn transient_failure_is_retried_until_it_succeeds() {
-        let calls = AtomicU32::new(0);
-        let result: Result<&str, ATMError> =
-            retry_transient(3, TEST_BACKOFF, TEST_BACKOFF, || async {
-                // Fail twice, then succeed — the resolver-recovers case.
-                if calls.fetch_add(1, Ordering::SeqCst) < 2 {
-                    Err(ATMError::DIDError("resolver down".into()))
-                } else {
-                    Ok("unpacked")
-                }
-            })
-            .await;
-
-        assert_eq!(result.expect("succeeds on third attempt"), "unpacked");
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test]
-    async fn poison_is_not_retried() {
-        let calls = AtomicU32::new(0);
-        let result: Result<&str, ATMError> =
-            retry_transient(3, TEST_BACKOFF, TEST_BACKOFF, || async {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Err(ATMError::MsgReceiveError("bad signature".into()))
-            })
-            .await;
-
-        assert!(result.is_err());
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "poison must fail on the first attempt, not burn the retry budget"
-        );
-    }
-
-    #[tokio::test]
-    async fn transient_failure_gives_up_after_the_attempt_budget() {
-        let calls = AtomicU32::new(0);
-        let result: Result<&str, ATMError> =
-            retry_transient(3, TEST_BACKOFF, TEST_BACKOFF, || async {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Err(ATMError::DIDError("resolver still down".into()))
-            })
-            .await;
-
-        // The final error stays transient-classified so the call site can log
-        // it as a possible lost write rather than a rejection.
-        let err = result.expect_err("gives up");
-        assert!(is_transient_unpack_error(&err));
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test]
-    async fn first_attempt_success_does_not_sleep() {
-        let calls = AtomicU32::new(0);
-        let result: Result<&str, ATMError> = retry_transient(
-            3,
-            Duration::from_secs(30),
-            Duration::from_secs(30),
-            || async {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Ok("unpacked")
-            },
-        )
-        .await;
-
-        // A 30s backoff would hang the test if the happy path slept.
-        assert!(result.is_ok());
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

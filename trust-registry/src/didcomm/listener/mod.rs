@@ -67,6 +67,12 @@ pub enum DidCommSource {
     /// frames go to whichever reader takes them first, so two readers on one
     /// socket silently split the traffic. If the host needs to keep reading,
     /// use [`HostDriven`](Self::HostDriven) instead.
+    ///
+    /// With TSP enabled the registry receives through the SDK's
+    /// `DidCommTransport` over this connection (see `crate::messaging`), and
+    /// inbound TSP relationships are recorded in the lent ATM's relationship
+    /// store, whose durability and bound are the host's to configure. The
+    /// profile's websocket must already be enabled.
     SharedAtm {
         atm: Arc<ATM>,
         profile: Arc<ATMProfile>,
@@ -91,20 +97,6 @@ impl std::fmt::Debug for DidCommSource {
     }
 }
 
-/// TSP routing context attached to a [`Listener`] when built with `--features
-/// tsp`. The dispatcher is shared (`Arc`) so per-frame handlers can be spawned
-/// without cloning the closures; the proof verifier is the same one the DIDComm
-/// handler uses.
-#[cfg(feature = "tsp")]
-pub(crate) struct TspContext {
-    /// The same [`TaskHandler`](crate::trust_tasks::TaskHandler) the DIDComm
-    /// binding routes through, so a document arriving over either transport
-    /// gets the same freshness checks, write ACL, proof verification and
-    /// message-id dedup — including replaying rather than re-applying a
-    /// mutation redelivered over the *other* transport.
-    pub(crate) tasks: crate::trust_tasks::TaskHandler,
-}
-
 pub struct Listener<H: MessageHandler> {
     pub atm: Arc<ATM>,
     pub profile: Arc<ATMProfile>,
@@ -116,9 +108,6 @@ pub struct Listener<H: MessageHandler> {
     /// Handler slots; see [`delivery::MAX_INFLIGHT_HANDLERS`].
     pub(crate) permits: Arc<tokio::sync::Semaphore>,
     pub(crate) max_inflight: usize,
-    /// Routing for TSP frames multiplexed onto the DIDComm pickup socket.
-    #[cfg(feature = "tsp")]
-    pub(crate) tsp: Option<TspContext>,
 }
 
 impl<H: MessageHandler> Listener<H> {
@@ -136,8 +125,6 @@ impl<H: MessageHandler> Listener<H> {
             ledger: Arc::default(),
             permits: Arc::new(tokio::sync::Semaphore::new(delivery::MAX_INFLIGHT_HANDLERS)),
             max_inflight: delivery::MAX_INFLIGHT_HANDLERS,
-            #[cfg(feature = "tsp")]
-            tsp: None,
         }
     }
 
@@ -149,38 +136,34 @@ impl<H: MessageHandler> Listener<H> {
         self.max_inflight = max;
         self
     }
-
-    /// Attach the TSP dispatcher + proof verifier so TSP frames arriving on the
-    /// shared pickup socket are routed through the same registry dispatcher as
-    /// DIDComm.
-    #[cfg(feature = "tsp")]
-    pub(crate) fn with_tsp(mut self, tasks: crate::trust_tasks::TaskHandler) -> Self {
-        self.tsp = Some(TspContext { tasks });
-        self
-    }
 }
 
-/// Checks if /.well-known/did.json is reachable with exponential retry
+/// The URL a `did:web` DID document is fetched from: `https://{domain}/.well-known/did.json`,
+/// or `https://{domain}/{path}/did.json` for a DID with a path. `None` for any
+/// other DID method.
+fn did_web_document_url(profile_did: &str) -> Result<Option<String>, DIDCommError> {
+    let Some(did_path) = profile_did.strip_prefix("did:web:") else {
+        return Ok(None);
+    };
+    let parts: Vec<&str> = did_path.split(':').collect();
+    // URL-decode the domain, which may carry a port: did:web:localhost%3A3232
+    let domain = decode(parts[0]).map_err(|_| DIDCommError::InvalidDid)?;
+    Ok(Some(if parts.len() > 1 {
+        format!("https://{domain}/{}/did.json", parts[1..].join("/"))
+    } else {
+        format!("https://{domain}/.well-known/did.json")
+    }))
+}
+
+/// Checks, with exponential retry, that a `did:web` DID document can be
+/// fetched from [`did_web_document_url`]. Other DID methods are not checked.
 async fn check_did_document_availability(
     profile_did: &str,
     max_attempts: u32,
     initial_delay_secs: u64,
     max_delay_secs: u64,
 ) -> Result<(), DIDCommError> {
-    // Extract the base URL from did:web
-    let did_document_url = if let Some(did_path) = profile_did.strip_prefix("did:web:") {
-        let parts: Vec<&str> = did_path.split(':').collect();
-        // URL decode domain in case it contians port e.g. did:web:localhost%3A3232
-        let domain = decode(parts[0]).map_err(|_| DIDCommError::InvalidDid)?;
-
-        if parts.len() > 1 {
-            let path = parts[1..].join("/");
-            format!("https://{domain}/{path}/did.json")
-        } else {
-            format!("https://{domain}/.well-known/did.json")
-        }
-    } else {
-        // Skip for other DID methods
+    let Some(did_document_url) = did_web_document_url(profile_did)? else {
         info!(
             "DID method is not did:web, skipping DID document availability check for: {}",
             profile_did
@@ -232,7 +215,7 @@ async fn check_did_document_availability(
         }
     }
 
-    Err(DIDCommError::UnreachableDidDocument)
+    Err(DIDCommError::UnreachableDidDocument(did_document_url))
 }
 
 pub(crate) async fn start_one_did_listener(
@@ -272,12 +255,13 @@ pub(crate) async fn start_one_did_listener(
             )
             .await?;
 
-            // A TSP-enabled registry drives the mediator socket through the D1
-            // delivery layer instead of the hand-rolled pickup loop: that path
-            // records inbound TSP relationship-control frames and persists the
-            // relationship state across a restart (Rev 3 §7.2.2), which the
-            // pickup loop's `atm.tsp().unpack()` cannot do. The DIDComm arm is
-            // handled identically (the same `handler` rehydrates each message).
+            // A TSP-enabled registry receives through the SDK's
+            // `DidCommTransport` instead of the pickup loop: that transport
+            // records inbound TSP relationship-control frames (Rev 3 §7.2.2),
+            // which an `atm.tsp().unpack()` on the pickup loop cannot, and this
+            // path persists the relationship state across a restart. DIDComm
+            // messages on the same socket go to the same `handler`; see
+            // `crate::messaging` for how the two receive paths differ.
             #[cfg(feature = "tsp")]
             if config.transport_flags.tsp {
                 return crate::messaging::service::start_managed_delivery(
@@ -309,6 +293,23 @@ pub(crate) async fn start_one_did_listener(
                 "[profile = {}] Attaching to a host-provided mediator connection",
                 &profile.inner.alias
             );
+            // TSP needs the delivery-layer receive path here too: the pickup
+            // loop cannot record relationship-control frames, so with the
+            // SDK's default §7.2.2 gating every TSP Trust Task from a peer
+            // would be dropped. Relationship state is recorded in the lent
+            // ATM's own relationship store.
+            #[cfg(feature = "tsp")]
+            if config.transport_flags.tsp {
+                return crate::messaging::service::start_shared_delivery(
+                    atm,
+                    profile,
+                    config,
+                    Arc::new(handler),
+                    tasks,
+                    shutdown,
+                )
+                .await;
+            }
             Listener::new(atm, profile, Arc::new(handler), shutdown)
         }
         DidCommSource::HostDriven => {
@@ -328,26 +329,14 @@ pub(crate) async fn start_one_did_listener(
         &listener.profile.inner.alias
     );
 
-    // TSP shares the DIDComm pickup socket (the mediator allows one websocket per
-    // DID). Attach the TSP dispatcher + verifier so the receive loop routes
-    // multiplexed `InboundFrame::Tsp` frames alongside DIDComm. Requires both the
-    // `tsp` build feature and ENABLE_TSP=true — the same flag that decides whether
-    // the DID document advertises `TSPTransport`, so the two cannot disagree.
+    // Only a registry with TSP disabled gets here; a TSP frame that reaches
+    // this listener is acked as unservable (`mediator_functions::Work`).
     #[cfg(feature = "tsp")]
-    let listener = if config.transport_flags.tsp {
-        info!(
-            "[profile = {}] TSP frames multiplexed on the DIDComm socket",
-            &listener.profile.inner.alias
-        );
-        listener.with_tsp(tasks)
-    } else {
-        info!(
-            "[profile = {}] TSP disabled (ENABLE_TSP is not 'true'); \
-             multiplexed TSP frames will be ignored",
-            &listener.profile.inner.alias
-        );
-        listener
-    };
+    info!(
+        "[profile = {}] TSP disabled (ENABLE_TSP is not 'true'); TSP frames on this socket \
+         will be dropped",
+        &listener.profile.inner.alias
+    );
 
     Arc::new(listener).start_listening(config).await?;
     Ok(())

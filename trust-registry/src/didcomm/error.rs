@@ -21,8 +21,9 @@ pub enum DIDCommError {
     #[error("Messaging error: {0}")]
     Messaging(String),
 
-    #[error("Trust Registry DID document is unreachable at /.well-known/did.json")]
-    UnreachableDidDocument,
+    /// The `did:web` document could not be fetched; carries the URL tried.
+    #[error("Trust Registry DID document is unreachable at {0}")]
+    UnreachableDidDocument(String),
 
     #[error("Invalid DID format")]
     InvalidDid,
