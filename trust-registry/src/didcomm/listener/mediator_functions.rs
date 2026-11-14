@@ -352,7 +352,7 @@ impl<H: MessageHandler> Listener<H> {
                  retry on the next sync",
                 self.profile.inner.alias
             ),
-            Ack::Now => ack(&self.atm, &self.profile, &self.acks, &id).await,
+            Ack::Now => ack(&self.atm, &self.profile, &self.acks, id).await,
             Ack::GiveUp => {
                 error!(
                     "[profile = {}] queued message {id} still cannot be unpacked after {} \
@@ -364,7 +364,7 @@ impl<H: MessageHandler> Listener<H> {
                 if let Some(health) = &self.health {
                     health.record_given_up();
                 }
-                ack(&self.atm, &self.profile, &self.acks, &id).await;
+                ack(&self.atm, &self.profile, &self.acks, id).await;
             }
         }
         Some(decision)
@@ -430,6 +430,11 @@ pub(crate) fn lock_ledger(
 /// shutdown can send its deletion again directly. Comfortably longer than the
 /// SDK's deletion handler takes to send a batch, retries included.
 pub(crate) const RECENT_ACK_WINDOW: Duration = Duration::from_secs(60);
+/// The most the shutdown flush of recent acks may take, on either receive
+/// path, so the listener's stop stays within the server's shutdown grace. Ids
+/// not reached by then stay queued at the mediator and are redelivered.
+pub(crate) const ACK_FLUSH_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Most ids remembered for [`RECENT_ACK_WINDOW`].
 const RECENT_ACK_CAPACITY: usize = 4_096;
 /// Most ids one direct `DELETE` may carry (the mediator's limit).

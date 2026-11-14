@@ -844,7 +844,7 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 - **`ServerHandle::shutdown` and `join` wait for every task** (#206): with
   REST on, the DIDComm listener's handle was dropped when the HTTP task ended,
   leaving it running. The tasks drain concurrently, each within its own bound
-  (HTTP: the request time limit plus 5s; listener: 75s), and are then
+  (HTTP: the request time limit plus 5s; listener: 80s), and are then
   aborted. A listener still checking its DID document stops on shutdown.
 - **A clean stop no longer loses the acks of messages handled just before
   it** (R1.6). Acks go through the SDK's background deletion handler, which
@@ -853,15 +853,21 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   memory — after a restart. On shutdown the pickup listener now sends the
   deletion of every message acked in the last minute directly, after its
   handlers drain, and then closes the mediator connection it opened (never a
-  host's lent `SharedAtm` connection).
+  host's lent `SharedAtm` connection). On both receive paths (pickup and TSP
+  delivery layer) that direct-delete flush is bounded at 20 seconds and the
+  connection close at 10, so the listener stops within the server's 80-second
+  shutdown grace.
 - **`/health` no longer reports writes `ok` from boot** (#207, R6.1/R6.2/R6.5):
   `starting` until the listener's first round trip with the mediator, then
   driven by the periodic offline sync — `unavailable` after two failures in a
   row or five minutes without a success, `ok` again on recovery; a listener
   still `starting` five minutes after boot is `unavailable` too. The listener
   marks writes unavailable when it stops, whether or not the `ServerHandle`
-  is awaited. A host-driven registry reports `unknown`, and the record store
-  is probed.
+  is awaited. With TSP enabled (the delivery-layer path, managed or on a
+  host's `SharedAtm`), `writes` follows the transport's connection state —
+  `ok` while connected, `unavailable` while it reconnects — and that path
+  counts `givenUpMessages` too. A host-driven registry reports `unknown`, and
+  the record store is probed.
 - **A DID resolver that fails to build is retried** (#240). The registry used
   a `did:key`-only verifier for the life of the process and refused every
   other admin's write as `proofInvalid`. It now rebuilds the resolver in the

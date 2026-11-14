@@ -447,3 +447,42 @@ fn a_failed_accept_says_whether_the_relationship_was_recorded() {
     );
     assert!(accept_failure_note(None).contains("host"));
 }
+
+/// On the delivery-layer path `/health` follows the transport's connection
+/// state, both ways, rather than reporting `unknown` (R6.2), and shows the
+/// given-up counter.
+#[tokio::test]
+async fn health_follows_the_connection_state() {
+    let (transport, _tx) = MockTransport::new();
+    let health = Arc::new(RegistryHealth::new(true));
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn({
+        let inbound_loop = InboundLoop::new(
+            transport.clone(),
+            transport.clone(),
+            FakeSink::new(),
+            "t",
+            shutdown.clone(),
+        )
+        .with_health(Some(health.clone()));
+        async move { inbound_loop.run().await }
+    });
+
+    let writes = || {
+        health.to_json()["writes"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(health.to_json()["givenUpMessages"], 0);
+    transport.conn.send_replace(ConnState::Connected);
+    until("writes ok", || writes() == "ok").await;
+    transport.conn.send_replace(ConnState::Disconnected);
+    until("writes unavailable", || writes() == "unavailable").await;
+    assert_eq!(health.to_json()["status"], "degraded");
+    transport.conn.send_replace(ConnState::Connected);
+    until("writes ok again", || writes() == "ok").await;
+
+    shutdown.cancel();
+    assert_eq!(task.await.unwrap(), LoopEnd::Shutdown);
+}

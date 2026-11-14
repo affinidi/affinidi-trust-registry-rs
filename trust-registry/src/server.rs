@@ -21,9 +21,10 @@ use crate::{
 /// How long [`ServerHandle::join`] waits, once shutdown is under way, for the
 /// DIDComm/TSP listener to stop: draining its in-flight handlers (each bounded
 /// by its own handler and ack time limits, 40 seconds in all), sending their
-/// deletions to the mediator directly, and closing its own mediator
-/// connection, with margin.
-pub const LISTENER_SHUTDOWN_GRACE: Duration = Duration::from_secs(75);
+/// deletions to the mediator directly (at most 20 seconds), and closing its
+/// own mediator connection (at most 10 seconds), with margin. The same bounds
+/// hold on the pickup and the TSP delivery-layer receive paths.
+pub const LISTENER_SHUTDOWN_GRACE: Duration = Duration::from_secs(80);
 
 /// Margin [`ServerHandle::join`] adds to the HTTP request time limit while
 /// waiting for in-flight HTTP requests to drain.

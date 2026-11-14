@@ -278,11 +278,6 @@ pub(crate) async fn start_one_did_listener(
             // `crate::messaging` for how the two receive paths differ.
             #[cfg(feature = "tsp")]
             if config.transport_flags.tsp {
-                // The delivery layer does not report its mediator round trips,
-                // so the write path's state is not observable from here (R6.2).
-                if let Some(health) = &health {
-                    health.mark_writes_unknown();
-                }
                 return crate::messaging::service::start_managed_delivery(
                     profile_config,
                     config,
@@ -325,6 +320,7 @@ pub(crate) async fn start_one_did_listener(
                     config,
                     Arc::new(handler),
                     tasks,
+                    health,
                     shutdown,
                 )
                 .await;
