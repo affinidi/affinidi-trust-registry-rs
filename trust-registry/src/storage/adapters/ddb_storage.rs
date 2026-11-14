@@ -49,9 +49,12 @@ impl DynamoDbStorage {
 
         if let Some(endpoint_url) = &config.endpoint_url {
             loader = loader.endpoint_url(endpoint_url.clone());
-            if endpoint_url.contains("local") {
-                loader = loader.test_credentials();
-            }
+        }
+        // Only on explicit request (`DDB_USE_TEST_CREDENTIALS=true`): inferring
+        // it from the endpoint swapped real credentials for fake ones on any
+        // in-cluster `*.local` hostname.
+        if config.use_test_credentials {
+            loader = loader.test_credentials();
         }
 
         let shared_config = loader.load().await;

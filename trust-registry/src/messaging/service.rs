@@ -37,7 +37,7 @@ use crate::health::RegistryHealth;
 use crate::messaging::kv::{KvKeyspace, MessagingStore};
 use crate::messaging::outbox_store::FjallOutboxStore;
 use crate::messaging::relationship_store::{
-    FjallRelationshipKv, RegistryRelationshipStore, RelationshipLimits, mark_active,
+    FjallRelationshipKv, RegistryRelationshipStore, mark_active,
 };
 use crate::messaging::tsp_inbound::{ControlDecision, decide_control};
 use crate::trust_tasks::TaskHandler;
@@ -45,17 +45,11 @@ use affinidi_messaging_sdk::RelationshipStore as _;
 use affinidi_messaging_sdk::protocols::tsp::RelationshipState;
 
 /// Resolve the on-disk path for the messaging store, namespaced per profile so
-/// two DIDs never share one fjall database. `TR_MESSAGING_STORE_PATH` overrides
-/// the base; otherwise it follows the secret store's data dir convention.
-fn messaging_store_path(alias: &str) -> std::path::PathBuf {
-    let base = std::env::var("TR_MESSAGING_STORE_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::var("TR_SECRETS_DATA_DIR")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::path::PathBuf::from("./.trust-registry"))
-                .join("messaging")
-        });
+/// two DIDs never share one fjall database. The base is
+/// [`DidcommConfig::messaging_store_path`], set from `TR_MESSAGING_STORE_PATH`
+/// (or `TR_SECRETS_DATA_DIR`) when the configuration loads.
+fn messaging_store_path(config: &DidcommConfig, alias: &str) -> std::path::PathBuf {
+    let base = config.messaging_store_path();
     let safe: String = alias
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -78,9 +72,8 @@ pub async fn start_managed_delivery<H: MessageHandler>(
     health: Option<Arc<RegistryHealth>>,
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
-    // A malformed bound stops the listener rather than running unbounded.
-    let limits = RelationshipLimits::from_env().map_err(DIDCommError::Messaging)?;
-    let path = messaging_store_path(&profile_config.alias);
+    let limits = config.relationship_limits;
+    let path = messaging_store_path(&config, &profile_config.alias);
     let path_str = path.to_str().ok_or_else(|| {
         DIDCommError::Messaging(format!("non-UTF-8 messaging store path: {path:?}"))
     })?;

@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 #[derive(Clone)]
 pub struct FileStorage {
@@ -34,6 +34,14 @@ impl FileStorage {
         update_interval_sec: u64,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let file_path = file_path.into();
+        // A zero interval would make the sync task re-read the file's metadata
+        // in a tight loop.
+        if update_interval_sec == 0 {
+            return Err(
+                anyhow!("the CSV update interval must be at least one second")
+                    .into_boxed_dyn_error(),
+            );
+        }
         let update_interval = Duration::from_secs(update_interval_sec);
 
         let records = Arc::new(RwLock::new(HashMap::new()));
@@ -83,7 +91,7 @@ impl FileStorage {
                         break;
                     }
                     _ = sleep(update_interval) => {
-                        info!(path = %file_path.display(), "Syncing trust records from file");
+                        debug!(path = %file_path.display(), "Syncing trust records from file");
 
                         let previous = { *last_modified.read().await };
 
@@ -128,7 +136,7 @@ impl FileStorage {
         if let Some(previous) = last_seen
             && modified <= previous
         {
-            info!(
+            debug!(
                 path = %path.display(),
                 "No changes detected in trust records file"
             );
@@ -412,6 +420,18 @@ mod tests {
     async fn fails_when_initial_load_fails() {
         let result = FileStorage::try_new("/does/not/exist.csv", 1).await;
         assert!(result.is_err());
+    }
+
+    /// A zero interval would spin the sync task; it is refused before the
+    /// file is read.
+    #[tokio::test]
+    async fn a_zero_update_interval_is_refused() {
+        let file = NamedTempFile::new().unwrap();
+        let err = FileStorage::try_new(file.path(), 0)
+            .await
+            .err()
+            .expect("zero interval refused");
+        assert!(err.to_string().contains("interval"), "{err}");
     }
 
     /// The validity columns are optional: an empty cell is no bound, and a

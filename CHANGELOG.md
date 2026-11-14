@@ -76,6 +76,83 @@ release goes GA (`## 0.27.0 (date)`).
   poison, or transient), which decides whether the pickup listener acks the
   frame.
 
+- **Configuration is strict: a value that does not parse stops startup with an
+  error naming the variable**, where it used to be replaced by a default or
+  reported without the variable's name. A configuration that started before
+  may now refuse to (#214, #215, #217, #219, #255):
+  - `TR_STORAGE_BACKEND`: anything but `csv`, `dynamodb`/`ddb`, `redis` or
+    `fjall` (case-insensitive) is an error; it used to select the CSV file.
+    Unset still means `csv`.
+  - `FILE_STORAGE_UPDATE_INTERVAL_SEC`: must be a positive whole number; `0`
+    (which spun the CSV sync task) and non-numbers are errors.
+    `FileStorage::try_new` also refuses `0`.
+  - `AUDIT_LOG_FORMAT`: anything but `json` or `text` is an error; it used to
+    become `json`.
+  - `DID_CHECK_MAX_ATTEMPTS`, `DID_CHECK_INITIAL_DELAY_SECS`,
+    `DID_CHECK_MAX_DELAY_SECS`: must be positive whole numbers, with the
+    maximum delay at least the initial one; bad values used to fall back to
+    the defaults. `DidDocumentRetryConfig::default()` now matches the
+    environment defaults (maximum delay `20`, was `30`).
+  - `TR_SECRETS_ALLOW_PLAINTEXT`: must be `true` or `false` (anything else
+    used to mean `false`); `VAULT_SKIP_VERIFY` / `TR_SECRETS_VAULT_SKIP_VERIFY`:
+    one of `true`/`false`, `1`/`0`, `yes`/`no` (anything else used to mean
+    `false`). `DDB_USE_TEST_CREDENTIALS` (new) is `true`/`false`.
+  - `PROFILE_CONFIG`, `DID_DOCUMENT`, `TR_VTA_CREDENTIAL`: a value that starts
+    like a URI (`<scheme>:`) with a scheme other than `string://`, `file://`,
+    `aws_secrets://` or `aws_parameter_store://` is an error naming the
+    variable; it used to be taken as the literal value. Inline JSON is still
+    the value itself. `DID_DOCUMENT` must now be JSON.
+- **DynamoDB: the region is no longer forced to `ap-southeast-1`.** With
+  `AWS_REGION` unset the AWS SDK resolves it (`AWS_DEFAULT_REGION`, the
+  profile, instance metadata); a deployment that relied on the old default
+  must set `AWS_REGION=ap-southeast-1`. **Test credentials are used only with
+  `DDB_USE_TEST_CREDENTIALS=true`**, never because the endpoint URL contains
+  `local`; DynamoDB Local / LocalStack setups without real credentials must
+  set it. `DYNAMODB_ENDPOINT` is the endpoint variable; `AWS_ENDPOINT` is
+  deprecated (still read, with a warning) and both set to different values
+  is an error. `DynamoDbStorageConfig` has a new public field
+  `use_test_credentials` (#215).
+- **Secret-store selection agrees with `vti-secrets` and refuses ambiguous or
+  half-configured setups** (#217):
+  - `TR_SECRETS_AZURE_SECRET_NAME` without `TR_SECRETS_AZURE_VAULT_URL` (or
+    the reverse), `TR_SECRETS_VAULT_SECRET_PATH` without a Vault address (or
+    the reverse), and `TR_SECRETS_GCP_SECRET_NAME` without
+    `TR_SECRETS_GCP_PROJECT` are errors naming the missing variable; they
+    used to land the profile in another store (the keyring) or fail with a
+    message about plaintext.
+  - Setting the activating variables of more than one backend is an error
+    unless `TR_SECRETS_BACKEND` (new) names one; it used to pick by priority.
+  - `VAULT_ADDR`, `VAULT_TOKEN`, `VAULT_NAMESPACE` and `VAULT_SKIP_VERIFY` are
+    honoured only when Vault is requested (`TR_SECRETS_VAULT_SECRET_PATH` or
+    `TR_SECRETS_BACKEND=vault`); an ambient `VAULT_ADDR` no longer selects
+    Vault or breaks another backend.
+  - `secret_store::secrets_config_from_env` returns `Result`, and
+    `backend_selected` follows the same rule as `vti_secrets::create_seed_store`
+    (Azure is selected by its vault URL, Vault by its address).
+    `setup-trust-registry` refuses to provision into the read-only
+    `TR_SECRETS_SEED`.
+- **The VTA offline cache has its own slot in the secret store** (#218): the
+  configured secret name (Vault path, Kubernetes `Secret` name, keyring
+  service) with `-vta-cache` appended, or `<TR_SECRETS_DATA_DIR>/vta-cache/`
+  for the plaintext file. It no longer overwrites a provisioned profile
+  bundle. A cache an earlier release wrote to the unsuffixed slot is still
+  read; grant the registry access to the new name. `VtaSecretCache` is now
+  built with `VtaSecretCache::new(config, data_dir)`, `startup_profile_json`
+  takes the `VtaConfig` and the cache, and `rotate_did` takes the
+  `Option<&VtaConfig>` it rotates through as its first argument.
+- **Environment reads moved inside the `Configs` boundary** (#257).
+  `DidcommConfig` has new public fields `messaging_store_path`
+  (`TR_MESSAGING_STORE_PATH`, else `<TR_SECRETS_DATA_DIR>/messaging`),
+  `relationship_limits` (`tsp`; the `TR_TSP_*` bounds, so a bad value now
+  stops startup instead of the listener) and `vta` (`vta`; the credential
+  `did/rotate` uses, loaded once instead of re-read from `TR_VTA_*` on every
+  rotation). An embedded registry is unaffected by those variables;
+  `TrustRegistryConfig::embedded` puts the messaging store under its data
+  directory.
+- **`.env.example` starts with `ENABLE_DIDCOMM=false`** and no sample
+  `PROFILE_CONFIG` (the old one was not valid JSON), so a copy of it starts;
+  `setup-trust-registry` now writes `ENABLE_DIDCOMM` to `.env` (#259).
+
 ### Added
 
 - **Audit entries for writes carry `document_digest`**, the SHA-256 (hex) of
@@ -102,6 +179,17 @@ release goes GA (`## 0.27.0 (date)`).
 - **`trql-client`: `HttpsTransportConfig::allow_non_public_addresses`**
   opts out of the address check above (see Breaking). New constants
   `DEFAULT_MAX_RESPONSE_BYTES` and `MAX_ERROR_DETAIL_CHARS`.
+
+- **`TR_SECRETS_BACKEND`** names the secret-store backend explicitly
+  (`aws`, `gcp`, `azure`, `vault`, `kubernetes`, `config_seed`, `keyring`,
+  `plaintext`), mapped to `vti_secrets::SecretsConfig::backend`; the selected
+  backend is logged at startup (#217).
+- **`DDB_USE_TEST_CREDENTIALS`** for DynamoDB Local / LocalStack (#215).
+- The storage backend in use and its location are logged at startup (#214).
+- `configs::loaders::load_setting`, `loaders::environment::{parse_env,
+  positive_env, env_flag, non_empty_env}`, `configs::vta::VtaConfig` and
+  `vta_cache_slot`, `secret_store::{selected_backend, backend_name,
+  parse_secret_backend}`.
 
 ### Changed
 
@@ -393,6 +481,28 @@ release goes GA (`## 0.27.0 (date)`).
   accepting the reply. The `TrqlTransport` signature is unchanged; its
   documentation now states that a transport returns only the addressed
   party's reply.
+- **The documented VTA offline cache did not exist**: with the documented
+  `--features vta` build and environment, the cache write failed and was only
+  logged. The documentation now says a cache needs a configured backend (or
+  `TR_SECRETS_ALLOW_PLAINTEXT=true` for development), and startup warns,
+  naming the variables, when there is none (#218).
+- The environment reference in `README.md`, `.env.example`,
+  `.env.vta.example`, `VTA_SETUP.md` and `SETUP_COMMAND_REFERENCES.md` now
+  lists every variable the server reads with its real default and
+  Required marking (`TR_STORAGE_BACKEND`, `FILE_STORAGE_PATH`,
+  `TR_FJALL_PATH`, `CORS_ALLOWED_ORIGINS` and `ADMIN_DIDS` are optional;
+  `FILE_STORAGE_UPDATE_INTERVAL_SEC`, `AWS_REGION`, `AWS_PROFILE`,
+  `DYNAMODB_ENDPOINT`, `DID_DOCUMENT`, `DID_CHECK_*`, `TR_CAPABILITY_STATE`
+  and `TR_MESSAGING_STORE_PATH` were undocumented), documents the DynamoDB
+  table schema, and says that `TR_SECRETS_SEED` holds the hex-encoded profile
+  bundle and is read-only (#215, #217, #259).
+- `ADMIN_DIDS` ignores empty entries; unset used to yield one empty admin
+  DID (#255).
+- A profile bundle that does not parse names its source (`PROFILE_CONFIG`,
+  the secret store or the VTA) (#255).
+- The CSV backend's per-poll messages are logged at `debug`, not `info`
+  (#255).
+- `file://` loader values are read without blocking the async runtime (#219).
 
 ## 0.31.0 (release/0.31)
 

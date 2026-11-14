@@ -328,6 +328,8 @@ fn write_task_handler(
     .with_dedup(dedup.clone())
     .with_capabilities(capabilities.clone())
     .with_audit(audit.clone() as Arc<dyn AuditLogger>);
+    #[cfg(feature = "vta")]
+    let handler = handler.with_vta(config.didcomm_config.vta.clone());
     with_reply_signer(handler, config)
 }
 

@@ -343,8 +343,8 @@ credential.
 ### Step 4 — Build with the `vta` feature
 
 ```bash
-# add a secrets backend feature (e.g. secrets-aws) if you want the offline
-# cache stored in a cloud backend rather than on local disk
+# add a secrets backend feature (e.g. secrets-aws) for the offline cache;
+# a plain `vta` build can cache only to a plaintext file (dev/test, Step 6)
 cargo build --release --bin trust-registry --features vta
 ```
 
@@ -369,9 +369,11 @@ TR_VTA_CONTEXT_ID=trust-registry    # the --id slug from Step 2
 # TR_VTA_URL=https://vta.example.com  # optional; overrides vtaUrl in the credential
 # TR_ALIAS=Trust Registry             # optional; default "Trust Registry"
 
-# --- offline cache location (optional; see Step 6) ---
-# TR_SECRETS_AWS_SECRET_NAME=trust-registry/vta-cache
+# --- offline cache (see Step 6; without one, startup warns) ---
+# TR_SECRETS_AWS_SECRET_NAME=trust-registry   # cache kept in trust-registry-vta-cache
 # TR_SECRETS_AWS_REGION=ap-southeast-1
+# or, dev/test only, a plaintext file under ./.trust-registry/vta-cache/:
+# TR_SECRETS_ALLOW_PLAINTEXT=true
 
 # --- server ---
 LISTEN_ADDRESS=0.0.0.0:3232
@@ -387,9 +389,23 @@ use `aws_secrets://<name>`, `aws_parameter_store://<name>`, or inline the JSON a
 ### Step 6 — Offline cache (recommended)
 
 If the VTA is unreachable at boot, the registry falls back to a cached copy of
-the last bundle, stored in whichever `TR_SECRETS_*` backend you configure
-(default: local dir `./.trust-registry`; build the matching `secrets-*` feature
-for cloud backends).
+the last bundle, stored in the secret store you configure with `TR_SECRETS_*`
+(build the matching `secrets-*` feature; see the README's
+[secret-store backends](README.md#secret-store-backends-secrets-)).
+
+- **There is no cache unless you configure one.** A `--features vta` build has
+  no keyring, so with no `TR_SECRETS_*` backend the cache can only be the
+  plaintext file `<TR_SECRETS_DATA_DIR>/vta-cache/seed.plaintext` (default
+  `./.trust-registry/vta-cache/`), and only with
+  `TR_SECRETS_ALLOW_PLAINTEXT=true` — dev/test only. Without either, startup
+  logs `VTA offline cache unavailable …` naming these variables.
+- **The cache has its own slot**, so it never overwrites a profile bundle kept
+  in the same store: the configured secret name (or Vault path, Kubernetes
+  `Secret` name, keyring service) with `-vta-cache` appended. Grant the
+  registry access to that name. A cache written by an earlier release into the
+  unsuffixed slot is still read until the first successful VTA fetch writes the
+  new one.
+- `TR_SECRETS_SEED` is read-only and cannot hold the cache.
 
 > **Caveat:** if the VTA is down **and** the cache is empty, startup fails —
 > there is no fallback to `PROFILE_CONFIG`.

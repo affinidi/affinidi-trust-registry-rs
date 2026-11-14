@@ -1,8 +1,9 @@
+use tracing::{info, warn};
+
 use super::{Configs, loaders::environment::*};
 
-const DEFAULT_TRUST_REGISTRY_FILE_PATH: &str = "trust_records.csv";
-const DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC: u64 = 60;
-const DEFAULT_REGION: &str = "ap-southeast-1";
+pub const DEFAULT_TRUST_REGISTRY_FILE_PATH: &str = "trust_records.csv";
+pub const DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC: u64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrustStorageBackend {
@@ -15,22 +16,40 @@ pub enum TrustStorageBackend {
     Fjall,
 }
 
-const DEFAULT_FJALL_PATH: &str = "./trust_records.fjall";
+pub const DEFAULT_FJALL_PATH: &str = "./trust_records.fjall";
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct FileStorageConfig {
     pub is_enabled: bool,
     pub path: String,
+    /// How often the file is checked for changes. Must be at least one.
     pub update_interval_sec: u64,
+}
+
+/// The same defaults `FILE_STORAGE_PATH` and `FILE_STORAGE_UPDATE_INTERVAL_SEC`
+/// take when unset.
+impl Default for FileStorageConfig {
+    fn default() -> Self {
+        Self {
+            is_enabled: false,
+            path: DEFAULT_TRUST_REGISTRY_FILE_PATH.to_string(),
+            update_interval_sec: DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
 pub struct DynamoDbStorageConfig {
     pub is_enabled: bool,
     pub table_name: String,
+    /// `None` lets the AWS SDK resolve the region (`AWS_DEFAULT_REGION`, the
+    /// profile, instance metadata).
     pub region: Option<String>,
     pub profile: Option<String>,
     pub endpoint_url: Option<String>,
+    /// Use the SDK's static test credentials, for DynamoDB Local or
+    /// LocalStack. Never inferred from the endpoint.
+    pub use_test_credentials: bool,
 }
 
 impl std::fmt::Debug for DynamoDbStorageConfig {
@@ -44,6 +63,7 @@ impl std::fmt::Debug for DynamoDbStorageConfig {
                 "endpoint_url",
                 &self.endpoint_url.as_deref().map(redact_url_credentials),
             )
+            .field("use_test_credentials", &self.use_test_credentials)
             .finish()
     }
 }
@@ -113,10 +133,20 @@ pub fn redact_url_credentials(raw: &str) -> String {
     url.to_string()
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct FjallStorageConfig {
     pub is_enabled: bool,
     pub path: String,
+}
+
+/// The same default `TR_FJALL_PATH` takes when unset.
+impl Default for FjallStorageConfig {
+    fn default() -> Self {
+        Self {
+            is_enabled: false,
+            path: DEFAULT_FJALL_PATH.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -128,98 +158,333 @@ pub struct StorageConfig {
     pub storage_backend: TrustStorageBackend,
 }
 
-fn load_storage_backend() -> TrustStorageBackend {
-    let storage_backend_str = env_or("TR_STORAGE_BACKEND", "csv").to_lowercase();
-    match storage_backend_str.as_str() {
-        "dynamodb" | "ddb" => TrustStorageBackend::DynamoDb,
-        "redis" => TrustStorageBackend::Redis,
-        "fjall" => TrustStorageBackend::Fjall,
-        _ => TrustStorageBackend::Csv,
+/// The values `TR_STORAGE_BACKEND` accepts, for error messages.
+const ACCEPTED_BACKENDS: &str = "'csv', 'dynamodb' (or 'ddb'), 'redis', 'fjall'";
+
+/// Parse a `TR_STORAGE_BACKEND` value. Unset or blank means `csv`; anything
+/// that is not one of the accepted names is an error naming the variable, so a
+/// typo such as `dynamo` cannot start the registry on the CSV file instead.
+pub fn parse_storage_backend(raw: Option<&str>) -> Result<TrustStorageBackend, String> {
+    let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(TrustStorageBackend::Csv);
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        "csv" => Ok(TrustStorageBackend::Csv),
+        "dynamodb" | "ddb" => Ok(TrustStorageBackend::DynamoDb),
+        "redis" => Ok(TrustStorageBackend::Redis),
+        "fjall" => Ok(TrustStorageBackend::Fjall),
+        _ => Err(format!(
+            "TR_STORAGE_BACKEND must be one of {ACCEPTED_BACKENDS} (got '{raw}'); \
+             unset means 'csv'"
+        )),
     }
 }
 
-#[async_trait::async_trait]
-impl Configs for FileStorageConfig {
-    async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        if load_storage_backend() == TrustStorageBackend::Csv {
-            Ok(FileStorageConfig {
-                is_enabled: true,
-                path: env_or("FILE_STORAGE_PATH", DEFAULT_TRUST_REGISTRY_FILE_PATH),
-                update_interval_sec: env_or(
-                    "FILE_STORAGE_UPDATE_INTERVAL_SEC",
-                    &DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC.to_string(),
-                )
-                .parse::<u64>()?,
-            })
-        } else {
-            Ok(Default::default())
+fn load_storage_backend() -> Result<TrustStorageBackend, String> {
+    parse_storage_backend(optional_env("TR_STORAGE_BACKEND").as_deref())
+}
+
+impl FileStorageConfig {
+    fn from_env() -> Result<Self, String> {
+        Ok(FileStorageConfig {
+            is_enabled: true,
+            path: env_or("FILE_STORAGE_PATH", DEFAULT_TRUST_REGISTRY_FILE_PATH),
+            update_interval_sec: positive_env(
+                "FILE_STORAGE_UPDATE_INTERVAL_SEC",
+                DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC,
+            )?,
+        })
+    }
+}
+
+impl DynamoDbStorageConfig {
+    fn from_env() -> Result<Self, String> {
+        Ok(DynamoDbStorageConfig {
+            is_enabled: true,
+            table_name: required_env("DDB_TABLE_NAME")?,
+            // Unset: the AWS SDK resolves the region itself (AWS_DEFAULT_REGION,
+            // the selected profile, instance metadata).
+            region: non_empty_env("AWS_REGION"),
+            profile: non_empty_env("AWS_PROFILE"),
+            endpoint_url: ddb_endpoint_from_env()?,
+            use_test_credentials: env_flag("DDB_USE_TEST_CREDENTIALS", false)?,
+        })
+    }
+}
+
+/// `DYNAMODB_ENDPOINT`, or the deprecated `AWS_ENDPOINT` spelling. Both set to
+/// different values is an error rather than a silent pick of one.
+fn ddb_endpoint_from_env() -> Result<Option<String>, String> {
+    let current = non_empty_env("DYNAMODB_ENDPOINT");
+    let deprecated = non_empty_env("AWS_ENDPOINT");
+    match (current, deprecated) {
+        (Some(current), Some(deprecated)) if current != deprecated => Err(
+            "DYNAMODB_ENDPOINT and the deprecated AWS_ENDPOINT are both set, to different \
+             values; set DYNAMODB_ENDPOINT only"
+                .to_string(),
+        ),
+        (Some(current), _) => Ok(Some(current)),
+        (None, Some(deprecated)) => {
+            warn!("AWS_ENDPOINT is deprecated for the DynamoDB backend; use DYNAMODB_ENDPOINT");
+            Ok(Some(deprecated))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+impl RedisStorageConfig {
+    fn from_env() -> Result<Self, String> {
+        Ok(RedisStorageConfig {
+            is_enabled: true,
+            redis_url: required_env("REDIS_URL")?,
+        })
+    }
+}
+
+impl FjallStorageConfig {
+    fn from_env() -> Self {
+        FjallStorageConfig {
+            is_enabled: true,
+            path: env_or("TR_FJALL_PATH", DEFAULT_FJALL_PATH),
         }
     }
 }
 
-#[async_trait::async_trait]
-impl Configs for DynamoDbStorageConfig {
-    async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        if load_storage_backend() == TrustStorageBackend::DynamoDb {
-            Ok(DynamoDbStorageConfig {
-                is_enabled: true,
-                table_name: required_env("DDB_TABLE_NAME")?,
-                region: Some(env_or("AWS_REGION", DEFAULT_REGION)),
-                profile: optional_env("AWS_PROFILE"),
-                endpoint_url: optional_env("AWS_ENDPOINT")
-                    .or_else(|| optional_env("DYNAMODB_ENDPOINT")),
-            })
-        } else {
-            Ok(Default::default())
+/// Each sub-config loads its own settings only when `TR_STORAGE_BACKEND`
+/// selects it, and the default (disabled) value otherwise.
+macro_rules! load_when_selected {
+    ($ty:ty, $backend:expr, $from_env:expr) => {
+        #[async_trait::async_trait]
+        impl Configs for $ty {
+            async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+                if load_storage_backend()? == $backend {
+                    Ok($from_env)
+                } else {
+                    Ok(Default::default())
+                }
+            }
         }
-    }
+    };
 }
 
-#[async_trait::async_trait]
-impl Configs for RedisStorageConfig {
-    async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        if load_storage_backend() == TrustStorageBackend::Redis {
-            Ok(RedisStorageConfig {
-                is_enabled: true,
-                redis_url: required_env("REDIS_URL")?,
-            })
-        } else {
-            Ok(Default::default())
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl Configs for FjallStorageConfig {
-    async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        if load_storage_backend() == TrustStorageBackend::Fjall {
-            Ok(FjallStorageConfig {
-                is_enabled: true,
-                path: env_or("TR_FJALL_PATH", DEFAULT_FJALL_PATH),
-            })
-        } else {
-            Ok(Default::default())
-        }
-    }
-}
+load_when_selected!(
+    FileStorageConfig,
+    TrustStorageBackend::Csv,
+    FileStorageConfig::from_env()?
+);
+load_when_selected!(
+    DynamoDbStorageConfig,
+    TrustStorageBackend::DynamoDb,
+    DynamoDbStorageConfig::from_env()?
+);
+load_when_selected!(
+    RedisStorageConfig,
+    TrustStorageBackend::Redis,
+    RedisStorageConfig::from_env()?
+);
+load_when_selected!(
+    FjallStorageConfig,
+    TrustStorageBackend::Fjall,
+    FjallStorageConfig::from_env()
+);
 
 #[async_trait::async_trait]
 impl Configs for StorageConfig {
     async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let storage_backend = load_storage_backend();
-        Ok(StorageConfig {
-            ddb_storage_config: DynamoDbStorageConfig::load().await?,
-            file_storage_config: FileStorageConfig::load().await?,
-            redis_storage_config: RedisStorageConfig::load().await?,
-            fjall_storage_config: FjallStorageConfig::load().await?,
+        // Read once: every sub-config below follows this one value.
+        let storage_backend = load_storage_backend()?;
+        let mut config = StorageConfig {
             storage_backend,
-        })
+            ..Default::default()
+        };
+        let location = match storage_backend {
+            TrustStorageBackend::Csv => {
+                config.file_storage_config = FileStorageConfig::from_env()?;
+                config.file_storage_config.path.clone()
+            }
+            TrustStorageBackend::DynamoDb => {
+                config.ddb_storage_config = DynamoDbStorageConfig::from_env()?;
+                format!("table {}", config.ddb_storage_config.table_name)
+            }
+            TrustStorageBackend::Redis => {
+                config.redis_storage_config = RedisStorageConfig::from_env()?;
+                redact_url_credentials(&config.redis_storage_config.redis_url)
+            }
+            TrustStorageBackend::Fjall => {
+                config.fjall_storage_config = FjallStorageConfig::from_env();
+                config.fjall_storage_config.path.clone()
+            }
+        };
+        info!(backend = ?storage_backend, location = %location, "trust record storage selected");
+        Ok(config)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    const STORAGE_VARS: &[&str] = &[
+        "TR_STORAGE_BACKEND",
+        "FILE_STORAGE_PATH",
+        "FILE_STORAGE_UPDATE_INTERVAL_SEC",
+        "DDB_TABLE_NAME",
+        "AWS_REGION",
+        "AWS_PROFILE",
+        "AWS_ENDPOINT",
+        "DYNAMODB_ENDPOINT",
+        "DDB_USE_TEST_CREDENTIALS",
+        "REDIS_URL",
+        "TR_FJALL_PATH",
+    ];
+
+    fn clear_storage_env() {
+        for k in STORAGE_VARS {
+            unsafe { std::env::remove_var(k) };
+        }
+    }
+
+    #[test]
+    fn storage_backend_accepts_each_documented_name() {
+        assert_eq!(parse_storage_backend(None), Ok(TrustStorageBackend::Csv));
+        assert_eq!(
+            parse_storage_backend(Some(" ")),
+            Ok(TrustStorageBackend::Csv)
+        );
+        for (raw, expected) in [
+            ("csv", TrustStorageBackend::Csv),
+            ("DynamoDB", TrustStorageBackend::DynamoDb),
+            ("ddb", TrustStorageBackend::DynamoDb),
+            (" redis ", TrustStorageBackend::Redis),
+            ("fjall", TrustStorageBackend::Fjall),
+        ] {
+            assert_eq!(parse_storage_backend(Some(raw)), Ok(expected), "{raw}");
+        }
+    }
+
+    /// A misspelt backend used to start the registry on the CSV file.
+    #[test]
+    fn an_unknown_storage_backend_is_an_error_naming_the_variable() {
+        for raw in ["dynamo", "reddis", "fjal", "file"] {
+            let err = parse_storage_backend(Some(raw)).expect_err(raw);
+            assert!(err.contains("TR_STORAGE_BACKEND"), "{err}");
+            assert!(err.contains(raw), "{err}");
+            assert!(err.contains("'redis'"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_unknown_storage_backend_stops_configuration() {
+        clear_storage_env();
+        unsafe { std::env::set_var("TR_STORAGE_BACKEND", "dynamo") };
+        let err = StorageConfig::load().await.expect_err("refused");
+        assert!(err.to_string().contains("TR_STORAGE_BACKEND"), "{err}");
+        let err = FileStorageConfig::load().await.expect_err("refused");
+        assert!(err.to_string().contains("TR_STORAGE_BACKEND"), "{err}");
+        clear_storage_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn the_csv_defaults_match_the_default_impl() {
+        clear_storage_env();
+        let loaded = StorageConfig::load().await.expect("defaults load");
+        let default = FileStorageConfig::default();
+        assert_eq!(loaded.storage_backend, TrustStorageBackend::Csv);
+        assert_eq!(loaded.file_storage_config.path, default.path);
+        assert_eq!(
+            loaded.file_storage_config.update_interval_sec,
+            default.update_interval_sec
+        );
+        assert_eq!(
+            FjallStorageConfig::default().path,
+            FjallStorageConfig::from_env().path
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_bad_or_zero_update_interval_is_an_error_naming_the_variable() {
+        for raw in ["0", "sixty", "-1"] {
+            clear_storage_env();
+            unsafe { std::env::set_var("FILE_STORAGE_UPDATE_INTERVAL_SEC", raw) };
+            let err = StorageConfig::load().await.expect_err(raw);
+            assert!(
+                err.to_string().contains("FILE_STORAGE_UPDATE_INTERVAL_SEC"),
+                "{err}"
+            );
+        }
+        clear_storage_env();
+    }
+
+    /// The region is the SDK's to resolve unless `AWS_REGION` is set, and the
+    /// test credentials are used only on request, never because the endpoint
+    /// URL happens to contain "local".
+    #[tokio::test]
+    #[serial]
+    async fn ddb_region_and_test_credentials_are_explicit() {
+        clear_storage_env();
+        unsafe {
+            std::env::set_var("TR_STORAGE_BACKEND", "ddb");
+            std::env::set_var("DDB_TABLE_NAME", "records");
+            std::env::set_var(
+                "DYNAMODB_ENDPOINT",
+                "http://dynamodb.data.svc.cluster.local:8000",
+            );
+        }
+        let ddb = StorageConfig::load()
+            .await
+            .expect("loads")
+            .ddb_storage_config;
+        assert_eq!(ddb.region, None);
+        assert!(!ddb.use_test_credentials);
+        assert_eq!(
+            ddb.endpoint_url.as_deref(),
+            Some("http://dynamodb.data.svc.cluster.local:8000")
+        );
+
+        unsafe {
+            std::env::set_var("AWS_REGION", "eu-west-1");
+            std::env::set_var("DDB_USE_TEST_CREDENTIALS", "true");
+        }
+        let ddb = StorageConfig::load()
+            .await
+            .expect("loads")
+            .ddb_storage_config;
+        assert_eq!(ddb.region.as_deref(), Some("eu-west-1"));
+        assert!(ddb.use_test_credentials);
+
+        unsafe { std::env::set_var("DDB_USE_TEST_CREDENTIALS", "local") };
+        let err = StorageConfig::load().await.expect_err("not a boolean");
+        assert!(
+            err.to_string().contains("DDB_USE_TEST_CREDENTIALS"),
+            "{err}"
+        );
+        clear_storage_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ddb_endpoint_spellings_must_agree() {
+        clear_storage_env();
+        unsafe {
+            std::env::set_var("TR_STORAGE_BACKEND", "dynamodb");
+            std::env::set_var("DDB_TABLE_NAME", "records");
+            std::env::set_var("AWS_ENDPOINT", "http://127.0.0.1:4566");
+        }
+        let ddb = StorageConfig::load()
+            .await
+            .expect("loads")
+            .ddb_storage_config;
+        assert_eq!(ddb.endpoint_url.as_deref(), Some("http://127.0.0.1:4566"));
+
+        unsafe { std::env::set_var("DYNAMODB_ENDPOINT", "http://127.0.0.1:8000") };
+        let err = StorageConfig::load().await.expect_err("conflict");
+        assert!(err.to_string().contains("DYNAMODB_ENDPOINT"), "{err}");
+        clear_storage_env();
+    }
 
     #[test]
     fn redaction_removes_username_and_password() {

@@ -873,17 +873,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // PROFILE_CONFIG. The bundle then stays out of .env: a plaintext copy there
     // would defeat the store. A failed write stops the setup.
     let mut env_remove: Vec<&str> = Vec::new();
-    let cfg = trust_registry::configs::secret_store::secrets_config_from_env();
-    match (
-        trust_registry::configs::secret_store::backend_selected(&cfg),
-        &profile_bundle,
-    ) {
+    let cfg = trust_registry::configs::secret_store::secrets_config_from_env()?;
+    let selected = trust_registry::configs::secret_store::selected_backend(&cfg);
+    match (selected.is_some(), &profile_bundle) {
         (true, Some(bundle)) => {
+            if selected == Some(vti_secrets::SecretBackend::ConfigSeed) {
+                return Err(
+                    "TR_SECRETS_SEED selects a read-only store: it must already hold \
+                            the hex-encoded profile bundle JSON. Unset it, or select a \
+                            writable backend, to provision the profile."
+                        .into(),
+                );
+            }
             let dir = trust_registry::configs::secret_store::data_dir();
             trust_registry::configs::secret_store::write_profile(&cfg, &dir, bundle)
                 .await
                 .map_err(|e| format!("Failed to write the profile to the secret store: {e}"))?;
-            println!("✓ Profile bundle provisioned into the configured secret-store backend");
+            println!(
+                "✓ Profile bundle provisioned into the {} secret-store backend",
+                selected.map_or(
+                    "configured",
+                    trust_registry::configs::secret_store::backend_name
+                )
+            );
             println!("  PROFILE_CONFIG is left out of .env; the registry loads the backend.");
             env_remove.push("PROFILE_CONFIG");
         }
@@ -998,6 +1010,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("{}", serde_json::to_string_pretty(&config_json)?);
     println!();
+
+    // `.env.example` starts with DIDComm off; say which way this setup went.
+    server_vars.insert("ENABLE_DIDCOMM".to_string(), enable_didcomm.to_string());
 
     // Insert variables into .env file
     insert_env_vars("./.env", server_vars, &env_remove, Some("./.env.example"))?;

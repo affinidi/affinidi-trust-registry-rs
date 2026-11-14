@@ -23,113 +23,247 @@
 //! "mediator key" provisioning step — sourcing the profile from the VTA sources
 //! the mediator connection keys from the VTA in the same act.
 //!
-//! Configuration (env):
+//! ## Configuration
+//!
+//! Read once by [`VtaConfig::from_env`] while the configuration loads, and
+//! held in [`DidcommConfig::vta`](crate::configs::DidcommConfig::vta):
 //! - `TR_VTA_CREDENTIAL` — the VTA `CredentialBundle` JSON, or a loader URI
 //!   (`file://`, `aws_secrets://`, …) resolving to it. Presence enables the VTA path.
 //! - `TR_VTA_CONTEXT_ID` — the VTA context holding this service's DID + keys.
 //! - `TR_VTA_URL` — optional VTA URL override (else taken from the credential).
 //! - `TR_ALIAS` — profile alias (default `Trust Registry`).
+//!
+//! ## Offline cache
+//!
+//! The cache lives in its own slot of the configured secret store, never in the
+//! slot that holds a provisioned profile bundle: the backend's secret name (or
+//! Vault path, Kubernetes `Secret` name, keyring service) with
+//! [`VTA_CACHE_SUFFIX`] appended, and for the plaintext file backend the
+//! [`VTA_CACHE_DIR`] subdirectory of `TR_SECRETS_DATA_DIR`. With no backend
+//! configured the cache needs `TR_SECRETS_ALLOW_PLAINTEXT=true` (dev/test), as
+//! a `--features vta` build has no keyring; without either, startup warns that
+//! there is no offline cache.
+
+use std::path::{Path, PathBuf};
 
 use affinidi_did_common::scid::strip_scid_src;
 use serde_json::json;
+use tracing::{info, warn};
 use vta_sdk::credentials::CredentialBundle;
 use vta_sdk::did_key::secrets_from_bundle;
 use vta_sdk::did_secrets::DidSecretsBundle;
 use vta_sdk::integration::{SecretCache, VtaServiceConfig, startup};
+use vti_secrets::{SecretBackend, SecretsConfig, create_seed_store};
 
-use super::loaders::{environment::optional_env, load};
+use super::loaders::{environment::non_empty_env, load_setting};
 use super::secret_store;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Appended to the configured secret name (Vault path, `Secret` name, keyring
+/// service) to make the VTA cache's own slot.
+pub const VTA_CACHE_SUFFIX: &str = "-vta-cache";
+
+/// Subdirectory of the data directory the plaintext-file cache is kept in.
+pub const VTA_CACHE_DIR: &str = "vta-cache";
+
+const DEFAULT_ALIAS: &str = "Trust Registry";
+
+/// The VTA settings, resolved once while the configuration loads.
+#[derive(Clone, Debug)]
+pub struct VtaConfig {
+    /// The credential the registry authenticates to the VTA with. Its `Debug`
+    /// leaves the private key out.
+    pub credential: CredentialBundle,
+    /// The VTA context holding this service's DID and keys.
+    pub context_id: String,
+    /// Overrides the VTA URL inside the credential.
+    pub url_override: Option<String>,
+    /// The profile alias.
+    pub alias: String,
+}
+
+impl VtaConfig {
+    /// Read `TR_VTA_*` and `TR_ALIAS`, resolving the credential through the
+    /// loaders. `None` when `TR_VTA_CREDENTIAL` is unset.
+    pub async fn from_env() -> Result<Option<Self>, String> {
+        let Some(credential_uri) = non_empty_env("TR_VTA_CREDENTIAL") else {
+            return Ok(None);
+        };
+        let context_id = non_empty_env("TR_VTA_CONTEXT_ID").ok_or_else(|| {
+            "TR_VTA_CREDENTIAL is set but TR_VTA_CONTEXT_ID is missing".to_string()
+        })?;
+
+        // Resolve the credential via the standard loaders so it can live in a
+        // file, AWS Secrets Manager, etc.
+        let credential_json = load_setting("TR_VTA_CREDENTIAL", &credential_uri).await?;
+        let credential: CredentialBundle = serde_json::from_str(&credential_json)
+            .map_err(|e| format!("TR_VTA_CREDENTIAL is not a VTA credential bundle: {e}"))?;
+
+        Ok(Some(Self {
+            credential,
+            context_id,
+            url_override: non_empty_env("TR_VTA_URL"),
+            alias: non_empty_env("TR_ALIAS").unwrap_or_else(|| DEFAULT_ALIAS.to_string()),
+        }))
+    }
+
+    fn service_config(&self) -> VtaServiceConfig {
+        let mut config = VtaServiceConfig::new(self.credential.clone(), self.context_id.clone());
+        config.auth.url_override = self.url_override.clone();
+        config
+    }
+}
+
+/// The cache's own slot in the store `cfg` selects: each backend's secret name
+/// with [`VTA_CACHE_SUFFIX`] appended, and `data_dir`/[`VTA_CACHE_DIR`] for
+/// the file backends.
+pub fn vta_cache_slot(cfg: &SecretsConfig, data_dir: &Path) -> (SecretsConfig, PathBuf) {
+    let mut cache = cfg.clone();
+    for name in [
+        &mut cache.aws_secret_name,
+        &mut cache.gcp_secret_name,
+        &mut cache.azure_secret_name,
+        &mut cache.vault_secret_path,
+        &mut cache.k8s_secret_name,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        name.push_str(VTA_CACHE_SUFFIX);
+    }
+    cache.keyring_service.push_str(VTA_CACHE_SUFFIX);
+    (cache, data_dir.join(VTA_CACHE_DIR))
+}
+
 /// Offline cache for the VTA secrets bundle, persisted through the Trust
-/// Registry's configured secret-store backend (the same `TR_SECRETS_*` backends
-/// used for the profile bundle). In VTA mode that backend holds the cached
-/// bundle so the service can boot while the VTA is unreachable.
-pub struct VtaSecretCache;
+/// Registry's configured secret-store backend in a slot of its own (see
+/// [`vta_cache_slot`]), so the service can boot while the VTA is unreachable.
+pub struct VtaSecretCache {
+    /// The configured store: where a provisioned profile bundle lives, and
+    /// where releases before the cache had its own slot wrote the cache.
+    store: SecretsConfig,
+    data_dir: PathBuf,
+}
+
+impl VtaSecretCache {
+    pub fn new(store: SecretsConfig, data_dir: PathBuf) -> Self {
+        Self { store, data_dir }
+    }
+
+    /// `TR_SECRETS_SEED` is read-only and holds the profile itself, so it has
+    /// no slot for a cache.
+    fn read_only(&self) -> bool {
+        secret_store::selected_backend(&self.store) == Some(SecretBackend::ConfigSeed)
+    }
+
+    fn slot(&self) -> (SecretsConfig, PathBuf) {
+        vta_cache_slot(&self.store, &self.data_dir)
+    }
+
+    /// Whether the cache store can be built; `Err` says what to set.
+    pub fn check(&self) -> Result<(), String> {
+        if self.read_only() {
+            return Err(
+                "the selected secret store (TR_SECRETS_SEED) is read-only and cannot hold \
+                 the VTA offline cache"
+                    .to_string(),
+            );
+        }
+        let (cfg, dir) = self.slot();
+        create_seed_store(&cfg, &dir).map(|_| ()).map_err(|e| {
+            format!(
+                "{e}. Configure a secret-store backend (TR_SECRETS_BACKEND and its \
+                 TR_SECRETS_* settings) or, for development only, set \
+                 TR_SECRETS_ALLOW_PLAINTEXT=true to cache under TR_SECRETS_DATA_DIR"
+            )
+        })
+    }
+}
 
 impl SecretCache for VtaSecretCache {
     async fn store(&self, bundle: &DidSecretsBundle) -> Result<(), BoxError> {
+        if self.read_only() {
+            return Err("the TR_SECRETS_SEED store is read-only; no VTA cache written".into());
+        }
         // `DidSecretsBundle` has no encode()/decode(); serialise with serde_json.
         let json = serde_json::to_string(bundle).map_err(|e| Box::new(e) as BoxError)?;
-        let cfg = secret_store::secrets_config_from_env();
-        secret_store::write_profile(&cfg, &secret_store::data_dir(), &json)
+        let (cfg, dir) = self.slot();
+        secret_store::write_profile(&cfg, &dir, &json)
             .await
-            .map_err(BoxError::from)?;
-        Ok(())
+            .map_err(BoxError::from)
     }
 
     async fn load(&self) -> Result<Option<DidSecretsBundle>, BoxError> {
-        let cfg = secret_store::secrets_config_from_env();
-        match secret_store::read_profile(&cfg, &secret_store::data_dir())
+        if self.read_only() {
+            return Ok(None);
+        }
+        let (cfg, dir) = self.slot();
+        if let Some(json) = secret_store::read_profile(&cfg, &dir)
             .await
             .map_err(BoxError::from)?
         {
-            Some(json) => Ok(Some(
+            return Ok(Some(
                 serde_json::from_str(&json).map_err(|e| Box::new(e) as BoxError)?,
-            )),
-            None => Ok(None),
+            ));
+        }
+        // Releases before the cache had its own slot wrote it where the
+        // profile bundle lives. Read a cache found there, so an upgrade while
+        // the VTA is down still boots; anything else there (a provisioned
+        // profile) is left alone and never overwritten.
+        match secret_store::read_profile(&self.store, &self.data_dir).await {
+            Ok(Some(json)) => match serde_json::from_str::<DidSecretsBundle>(&json) {
+                Ok(bundle) => {
+                    info!("using the VTA offline cache found in the profile bundle's slot");
+                    Ok(Some(bundle))
+                }
+                Err(_) => Ok(None),
+            },
+            Ok(None) | Err(_) => Ok(None),
         }
     }
 }
 
-/// Build a [`VtaServiceConfig`] from the environment, or `None` when the VTA path
-/// is not configured (`TR_VTA_CREDENTIAL` unset).
-async fn vta_config_from_env() -> Result<Option<VtaServiceConfig>, String> {
-    let Some(credential_uri) = optional_env("TR_VTA_CREDENTIAL") else {
-        return Ok(None);
-    };
-    let context_id = optional_env("TR_VTA_CONTEXT_ID")
-        .ok_or_else(|| "TR_VTA_CREDENTIAL is set but TR_VTA_CONTEXT_ID is missing".to_string())?;
-
-    // Resolve the credential via the standard loaders so it can live in a file,
-    // AWS Secrets Manager, etc.
-    let credential_json = load(&credential_uri).await?;
-    let credential: CredentialBundle = serde_json::from_str(&credential_json)
-        .map_err(|e| format!("invalid TR_VTA_CREDENTIAL bundle: {e}"))?;
-
-    let mut config = VtaServiceConfig::new(credential, context_id);
-    if let Some(url) = optional_env("TR_VTA_URL") {
-        config.auth.url_override = Some(url);
-    }
-    Ok(Some(config))
-}
-
-/// If a VTA is configured, authenticate and pull the Trust Registry's identity,
+/// Authenticate to the configured VTA and pull the Trust Registry's identity,
 /// returning it as a `PROFILE_CONFIG`-shaped JSON string (`{alias, did,
 /// secrets}`) so it flows through the same parsing path as the other sources.
 ///
-/// Returns `Ok(None)` when no VTA is configured. Propagates an error when a VTA
-/// is configured but neither the live fetch nor the offline cache yields a
-/// bundle — the caller must not silently fall back to a different identity.
-pub async fn startup_profile_json() -> Result<Option<String>, String> {
-    let Some(config) = vta_config_from_env().await? else {
-        return Ok(None);
-    };
-
-    let cache = VtaSecretCache;
-    let result = startup(&config, &cache)
+/// `cache` is the offline cache, built from the secret-store settings loaded
+/// with the rest of the configuration. Propagates an error when neither the
+/// live fetch nor the offline cache yields a bundle — the caller must not
+/// silently fall back to a different identity.
+pub async fn startup_profile_json(
+    vta: &VtaConfig,
+    cache: &VtaSecretCache,
+) -> Result<String, String> {
+    if let Err(e) = cache.check() {
+        warn!(
+            "VTA offline cache unavailable, so the registry cannot start while the VTA is \
+             unreachable: {e}"
+        );
+    }
+    let result = startup(&vta.service_config(), cache)
         .await
         .map_err(|e| format!("VTA startup failed: {e}"))?;
 
     let secrets = secrets_from_bundle(&result.bundle)
         .map_err(|e| format!("failed to decode VTA secrets bundle: {e}"))?;
 
-    let alias = optional_env("TR_ALIAS").unwrap_or_else(|| "Trust Registry".to_string());
     let profile = json!({
-        "alias": alias,
+        "alias": vta.alias,
         "did": result.did,
         "secrets": secrets,
     });
-    Ok(Some(profile.to_string()))
+    Ok(profile.to_string())
 }
 
 /// Rotate the Trust Registry's VTA-managed `did:webvh` keys.
 ///
-/// Builds a [`vta_sdk::client::VtaClient`] on demand from `TR_VTA_CREDENTIAL`
-/// and calls the VTA's canonical `webvh/dids/rotate-keys/1.0` task, which keys
-/// on the DID itself — no context id or SCID needed. Returns
-/// `(did, new_scid, new_version_id)` on success.
+/// Builds a [`vta_sdk::client::VtaClient`] from the credential loaded with the
+/// configuration (`vta`, `None` when no VTA is configured) and calls the VTA's
+/// canonical `webvh/dids/rotate-keys/1.0` task, which keys on the DID itself —
+/// no context id or SCID needed. Returns `(did, new_scid, new_version_id)` on
+/// success.
 ///
 /// `did` must be a `did:webvh`, or a `did:scid:vh:1` (VTI-KEY-160), whose log
 /// is a did:webvh log and is rotated as one; rejecting anything else here
@@ -137,6 +271,7 @@ pub async fn startup_profile_json() -> Result<Option<String>, String> {
 /// The returned DID is `did` as the registry presents it: for a did:scid, its
 /// bare DID, which a rotation does not change.
 pub async fn rotate_did(
+    vta: Option<&VtaConfig>,
     did: &str,
     pre_rotation_count: Option<u32>,
     label: Option<String>,
@@ -144,16 +279,10 @@ pub async fn rotate_did(
     use vta_sdk::client::VtaClient;
     use vta_sdk::protocols::did_management::update::RotateDidWebvhKeysBody;
 
-    let credential_uri = optional_env("TR_VTA_CREDENTIAL")
-        .ok_or_else(|| "VTA is not configured (TR_VTA_CREDENTIAL unset)".to_string())?;
+    let vta = vta.ok_or_else(|| "VTA is not configured (TR_VTA_CREDENTIAL unset)".to_string())?;
     let webvh_did = webvh_log_did(did).await?;
 
-    let credential_json = load(&credential_uri).await?;
-    let credential: CredentialBundle = serde_json::from_str(&credential_json)
-        .map_err(|e| format!("invalid TR_VTA_CREDENTIAL bundle: {e}"))?;
-    let url_override = optional_env("TR_VTA_URL");
-
-    let client = VtaClient::from_credential(&credential, url_override.as_deref())
+    let client = VtaClient::from_credential(&vta.credential, vta.url_override.as_deref())
         .await
         .map_err(|e| format!("VTA authentication failed: {e}"))?;
 
@@ -223,7 +352,12 @@ mod tests {
     use serial_test::serial;
 
     fn clear_vta_env() {
-        for k in ["TR_VTA_CREDENTIAL", "TR_VTA_CONTEXT_ID", "TR_VTA_URL"] {
+        for k in [
+            "TR_VTA_CREDENTIAL",
+            "TR_VTA_CONTEXT_ID",
+            "TR_VTA_URL",
+            "TR_ALIAS",
+        ] {
             unsafe { std::env::remove_var(k) };
         }
     }
@@ -232,8 +366,7 @@ mod tests {
     #[serial]
     async fn no_vta_configured_returns_none() {
         clear_vta_env();
-        assert!(vta_config_from_env().await.expect("ok").is_none());
-        assert!(startup_profile_json().await.expect("ok").is_none());
+        assert!(VtaConfig::from_env().await.expect("ok").is_none());
     }
 
     #[tokio::test]
@@ -246,7 +379,21 @@ mod tests {
                 r#"string://{"did":"did:web:svc","privateKeyMultibase":"z0","vtaDid":"did:web:vta"}"#,
             );
         }
-        assert!(vta_config_from_env().await.is_err());
+        let err = VtaConfig::from_env().await.expect_err("no context");
+        assert!(err.contains("TR_VTA_CONTEXT_ID"), "{err}");
+        clear_vta_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_mistyped_credential_scheme_names_the_variable() {
+        clear_vta_env();
+        unsafe {
+            std::env::set_var("TR_VTA_CREDENTIAL", "flie:///etc/tr/vta.json");
+            std::env::set_var("TR_VTA_CONTEXT_ID", "ctx-1");
+        }
+        let err = VtaConfig::from_env().await.expect_err("bad scheme");
+        assert!(err.starts_with("TR_VTA_CREDENTIAL: "), "{err}");
         clear_vta_env();
     }
 
@@ -260,10 +407,133 @@ mod tests {
                 r#"string://{"did":"did:web:svc","privateKeyMultibase":"z6Mkexample","vtaDid":"did:web:vta","vtaUrl":"https://vta.example"}"#,
             );
             std::env::set_var("TR_VTA_CONTEXT_ID", "ctx-1");
+            std::env::set_var("TR_VTA_URL", "https://override.example");
         }
-        let cfg = vta_config_from_env().await.expect("ok").expect("some");
+        let vta = VtaConfig::from_env().await.expect("ok").expect("some");
+        assert_eq!(vta.alias, DEFAULT_ALIAS);
+        let cfg = vta.service_config();
         assert_eq!(cfg.context.id, "ctx-1");
         assert_eq!(cfg.auth.credential.did, "did:web:svc");
+        assert_eq!(
+            cfg.auth.url_override.as_deref(),
+            Some("https://override.example")
+        );
+        // The private key stays out of a config dump.
+        assert!(!format!("{vta:?}").contains("z6Mkexample"));
         clear_vta_env();
+    }
+
+    /// Rotation takes its credential from the configuration, not from the
+    /// environment at request time.
+    #[tokio::test]
+    #[serial]
+    async fn rotation_without_a_configured_vta_is_refused() {
+        clear_vta_env();
+        unsafe {
+            std::env::set_var(
+                "TR_VTA_CREDENTIAL",
+                r#"string://{"did":"did:web:svc","privateKeyMultibase":"z0","vtaDid":"did:web:vta"}"#,
+            );
+        }
+        let err = rotate_did(None, "did:webvh:Qm:example.com", None, None)
+            .await
+            .expect_err("no VTA");
+        assert!(err.contains("not configured"), "{err}");
+        clear_vta_env();
+    }
+
+    fn plaintext_store() -> SecretsConfig {
+        let mut cfg = SecretsConfig::default();
+        cfg.backend = Some(SecretBackend::Plaintext);
+        cfg.allow_plaintext = true;
+        cfg
+    }
+
+    fn bundle() -> DidSecretsBundle {
+        DidSecretsBundle {
+            did: "did:webvh:QmCache:example.com".to_string(),
+            secrets: Vec::new(),
+        }
+    }
+
+    /// With the documented development cache (plaintext under the data dir)
+    /// a stored bundle loads back, and it is written to its own slot rather
+    /// than over the profile bundle.
+    #[tokio::test]
+    async fn the_cache_round_trips_in_its_own_slot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = plaintext_store();
+        let profile = r#"{"alias":"TR","did":"did:example:tr","secrets":[]}"#;
+        secret_store::write_profile(&store, dir.path(), profile)
+            .await
+            .expect("profile written");
+
+        let cache = VtaSecretCache::new(store.clone(), dir.path().to_path_buf());
+        cache.check().expect("cache store available");
+        cache.store(&bundle()).await.expect("stored");
+        let loaded = cache.load().await.expect("loads").expect("cached");
+        assert_eq!(loaded.did, bundle().did);
+
+        assert_eq!(
+            secret_store::read_profile(&store, dir.path())
+                .await
+                .expect("read")
+                .as_deref(),
+            Some(profile),
+            "the profile bundle's slot is untouched"
+        );
+    }
+
+    /// A cache written by an earlier release into the profile's slot is still
+    /// found; a profile bundle there is not mistaken for a cache.
+    #[tokio::test]
+    async fn the_cache_reads_a_legacy_cache_but_not_a_profile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = plaintext_store();
+        let cache = VtaSecretCache::new(store.clone(), dir.path().to_path_buf());
+        assert!(cache.load().await.expect("empty").is_none());
+
+        let profile = r#"{"alias":"TR","did":"did:example:tr","secrets":[{"id":"k"}]}"#;
+        secret_store::write_profile(&store, dir.path(), profile)
+            .await
+            .expect("written");
+        assert!(cache.load().await.expect("not a cache").is_none());
+
+        let legacy = serde_json::to_string(&bundle()).expect("json");
+        secret_store::write_profile(&store, dir.path(), &legacy)
+            .await
+            .expect("written");
+        let loaded = cache.load().await.expect("loads").expect("legacy cache");
+        assert_eq!(loaded.did, bundle().did);
+    }
+
+    /// Without a backend or the plaintext opt-in, the cache cannot be kept,
+    /// and the check says which variables to set.
+    #[cfg(not(feature = "secrets-keyring"))]
+    #[test]
+    fn an_unavailable_cache_names_what_to_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = VtaSecretCache::new(SecretsConfig::default(), dir.path().to_path_buf());
+        let err = cache.check().expect_err("no store");
+        assert!(err.contains("TR_SECRETS_ALLOW_PLAINTEXT"), "{err}");
+    }
+
+    #[test]
+    fn the_cache_slot_differs_from_the_profile_slot() {
+        let mut cfg = SecretsConfig::default();
+        cfg.aws_secret_name = Some("tr/profile".to_string());
+        cfg.vault_secret_path = Some("tr/seed".to_string());
+        let (cache, dir) = vta_cache_slot(&cfg, Path::new("/srv/tr"));
+        assert_eq!(
+            cache.aws_secret_name.as_deref(),
+            Some("tr/profile-vta-cache")
+        );
+        assert_eq!(
+            cache.vault_secret_path.as_deref(),
+            Some("tr/seed-vta-cache")
+        );
+        assert_eq!(cache.gcp_secret_name, None);
+        assert_ne!(cache.keyring_service, cfg.keyring_service);
+        assert_eq!(dir, Path::new("/srv/tr").join(VTA_CACHE_DIR));
     }
 }
