@@ -6,6 +6,8 @@
 //! envelopes by hand, and some through `trql-client`'s `DidcommTransport` and
 //! `TspTransport`, the transports verifiers use.
 
+// Test code: a panic on an unexpected `Err`/`None` is the failure report.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(feature = "mediator")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

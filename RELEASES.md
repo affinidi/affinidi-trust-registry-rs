@@ -113,8 +113,20 @@ the local fallback, a maintainer opened it.
 ## Changelog
 
 Every PR with a user-visible change adds its entry under `## Unreleased` at the
-top of `CHANGELOG.md` on `main`. The tooling owns the headings: the cut and the
-GA prep turn `## Unreleased` into `## 0.27.0 (date)`.
+top of `CHANGELOG.md` on `main`. The tooling owns the headings, and both sides
+end up as `## 0.27.0 (date)`:
+
+- on the release branch, the GA prep turns `## Unreleased` into
+  `## 0.27.0 (<GA date>)`;
+- on `main`, the cut PR closes `## Unreleased` under a heading for the release
+  and opens a fresh `## Unreleased` above it. `scripts/cut-release.py` writes
+  `## 0.27.0 (<cut date, UTC>)`. The `release-cut.yml` workflow (the shared
+  `pipeline-rust` action) still writes `## 0.27.0 (release/0.27)`: change that
+  heading to the date in the cut PR before merging it.
+
+When the GA lands on a later day than the cut, set `main`'s heading to the GA
+date in a follow-up PR, so the two branches carry the same heading and a
+backport touching `CHANGELOG.md` conflicts only on `## Unreleased`.
 
 ## Procedures
 
@@ -139,7 +151,13 @@ With the release bot's token it pushes `release/0.29` (workspace at `0.29.0`,
 Fallback, when the workflow cannot run: a maintainer runs
 `python3 scripts/cut-release.py 0.29 [--dry-run] [--from <rev>]` from a clean
 checkout with push access, Python ≥ 3.11, cargo, and `gh` authenticated. It
-does the same with their own credentials.
+does the same with their own credentials: it creates the label first, pushes
+`release/0.29` and `release-cut/0.29` together (`git push --atomic`), then
+opens the PR. If it stops part-way, run the same command again: it resumes,
+accepting a `release/0.29` that is its own cut commit on a `main` commit and
+reusing an existing `release-cut/0.29` branch or PR. The script and
+`scripts/release_lib.py` are deleted once a release has been cut with
+`release-cut.yml`.
 
 ### Release candidate, GA, patch
 

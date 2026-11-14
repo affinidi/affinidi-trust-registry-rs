@@ -7,9 +7,9 @@ name: Cut a release
 # the Actions tab on main; it is a dry run unless that box is cleared.
 #
 # With the release-bot app's token: branch-rules.yml accepts a cut PR from
-# that app, and a branch GITHUB_TOKEN pushed would never be tagged. Until
-# maintainers stop cutting with scripts/cut-release.py, this is the
-# replacement in waiting.
+# that app, and a branch GITHUB_TOKEN pushed would never be tagged.
+# scripts/cut-release.py is the local fallback for it, deleted once a release
+# has been cut with this workflow.
 on:
   workflow_dispatch:
     inputs:

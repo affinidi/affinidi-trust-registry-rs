@@ -1,6 +1,10 @@
 //! Shared fixtures for the per-transport query tests: one seeded registry and
 //! one query document, so the DIDComm and TSP bindings are held to the same
 //! answer.
+//!
+//! Test-only (`#[cfg(test)]` on its `mod` line), where a panic is the failure
+//! report.
+#![allow(clippy::expect_used)]
 
 use std::sync::Arc;
 

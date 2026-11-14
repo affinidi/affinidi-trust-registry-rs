@@ -30,6 +30,9 @@
 //! P-256 DID, whose mode the mediator therefore refuses, and checks that it does
 //! not serve DIDComm: `/health` reports `degraded` with the reason.
 
+// Test code: a panic on an unexpected `Err`/`None` is the failure report.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod e2e;
 
 use std::time::Duration;

@@ -412,7 +412,7 @@ mod tests {
             true,
             "authorization",
         );
-        cleanup_test_data(&storage, &[record.clone()]).await;
+        cleanup_test_data(&storage, std::slice::from_ref(&record)).await;
 
         storage.create(record.clone()).await.unwrap();
 
@@ -447,7 +447,7 @@ mod tests {
             true,
             "authorization",
         );
-        cleanup_test_data(&storage, &[record.clone()]).await;
+        cleanup_test_data(&storage, std::slice::from_ref(&record)).await;
 
         storage.create(record.clone()).await.unwrap();
         let result = storage.create(record.clone()).await;
@@ -476,7 +476,7 @@ mod tests {
             true,
             "authorization",
         );
-        cleanup_test_data(&storage, &[record.clone()]).await;
+        cleanup_test_data(&storage, std::slice::from_ref(&record)).await;
 
         storage.create(record.clone()).await.unwrap();
 
@@ -522,7 +522,7 @@ mod tests {
             true,
             "authorization",
         );
-        cleanup_test_data(&storage, &[record.clone()]).await;
+        cleanup_test_data(&storage, std::slice::from_ref(&record)).await;
 
         storage.create(record.clone()).await.unwrap();
 
@@ -595,7 +595,7 @@ mod tests {
             true,
             "authorization",
         );
-        cleanup_test_data(&storage, &[record.clone()]).await;
+        cleanup_test_data(&storage, std::slice::from_ref(&record)).await;
 
         storage.create(record.clone()).await.unwrap();
 

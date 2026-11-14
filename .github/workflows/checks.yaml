@@ -43,7 +43,7 @@ jobs:
       SNYK_GLOBAL_POLICY: ${{ secrets.SNYK_GLOBAL_POLICY }}
     with:
       toolchain: '1.96.0'
-      rustflags: '-D warnings --cfg tracing_unstable'
+      rustflags: '-D warnings'
   guards:
     # Cheap, build-free guards that protect the release pipeline: lockstep
     # versions, CHANGELOG / RELEASE consistency.
@@ -68,8 +68,8 @@ jobs:
     env:
       # Rustdoc JSON for the baseline and the PR; warnings are not this job's
       # concern (the rust-pipeline checks own them).
-      RUSTFLAGS: '--cfg tracing_unstable'
-      RUSTDOCFLAGS: '--cfg tracing_unstable'
+      RUSTFLAGS: ''
+      RUSTDOCFLAGS: ''
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -78,7 +78,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           toolchain: '1.96.0'
-          rustflags: '--cfg tracing_unstable'
+          rustflags: ''
       - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
@@ -91,6 +91,124 @@ jobs:
           cargo semver-checks --workspace \
             --release-type patch \
             --baseline-rev "$BASE_SHA"
+  lint:
+    # The pipeline-rust checks lint the default features and targets only.
+    # This holds every crate, feature combination, test and binary to
+    # `-D warnings`, and the docs to rustdoc's lints.
+    name: lint (all features, targets and docs)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: '-D warnings'
+      RUSTDOCFLAGS: '-D warnings'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: '1.96.0'
+          components: clippy
+          rustflags: '-D warnings'
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: 'rust-cache-lint'
+      - name: clippy, whole workspace, all features and targets
+        run: cargo clippy --locked --workspace --all-features --all-targets --no-deps
+      - name: clippy, feature combinations
+        run: |
+          set -euo pipefail
+          lint() { echo "::group::cargo clippy $*"; cargo clippy --locked --no-deps --all-targets "$@"; echo "::endgroup::"; }
+          # trql-client: each transport on its own, and none.
+          lint -p trql-client --no-default-features
+          lint -p trql-client --no-default-features --features didcomm
+          lint -p trql-client --no-default-features --features tsp
+          # trust-registry: the documented embedding build, and each opt-in
+          # feature over the defaults.
+          lint -p trust-registry --no-default-features
+          lint -p trust-registry --no-default-features --features storage-fjall
+          lint -p trust-registry --features tsp
+          lint -p trust-registry --features vta
+          lint -p trust-registry --features dev-tools
+          # test-trust-registry: the plain fixture and the mediator-wired one.
+          lint -p test-trust-registry
+          lint -p test-trust-registry --features mediator
+      - name: rustdoc
+        run: cargo doc --locked --workspace --no-deps --all-features
+      - name: shellcheck
+        run: shellcheck testing/run_tests.sh trust-registry/docker/healthcheck.sh
+      - name: README states the declared rust-version
+        run: |
+          set -euo pipefail
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          grep -qF "(currently ${msrv})" README.md || {
+            echo "::error file=README.md::README's Requirements section does not say rust-version ${msrv} (Cargo.toml)"
+            exit 1
+          }
+  msrv:
+    # The workspace must build on the rust-version it declares, not only on
+    # the toolchain CI lints with.
+    name: msrv (declared rust-version)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Read rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          rustflags: ''
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: 'rust-cache-msrv'
+      - name: cargo check on the declared rust-version
+        run: cargo check --locked --workspace --all-features --all-targets
+  docker:
+    # Builds the image as `docker compose up --build` does and checks the
+    # container comes up healthy (REST only, CSV sample data).
+    name: docker image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Build the image
+        env:
+          DOCKER_BUILDKIT: '1'
+        run: docker build -f trust-registry/Dockerfile -t trust-registry:ci .
+      - name: Start it and wait for /health
+        run: |
+          set -euo pipefail
+          docker run -d --name tr -p 127.0.0.1:3232:3232 \
+            -e LISTEN_ADDRESS=0.0.0.0:3232 \
+            -e ENABLE_DIDCOMM=false \
+            -e TR_STORAGE_BACKEND=csv \
+            -e FILE_STORAGE_PATH=/app/sample-data/data.csv \
+            trust-registry:ci
+          if ! timeout 120 bash -c 'until curl -fsS http://127.0.0.1:3232/health; do sleep 2; done'; then
+            docker logs tr
+            exit 1
+          fi
+          # The image's own HEALTHCHECK agrees.
+          docker exec tr /usr/local/bin/trust-registry-healthcheck
+      - name: Stop it
+        if: always()
+        run: docker rm -f tr || true
   test:
     name: Test Suite
     runs-on: ubuntu-24.04
@@ -189,12 +307,14 @@ jobs:
           trap 'kill $TAIL_PID 2>/dev/null || true' EXIT
           cargo llvm-cov --all-features -p trust-registry --summary-only --fail-under-lines=45
       - name: Test library crates
-        # test-trust-registry with its default features only: its `mediator`
-        # / `tsp` suites need a Redis for the test mediator and run on the
-        # scheduled mediator workflow instead.
+        run: cargo test --all-features -p trql-client -p trqp
+      - name: Test the test-trust-registry fixture
         run: |
-          cargo test --all-features -p trql-client -p trqp
           cargo test -p test-trust-registry
+          # Its `mediator` / `tsp` suites need a Redis for the test mediator
+          # and run in ignored-tests.yml (nightly); build them here so they
+          # cannot rot.
+          cargo test -p test-trust-registry --features mediator,tsp --no-run
       - name: Stop server
         if: always()
         run: |

@@ -11,8 +11,8 @@ Some versions are omitted because certain CI/CD deployment iterations included m
 Missing versions simply reflect internal deployment‑related patches.
 
 From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
-`## Unreleased` on `main`, and the release tooling renames that section when a
-release goes GA (`## 0.27.0 (date)`).
+`## Unreleased` on `main`, and the release tooling closes that section under
+`## 0.27.0 (date)` when the release is cut and when it goes GA.
 
 ---
 
@@ -352,6 +352,68 @@ release goes GA (`## 0.27.0 (date)`).
   responses are built with their generated spec types (the JSON is
   unchanged). Module and item documentation in `trust_tasks`, `dedup` and
   `capabilities` describes the current pipeline.
+- **Release builds use a `[profile.release]`**: `overflow-checks = true` (an
+  integer overflow panics instead of wrapping), thin LTO, one codegen unit,
+  debug info stripped (symbols kept, so backtraces still name functions).
+  `panic` stays `unwind`, so a panicking request or listener task is caught at
+  its `JoinHandle` rather than aborting the process. The profile applies to
+  binaries built from this workspace (the service, its tools, the Docker
+  image), not to hosts that depend on the published crates.
+- **The workspace denies `unsafe` code** (`[workspace.lints.rust]`); the tests
+  that set environment variables allow it locally. `clippy.toml` allows
+  `unwrap()`/`expect()` in tests; service and tool code is held to the
+  workspace's `unwrap_used`/`expect_used` lints under `-D warnings`.
+- **`--cfg tracing_unstable` is no longer passed** (`.cargo/config.toml` is
+  removed, and CI and the release workflow drop the flag). It only switches
+  on `tracing`'s `valuable` support, which nothing in the dependency graph
+  uses. The `[target.'cfg(coverage)']` table it sat next to never matched.
+- **The `aws_secrets://` and `aws_parameter_store://` config loaders use the
+  AWS SDK behaviour version `v2026_11_10`** (Retry Behavior 2.1: shorter
+  backoff for non-throttling errors). `v2026_01_12` is deprecated in the
+  `aws-smithy-runtime-api` the lockfile now resolves.
+- **The Docker image is built for the platform it is packaged for.** The
+  builder stage no longer runs on `$BUILDPLATFORM`, so a `buildx` build for
+  another platform compiles that platform's binary (under emulation) instead
+  of packaging the build host's. `docker-compose.yaml` no longer pins
+  `linux/arm64`. The build uses `--locked` and BuildKit cache mounts for the
+  cargo registry and `target/`.
+- **CI lints every crate, feature combination, test and binary** (new `lint`
+  job: `clippy --workspace --all-features --all-targets` and the feature
+  combinations of `trust-registry`, `trql-client` and `test-trust-registry`
+  under `-D warnings`, `cargo doc` under `RUSTDOCFLAGS=-D warnings`,
+  `shellcheck`), checks the workspace on its declared `rust-version` (`msrv`),
+  builds the Docker image and checks it answers `/health` (`docker`), and
+  runs the `test-trust-registry` smoke test and builds its mediator tests.
+- **`setup-trust-registry` and `generate-secrets` return errors instead of
+  panicking** when key generation, the TDK or a did:webvh log entry fails.
+  Failing to reach the mediator while opening a test DID's account is still
+  reported and skipped.
+- **The test client waits for the registry's answer to each request** (matched
+  by thread id, 30 s timeout), says whether it was the expected `#response` or
+  `trust-task-error`, and exits: `0` when every step answered as expected, `1`
+  otherwise (and on missing or invalid configuration), `2` after generating a
+  new identity. Its unused legacy modules (`sender`, `common`, the endless
+  listener) and dependencies (`axum`, `axum-server`, `tower-http`,
+  `async-trait`, `futures`, `once_cell`, `serde_derive`, `sha256`, `tracing`)
+  are removed, and it no longer uses the SDK's deprecated `Protocols` API.
+- **`scripts/cut-release.py` can be re-run after a failure.** It creates the
+  label first, pushes `release/<x.y>` and `release-cut/<x.y>` in one
+  `git push --atomic`, accepts an existing `release/<x.y>` that is its own cut
+  commit, reuses an existing `release-cut/<x.y>` branch or PR, and states its
+  Python ≥ 3.11 requirement instead of failing on `import tomllib`. It closes
+  `main`'s `## Unreleased` under `## <x.y>.0 (<date>)`, not `(release/<x.y>)`;
+  the 0.27–0.31 headings on `main` now carry the dates their release branches
+  give them. Unused helpers are removed from `scripts/release_lib.py`.
+- **Contributor docs match the repository.** `COVERAGE.md` (a missing script
+  and crates that do not exist) is removed; `testing/README.md` describes the
+  real suites, their prerequisites and what CI runs; `CONTRIBUTING.md` gives
+  the CI-equivalent checks, the changelog rule and the pre-merge checklist.
+  The README states the declared `rust-version`, the current crate version in
+  the embedding snippet, which features are on by default, an Ed25519/X25519
+  `PROFILE_CONFIG` example, that `TR_STORAGE_BACKEND` defaults to `csv` (and
+  accepts `ddb` or `dynamodb`), and that `context` is Base64 only in the CSV
+  file.
+
 - **The test client generates its own admin identity.** The repository no
   longer ships `test-client/conf/user_config.json`. On its first run the test
   client creates a new `did:peer` (Ed25519 signing, X25519 key agreement),
@@ -709,6 +771,22 @@ release goes GA (`## 0.27.0 (date)`).
   tests (`--ignored`, a local Redis, direct delivery and a TSP relationship
   for TSP), and states that an admin DID may write only under its own
   authority.
+- **`pin-utils` (RUSTSEC-2026-0441, unmaintained) is out of the dependency
+  graph.** The lockfile moves `aws-smithy-runtime` to 1.16.2 and
+  `aws-smithy-http` to 0.64.3, which no longer depend on it.
+- **`testing/run_tests.sh` exits with the tests' status** (it returned the
+  status of the final `docker compose down`), stops what it started on any
+  exit, waits for `/health` and LocalStack by polling instead of fixed sleeps,
+  and seeds DynamoDB in the layout the adapter reads (`PK` = `TR`, `SK` =
+  `TR#<authority>#<action>#<resource>#<entity>`, with `record_type`).
+  `--profile-configs` now overrides `.env.test` instead of being overwritten
+  by it, and the documented `--storage-backend` option exists.
+- **`trust-registry` builds its tests without default features**: the
+  integration tests that need `standalone` or `storage-redis` declare it, so
+  `cargo test --no-default-features` skips them instead of failing to compile.
+- **Broken intra-doc links** in `trust-registry` (`cargo doc` with
+  `-D warnings` now passes).
+
 - **Records whose identifiers contain `#` no longer share a storage key.** The
   Redis, DynamoDB and fjall backends keyed a record by
   `TR#{authority}#{action}#{resource}#{entity}` with the identifiers joined as
@@ -822,7 +900,7 @@ release goes GA (`## 0.27.0 (date)`).
   troubleshooting steps, and the shared storage key layout, the CSV write
   guarantees and the fjall durability are documented.
 
-## 0.31.0 (release/0.31)
+## 0.31.0 (2026-11-05)
 
 ### Changed
 
@@ -834,7 +912,7 @@ release goes GA (`## 0.27.0 (date)`).
   A `trql-client` on this line lets consumers on vta-sdk 0.80 depend on it
   without a second trust-tasks-rs.
 
-## 0.30.0 (release/0.30)
+## 0.30.0 (2026-10-29)
 
 ### Changed
 
@@ -868,7 +946,7 @@ release goes GA (`## 0.27.0 (date)`).
   is exactly a version in the crate's `trust-tasks.lock`, and that each has a
   generated schema. A missing pin or a lost schema now fails the build.
 
-## 0.29.0 (release/0.29)
+## 0.29.0 (2026-10-28)
 
 ### Added
 
@@ -948,7 +1026,7 @@ release goes GA (`## 0.27.0 (date)`).
   A client that sent an invalid identifier and treated the `404` as "not
   recognised" now gets a `400`.
 
-## 0.28.0 (release/0.28)
+## 0.28.0 (2026-10-26)
 
 ### Changed
 
@@ -1007,7 +1085,7 @@ release goes GA (`## 0.27.0 (date)`).
     not sign the DID-management task"), which verifiable-trust-infrastructure#2251
     fixes.
 
-## 0.27.0 (release/0.27)
+## 0.27.0 (2026-10-19)
 
 ### Changed
 

@@ -111,6 +111,25 @@ name = "setup-trust-registry"
 path = "bin/setup_trust_registry.rs"
 required-features = ["dev-tools"]
 
+# Integration tests that need a default feature, so a `--no-default-features`
+# build skips them instead of failing to compile. The rest are discovered
+# automatically.
+[[test]]
+name = "didcomm_server_test"
+required-features = ["standalone"]
+
+[[test]]
+name = "didcomm_integration_test"
+required-features = ["standalone"]
+
+[[test]]
+name = "http_integration_test"
+required-features = ["standalone"]
+
+[[test]]
+name = "redis_integration_test"
+required-features = ["storage-redis"]
+
 [features]
 # Everything the standalone service needs. A host embedding the registry as a
 # library should build with `default-features = false` and add back only the

@@ -6,7 +6,7 @@
 //!
 //! 1. parses the envelope body into a `TrustTask<Value>`;
 //! 2. hands the document, with the authcrypt sender (if any) as the transport
-//!    identity, to the shared [`TaskHandler`](crate::trust_tasks::TaskHandler),
+//!    identity, to the shared [`crate::trust_tasks::TaskHandler`],
 //!    which resolves the parties (SPEC §4.8.1), applies the freshness checks,
 //!    the write ACL, proof verification and the authority binding, and
 //!    dispatches; and
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn envelope_type_is_the_binding_envelope() {
-        let handler_types = vec![ENVELOPE_TYPE.to_string()];
+        let handler_types = [ENVELOPE_TYPE.to_string()];
         assert_eq!(
             handler_types[0],
             "https://trusttasks.org/binding/didcomm/0.1/envelope"

@@ -17,7 +17,7 @@ pub mod codes {
 }
 
 /// Problem report structure following DIDComm problem-report protocol
-/// https://identity.foundation/didcomm-messaging/spec/#problem-reports
+/// <https://identity.foundation/didcomm-messaging/spec/#problem-reports>
 #[derive(Debug, Clone)]
 pub struct ProblemReport {
     pub code: String,

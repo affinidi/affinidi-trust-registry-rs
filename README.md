@@ -140,7 +140,7 @@ This ensures **security**, **compliance**, and **interoperability** across decen
 
 ## Key Components
 
-- **`trust-registry`**: Unified server providing both RESTful API (TRQP endpoints for recognition and authorisation queries) and optional DIDComm messaging interface for CRUD admin operations.
+- **`trust-registry`**: Unified server providing both RESTful API (TRQP endpoints for recognition and authorisation queries) and an optional DIDComm interface over which administrators manage records with the `registry/record/*` Trust Tasks.
 
 - **Storage backends**: Stores authoritative records about the entities for querying. It supports the following storage types:
   - CSV file storage
@@ -166,7 +166,7 @@ This ensures **security**, **compliance**, and **interoperability** across decen
 
 1. Install Rust on your machine.
 
-- **Rust**: 1.88.0 or higher
+- **Rust**: the `rust-version` in the root [`Cargo.toml`](Cargo.toml) (currently 1.95.0) or higher
 - **Edition**: 2024
 - **Cargo**: Latest version bundled with Rust
 
@@ -273,6 +273,8 @@ docker compose up --build
 ```
 
 The Trust Registry will be available at `http://localhost:3232`.
+
+The image is built for the platform Docker builds for, the host's by default. For another one, or several, use `docker buildx build --platform linux/amd64,linux/arm64 -f trust-registry/Dockerfile .`: the builder stage runs on each target platform (under emulation for a non-native one), so each image holds a binary for its own architecture. `--build-arg FEATURES="vta tsp"` adds Cargo features. Rebuilds reuse compiled dependencies through BuildKit cache mounts.
 
 **Note:** The `sample-data` folder is mounted as a volume to synchronise the changes from data.csv to the container automatically. If you have configured a different path for the data using CSV as the storage backend, configure the Docker settings accordingly.
 
@@ -432,7 +434,7 @@ volumes:
 To migrate existing trust records to Redis:
 
 1. Export records from your current storage backend
-2. Use the DIDComm admin API to create records in Redis
+2. Create the records in the Redis-backed registry with the `registry/record/put` Trust Task (see [Manage Trust Records](#manage-trust-records))
 3. Verify all records are migrated correctly
 4. Update the `TR_STORAGE_BACKEND` environment variable to `redis`
 
@@ -546,7 +548,7 @@ record that does not exist is still `404`.
 
 - Add more records to `./sample-data/data.csv` to expand test coverage.
 - Test with both defined and undefined IDs to ensure the system correctly handles invalid or missing identifiers.
-- Ensure the `context` field contains a valid JSON object encoded in Base64. Invalid or malformed data should trigger appropriate error responses.
+- In a request, `context` is a JSON object. Only the CSV storage file holds it Base64-encoded (its `context` column). Invalid or malformed data should trigger appropriate error responses.
 
 ## Manage Trust Records
 
@@ -650,7 +652,7 @@ should turn them off and add back only what it uses:
 
 ```toml
 [dependencies]
-trust-registry = { version = "0.11", default-features = false, features = ["storage-fjall"] }
+trust-registry = { version = "0.32", default-features = false, features = ["storage-fjall"] }
 ```
 
 That drops the AWS SDKs, Redis, `serde_dynamo`, `dotenvy`, `crossterm` and
@@ -685,9 +687,13 @@ should supply its own.
 Beyond the core REST/DIDComm server, the Trust Registry ships a set of **optional,
 feature-gated** capabilities that let Verifiable Trust Communities (VTC/OpenVTC)
 and verifiers interact with it as a first-class [Trust Tasks](https://trusttasks.org)
-participant, and let it delegate its own identity and secret custody. All of these
-are **off by default** — the default build is the REST + DIDComm server described
-above.
+participant, and let it delegate its own identity and secret custody.
+
+The `registry/*` Trust Tasks themselves, over `POST /trust-tasks` and the DIDComm
+Trust Task envelope, are always compiled in. The Cargo features below choose
+storage backends, config loaders, the standalone entrypoint, the TSP binding, VTA
+identity and secret-store backends. The standalone service's backends are on by
+default (the first six rows); everything else is opt-in.
 
 ### Cargo feature flags
 
@@ -1301,21 +1307,20 @@ All options must provide the Trust Registry DID and DID secrets in the following
     {
       "id": "did:peer:2.VzDna...#key-1",
       "privateKeyJwk": {
-        "crv": "P-256",
-        "kty": "EC",
-        "x": "RgvVBx01Mva...",
-        "y": "U5pT2A5WdIkD..."
+        "crv": "Ed25519",
+        "d": "...",
+        "kty": "OKP",
+        "x": "Vd8C1RjQ4Ow..."
       },
       "type": "JsonWebKey2020"
     },
     {
       "id": "did:peer:2.VzDna...#key-2",
       "privateKeyJwk": {
-        "crv": "secp256k1",
+        "crv": "X25519",
         "d": "...",
-        "kty": "EC",
-        "x": "O9pWQXY...",
-        "y": "TQk8LY_BcY..."
+        "kty": "OKP",
+        "x": "3xG7j0dbVvo..."
       },
       "type": "JsonWebKey2020"
     }

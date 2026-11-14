@@ -71,6 +71,8 @@ pub fn env_flag(env_name: &str, default: bool) -> Result<bool, String> {
 }
 
 #[cfg(test)]
+// `std::env::{set_var, remove_var}` are unsafe since edition 2024.
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use serial_test::serial;

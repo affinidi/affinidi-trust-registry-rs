@@ -11,7 +11,6 @@ resolver = "3"
 [workspace.package]
 version = "0.32.0"
 edition = "2024"
-publish = true
 rust-version = "1.95.0"
 description = "Trust Registry"
 readme = "README.md"
@@ -27,32 +26,8 @@ affinidi-tdk = "0.37.0"
 # dep exists only to switch on the SDK's `tsp` feature, and a feature only
 # unifies within one semver-compatible copy — a mismatched major/minor silently
 # gives two SDKs, and the feature lands on the one tdk does *not* re-export.
-#
-# 0.18 -> 0.20 (SDK 0.28.1 -> 0.30.0, trust-tasks-rs 0.23.4 -> 0.24.2, vta-sdk
-# 0.54 -> 0.56) is the VTI/TDK stack move: vta-sdk 0.56 is the release that
-# declares `affinidi-tdk ^0.20`, `affinidi-messaging-sdk ^0.30` and
-# `trust-tasks-rs ^0.24.2`, so all three move in this same commit.
-#
-# 0.22 -> 0.24 (SDK 0.32 -> 0.34.1, trust-tasks 0.26 -> 0.28, vta-sdk 0.61 ->
-# 0.65) is the same kind of move: vta-sdk 0.65 declares all three.
-#
-# 0.24 -> 0.26 (SDK 0.34 -> 0.36, trust-tasks 0.28 -> 0.31, vta-sdk 0.65 ->
-# 0.68) again: vta-sdk 0.68 declares all three.
-#
-# 0.26 -> 0.27 (SDK 0.36 -> 0.37, trust-tasks 0.31 -> 0.32, vta-sdk 0.69 ->
-# 0.72) the same again: vta-sdk 0.72 declares all three.
-#
-# 0.27 -> 0.32 (SDK 0.37 -> 0.40, trust-tasks 0.32 -> 0.34, vta-sdk 0.72 ->
-# 0.73) the same again: vta-sdk 0.73 declares all three.
-#
-# 0.32 -> 0.33 (SDK 0.40 -> 0.41, trust-tasks 0.34 -> 0.35, vta-sdk 0.73 ->
-# 0.74) the same again: vta-sdk 0.74 declares all three.
-#
-# 0.33 -> 0.36 (SDK 0.41 -> 0.44, trust-tasks 0.35 -> 0.36, vta-sdk 0.74 ->
-# 0.75) the same again: vta-sdk 0.75 declares all three.
-#
-# 0.36 -> 0.37 (SDK 0.44 -> 0.45, trust-tasks 0.36 -> 0.37, vta-sdk 0.75 ->
-# 0.80) the same again: vta-sdk 0.80 declares all three.
+# So affinidi-tdk, affinidi-messaging-sdk, trust-tasks-* and vta-sdk move
+# together, to the set the chosen vta-sdk release declares.
 affinidi-messaging-sdk = "0.45.0"
 # The D1 delivery layer + its neutral transport types. Used by the messaging
 # module to drive inbound off `MessagingService::subscribe` (which surfaces the
@@ -99,8 +74,6 @@ thiserror = "2.0"
 serde_derive = { version = "1.0" }
 serde_json = { version = "1.0" }
 sha256 = "1.6"
-once_cell = "1.21"
-axum-server = { version = "0.8", default-features = true }
 tower-http = { version = "0.7", features = ["cors", "trace", "limit"] }
 uuid = { version = "1.28", features = ["v4"] }
 aws-types = { version = "1.6" }
@@ -146,6 +119,28 @@ reqwest = { version = "0.13", features = ["json"] }
 serial_test = "4.0"
 tower = { version = "0.5", features = ["util"] }
 
+[workspace.lints.rust]
+# Nothing in the workspace needs `unsafe` outside tests; the tests that call
+# `std::env::{set_var, remove_var}` (unsafe since edition 2024) allow it on
+# their test module. `deny` rather than `forbid` so that local allow works.
+unsafe_code = "deny"
+
 [workspace.lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"
+
+# Applies to the binaries built from this workspace (the service, its dev
+# tools, the Docker image). Cargo ignores a dependency's profiles, so hosts
+# embedding the published crates keep their own.
+[profile.release]
+# Integer overflow is a bug in an authorization service; trap it rather than
+# wrap silently.
+overflow-checks = true
+lto = "thin"
+codegen-units = 1
+# Drop debug info but keep the symbol table, so a panic backtrace still names
+# functions.
+strip = "debuginfo"
+# `panic` stays at the default `unwind`: the service runs every request and
+# listener on its own tokio task, and a panic in one must be caught at that
+# task's JoinHandle, not abort the process (and every in-flight write) with it.

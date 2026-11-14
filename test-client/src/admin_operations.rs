@@ -6,6 +6,9 @@
 //! `ADMIN_AUTHORITIES` grants it).
 
 use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use affinidi_tdk::{
     didcomm::Message,
@@ -63,7 +66,7 @@ pub async fn create_record(
     recognized: bool,
     authorized: bool,
     context: Option<Value>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<String, Box<dyn std::error::Error>> {
     let payload = json!({
         "record": input.record(recognized, authorized, context),
         "expectedExisting": false,
@@ -77,7 +80,7 @@ pub async fn update_record(
     recognized: bool,
     authorized: bool,
     context: Option<Value>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<String, Box<dyn std::error::Error>> {
     let payload = json!({
         "record": input.record(recognized, authorized, context),
         "expectedExisting": true,
@@ -85,16 +88,16 @@ pub async fn update_record(
     send_trust_task(&input, RECORD_PUT, payload).await
 }
 
-pub async fn delete_record(input: CommonCrudInput) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn delete_record(input: CommonCrudInput) -> Result<String, Box<dyn std::error::Error>> {
     send_trust_task(&input, RECORD_DELETE, input.key()).await
 }
 
-pub async fn read_record(input: CommonCrudInput) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn read_record(input: CommonCrudInput) -> Result<String, Box<dyn std::error::Error>> {
     send_trust_task(&input, RECORD_QUERY, input.key()).await
 }
 
 /// List the records held under the input's authority.
-pub async fn list_records(input: CommonCrudInput) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn list_records(input: CommonCrudInput) -> Result<String, Box<dyn std::error::Error>> {
     let payload = json!({ "authorityId": input.authority_id });
     send_trust_task(&input, RECORD_QUERY, payload).await
 }
@@ -102,11 +105,14 @@ pub async fn list_records(input: CommonCrudInput) -> Result<(), Box<dyn std::err
 /// Build the Trust Task, sign it, and send it to the registry in the DIDComm
 /// Trust Task envelope. Reads are signed too: `registry/record/query` is only
 /// answered for an admin, under the same rules as a write.
+///
+/// Returns the document id, which the registry's reply carries as its
+/// `threadId` (and as the envelope's `thid`).
 async fn send_trust_task(
     input: &CommonCrudInput,
     type_uri: &str,
     payload: Value,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<String, Box<dyn std::error::Error>> {
     let did = input.profile.inner.did.clone();
     let mut doc = TrustTask::new(
         format!("urn:uuid:{}", Uuid::new_v4()),
@@ -180,6 +186,111 @@ async fn send_trust_task(
             false,
         )
         .await?;
-    println!("Trust Task sent successfully");
-    Ok(())
+    println!("Trust Task sent");
+    Ok(doc.id)
+}
+
+/// How the registry answered a Trust Task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reply {
+    /// A `#response` document.
+    Response(Value),
+    /// A `trust-task-error` document (or anything else that is not a
+    /// `#response`), with its `code`.
+    Error { code: String, document: Value },
+}
+
+/// Wait up to `timeout` for the registry's reply to the Trust Task whose id is
+/// `thread_id`. Other messages that arrive meanwhile (replies to earlier
+/// requests, say) are taken off the mediator and reported, not matched.
+pub async fn await_reply(
+    atm: &ATM,
+    profile: &Arc<ATMProfile>,
+    thread_id: &str,
+    timeout: Duration,
+) -> Result<Reply, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("no reply to {thread_id} within {timeout:?}").into());
+        }
+        let Some((message, _)) = atm
+            .message_pickup()
+            .live_stream_next(profile, Some(remaining), true)
+            .await?
+        else {
+            continue;
+        };
+        let body_thread = message.body.get("threadId").and_then(Value::as_str);
+        if message.thid.as_deref() != Some(thread_id) && body_thread != Some(thread_id) {
+            println!(
+                "   (ignoring a message of type {} for thread {:?})",
+                message.typ, message.thid
+            );
+            continue;
+        }
+        return Ok(classify(message.body));
+    }
+}
+
+fn classify(document: Value) -> Reply {
+    let doc_type = document
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if doc_type.ends_with("#response") {
+        return Reply::Response(document);
+    }
+    let fallback = if doc_type.contains("trust-task-error") {
+        "unknown"
+    } else {
+        "unexpected-document-type"
+    };
+    let code = document
+        .pointer("/payload/code")
+        .and_then(Value::as_str)
+        .unwrap_or(fallback)
+        .to_string();
+    Reply::Error { code, document }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_response_document_is_a_response() {
+        let doc = json!({
+            "type": "https://trusttasks.org/spec/registry/record/put/0.3#response",
+            "threadId": "urn:uuid:1",
+            "payload": {}
+        });
+        assert_eq!(classify(doc.clone()), Reply::Response(doc));
+    }
+
+    #[test]
+    fn an_error_document_carries_its_code() {
+        let doc = json!({
+            "type": "https://trusttasks.org/spec/trust-task-error/0.1",
+            "threadId": "urn:uuid:1",
+            "payload": { "code": "permissionDenied" }
+        });
+        assert_eq!(
+            classify(doc.clone()),
+            Reply::Error {
+                code: "permissionDenied".to_string(),
+                document: doc
+            }
+        );
+    }
+
+    #[test]
+    fn anything_else_is_not_mistaken_for_success() {
+        let doc = json!({ "type": "https://example.com/other", "payload": {} });
+        assert!(matches!(
+            classify(doc),
+            Reply::Error { code, .. } if code == "unexpected-document-type"
+        ));
+    }
 }

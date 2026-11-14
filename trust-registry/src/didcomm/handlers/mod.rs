@@ -344,8 +344,7 @@ mod tests {
                 protocols_handlers: vec![recorder.clone()],
             };
             handler.handle(&atm, &profile, message, meta).await.unwrap();
-            let replies = recorder.replies_to.lock().unwrap().clone();
-            replies
+            recorder.replies_to.lock().unwrap().clone()
         }
 
         /// A message whose `from` the envelope did not bind to a key reaches

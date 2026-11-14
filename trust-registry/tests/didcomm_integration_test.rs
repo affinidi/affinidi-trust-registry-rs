@@ -1,3 +1,6 @@
+// Test code: a panic on an unexpected `Err`/`None` is the failure report.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use affinidi_tdk::messaging::tasks::messaging::account::update::v0_2::{
     MediatorAcl, MediatorAclAccessListMode,
 };
