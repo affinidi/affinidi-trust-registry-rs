@@ -1,9 +1,13 @@
 //! The client's error taxonomy.
 //!
-//! Variants separate the three failure classes an operator must be able to
-//! tell apart: the transport failed (retry / check connectivity), the registry
-//! rejected the task (act on the machine-readable code), or one side broke the
-//! wire contract (a bug — never retried).
+//! Variants separate the failure classes an operator must be able to tell
+//! apart: the client was misconfigured; the transport failed or timed out
+//! (retry / check connectivity); the registry rejected the task (act on the
+//! machine-readable code); one side broke the wire contract (a bug — never
+//! retried); the registry answered a different question, or an answer did not
+//! close the referral that led to it; or the two sides share no transport.
+//! [`TrqlError::is_retryable`] sorts them. The enum is `#[non_exhaustive]`:
+//! match the variants you act on and keep a catch-all arm.
 
 use chrono::{DateTime, Utc};
 use trust_tasks_rs::TrustTaskCode;
@@ -12,7 +16,12 @@ use crate::transport::TransportKind;
 
 /// Errors returned by [`crate::TrqlClient`] and [`crate::TrqlTransport`]
 /// implementations.
+///
+/// `#[non_exhaustive]`: new failure classes may be added in a minor release,
+/// so a `match` outside this crate needs a wildcard arm. The variants can
+/// still be built (a [`crate::TrqlTransport`] implementation returns them).
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TrqlError {
     /// The client or transport was built with missing/invalid configuration.
     #[error("configuration error: {0}")]
@@ -57,21 +66,28 @@ pub enum TrqlError {
     #[error("contract violation: {0}")]
     Contract(String),
 
-    /// The reply is correlated to our request but answers a *different* TRQP
-    /// tuple than the one we asked about.
+    /// The reply is correlated to our request but answers a *different*
+    /// question than the one we asked: another TRQP tuple, or another
+    /// evaluation time.
     ///
     /// Correlation proves the reply belongs to our exchange; it says nothing
     /// about what the reply is an answer to. A registry that echoes a
     /// different `entity_id`/`authority_id`/`action`/`resource` has answered
     /// someone else's question, and treating it as ours silently substitutes
-    /// the subject of an authorization decision.
+    /// the subject of an authorization decision. Likewise a query that asked
+    /// for evaluation as of a given time ([`crate::TrqpQuery::at`]) must be
+    /// answered for that time: a reply that omits the time, or echoes another
+    /// one, may be a "now" answer to an "as of then" question.
     #[error("registry answered for a different {field}: asked `{asked}`, answered `{answered}`")]
     AnswerMismatch {
-        /// Which tuple member disagreed.
+        /// Which member of the question disagreed, as the wire spells it
+        /// (`entityId`, `authorityId`, `action`, `resource`, `asOf`; the 0.1
+        /// spellings `entity_id`, `authority_id`, `time_requested`).
         field: &'static str,
         /// The value we sent on the request.
         asked: String,
-        /// The value the registry echoed back.
+        /// The value the registry echoed back (`<absent>` when it echoed
+        /// none).
         answered: String,
     },
 

@@ -6539,6 +6539,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "trql-client",
  "trust-registry",
  "trust-tasks-didcomm",
  "trust-tasks-proof",

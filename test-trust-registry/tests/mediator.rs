@@ -2,9 +2,12 @@
 //!
 //! Spawns an `affinidi-messaging-test-mediator` and a Trust Registry whose
 //! DIDComm (and, under `--features tsp`, TSP) Trust Task listeners connect to
-//! it, then drives Trust Tasks end-to-end.
+//! it, then drives Trust Tasks end-to-end: some by building and polling
+//! envelopes by hand, and some through `trql-client`'s `DidcommTransport` and
+//! `TspTransport`, the transports verifiers use.
 
 #![cfg(feature = "mediator")]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use affinidi_messaging_test_mediator::TestEnvironment;
 use serde_json::{Value, json};
@@ -361,14 +364,16 @@ async fn signed_put_under_another_authority_is_refused_over_didcomm() {
 
 /// Under `--features tsp`, `serve()` additionally starts the TSP receive loop
 /// (raw-TSP websocket to the mediator). This asserts that build wires up and
-/// still serves; a full routed TSP Trust Task round-trip — which needs the
-/// client↔registry TSP VID/service routing — is a follow-up.
+/// still serves without any routed traffic; the routed TSP round trips are
+/// `recognition_round_trips_over_tsp` and
+/// `trql_client_queries_the_registry_over_tsp` below (`--ignored`).
 #[cfg(feature = "tsp")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tsp_enabled_registry_spawns_against_a_mediator() {
     let env = TestEnvironment::spawn().await.expect("spawn test mediator");
     let tr = TestTrustRegistry::builder()
         .record(sample_record())
+        .tsp(true)
         .spawn_with_mediator(&env.mediator)
         .await
         .expect("spawn trust registry");
@@ -389,6 +394,58 @@ async fn tsp_enabled_registry_spawns_against_a_mediator() {
     env.shutdown().await.ok();
 }
 
+/// Form the TSP relationship Spec Rev 3 §7.2.2 requires before any
+/// application message: `client` invites the registry, which accepts any
+/// authenticated VID, and `client` records the accept. Without it the
+/// registry discards the client's Trust Tasks, as specified.
+#[cfg(feature = "tsp")]
+async fn relate_with_registry(env: &TestEnvironment, client: &TestUser, tr_did: &str) {
+    use affinidi_messaging_sdk::messages::DeleteMessageRequest;
+
+    env.atm
+        .tsp()
+        .form_relationship(&client.profile, tr_did)
+        .await
+        .expect("send the relationship invite");
+    for _ in 0..40 {
+        let inbox = env
+            .atm
+            .fetch_messages(&client.profile, &FetchOptions::default())
+            .await
+            .expect("fetch messages");
+        if let Some(element) = inbox.success.first()
+            && let Some(stored) = element.msg.as_ref()
+        {
+            // Consume it, so it is not mistaken for a reply later.
+            env.atm
+                .delete_messages_direct(
+                    &client.profile,
+                    &DeleteMessageRequest {
+                        message_ids: vec![element.msg_id.clone()],
+                    },
+                )
+                .await
+                .expect("delete the accept");
+            let qb2 = env.atm.tsp().decode(stored).expect("decode the accept");
+            let (control, sender, _digest) = env
+                .atm
+                .tsp()
+                .unpack_control(&client.profile, &qb2)
+                .await
+                .expect("unpack the accept");
+            assert_eq!(sender, tr_did, "the accept came from another VID");
+            env.atm
+                .tsp()
+                .record_incoming_control(&client.profile, tr_did, &control)
+                .await
+                .expect("record the accept");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    panic!("the registry did not accept the TSP relationship");
+}
+
 /// Full routed TSP round-trip: a client sends a recognition Trust Task to the
 /// registry over TSP (through the mediator's TSP relay), and the registry —
 /// receiving it multiplexed on its single DIDComm pickup socket — dispatches and
@@ -407,6 +464,7 @@ async fn recognition_round_trips_over_tsp() {
         .expect("spawn test mediator");
     let tr = TestTrustRegistry::builder()
         .record(sample_record())
+        .tsp(true)
         .spawn_with_mediator(&env.mediator)
         .await
         .expect("spawn trust registry");
@@ -415,6 +473,7 @@ async fn recognition_round_trips_over_tsp() {
 
     // Give the registry's pickup socket a moment to establish live delivery.
     tokio::time::sleep(Duration::from_secs(2)).await;
+    relate_with_registry(&env, &client, &tr_did).await;
 
     // The TSP binding envelope is `{ type, document }` bytes — and uses the
     // *TSP* binding envelope type, not the DIDComm one.
@@ -457,6 +516,276 @@ async fn recognition_round_trips_over_tsp() {
     }
 
     assert_eq!(recognized, Some(true), "seeded record should be recognized");
+
+    tr.shutdown().await;
+    env.shutdown().await.ok();
+}
+
+// --- Through the real client (trql-client) -----------------------------------
+//
+// The tests above build envelopes by hand. These query through `TrqlClient`
+// over `DidcommTransport` / `TspTransport`, so what is exercised is what a
+// verifier runs: the request the client actually emits, the registry's real
+// reply, sender binding, routing of concurrent replies to their own waiters,
+// and the 0.2 request the registry answers.
+
+use trql_client::{DidcommTransport, DidcommTransportConfig, TrqlClient, TrqlError, TrqpQuery};
+
+fn seeded_query() -> TrqpQuery {
+    TrqpQuery::new("did:example:entity", "did:example:authority", "issue", "vc")
+}
+
+fn unknown_query() -> TrqpQuery {
+    TrqpQuery::new(
+        "did:example:stranger",
+        "did:example:authority",
+        "issue",
+        "vc",
+    )
+}
+
+/// A `TrqlClient` for `registry_did` over DIDComm from `client`'s profile,
+/// which the transport then owns (websocket live delivery switched on).
+async fn didcomm_client(
+    env: &TestEnvironment,
+    client: &TestUser,
+    registry_did: &str,
+    reply_timeout: Duration,
+) -> TrqlClient {
+    env.atm
+        .profile_enable_websocket(&client.profile)
+        .await
+        .expect("enable websocket live delivery on the client profile");
+    let transport = DidcommTransport::new(
+        env.atm.clone(),
+        client.profile.clone(),
+        DidcommTransportConfig::new().with_reply_timeout(reply_timeout),
+    )
+    .expect("didcomm transport");
+    TrqlClient::new(Arc::new(transport), registry_did).with_client_did(client.did.clone())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "routed round-trip through the mediator; run with --ignored"]
+async fn trql_client_queries_the_registry_over_didcomm() {
+    let env = TestEnvironment::spawn().await.expect("spawn test mediator");
+    let tr = TestTrustRegistry::builder()
+        .record(sample_record())
+        .spawn_with_mediator(&env.mediator)
+        .await
+        .expect("spawn trust registry");
+    let tr_did = tr.did().expect("tr did").to_string();
+    let user = env.add_user("verifier").await.expect("add client");
+    let client = didcomm_client(&env, &user, &tr_did, Duration::from_secs(20)).await;
+
+    let authorization = client
+        .authorization(seeded_query())
+        .await
+        .expect("authorization over didcomm");
+    assert!(authorization.authorized);
+    assert!(
+        client
+            .recognition(seeded_query())
+            .await
+            .expect("recognition over didcomm")
+            .recognized
+    );
+
+    // Two queries in flight on the one transport: each reply reaches its
+    // own waiter.
+    let (known, unknown) = tokio::join!(
+        client.authorization(seeded_query()),
+        client.authorization(unknown_query())
+    );
+    let (known, unknown) = (known.expect("known"), unknown.expect("unknown"));
+    assert!(known.authorized);
+    assert_eq!(known.entity_id, "did:example:entity");
+    assert!(!unknown.authorized);
+    assert_eq!(unknown.entity_id, "did:example:stranger");
+
+    tr.shutdown().await;
+    env.shutdown().await.ok();
+}
+
+/// Wait for the Trust Task request `registry` has been sent, and return it.
+async fn await_request(env: &TestEnvironment, registry: &TestUser) -> TrustTask<Value> {
+    for _ in 0..40 {
+        let fetched = env
+            .atm
+            .fetch_messages(&registry.profile, &FetchOptions::default())
+            .await
+            .expect("fetch messages");
+        for item in fetched.success {
+            let Some(packed) = item.msg else { continue };
+            let Ok((message, _)) = env.atm.unpack(&packed).await else {
+                continue;
+            };
+            if message.typ == ENVELOPE_TYPE {
+                return serde_json::from_value(message.body).expect("parse request task");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    panic!("no Trust Task request reached the registry's inbox");
+}
+
+/// An authorization `#response` to `request` saying `authorized`.
+fn authorization_reply(request: &TrustTask<Value>, authorized: bool) -> TrustTask<Value> {
+    let payload = json!({
+        "entityId": request.payload["entityId"],
+        "authorityId": request.payload["authorityId"],
+        "action": request.payload["action"],
+        "resource": request.payload["resource"],
+        "authorized": authorized,
+        "evaluatedAt": chrono::Utc::now(),
+    });
+    request.respond_with(format!("urn:uuid:{}", uuid::Uuid::new_v4()), payload)
+}
+
+/// Send `reply` to `to`, authcrypted with `from`'s own key.
+async fn send_reply_as(env: &TestEnvironment, from: &TestUser, to: &str, reply: &TrustTask<Value>) {
+    let body = serde_json::to_value(reply).expect("serialise reply");
+    let message = Message::new(ENVELOPE_TYPE, body)
+        .from(from.did.clone())
+        .to(vec![to.to_string()])
+        .thid(reply.thread_id.clone().expect("a reply is correlated"));
+    let (packed, _) = env
+        .atm
+        .pack_encrypted(&message, to, Some(&from.did), None)
+        .await
+        .expect("pack_encrypted");
+    env.atm
+        .forward_and_send_message(
+            &from.profile,
+            false,
+            &packed,
+            None,
+            env.mediator.did(),
+            to,
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("forward reply");
+}
+
+/// A third identity that learns the request id and answers first, correctly
+/// correlated and echoing the tuple, does not answer the query: only the
+/// party the request was addressed to can. Here the "registry" is a plain
+/// mediator user, so the test decides what each party says: the impostor
+/// grants, the registry denies, and the client must report the denial.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "routed round-trip through the mediator; run with --ignored"]
+async fn trql_client_ignores_a_reply_from_a_third_identity_over_didcomm() {
+    let env = TestEnvironment::spawn().await.expect("spawn test mediator");
+    let registry = env.add_user("registry").await.expect("add registry");
+    let impostor = env.add_user("impostor").await.expect("add impostor");
+    let user = env.add_user("verifier").await.expect("add client");
+    let client =
+        Arc::new(didcomm_client(&env, &user, &registry.did, Duration::from_secs(20)).await);
+
+    let query = tokio::spawn({
+        let client = client.clone();
+        async move { client.authorization(seeded_query()).await }
+    });
+    let request = await_request(&env, &registry).await;
+    send_reply_as(
+        &env,
+        &impostor,
+        &user.did,
+        &authorization_reply(&request, true),
+    )
+    .await;
+    // Give the forged reply time to arrive (and be discarded) first.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !query.is_finished(),
+        "the impostor's reply completed the query"
+    );
+    send_reply_as(
+        &env,
+        &registry,
+        &user.did,
+        &authorization_reply(&request, false),
+    )
+    .await;
+
+    let answer = query
+        .await
+        .expect("query task")
+        .expect("the registry's answer");
+    assert!(!answer.authorized, "the impostor's grant was believed");
+
+    // With only the impostor answering, the query times out. (A fresh
+    // verifier: a transport owns its profile's stream exclusively.)
+    let user = env.add_user("verifier-2").await.expect("add client");
+    let client = didcomm_client(&env, &user, &registry.did, Duration::from_secs(5)).await;
+    let query = tokio::spawn(async move { client.authorization(seeded_query()).await });
+    let request = await_request(&env, &registry).await;
+    send_reply_as(
+        &env,
+        &impostor,
+        &user.did,
+        &authorization_reply(&request, true),
+    )
+    .await;
+    let result = query.await.expect("query task");
+    assert!(
+        matches!(result, Err(TrqlError::Timeout { .. })),
+        "expected a timeout, got {result:?}"
+    );
+
+    env.shutdown().await.ok();
+}
+
+/// The same client over TSP: the registry's TSP binding, through the
+/// mediator's TSP relay, to `TspTransport`'s demux.
+#[cfg(feature = "tsp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "routed TSP round-trip through the mediator; run with --ignored"]
+async fn trql_client_queries_the_registry_over_tsp() {
+    use trql_client::{TspTransport, TspTransportConfig};
+
+    // Client and registry share one mediator: direct delivery, as in
+    // `recognition_round_trips_over_tsp`.
+    let env = TestEnvironment::spawn_with_direct_delivery()
+        .await
+        .expect("spawn test mediator");
+    let tr = TestTrustRegistry::builder()
+        .record(sample_record())
+        .tsp(true)
+        .spawn_with_mediator(&env.mediator)
+        .await
+        .expect("spawn trust registry");
+    let tr_did = tr.did().expect("tr did").to_string();
+    let user = env.add_user("verifier").await.expect("add client");
+    // Give the registry's pickup socket a moment to establish live delivery.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Before the transport owns the profile's stream: the accept is read
+    // from the inbox here.
+    relate_with_registry(&env, &user, &tr_did).await;
+    env.atm
+        .profile_enable_websocket(&user.profile)
+        .await
+        .expect("enable websocket live delivery on the client profile");
+
+    let transport = TspTransport::new(
+        env.atm.clone(),
+        user.profile.clone(),
+        TspTransportConfig::new().with_reply_timeout(Duration::from_secs(20)),
+    )
+    .expect("tsp transport");
+    let client = TrqlClient::new(Arc::new(transport), &tr_did).with_client_did(user.did.clone());
+
+    let (known, unknown) = tokio::join!(
+        client.recognition(seeded_query()),
+        client.recognition(unknown_query())
+    );
+    let (known, unknown) = (known.expect("known"), unknown.expect("unknown"));
+    assert!(known.recognized);
+    assert_eq!(known.entity_id, "did:example:entity");
+    assert!(!unknown.recognized);
 
     tr.shutdown().await;
     env.shutdown().await.ok();

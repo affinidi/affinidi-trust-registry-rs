@@ -2,11 +2,12 @@ name: release
 
 # THE FILENAME OF THIS FILE IS LOAD-BEARING. crates.io Trusted Publishing is
 # configured per crate against a repository + workflow FILENAME (+ the
-# `release` environment below). trust-registry, trqp and trql-client are
+# `release` environment below). trust-registry and trql-client are
 # registered against `affinidi/affinidi-trust-registry-rs`, `release.yaml`,
 # environment `release` — the file that published from main before
 # RELEASES.md. Renaming it makes the OIDC exchange fail before anything
-# publishes.
+# publishes. (trqp was registered too, but is `publish = false` now; the
+# publish action skips crates cargo would not publish.)
 #
 # Publishes the workspace to crates.io from a release branch (RELEASES.md):
 #

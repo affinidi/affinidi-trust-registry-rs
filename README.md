@@ -24,6 +24,7 @@ TRQP (REST or DIDComm) is unsigned and read-only, matching the ToIP spec verbati
   - [Why a Trust Registry Matters](#why-a-trust-registry-matters)
   - [Sample Use Cases](#sample-use-cases)
 - [Key Components](#key-components)
+  - [Crates in this workspace](#crates-in-this-workspace)
 - [Requirements](#requirements)
 - [Set up Trust Registry](#set-up-trust-registry)
   - [Run with DIDComm Enabled](#run-with-didcomm-enabled)
@@ -148,6 +149,16 @@ This ensures **security**, **compliance**, and **interoperability** across decen
 - **Trust Tasks & transports** _(optional)_: Every Trust Registry operation is also modelled as a versioned [Trust Task](https://trusttasks.org) (`registry/*`) that verifiers and communities (VTC/OpenVTC) can invoke over DIDComm, HTTP, or TSP. See [Trust Tasks, Transports & Identity](#trust-tasks-transports--identity).
 
 - **VTA identity** _(optional)_: The Trust Registry can source its DID and keys from a [Verifiable Trust Agent](https://docs.affinidi.com) instead of a local `PROFILE_CONFIG` (behind the `vta` feature).
+
+### Crates in this workspace
+
+| Crate | Published | What it is |
+| --- | --- | --- |
+| `trust-registry` | yes | The registry: the standalone server and the library for [embedding](#embedding-the-trust-registry) it. |
+| `trql-client` | yes | The client library for querying a registry with TRQP over Trust Tasks, by HTTPS, DIDComm or TSP. See [trql-client/README.md](trql-client/README.md). `trql` is only the crate's name; the protocol is TRQP. |
+| `test-trust-registry` | no | An in-process registry fixture for integration tests. See [test-trust-registry/README.md](test-trust-registry/README.md). |
+| `test-client` | no | A development client that drives a running registry over DIDComm. |
+| `trqp` | no | A placeholder for a TRQP command-line client. Earlier releases published it to crates.io; those versions remain there, and do nothing. |
 
 ## Requirements
 

@@ -70,3 +70,7 @@ __pycache__/
 
 # The test client's own identity (generated on first run)
 test-client/conf/user_config.json
+
+# TSP relationship stores the test-trust-registry fixture's registries write
+# (`--features tsp` mediator tests).
+/test-trust-registry/.trust-registry/

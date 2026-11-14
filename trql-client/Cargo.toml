@@ -4,10 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Transport-agnostic Trust Registry query client (TRQP over Trust Tasks): HTTPS, DIDComm, TSP"
-readme.workspace = true
+readme = "README.md"
 license.workspace = true
 homepage.workspace = true
-keywords.workspace = true
+# The protocol is TRQP; `trql` is only part of this crate's name, not a
+# separate protocol, so it is not a keyword.
+keywords = ["trust-registry", "trqp", "trust-tasks", "didcomm", "tsp"]
 repository.workspace = true
 
 publish = true
@@ -18,7 +20,7 @@ default = ["https"]
 # tokio resolves host names for the optional non-public address filter.
 https = ["dep:reqwest", "dep:tokio"]
 # DIDComm binding over the ATM mediator (trust-tasks-didcomm envelope).
-didcomm = ["dep:affinidi-tdk", "dep:trust-tasks-didcomm", "dep:tokio", "dep:uuid"]
+didcomm = ["dep:affinidi-tdk", "dep:trust-tasks-didcomm", "dep:tokio"]
 # TSP binding, multiplexed on the same mediator websocket (trust-tasks-tsp
 # envelope). Mirrors the trust-registry `tsp` feature: affinidi-tsp is a moving
 # 0.x dependency, so this stays opt-in.
@@ -27,7 +29,6 @@ tsp = [
     "dep:affinidi-messaging-sdk",
     "dep:trust-tasks-tsp",
     "dep:tokio",
-    "dep:uuid",
     "affinidi-tdk/tsp",
     "affinidi-messaging-sdk/tsp",
 ]
@@ -40,7 +41,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 trust-tasks-rs.workspace = true
-uuid = { workspace = true, optional = true }
+# Document ids are `urn:uuid:` + a random (v4) UUID in every build.
+uuid.workspace = true
 
 # https
 reqwest = { workspace = true, optional = true }
@@ -58,7 +60,10 @@ trust-tasks-build.workspace = true
 [dev-dependencies]
 axum.workspace = true
 tokio.workspace = true
-uuid.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+# Render the DIDComm and TSP transports too, not only the default HTTPS one.
+all-features = true
