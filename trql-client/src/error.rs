@@ -42,7 +42,8 @@ pub enum TrqlError {
     Timeout {
         /// Which binding timed out.
         kind: TransportKind,
-        /// How long the transport waited.
+        /// How long the transport waited, in whole seconds rounded up (a
+        /// sub-second window reads as 1, never 0).
         waited_secs: u64,
     },
 
@@ -126,6 +127,16 @@ pub enum TrqlError {
         /// Transports the registry advertises in its DID document.
         theirs: Vec<TransportKind>,
     },
+}
+
+/// `duration` in whole seconds, rounded up, for
+/// [`TrqlError::Timeout::waited_secs`]: a 300 ms window reports 1, not 0.
+#[cfg_attr(
+    not(any(feature = "https", feature = "didcomm", feature = "tsp")),
+    allow(dead_code)
+)]
+pub(crate) fn whole_secs_rounded_up(duration: std::time::Duration) -> u64 {
+    duration.as_secs() + u64::from(duration.subsec_nanos() > 0)
 }
 
 /// Render a transport list for an error message; `"none"` when empty, so a

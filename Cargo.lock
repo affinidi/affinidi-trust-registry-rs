@@ -6971,6 +6971,7 @@ dependencies = [
 name = "trql-client"
 version = "0.32.0"
 dependencies = [
+ "affinidi-messaging-core",
  "affinidi-messaging-sdk",
  "affinidi-tdk",
  "async-trait",

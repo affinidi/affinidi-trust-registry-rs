@@ -20,13 +20,19 @@ default = ["https"]
 # tokio resolves host names for the optional non-public address filter.
 https = ["dep:reqwest", "dep:tokio"]
 # DIDComm binding over the ATM mediator (trust-tasks-didcomm envelope).
-didcomm = ["dep:affinidi-tdk", "dep:trust-tasks-didcomm", "dep:tokio"]
+didcomm = [
+    "dep:affinidi-tdk",
+    "dep:affinidi-messaging-core",
+    "dep:trust-tasks-didcomm",
+    "dep:tokio",
+]
 # TSP binding, multiplexed on the same mediator websocket (trust-tasks-tsp
 # envelope). Mirrors the trust-registry `tsp` feature: affinidi-tsp is a moving
 # 0.x dependency, so this stays opt-in.
 tsp = [
     "dep:affinidi-tdk",
     "dep:affinidi-messaging-sdk",
+    "dep:affinidi-messaging-core",
     "dep:trust-tasks-tsp",
     "dep:tokio",
     "affinidi-tdk/tsp",
@@ -50,6 +56,9 @@ reqwest = { workspace = true, optional = true }
 # didcomm / tsp
 affinidi-tdk = { workspace = true, optional = true }
 affinidi-messaging-sdk = { workspace = true, optional = true }
+# `ConnState`, the websocket connection state the SDK reports (not re-exported
+# by the SDK); the same release the SDK depends on.
+affinidi-messaging-core = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 trust-tasks-didcomm = { workspace = true, optional = true }
 trust-tasks-tsp = { workspace = true, optional = true }

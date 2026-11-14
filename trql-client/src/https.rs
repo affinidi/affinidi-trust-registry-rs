@@ -295,7 +295,7 @@ impl HttpsTransport {
             if e.is_timeout() {
                 TrqlError::Timeout {
                     kind: TransportKind::Https,
-                    waited_secs: self.timeout.as_secs(),
+                    waited_secs: crate::error::whole_secs_rounded_up(self.timeout),
                 }
             } else {
                 Self::transport_error(format!("failed reading response body: {e}"))
@@ -328,7 +328,7 @@ impl TrqlTransport for HttpsTransport {
             if e.is_timeout() {
                 TrqlError::Timeout {
                     kind: TransportKind::Https,
-                    waited_secs: self.timeout.as_secs(),
+                    waited_secs: crate::error::whole_secs_rounded_up(self.timeout),
                 }
             } else if e.is_connect() {
                 Self::transport_error(format!("could not connect to {}: {e}", self.endpoint))

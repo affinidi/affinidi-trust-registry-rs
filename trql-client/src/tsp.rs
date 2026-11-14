@@ -31,10 +31,11 @@
 //!
 //! ### Failure reporting
 //!
-//! As for the DIDComm binding: inbound-stream failures are retried with
-//! capped exponential backoff and escalating logs, and while the stream is
-//! unavailable (or the demux task has stopped) exchanges fail at once with
-//! [`TrqlError::Transport`]; see [`TspTransport::inbound_error`].
+//! As for the DIDComm binding: poll failures are retried with capped
+//! exponential backoff and escalating logs, the profile's websocket
+//! connection state is followed too, and once either has been failing for 10
+//! seconds without a break (or the demux task has stopped) exchanges fail at
+//! once with [`TrqlError::Transport`]; see [`TspTransport::inbound_error`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,7 +48,9 @@ use trust_tasks_rs::TrustTask;
 use trust_tasks_tsp::ENVELOPE_TYPE;
 
 use crate::error::TrqlError;
-use crate::pending::{DEMUX_STOPPED, InboundMonitor, PendingReplies, RouteOutcome};
+use crate::pending::{
+    DEMUX_STOPPED, InboundMonitor, PendingReplies, RouteOutcome, watch_connection,
+};
 use crate::transport::{TransportKind, TrqlTransport};
 
 /// How long each inbound pickup poll waits before looping.
@@ -95,6 +98,8 @@ pub struct TspTransport {
     pending: PendingReplies,
     reply_timeout: Duration,
     demux: tokio::task::JoinHandle<()>,
+    /// Follows the profile's websocket connection state for the health check.
+    watcher: tokio::task::JoinHandle<()>,
 }
 
 impl TspTransport {
@@ -121,18 +126,25 @@ impl TspTransport {
             pending.clone(),
             monitor,
         ));
+        let watcher = tokio::spawn(watch_connection(
+            profile.clone(),
+            pending.clone(),
+            TransportKind::Tsp,
+        ));
         Ok(Self {
             atm,
             profile,
             pending,
             reply_timeout: config.reply_timeout,
             demux,
+            watcher,
         })
     }
 
-    /// Why this transport cannot receive replies right now (its inbound
-    /// stream has failed repeatedly, or its demux task has stopped), or
-    /// `None` while it can. Exchanges fail fast with this reason meanwhile.
+    /// Why this transport cannot receive replies right now (its polls have
+    /// failed, or its mediator websocket has been disconnected, for longer
+    /// than the health threshold; or its demux task has stopped), or `None`
+    /// while it can. Exchanges fail fast with this reason meanwhile.
     pub fn inbound_error(&self) -> Option<String> {
         if self.demux.is_finished() {
             return Some(DEMUX_STOPPED.to_string());
@@ -144,6 +156,7 @@ impl TspTransport {
 impl Drop for TspTransport {
     fn drop(&mut self) {
         self.demux.abort();
+        self.watcher.abort();
     }
 }
 

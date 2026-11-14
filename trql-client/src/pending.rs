@@ -20,38 +20,53 @@
 //!
 //! ### Inbound health
 //!
-//! The demux task reports every poll of its stream to an [`InboundMonitor`].
-//! After [`UNAVAILABLE_AFTER`] consecutive failures the stream is marked
-//! unavailable: every waiter is failed at once with the stream's error, and
-//! new exchanges are refused up front, rather than each waiting out the full
+//! Two signals say whether replies can arrive: the demux task's polls of the
+//! stream ([`InboundMonitor`]), and the profile's websocket connection state,
+//! followed by [`watch_connection`]. The SDK keeps reconnecting a websocket
+//! whose mediator is unreachable or rejects the profile's credentials, and a
+//! poll during that time returns "no message" rather than an error, so the
+//! polls alone would look healthy; the connection state does not.
+//!
+//! Once the stream has been failing (poll errors, or the websocket not
+//! connected) without a break for [`UNAVAILABLE_AFTER`], it is marked
+//! unavailable: every waiter is failed at once with the reason, and new
+//! exchanges are refused up front, rather than each waiting out the full
 //! reply window and reporting a timeout that points at the registry. The
-//! first successful poll clears the state (it is never latched). When the
-//! demux task ends — panic or abort — the monitor's `Drop` marks the
-//! transport stopped and closes every waiter.
+//! threshold is time, not a count, so a brief blip (a reconnect, a few quick
+//! errors) does not fail queries. The state clears as soon as both signals
+//! are good again (it is never latched). When the demux task ends (panic or
+//! abort) the monitor's `Drop` marks the transport stopped and closes every
+//! waiter.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use affinidi_messaging_core::ConnState;
 use affinidi_tdk::did_common::scid::same_reference;
+use affinidi_tdk::messaging::profiles::ATMProfile;
 use serde_json::Value;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tracing::{debug, error, info, warn};
 use trust_tasks_rs::TrustTask;
 
 use crate::error::TrqlError;
 use crate::transport::TransportKind;
 
-/// Consecutive inbound-stream failures after which the stream is reported
+/// How long the inbound side must have been failing without a break (poll
+/// errors, or the websocket not connected) before the stream is reported
 /// unavailable and in-flight and new exchanges fail fast.
-pub(crate) const UNAVAILABLE_AFTER: u32 = 3;
+pub(crate) const UNAVAILABLE_AFTER: Duration = Duration::from_secs(10);
 /// First retry delay after an inbound-stream failure.
 const BACKOFF_INITIAL: Duration = Duration::from_millis(500);
 /// Ceiling on the retry delay.
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
-/// While the stream stays down, repeat the warning every this many failures.
+/// While polls keep failing, repeat the warning every this many failures.
 const WARN_EVERY: u32 = 20;
+/// How often the connection watcher re-checks the websocket state when it
+/// has not changed, so the time threshold is noticed.
+const CONNECTION_RECHECK: Duration = Duration::from_secs(1);
 
 /// What a waiter receives: the reply document, or the reason the inbound
 /// stream can no longer deliver one.
@@ -85,19 +100,73 @@ pub(crate) enum RouteOutcome {
 /// The inbound side's state, as exchanges observe it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Health {
-    /// Polling normally (or not yet failed).
+    /// Receiving normally (or not failing for long enough to matter).
     Healthy,
-    /// The stream has failed [`UNAVAILABLE_AFTER`] times in a row; carries
-    /// the last error. Cleared by the next successful poll.
+    /// The stream has been failing for [`UNAVAILABLE_AFTER`]; carries why.
+    /// Cleared once polls succeed and the websocket is connected again.
     Unavailable(String),
     /// The demux task has ended; nothing will ever be routed again.
     Stopped,
+}
+
+/// Something the demux task or the connection watcher observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InboundEvent {
+    /// A poll of the stream returned (with or without a message).
+    PollOk,
+    /// A poll of the stream failed.
+    PollFailed(String),
+    /// The profile's websocket is connected.
+    Connected,
+    /// The profile's websocket is not connected (dropped, still connecting,
+    /// or not running at all).
+    Disconnected,
+    /// Nothing new; re-evaluate the time threshold (tests; the watcher
+    /// re-reports the connection state instead).
+    #[cfg(test)]
+    Tick,
+}
+
+/// The two failure signals and since when each has held.
+#[derive(Default)]
+struct InboundSignals {
+    /// When the current run of poll errors began, and the latest error.
+    poll_failing: Option<(Instant, String)>,
+    /// Since when the websocket has not been connected.
+    disconnected_since: Option<Instant>,
+}
+
+impl InboundSignals {
+    /// Why the stream counts as unavailable at `now`, if it does.
+    fn verdict(&self, now: Instant) -> Option<String> {
+        if let Some((since, detail)) = &self.poll_failing {
+            let failing = now.saturating_duration_since(*since);
+            if failing >= UNAVAILABLE_AFTER {
+                return Some(format!(
+                    "{detail} (polls failing for {}s)",
+                    failing.as_secs()
+                ));
+            }
+        }
+        if let Some(since) = self.disconnected_since {
+            let down = now.saturating_duration_since(since);
+            if down >= UNAVAILABLE_AFTER {
+                return Some(format!(
+                    "the mediator websocket has not been connected for {}s \
+                     (mediator unreachable, credentials rejected, or live delivery not enabled)",
+                    down.as_secs()
+                ));
+            }
+        }
+        None
+    }
 }
 
 #[derive(Default)]
 struct State {
     waiters: HashMap<String, Waiter>,
     health: Option<Health>,
+    signals: InboundSignals,
 }
 
 impl State {
@@ -246,33 +315,75 @@ impl PendingReplies {
             Ok(Err(_closed)) => Err(transport_error(DEMUX_STOPPED.to_string())),
             Err(_elapsed) => Err(TrqlError::Timeout {
                 kind,
-                waited_secs: reply_timeout.as_secs(),
+                waited_secs: crate::error::whole_secs_rounded_up(reply_timeout),
             }),
         }
     }
 
-    /// Mark the stream unavailable and fail every waiter with `detail`.
-    fn mark_unavailable(&self, detail: &str) {
-        let waiters = {
+    /// Record an inbound observation made at `now`, and move between healthy
+    /// and unavailable when the verdict changes: becoming unavailable fails
+    /// every waiter with the reason (logged at `error`); recovering is logged
+    /// at `info`.
+    pub(crate) fn observe(&self, kind: TransportKind, event: InboundEvent, now: Instant) {
+        enum Transition {
+            Down(String, HashMap<String, Waiter>),
+            Up,
+        }
+        let transition = {
             let mut state = self.lock();
             if state.health() == &Health::Stopped {
                 return;
             }
-            state.health = Some(Health::Unavailable(detail.to_string()));
-            std::mem::take(&mut state.waiters)
+            let signals = &mut state.signals;
+            match event {
+                InboundEvent::PollOk => signals.poll_failing = None,
+                InboundEvent::PollFailed(detail) => match &mut signals.poll_failing {
+                    Some((_, last)) => *last = detail,
+                    None => signals.poll_failing = Some((now, detail)),
+                },
+                InboundEvent::Connected => signals.disconnected_since = None,
+                InboundEvent::Disconnected => {
+                    signals.disconnected_since.get_or_insert(now);
+                }
+                #[cfg(test)]
+                InboundEvent::Tick => {}
+            }
+            let verdict = state.signals.verdict(now);
+            match (state.health().clone(), verdict) {
+                (Health::Healthy, Some(reason)) => {
+                    state.health = Some(Health::Unavailable(reason.clone()));
+                    Some(Transition::Down(reason, std::mem::take(&mut state.waiters)))
+                }
+                (Health::Unavailable(_), Some(reason)) => {
+                    // Keep the reported reason current.
+                    state.health = Some(Health::Unavailable(reason));
+                    None
+                }
+                (Health::Unavailable(_), None) => {
+                    state.health = Some(Health::Healthy);
+                    Some(Transition::Up)
+                }
+                _ => None,
+            }
         };
-        for waiter in waiters.into_values() {
-            let _ = waiter
-                .tx
-                .send(Err(format!("inbound stream unavailable: {detail}")));
-        }
-    }
-
-    /// Clear an unavailable state after a successful poll.
-    fn mark_healthy(&self) {
-        let mut state = self.lock();
-        if matches!(state.health(), Health::Unavailable(_)) {
-            state.health = Some(Health::Healthy);
+        match transition {
+            Some(Transition::Down(reason, waiters)) => {
+                error!(
+                    transport = %kind,
+                    in_flight = waiters.len(),
+                    "trql-client reply stream unavailable; failing in-flight and new registry \
+                     queries until it recovers: {reason}"
+                );
+                for waiter in waiters.into_values() {
+                    let _ = waiter
+                        .tx
+                        .send(Err(format!("inbound stream unavailable: {reason}")));
+                }
+            }
+            Some(Transition::Up) => {
+                info!(transport = %kind, "trql-client reply stream recovered");
+            }
+            None => {}
         }
     }
 
@@ -304,10 +415,10 @@ impl PendingReplies {
 /// The error an exchange reports once the demux task has ended.
 pub(crate) const DEMUX_STOPPED: &str = "reply demux task stopped";
 
-/// The demux task's view of its own stream: counts consecutive failures,
-/// escalates the logging, computes the backoff, and publishes the health
-/// that exchanges observe. Owned by the demux task; its `Drop` (which also
-/// runs when the task panics or is aborted) marks the transport stopped.
+/// The demux task's view of its own polls: counts consecutive failures for
+/// the backoff and the logging, and reports each poll to the shared health.
+/// Owned by the demux task; its `Drop` (which also runs when the task panics
+/// or is aborted) marks the transport stopped.
 pub(crate) struct InboundMonitor {
     pending: PendingReplies,
     kind: TransportKind,
@@ -323,17 +434,20 @@ impl InboundMonitor {
         }
     }
 
-    /// A poll of the stream succeeded (with or without a message).
+    /// A poll of the stream returned (with or without a message). A poll
+    /// that returns nothing while the websocket is down is not proof of
+    /// health; the connection watcher reports that side.
     pub(crate) fn succeeded(&mut self) {
         if self.consecutive_failures > 0 {
             info!(
                 transport = %self.kind,
                 failures = self.consecutive_failures,
-                "trql-client reply stream recovered"
+                "trql-client reply stream polls succeed again"
             );
             self.consecutive_failures = 0;
-            self.pending.mark_healthy();
         }
+        self.pending
+            .observe(self.kind, InboundEvent::PollOk, Instant::now());
     }
 
     /// A poll of the stream failed with `detail`. Returns how long to wait
@@ -343,26 +457,98 @@ impl InboundMonitor {
         let n = self.consecutive_failures;
         let kind = self.kind;
         if n == 1 {
-            warn!(transport = %kind, "trql-client reply stream failed (retrying): {detail}");
-        } else if n == UNAVAILABLE_AFTER {
-            error!(
-                transport = %kind,
-                failures = n,
-                "trql-client reply stream unavailable; failing in-flight and new registry \
-                 queries until it recovers: {detail}"
-            );
-            self.pending.mark_unavailable(detail);
-        } else if n > UNAVAILABLE_AFTER && n.is_multiple_of(WARN_EVERY) {
-            warn!(transport = %kind, failures = n, "trql-client reply stream still unavailable: {detail}");
+            warn!(transport = %kind, "trql-client reply stream poll failed (retrying): {detail}");
+        } else if n.is_multiple_of(WARN_EVERY) {
+            warn!(transport = %kind, failures = n, "trql-client reply stream polls still failing: {detail}");
         } else {
-            debug!(transport = %kind, failures = n, "trql-client reply stream failed: {detail}");
+            debug!(transport = %kind, failures = n, "trql-client reply stream poll failed: {detail}");
         }
-        if n > UNAVAILABLE_AFTER {
-            // Keep the reported reason current.
-            self.pending.mark_unavailable(detail);
-        }
+        self.pending.observe(
+            kind,
+            InboundEvent::PollFailed(detail.to_string()),
+            Instant::now(),
+        );
         backoff(n)
     }
+}
+
+/// Follow `profile`'s websocket connection state for the life of the
+/// transport and report it to `pending`'s health (see the module docs).
+///
+/// Spawned beside the demux task and aborted with it. While no websocket
+/// transport is running for the profile, the stream counts as disconnected.
+pub(crate) async fn watch_connection(
+    profile: Arc<ATMProfile>,
+    pending: PendingReplies,
+    kind: TransportKind,
+) {
+    let mut last = None;
+    loop {
+        match profile.connection_state().await {
+            Some(rx) => follow_connection(rx, &pending, kind, &mut last).await,
+            None => {
+                note_connection(
+                    &pending,
+                    kind,
+                    false,
+                    &mut last,
+                    "no websocket is running for the profile",
+                );
+                tokio::time::sleep(CONNECTION_RECHECK).await;
+            }
+        }
+    }
+}
+
+/// Report every state `rx` takes until its sender goes away (the SDK's
+/// websocket task ended), re-checking at least every [`CONNECTION_RECHECK`]
+/// so the time threshold is noticed.
+async fn follow_connection(
+    mut rx: watch::Receiver<ConnState>,
+    pending: &PendingReplies,
+    kind: TransportKind,
+    last: &mut Option<bool>,
+) {
+    loop {
+        let state = *rx.borrow_and_update();
+        let connected = state == ConnState::Connected;
+        note_connection(pending, kind, connected, last, &format!("{state:?}"));
+        tokio::select! {
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    note_connection(pending, kind, false, last, "the websocket task ended");
+                    return;
+                }
+            }
+            () = tokio::time::sleep(CONNECTION_RECHECK) => {}
+        }
+    }
+}
+
+/// Report one connection observation, logging a change of state.
+fn note_connection(
+    pending: &PendingReplies,
+    kind: TransportKind,
+    connected: bool,
+    last: &mut Option<bool>,
+    detail: &str,
+) {
+    match (*last, connected) {
+        (Some(true), false) => {
+            warn!(transport = %kind, "trql-client mediator websocket disconnected: {detail}");
+        }
+        (Some(false), true) => {
+            info!(transport = %kind, "trql-client mediator websocket connected");
+        }
+        _ => {}
+    }
+    *last = Some(connected);
+    let event = if connected {
+        InboundEvent::Connected
+    } else {
+        InboundEvent::Disconnected
+    };
+    pending.observe(kind, event, Instant::now());
 }
 
 impl Drop for InboundMonitor {
@@ -626,7 +812,11 @@ pub(crate) mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, TrqlError::Timeout { .. }), "{err}");
+        // A 20 ms window reports 1 second, not "timed out after 0s".
+        assert!(
+            matches!(err, TrqlError::Timeout { waited_secs: 1, .. }),
+            "{err}"
+        );
         assert_eq!(pending.waiting(), 0);
     }
 
@@ -657,12 +847,11 @@ pub(crate) mod tests {
 
     // --- inbound health -----------------------------------------------------
 
-    #[tokio::test]
-    async fn a_persistently_failing_stream_fails_waiters_fast_and_refuses_new_ones() {
-        let pending = PendingReplies::new();
-        let mut monitor = InboundMonitor::new(pending.clone(), TransportKind::Didcomm);
-
-        let waiting = {
+    /// Spawn an exchange that waits for a reply, once its waiter exists.
+    async fn waiting_exchange(
+        pending: &PendingReplies,
+    ) -> tokio::task::JoinHandle<Result<TrustTask<Value>, TrqlError>> {
+        let handle = {
             let pending = pending.clone();
             tokio::spawn(async move {
                 pending
@@ -679,15 +868,14 @@ pub(crate) mod tests {
         while pending.waiting() == 0 {
             tokio::task::yield_now().await;
         }
+        handle
+    }
 
-        // Fewer than the threshold: a transient blip changes nothing.
-        for _ in 1..UNAVAILABLE_AFTER {
-            monitor.failed("websocket closed");
-        }
-        assert_eq!(pending.waiting(), 1);
-        assert_eq!(pending.inbound_error(), None);
-
-        monitor.failed("websocket closed");
+    /// The waiter fails fast with a Transport error naming `needle`.
+    async fn fails_fast_naming(
+        waiting: tokio::task::JoinHandle<Result<TrustTask<Value>, TrqlError>>,
+        needle: &str,
+    ) {
         let err = tokio::time::timeout(Duration::from_secs(5), waiting)
             .await
             .expect("the waiter must fail fast, not wait out the reply window")
@@ -696,10 +884,31 @@ pub(crate) mod tests {
         match &err {
             TrqlError::Transport { detail, .. } => {
                 assert!(detail.contains("inbound stream unavailable"), "{detail}");
-                assert!(detail.contains("websocket closed"), "{detail}");
+                assert!(detail.contains(needle), "{detail}");
             }
             other => panic!("expected Transport, got {other}"),
         }
+    }
+
+    const KIND: TransportKind = TransportKind::Didcomm;
+
+    #[tokio::test]
+    async fn polls_failing_for_the_threshold_fail_waiters_fast_and_refuse_new_ones() {
+        let pending = PendingReplies::new();
+        let waiting = waiting_exchange(&pending).await;
+        let t0 = Instant::now();
+        let failed = || InboundEvent::PollFailed("websocket closed".into());
+
+        // Many quick failures inside the threshold change nothing.
+        for ms in [0, 100, 200, 500, 1500] {
+            pending.observe(KIND, failed(), t0 + Duration::from_millis(ms));
+        }
+        assert_eq!(pending.waiting(), 1);
+        assert_eq!(pending.inbound_error(), None);
+
+        // Still failing once the threshold has passed.
+        pending.observe(KIND, failed(), t0 + UNAVAILABLE_AFTER);
+        fails_fast_naming(waiting, "websocket closed").await;
 
         // A new exchange is refused up front, before anything is sent.
         let sent = std::sync::atomic::AtomicBool::new(false);
@@ -721,9 +930,96 @@ pub(crate) mod tests {
         assert!(pending.inbound_error().is_some());
 
         // Not latched: one good poll clears it.
-        monitor.succeeded();
+        pending.observe(KIND, InboundEvent::PollOk, t0 + UNAVAILABLE_AFTER * 2);
         assert_eq!(pending.inbound_error(), None);
         assert!(pending.register("req-3", REGISTRY).is_ok());
+    }
+
+    #[test]
+    fn a_poll_success_breaks_a_run_of_failures() {
+        let pending = PendingReplies::new();
+        let t0 = Instant::now();
+        pending.observe(KIND, InboundEvent::PollFailed("x".into()), t0);
+        pending.observe(KIND, InboundEvent::PollOk, t0 + UNAVAILABLE_AFTER / 2);
+        pending.observe(
+            KIND,
+            InboundEvent::PollFailed("x".into()),
+            t0 + UNAVAILABLE_AFTER,
+        );
+        assert_eq!(pending.inbound_error(), None, "the run restarted");
+    }
+
+    /// The reviewer's case: a mediator that is unreachable or rejects the
+    /// credentials leaves the SDK reconnecting, and every poll returns
+    /// "nothing" rather than an error. The connection state still trips it.
+    #[tokio::test]
+    async fn a_disconnected_websocket_trips_even_though_polls_return_ok() {
+        let pending = PendingReplies::new();
+        let waiting = waiting_exchange(&pending).await;
+        let t0 = Instant::now();
+        pending.observe(KIND, InboundEvent::Disconnected, t0);
+        for secs in 1..UNAVAILABLE_AFTER.as_secs() {
+            let now = t0 + Duration::from_secs(secs);
+            pending.observe(KIND, InboundEvent::PollOk, now);
+            pending.observe(KIND, InboundEvent::Disconnected, now);
+        }
+        assert_eq!(pending.inbound_error(), None, "not yet");
+        pending.observe(KIND, InboundEvent::PollOk, t0 + UNAVAILABLE_AFTER);
+        fails_fast_naming(waiting, "websocket has not been connected").await;
+
+        // Reconnecting clears it.
+        pending.observe(KIND, InboundEvent::Connected, t0 + UNAVAILABLE_AFTER * 2);
+        assert_eq!(pending.inbound_error(), None);
+    }
+
+    /// A reconnect inside the threshold is a blip, not an outage.
+    #[test]
+    fn a_brief_disconnect_changes_nothing() {
+        let pending = PendingReplies::new();
+        let t0 = Instant::now();
+        pending.observe(KIND, InboundEvent::Disconnected, t0);
+        pending.observe(KIND, InboundEvent::Connected, t0 + Duration::from_secs(2));
+        pending.observe(KIND, InboundEvent::Tick, t0 + UNAVAILABLE_AFTER * 3);
+        assert_eq!(pending.inbound_error(), None);
+    }
+
+    /// The watcher follows a real `watch` channel of the SDK's `ConnState`.
+    #[tokio::test]
+    async fn the_connection_watcher_reports_the_websocket_state() {
+        let pending = PendingReplies::new();
+        let (tx, rx) = watch::channel(ConnState::Connecting);
+        let follower = {
+            let pending = pending.clone();
+            tokio::spawn(async move {
+                let mut last = None;
+                follow_connection(rx, &pending, KIND, &mut last).await;
+                last
+            })
+        };
+        // Give the follower its first look: not connected yet.
+        while pending.lock().signals.disconnected_since.is_none() {
+            tokio::task::yield_now().await;
+        }
+        pending.observe(KIND, InboundEvent::Tick, Instant::now() + UNAVAILABLE_AFTER);
+        assert!(pending.inbound_error().is_some(), "never connected");
+
+        tx.send(ConnState::Connected).unwrap();
+        while pending.inbound_error().is_some() {
+            tokio::task::yield_now().await;
+        }
+
+        tx.send(ConnState::Disconnected).unwrap();
+        while pending.lock().signals.disconnected_since.is_none() {
+            tokio::task::yield_now().await;
+        }
+
+        // The SDK's websocket task ends: the follower returns, disconnected.
+        drop(tx);
+        let last = tokio::time::timeout(Duration::from_secs(5), follower)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(last, Some(false));
     }
 
     #[tokio::test]

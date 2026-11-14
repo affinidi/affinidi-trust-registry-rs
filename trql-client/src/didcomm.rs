@@ -44,20 +44,27 @@
 //!   this transport, so nothing else will ever consume it, and leaving it
 //!   would grow the mediator queue without bound.
 //!
-//! None of these decisions depends on anything transient: the SDK has
-//! already unpacked and authenticated the message (one that fails to unpack
-//! surfaces as a stream error and is not deleted here), and the remaining
-//! checks are pure functions of its content.
+//! None of these decisions depends on anything transient: every message this
+//! loop sees has already been unpacked and authenticated by the SDK, and the
+//! remaining checks are pure functions of its content. A frame that fails to
+//! unpack never reaches this loop: the SDK's receive leg classifies it,
+//! deleting a poison frame and keeping one that failed for a transient reason
+//! (a resolver hiccup) for redelivery.
 //!
 //! ### Failure reporting
 //!
-//! Inbound-stream failures are retried with capped exponential backoff and
-//! logged with escalation (the first failure at `warn`, then `error` once the
-//! stream is declared unavailable). While it is unavailable, in-flight and
-//! new exchanges fail at once with [`TrqlError::Transport`] naming the
-//! stream's error instead of waiting out the reply window; see
-//! [`DidcommTransport::inbound_error`]. If the demux task ever ends, every
-//! exchange fails with "reply demux task stopped".
+//! Poll failures are retried with capped exponential backoff and logged with
+//! escalation (the first at `warn`, then periodically). The transport also
+//! follows the profile's websocket connection state: the SDK keeps
+//! reconnecting a websocket whose mediator is unreachable or rejects the
+//! profile's credentials, and polls during that time return "no message"
+//! rather than an error. Once polls have failed, or the websocket has been
+//! disconnected, for 10 seconds without a break, the stream is declared
+//! unavailable (logged at `error`): in-flight and new exchanges fail at once
+//! with [`TrqlError::Transport`] naming the reason instead of waiting out the
+//! reply window; see [`DidcommTransport::inbound_error`]. It clears as soon
+//! as polls succeed with the websocket connected. If the demux task ever
+//! ends, every exchange fails with "reply demux task stopped".
 //!
 //! Once the TDK delivery layer (architecture decision D1, phase 2) is
 //! consumable, this arm's internals move onto it; the [`TrqlTransport`] seam
@@ -76,7 +83,9 @@ use trust_tasks_didcomm::ENVELOPE_TYPE;
 use trust_tasks_rs::TrustTask;
 
 use crate::error::TrqlError;
-use crate::pending::{DEMUX_STOPPED, InboundMonitor, PendingReplies, RouteOutcome};
+use crate::pending::{
+    DEMUX_STOPPED, InboundMonitor, PendingReplies, RouteOutcome, watch_connection,
+};
 use crate::transport::{TransportKind, TrqlTransport};
 
 /// How long each inbound pickup poll waits before looping.
@@ -124,6 +133,8 @@ pub struct DidcommTransport {
     pending: PendingReplies,
     reply_timeout: Duration,
     demux: tokio::task::JoinHandle<()>,
+    /// Follows the profile's websocket connection state for the health check.
+    watcher: tokio::task::JoinHandle<()>,
 }
 
 impl DidcommTransport {
@@ -149,18 +160,25 @@ impl DidcommTransport {
             pending.clone(),
             monitor,
         ));
+        let watcher = tokio::spawn(watch_connection(
+            profile.clone(),
+            pending.clone(),
+            TransportKind::Didcomm,
+        ));
         Ok(Self {
             atm,
             profile,
             pending,
             reply_timeout: config.reply_timeout,
             demux,
+            watcher,
         })
     }
 
-    /// Why this transport cannot receive replies right now (its inbound
-    /// stream has failed repeatedly, or its demux task has stopped), or
-    /// `None` while it can. Exchanges fail fast with this reason meanwhile.
+    /// Why this transport cannot receive replies right now (its polls have
+    /// failed, or its mediator websocket has been disconnected, for longer
+    /// than the health threshold; or its demux task has stopped), or `None`
+    /// while it can. Exchanges fail fast with this reason meanwhile.
     pub fn inbound_error(&self) -> Option<String> {
         if self.demux.is_finished() {
             return Some(DEMUX_STOPPED.to_string());
@@ -172,6 +190,7 @@ impl DidcommTransport {
 impl Drop for DidcommTransport {
     fn drop(&mut self) {
         self.demux.abort();
+        self.watcher.abort();
     }
 }
 
@@ -311,6 +330,16 @@ fn route_envelope(
     meta: &UnpackMetadata,
 ) -> Disposition {
     if message.typ != ENVELOPE_TYPE {
+        // A problem report (from the mediator or the registry) usually
+        // explains why a query will go unanswered: say so where it shows.
+        if message.typ.contains("report-problem") {
+            warn!(
+                message_type = message.typ,
+                body = %message.body,
+                "discarding a DIDComm problem report on the trql-client profile"
+            );
+            return Disposition::OtherType;
+        }
         debug!(
             message_type = message.typ,
             "discarding a non-Trust-Task DIDComm message on the trql-client profile"
@@ -584,11 +613,16 @@ mod tests {
     fn other_message_types_are_not_routed_and_are_deleted() {
         let pending = PendingReplies::new();
         let mut reg = pending.register("req-1", REGISTRY).unwrap();
-        let mut msg = envelope(&reply_to("req-1"), Some(REGISTRY));
-        msg.typ = "https://didcomm.org/trust-ping/2.0/ping".to_string();
-        let outcome = route_envelope(&pending, msg, &authcrypt_by(REGISTRY));
-        assert_eq!(outcome, Disposition::OtherType);
-        assert!(outcome.deletes());
+        for typ in [
+            "https://didcomm.org/trust-ping/2.0/ping",
+            "https://didcomm.org/report-problem/2.0/problem-report",
+        ] {
+            let mut msg = envelope(&reply_to("req-1"), Some(REGISTRY));
+            msg.typ = typ.to_string();
+            let outcome = route_envelope(&pending, msg, &authcrypt_by(REGISTRY));
+            assert_eq!(outcome, Disposition::OtherType, "{typ}");
+            assert!(outcome.deletes());
+        }
         assert!(matches!(
             reg.receiver().try_recv(),
             Err(TryRecvError::Empty)

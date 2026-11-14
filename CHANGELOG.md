@@ -224,11 +224,18 @@ release goes GA (`## 0.27.0 (date)`).
   2xx reply carrying a `trust-task-error` is, as before,
   `TrqlError::Rejected`.
 - **`trql-client`: a DIDComm or TSP query fails fast when the reply stream is
-  down.** After three consecutive failures of the transport's inbound stream,
-  in-flight and new queries fail with `TrqlError::Transport` ("inbound stream
-  unavailable: …") instead of `TrqlError::Timeout` after the reply window; the
-  first successful poll clears it. A stopped reply-routing task is reported as
+  down.** Once the transport's polls have failed, or its mediator websocket
+  has been disconnected (mediator unreachable, credentials rejected), for 10
+  seconds without a break, in-flight and new queries fail with
+  `TrqlError::Transport` ("inbound stream unavailable: …") instead of
+  `TrqlError::Timeout` after the reply window; it clears once polls succeed
+  with the websocket connected. A stopped reply-routing task is reported as
   `TrqlError::Transport` ("reply demux task stopped") instead of a timeout.
+  `TrqlError::Timeout::waited_secs` rounds up, so a sub-second window no
+  longer reports 0.
+- **`trql-client`: an `asOf` echo written more coarsely than the asked time**
+  (whole seconds, milliseconds) matches the asked time truncated to that
+  precision; any other difference is an `AnswerMismatch`.
 - **`trql-client`: the DIDComm transport deletes every inbound message it
   cannot use** from the mediator (late or unsolicited replies, replies from a
   party other than the one addressed, malformed envelopes, and other DIDComm

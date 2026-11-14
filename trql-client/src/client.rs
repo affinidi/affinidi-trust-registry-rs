@@ -109,6 +109,11 @@ impl TrqpQuery {
     /// one that omits it, or names another instant, is refused as
     /// [`TrqlError::AnswerMismatch`] rather than returned as if it answered
     /// this question.
+    ///
+    /// The comparison is exact, except that an echo written with fewer
+    /// fractional-second digits (whole seconds, milliseconds) matches the
+    /// asked time truncated to that precision. A time in whole seconds
+    /// compares the same under every registry.
     pub fn at(mut self, time: DateTime<Utc>) -> Self {
         self.time = Some(time);
         self
@@ -501,7 +506,7 @@ impl TrqlClient {
                 None => return Err(mismatch("<absent>".to_string())),
                 Some(value) => {
                     if let Some(echoed_time) = parse_instant(value)
-                        && echoed_time != asked_time
+                        && !echoes_instant(asked_time, echoed_time, value)
                     {
                         return Err(mismatch(echoed_time.to_rfc3339()));
                     }
@@ -533,6 +538,42 @@ impl TrqlClient {
 /// (`Z` and `+00:00` name the same one). `None` when it is not a timestamp.
 fn parse_instant(value: &Value) -> Option<DateTime<Utc>> {
     serde_json::from_value(value.clone()).ok()
+}
+
+/// Whether `echoed` (spelled `raw` on the wire) is the instant `asked`, at the
+/// precision the echo is written in.
+///
+/// A registry may write timestamps with fewer fractional-second digits than
+/// the client sent (whole seconds, or milliseconds). An echo equal to the
+/// asked time truncated to the echo's own precision is the same answer
+/// written more coarsely; any other difference, including one in a digit the
+/// echo does write, is a different instant.
+fn echoes_instant(asked: DateTime<Utc>, echoed: DateTime<Utc>, raw: &Value) -> bool {
+    if asked == echoed {
+        return true;
+    }
+    let digits = raw.as_str().map_or(9, fractional_digits);
+    if digits >= 9 {
+        return false;
+    }
+    let unit = 10u32.pow(9 - digits);
+    let nanos = asked.timestamp_subsec_nanos();
+    let truncated = asked - chrono::Duration::nanoseconds(i64::from(nanos % unit));
+    truncated == echoed
+}
+
+/// How many fractional-second digits an RFC 3339 timestamp is written with.
+fn fractional_digits(timestamp: &str) -> u32 {
+    let Some((_, time)) = timestamp.split_once(['T', 't', ' ']) else {
+        return 0;
+    };
+    match time.split_once('.') {
+        Some((_, rest)) => {
+            let n = rest.bytes().take_while(u8::is_ascii_digit).count();
+            u32::try_from(n).unwrap_or(9)
+        }
+        None => 0,
+    }
 }
 
 /// Render a tuple member for an error message.
@@ -1088,6 +1129,32 @@ mod tests {
             client.recognition(query().at(asked_time())).await,
             Err(TrqlError::AnswerMismatch { field: "asOf", .. })
         ));
+    }
+
+    /// A sub-second time asked, echoed at the registry's coarser precision,
+    /// is the same answer; a difference in a digit the echo writes is not.
+    #[tokio::test]
+    async fn a_coarser_echo_of_a_sub_second_time_is_accepted() {
+        let asked: DateTime<Utc> = "2026-01-01T00:00:00.123456789Z".parse().unwrap();
+        for (echoed, ok) in [
+            ("2026-01-01T00:00:00.123456789Z", true),
+            ("2026-01-01T00:00:00.123Z", true),
+            ("2026-01-01T00:00:00Z", true),
+            ("2026-01-01T00:00:00.124Z", false),
+            ("2026-01-01T00:00:01Z", false),
+            ("2026-01-01T00:00:00.123456788Z", false),
+        ] {
+            let client = client_over(move |req| Ok(answer_as_of(&req, Some(echoed))));
+            let result = client.authorization(query().at(asked)).await;
+            assert_eq!(result.is_ok(), ok, "{echoed}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn fractional_digits_are_counted() {
+        assert_eq!(fractional_digits("2026-01-01T00:00:00Z"), 0);
+        assert_eq!(fractional_digits("2026-01-01T00:00:00.5+01:00"), 1);
+        assert_eq!(fractional_digits("2026-01-01T00:00:00.123456789Z"), 9);
     }
 
     /// No time asked, nothing to check: an `as_of` the registry volunteers is
