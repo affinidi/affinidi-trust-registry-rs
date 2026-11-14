@@ -7,14 +7,21 @@
 ###############################
 # Build stage
 ###############################
-FROM --platform=$BUILDPLATFORM rust:1.95@sha256:f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517ed341a598f67c3 AS builder
+# The builder runs on the target platform, so `cargo build` produces a binary
+# for the architecture the runtime stage is made for. A multi-arch
+# `docker buildx build --platform linux/amd64,linux/arm64` therefore builds the
+# non-native platform under emulation (slow, but correct); cross-compiling from
+# $BUILDPLATFORM would need a cross linker and target system libraries.
+FROM rust:1.95@sha256:f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517ed341a598f67c3 AS builder
 
-ARG TARGETPLATFORM
 # Cargo features to build in, space-separated. Empty builds the default
 # service. A VTA-provisioned registry needs `vta` (which also adds the
 # `trust-registry setup` command); add a secrets backend for its offline
 # cache, e.g. --build-arg FEATURES="vta secrets-vault tsp".
 ARG FEATURES=""
+# Names the target/ cache per platform, so builds for two platforms never
+# share (and keep invalidating) one cache.
+ARG TARGETPLATFORM
 
 WORKDIR /app
 
@@ -24,15 +31,18 @@ RUN apt-get update \
     libdbus-1-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY Cargo.toml Cargo.lock ./
-COPY trust-registry/Cargo.toml trust-registry/
-COPY sample-data/data.csv sample-data/data.csv
-
 COPY . .
 
-RUN set -eux; \
+# The cargo registry and `target/` are BuildKit cache mounts, so a rebuild
+# after a source change reuses the compiled dependencies instead of building
+# the whole graph again. The binary is copied out of the cache mount, which
+# does not persist into the image. `--locked` builds exactly Cargo.lock.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=trust-registry-target-${TARGETPLATFORM},target=/app/target,sharing=locked \
+    set -eux; \
     mkdir -p /app/dist; \
-    cargo build --release -p trust-registry --bin trust-registry ${FEATURES:+--features "$FEATURES"}; \
+    cargo build --release --locked -p trust-registry --bin trust-registry ${FEATURES:+--features "$FEATURES"}; \
     cp target/release/trust-registry /app/dist/trust-registry
 
 ###############################

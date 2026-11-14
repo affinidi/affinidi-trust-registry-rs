@@ -1,16 +1,11 @@
-version: "3.9"
-
 # Published ports are bound to the loopback interface. To reach the registry
 # from other machines, change "127.0.0.1:3232:3232" to "3232:3232" deliberately.
 services:
   trust-registry:
-    platform: linux/arm64
     image: trust-registry:local
     build:
       context: .
       dockerfile: trust-registry/Dockerfile
-      platforms:
-        - linux/arm64
     env_file:
       - .env
     environment:

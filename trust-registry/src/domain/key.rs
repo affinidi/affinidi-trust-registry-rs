@@ -43,7 +43,7 @@ impl TrustRecordKey {
     }
 
     /// The storage key: `TR#{authority}#{action}#{resource}#{entity}`, each
-    /// identifier escaped (see [`escape_component`]) so that distinct records
+    /// identifier escaped (`%` and `#` percent-encoded) so that distinct records
     /// never share a key.
     pub fn sk(&self) -> String {
         format!(

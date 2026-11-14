@@ -1,0 +1,80 @@
+name: ignored tests
+
+# The `#[ignore]`d suites: too slow or too dependent on Docker for every PR,
+# so they run nightly and on demand instead (testing/README.md). Not a PR gate,
+# which is why they live outside checks.yaml.
+#
+# Neither needs mediator variables, secrets or a .env:
+# - `mediator_e2e` starts Redis and the published mediator image with Docker
+#   and spawns the `trust-registry` binary against it;
+# - the `test-trust-registry` mediator tests run an in-process
+#   `affinidi-messaging-test-mediator`, which needs Redis on 127.0.0.1:6379
+#   (the job's `redis` service).
+on:
+  schedule:
+    # Daily at 01:00 UTC, before nightly.yml (02:00) advances `nightly`.
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  mediator-e2e:
+    name: mediator_e2e (Docker)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: '1.96.0'
+          rustflags: ''
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: 'rust-cache-ignored'
+      - name: cargo test --test mediator_e2e -- --ignored
+        run: cargo test --locked -p trust-registry --test mediator_e2e -- --ignored --nocapture
+  routed-round-trips:
+    name: test-trust-registry mediator tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: '1.96.0'
+          rustflags: ''
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: 'rust-cache-ignored'
+      # `--include-ignored`: the mediator tests that are not ignored need Redis
+      # too, so the PR gate only builds them. `tsp` implies `mediator`.
+      - name: cargo test -p test-trust-registry --features tsp -- --include-ignored
+        run: cargo test --locked -p test-trust-registry --features tsp -- --include-ignored --nocapture

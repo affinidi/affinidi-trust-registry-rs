@@ -11,14 +11,14 @@
 //! ## Which backend
 //!
 //! `TR_SECRETS_BACKEND` names the backend outright and is passed to
-//! `vti-secrets` as [`SecretsConfig::backend`]. Without it the backend is the
+//! `vti-secrets` as `SecretsConfig::backend`. Without it the backend is the
 //! one whose selector variable is set — `TR_SECRETS_AWS_SECRET_NAME`,
 //! `TR_SECRETS_GCP_SECRET_NAME`, `TR_SECRETS_AZURE_VAULT_URL`, the Vault
 //! address, `TR_SECRETS_K8S_SECRET_NAME` or `TR_SECRETS_SEED` — and setting
 //! more than one of them is an error rather than a silent pick by priority.
-//! [`selected_backend`] applies exactly the rule [`create_seed_store`] does, so
-//! the registry and `vti-secrets` cannot disagree about whether, and which, a
-//! backend is in use.
+//! `selected_backend` applies exactly the rule `vti_secrets::create_seed_store`
+//! does, so the registry and `vti-secrets` cannot disagree about whether, and
+//! which, a backend is in use.
 //!
 //! Half-configured backends are refused with the missing variable's name:
 //! Azure needs its vault URL and secret name, Vault its address and secret
@@ -352,6 +352,8 @@ pub async fn read_profile(cfg: &SecretsConfig, dir: &Path) -> Result<Option<Stri
 }
 
 #[cfg(test)]
+// `std::env::{set_var, remove_var}` are unsafe since edition 2024.
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use serial_test::serial;

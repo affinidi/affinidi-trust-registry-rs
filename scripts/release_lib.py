@@ -1,4 +1,4 @@
-# Kept only for cut-release.py; see the transitional note at its top.
+# Used only by cut-release.py; deleted with it (see the note at its top).
 """Shared helpers for the release tooling (RELEASES.md).
 
 A release is named `major.minor` (`0.27`) and lives on `release/<major.minor>`.
@@ -17,12 +17,16 @@ patches publish.
 import pathlib
 import re
 import subprocess
-import tomllib
+import sys
+
+if sys.version_info < (3, 11):
+    raise SystemExit("the release scripts need Python >= 3.11 (for tomllib)")
+
+import tomllib  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 RELEASE_NAME = re.compile(r"(\d+)\.(\d+)")
-RELEASE_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?")
 CRATE_VERSION = re.compile(r"\d+\.\d+\.\d+")
 
 # Dependency tables a manifest may name a workspace member in.
@@ -56,26 +60,6 @@ def member_names(root):
 
 def workspace_version(root):
     return root_manifest(root)["workspace"]["package"]["version"]
-
-
-def is_publishable(pkg, root):
-    """`publish` as cargo reads it: absent/true -> yes, false/[] -> no."""
-    publish = pkg.get("publish", True)
-    if isinstance(publish, dict) and publish.get("workspace"):
-        publish = root_manifest(root)["workspace"].get("package", {}).get("publish", True)
-    if publish is False or publish == []:
-        return False
-    return True
-
-
-def publishable_crates(root):
-    """name -> manifest path for every member cargo would publish."""
-    out = {}
-    for manifest in members(root):
-        pkg = tomllib.loads(manifest.read_text())["package"]
-        if is_publishable(pkg, root):
-            out[pkg["name"]] = manifest
-    return out
 
 
 def _dep_tables(data):
@@ -180,31 +164,6 @@ def set_version(root, version):
     if problems:
         raise SystemExit("set_version left the lockstep invariant broken:\n  " + "\n  ".join(problems))
     run("cargo", "update", "-w", cwd=root)
-
-
-def parse_release(text):
-    m = RELEASE_VERSION.fullmatch(text.strip())
-    if not m:
-        raise SystemExit(f"RELEASE holds {text.strip()!r}, not major.minor.patch[-rc.N]")
-    major, minor, patch, rc = m.groups()
-    return int(major), int(minor), int(patch), (None if rc is None else int(rc))
-
-
-# A released version's heading: `## 0.27.0 (date)` from this tooling, or the
-# `## [0.26.0] – date` form the changelog used before it.
-VERSION_HEADING = re.compile(r"^## \[?\d+\.\d+\.\d+", re.M)
-
-
-def insert_section(changelog, section):
-    """`changelog` with `section` placed above the newest released version.
-
-    The preamble (title, `## Changelog History`, …) stays on top; with no
-    released version yet, the section goes at the end.
-    """
-    m = VERSION_HEADING.search(changelog)
-    if not m:
-        return f"{changelog.rstrip()}\n\n{section}"
-    return f"{changelog[: m.start()]}{section}{changelog[m.start():]}"
 
 
 def unreleased_split(changelog):

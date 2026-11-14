@@ -1,18 +1,20 @@
 # Running the Test Client
 
-The test client demonstrates how to interact with the Trust Registry using DIDComm for administrative operations (create, read, update, delete, list trust records). Each operation is a `registry/record/*` Trust Task; writes are signed with the admin's authentication key (`proofPurpose` `authentication`) and are made under the admin's own DID as `authority_id`.
+The test client is a demo of administering trust records over DIDComm (create, read, update, delete, list), not an administration tool. Each operation is a `registry/record/*` Trust Task; writes are signed with the admin's authentication key (`proofPurpose` `authentication`) and are made under the admin's own DID as `authority_id`.
 
-When the test-client is executed, it performs the following steps:
+When the test-client is executed, it:
 
-1. Connect to the Trust Registry via DIDComm
-2. Perform a series of administrative operations:
-   - **Create** a sample trust record.
-   - **Read** the created record.
-   - **Update** the record with new information.
-   - **List** all trust records.
-   - **Delete** the trust record.
-   - **Read** again to verify deletion.
-4. Listen for responses from the Trust Registry
+1. Connects to the mediator as the admin identity and opens its mediator account to senders.
+2. Performs a series of administrative operations, sending one request at a time and waiting (up to 30 seconds) for the registry's reply to it, matched by its thread id:
+   - **Create** a sample trust record (expects a response).
+   - **Read** the created record (expects a response).
+   - **Update** the record with new information (expects a response).
+   - **List** the admin's trust records (expects a response).
+   - **Delete** the trust record (expects a response).
+   - **Read** again (expects a `trust-task-error`: the record is gone).
+3. Prints `ok` or `FAIL` for each step and exits.
+
+Exit status: `0` when every step got the answer it expected; `1` when a step did not (or configuration was missing or invalid); `2` when it generated a new identity that must be registered first (see below).
 
 ## Prerequisites
 
@@ -69,4 +71,4 @@ This approach is useful for:
 
 - **Authorization errors**: Ensure the DID the test client printed on its first run (the key of `conf/user_config.json`) is configured as an authorised admin in the Trust Registry's `ADMIN_DIDS` environment variable. A write under an `authority_id` other than the admin's own DID is refused unless the registry's `ADMIN_AUTHORITIES` lists that authority for the admin.
 - **"TRUST_REGISTRY_DID environment variable is not set"**: Either set it at runtime or ensure `PROFILE_CONFIG` exists in your `.env` file.
-- **"Unable to find 'SampleTRAdmin' from the user_config.json"**: Check that `conf/user_config.json` contains a user with the alias "SampleTRAdmin", or delete the file to have a new identity generated.
+- **"Unable to find 'SampleTRAdmin' in the test client's user_config.json"**: Check that `conf/user_config.json` contains a user with the alias "SampleTRAdmin", or delete the file to have a new identity generated.

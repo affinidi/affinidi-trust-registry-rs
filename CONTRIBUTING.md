@@ -4,52 +4,68 @@ When contributing to this repository, please first discuss the change you wish t
 
 ## Development Requirements
 
-### Installation
+### Toolchain
 
-Install Rust on your machine.
-
-- **Rust**: 1.88.0 or higher
-- **Edition**: 2024
-- **Cargo**: Latest version bundled with Rust
-
-Verify that your Rust installation meets the requirements.
-
-```bash
-rustc --version
-cargo --version
-```
+The minimum supported Rust version is the `rust-version` in the root
+[`Cargo.toml`](Cargo.toml) (edition 2024); CI builds and lints with the
+toolchain it pins in [`.github/workflows/checks.yaml`](.github/workflows/checks.yaml).
 
 ### Testing
 
-This project includes comprehensive unit and integration tests with support for multiple storage backends.
-
-For detailed testing instructions, refer to the [TESTING](testing/README.md) document.
+For the test suites, what each needs and how to run them, see
+[testing/README.md](testing/README.md).
 
 ### Pre-commit checks
 
-Run the formatter and lints before committing to maintain code consistency and catch common issues early.
+Run what CI runs (`checks.yaml`), with the toolchain it pins:
 
 ```bash
-# Format code (modify files)
-cargo fmt
+# Formatting
+cargo fmt --all -- --check
 
-# Check formatting (CI-friendly; fails if unformatted)
-cargo fmt -- --check
+# Lints, every crate, feature and target; warnings are errors
+cargo clippy --workspace --all-features --all-targets -- -D warnings
 
-# Run Clippy
-cargo clippy
+# Documentation; broken intra-doc links are errors
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --all-features
 
-# Optionally apply fixable Clippy suggestions locally
-cargo fix --clippy
+# Tests that need no external services
+cargo test -p trust-registry --lib --all-features
+cargo test -p trql-client --all-features
+cargo test -p trqp
+cargo test -p test-trust-registry
 ```
 
-### Code quality expectations
+The workspace denies `unsafe` code and warns on `unwrap()`/`expect()` outside
+tests (`[workspace.lints]` in `Cargo.toml`).
 
-1. Ensure the pipeline checks are finished successfully.
-2. Ensure the pull request doesn't contain redundant comments, console.log, etc.
-3. Ensure your code is covered with unit and integration tests (NOTE: no mocks/stubs in integration tests).
-4. Avoid adding comments to explain what code does, code should be self-explanatory and clean.
-5. Avoid using variable names like `i` or abbreviations - names should be simple and unambiguous.
+### Pull requests
+
+1. Every check in `checks.yaml` passes.
+2. A user-visible change adds an entry under `## Unreleased` in
+   [CHANGELOG.md](CHANGELOG.md), under the matching sub-heading (`### Breaking`
+   for a breaking public-API or wire change). `main` never changes the
+   workspace version; see [RELEASES.md](RELEASES.md).
+3. A behaviour change comes with a test that fails without it.
+4. Explain the *why* in comments where the code cannot: delivery and
+   acknowledgement decisions, security checks, and anything a later reader
+   would otherwise "simplify" away.
+5. The PR description includes the pre-merge checklist of the VTI stack
+   development guide (whose rule numbers it cites), checked honestly:
+
+```
+- [ ] No new reqwest::Client::new() / bare fetch(); all clients have finite timeouts (R1.2)
+- [ ] No lock held across a network await (R1.3)
+- [ ] No local state committed before its remote effect, or the flow is resumable with an idempotency key (R2.1)
+- [ ] Every retry is bounded + backed off; non-idempotent ops are not blind-retried (R1.4)
+- [ ] Accept/poll/listen loops survive transient errors (R1.5)
+- [ ] Acks/deletes happen only after durable handoff (R1.6)
+- [ ] New/changed wire types: camelCase, deny_unknown_fields where security-relevant, schema registered, all consumers (incl. JS) updated (R3.*)
+- [ ] Config absence = most restrictive; fail-closed if enforcement can't start (R5.*)
+- [ ] Logs/status claim only what was verified; background-job failures are surfaced (R6.*)
+- [ ] "Process dies on the next line" answered for every mutation touched (R2.1)
+- [ ] Deviations from this guide flagged explicitly with rule numbers
+```
 
 ## Code of Conduct
 
@@ -72,8 +88,9 @@ include:
 - Gracefully accepting constructive criticism
 - Focusing on what is best for the community
 - Showing empathy towards other community members
-- Avoiding obvious comments about things like code styling and indentation.
-  ** If you see yourself wanting to do that more than once - open an issue with a repo to update the ESLint/Prettier rules to address this concern once and for all. **Code reviews should be about logic, not indenting or adding more newlines\*\*
+- Avoiding comments about code style and indentation: if you find yourself
+  making one more than once, open an issue to change the `rustfmt` or Clippy
+  configuration instead. Code reviews should be about logic.
 
 Examples of unacceptable behavior by participants include:
 

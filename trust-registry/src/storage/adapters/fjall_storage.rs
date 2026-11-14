@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(fjall.read(query_for(&stored)).await.expect("read"), stored);
         assert_eq!(
             fjall.list().await.expect("list").records(),
-            &[stored.clone()]
+            std::slice::from_ref(&stored)
         );
         assert!(matches!(
             fjall.create(stored.clone()).await,

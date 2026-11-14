@@ -69,6 +69,6 @@ jobs:
           # Deliberately without `-D warnings`: CI already holds the code to that,
           # and failing a real release half-way through on a lint that appeared
           # upstream since helps nobody.
-          rustflags: '--cfg tracing_unstable'
+          rustflags: ''
           ubuntu-rust-deps: build-essential libdbus-1-dev libssl-dev
           build-jobs: '4'

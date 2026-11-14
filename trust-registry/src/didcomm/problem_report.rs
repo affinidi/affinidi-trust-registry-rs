@@ -1,7 +1,7 @@
 //! DIDComm problem reports (DIDComm v2 "Problem Reports"). The registry sends
 //! one in answer to a `trqp/1.0` query it cannot answer; see
 //! `DIDCOMM_PROTOCOLS.md` for when each code is used. Sent through
-//! [`transport::send_problem_report`](super::transport::send_problem_report).
+//! `transport::send_problem_report`.
 
 use serde_json::json;
 
@@ -17,7 +17,7 @@ pub mod codes {
 }
 
 /// Problem report structure following DIDComm problem-report protocol
-/// https://identity.foundation/didcomm-messaging/spec/#problem-reports
+/// <https://identity.foundation/didcomm-messaging/spec/#problem-reports>
 #[derive(Debug, Clone)]
 pub struct ProblemReport {
     pub code: String,

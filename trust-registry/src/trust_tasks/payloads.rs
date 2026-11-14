@@ -334,12 +334,15 @@ mod tests {
     #[allow(clippy::assertions_on_constants)]
     #[test]
     fn the_spec_flags_writes_but_not_queries_as_needing_a_proof() {
-        assert!(RecordPutRequest::IS_PROOF_REQUIRED);
-        assert!(RecordDeleteRequest::IS_PROOF_REQUIRED);
-        assert!(DidRotateRequest::IS_PROOF_REQUIRED);
-        assert!(!RecordQueryRequest::IS_PROOF_REQUIRED);
-        assert!(!RecognitionRequest::IS_PROOF_REQUIRED);
-        assert!(!AuthorizationRequest::IS_PROOF_REQUIRED);
+        // Constants, so checked at compile time.
+        const {
+            assert!(RecordPutRequest::IS_PROOF_REQUIRED);
+            assert!(RecordDeleteRequest::IS_PROOF_REQUIRED);
+            assert!(DidRotateRequest::IS_PROOF_REQUIRED);
+            assert!(!RecordQueryRequest::IS_PROOF_REQUIRED);
+            assert!(!RecognitionRequest::IS_PROOF_REQUIRED);
+            assert!(!AuthorizationRequest::IS_PROOF_REQUIRED);
+        }
     }
 
     #[test]

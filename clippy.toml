@@ -1,0 +1,5 @@
+# The workspace denies `unwrap_used` / `expect_used` (Cargo.toml) for service
+# and library code. In tests a panic on an unexpected `Err`/`None` is the
+# failure report, so they are allowed there.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

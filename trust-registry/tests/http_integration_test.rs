@@ -1,3 +1,8 @@
+// `std::env::set_var` is unsafe since edition 2024.
+#![allow(unsafe_code)]
+// Test code: a panic on an unexpected `Err`/`None` is the failure report.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use serde_json::{Value, json};
 use std::env;
 
