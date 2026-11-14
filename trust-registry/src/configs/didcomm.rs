@@ -706,6 +706,8 @@ mod acl_mode_tests {
 }
 
 #[cfg(test)]
+// `std::env::{set_var, remove_var}` are unsafe since edition 2024.
+#[allow(unsafe_code)]
 mod strictness_tests {
     use super::*;
     use serial_test::serial;

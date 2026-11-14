@@ -13,4 +13,5 @@ target
 *.pem
 *.key
 *.log
-tmp/.claude
+tmp/
+.claude

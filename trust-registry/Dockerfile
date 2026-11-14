@@ -19,6 +19,9 @@ FROM rust:1.95@sha256:f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517ed341a59
 # `trust-registry setup` command); add a secrets backend for its offline
 # cache, e.g. --build-arg FEATURES="vta secrets-vault tsp".
 ARG FEATURES=""
+# Names the target/ cache per platform, so builds for two platforms never
+# share (and keep invalidating) one cache.
+ARG TARGETPLATFORM
 
 WORKDIR /app
 
@@ -36,7 +39,7 @@ COPY . .
 # does not persist into the image. `--locked` builds exactly Cargo.lock.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/app/target,sharing=locked \
+    --mount=type=cache,id=trust-registry-target-${TARGETPLATFORM},target=/app/target,sharing=locked \
     set -eux; \
     mkdir -p /app/dist; \
     cargo build --release --locked -p trust-registry --bin trust-registry ${FEATURES:+--features "$FEATURES"}; \

@@ -94,6 +94,9 @@ file instead of HTML.
   `RUSTDOCFLAGS=-D warnings`; `shellcheck` on the shell scripts;
 - `msrv`: `cargo check --workspace --all-features` on the `rust-version`
   `Cargo.toml` declares;
+- `test-features`: the unit tests of `trql-client` with no transport, `didcomm`
+  only and `tsp` only, and of `trust-registry` without default features, with
+  `storage-fjall`, `tsp` and `vta`;
 - `docker`: builds `trust-registry/Dockerfile` and checks the container
   answers `/health`;
 - the test suite: the registry is started against the CI mediator, then
@@ -102,4 +105,5 @@ file instead of HTML.
   (`--no-run`) of the `test-trust-registry` mediator tests.
 
 The `#[ignore]`d suites (`mediator_e2e`, the `test-trust-registry` routed
-round-trips) are not run in CI.
+round-trips) run in `ignored-tests.yml`, daily and on demand (Actions → ignored
+tests → Run workflow). It is not a PR gate.

@@ -28,8 +28,10 @@ Each step is skipped when it is already done, so after a failure the same
 command resumes where it stopped: an existing `release/<name>` is accepted if
 its tip is this script's cut commit on top of a main commit (that commit is
 then the source, whatever `--from` says), an existing `release-cut/<name>` is
-reused, and an existing PR from it is left alone. A `release/<name>` that is
-not a cut stops the script.
+reused, and an open PR from it is left alone (a closed, unmerged one is
+replaced). Once `release/<name>` exists and its cut PR is merged, a rerun does
+nothing, even if the `release-cut/<name>` branch was deleted. A
+`release/<name>` that is not a cut stops the script.
 
 The CHANGELOG split is only automatic when main's `## Unreleased` section is
 the one the source commit has (nothing changelogged landed after nightly). If
@@ -39,6 +41,7 @@ entries that shipped in the release under its heading by hand, in the PR.
 
 import argparse
 import datetime
+import json
 import pathlib
 import sys
 import tempfile
@@ -58,6 +61,15 @@ def remote_head(branch):
     if out.returncode:
         return None
     return out.stdout.split()[0]
+
+
+def cut_pull_requests(cut_head):
+    """Every PR from `cut_head` into main, whatever its state: [{state, url}]."""
+    out = run(
+        "gh", "pr", "list", "--head", cut_head, "--base", "main", "--state", "all",
+        "--json", "state,url",
+    ).stdout
+    return json.loads(out or "[]")
 
 
 def cut_subject(branch, version):
@@ -97,6 +109,12 @@ def main():
     main_sha = git("rev-parse", "--verify", "origin/main^{commit}").stdout.strip()
 
     release_tip = remote_head(branch)
+    # Done already: the branch exists and the cut PR merged. The branch may
+    # have moved on (rc and GA preps) and the cut branch may be deleted.
+    merged = [pr for pr in cut_pull_requests(cut_head) if pr["state"] == "MERGED"]
+    if release_tip and merged:
+        print(f"{branch} exists and its cut PR is merged ({merged[0]['url']}): nothing to do")
+        return 0
     if release_tip:
         source = existing_cut_source(branch, version, release_tip, main_sha)
         print(f"{branch} already exists at {release_tip[:12]} (cut from {source[:12]}); resuming")
@@ -175,12 +193,10 @@ def main():
     finally:
         git("worktree", "prune")
 
-    existing_pr = run(
-        "gh", "pr", "list", "--head", cut_head, "--base", "main", "--state", "all",
-        "--json", "url", "--jq", ".[0].url",
-    ).stdout.strip()
-    if existing_pr:
-        print(f"the {cut_head} PR already exists: {existing_pr}")
+    # An open PR is reused; a closed, unmerged one does not count as done.
+    open_prs = [pr for pr in cut_pull_requests(cut_head) if pr["state"] == "OPEN"]
+    if open_prs:
+        print(f"the {cut_head} PR already exists: {open_prs[0]['url']}")
     else:
         run(
             "gh", "pr", "create", "--base", "main", "--head", cut_head,

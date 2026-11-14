@@ -175,6 +175,41 @@ jobs:
           shared-key: 'rust-cache-msrv'
       - name: cargo check on the declared rust-version
         run: cargo check --locked --workspace --all-features --all-targets
+  test-features:
+    # The Test Suite runs the tests with every feature on. These are the
+    # other builds people ship or embed: each trql-client transport alone and
+    # none, and trust-registry without its defaults (the documented embedding
+    # build) and with each opt-in feature. Unit tests only: they need no
+    # services.
+    name: test (feature combinations)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: '1.96.0'
+          rustflags: ''
+      - uses: affinidi/pipeline-rust/.github/actions/rust-dependencies@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: 'rust-cache-test-features'
+      - name: cargo test --lib, feature combinations
+        run: |
+          set -euo pipefail
+          t() { echo "::group::cargo test --lib $*"; cargo test --locked --lib "$@"; echo "::endgroup::"; }
+          t -p trql-client --no-default-features
+          t -p trql-client --no-default-features --features didcomm
+          t -p trql-client --no-default-features --features tsp
+          t -p trust-registry --no-default-features
+          t -p trust-registry --features tsp
+          t -p trust-registry --features vta
+          t -p trust-registry --no-default-features --features storage-fjall
   docker:
     # Builds the image as `docker compose up --build` does and checks the
     # container comes up healthy (REST only, CSV sample data).

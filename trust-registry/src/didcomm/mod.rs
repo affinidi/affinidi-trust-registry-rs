@@ -66,7 +66,7 @@ pub(crate) async fn connect_profile(
     Ok((Arc::new(atm), profile))
 }
 
-/// [`connect_profile`] for callers outside the crate (the integration tests
+/// `connect_profile` for callers outside the crate (the integration tests
 /// act as DIDComm clients with it).
 pub async fn prepare_atm_and_profile(
     alias: &str,

@@ -376,14 +376,18 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   another platform compiles that platform's binary (under emulation) instead
   of packaging the build host's. `docker-compose.yaml` no longer pins
   `linux/arm64`. The build uses `--locked` and BuildKit cache mounts for the
-  cargo registry and `target/`.
+  cargo registry and `target/` (one per target platform).
 - **CI lints every crate, feature combination, test and binary** (new `lint`
   job: `clippy --workspace --all-features --all-targets` and the feature
   combinations of `trust-registry`, `trql-client` and `test-trust-registry`
   under `-D warnings`, `cargo doc` under `RUSTDOCFLAGS=-D warnings`,
   `shellcheck`), checks the workspace on its declared `rust-version` (`msrv`),
-  builds the Docker image and checks it answers `/health` (`docker`), and
-  runs the `test-trust-registry` smoke test and builds its mediator tests.
+  builds the Docker image and checks it answers `/health` (`docker`), runs
+  the unit tests of each `trql-client` transport alone and of `trust-registry`
+  without defaults and with each opt-in feature (`test-features`), and runs
+  the `test-trust-registry` smoke test and builds its mediator tests. A new
+  `ignored-tests.yml` runs the `#[ignore]`d suites (`mediator_e2e`, the
+  `test-trust-registry` routed round-trips) daily and on demand.
 - **`setup-trust-registry` and `generate-secrets` return errors instead of
   panicking** when key generation, the TDK or a did:webvh log entry fails.
   Failing to reach the mediator while opening a test DID's account is still
@@ -399,7 +403,8 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 - **`scripts/cut-release.py` can be re-run after a failure.** It creates the
   label first, pushes `release/<x.y>` and `release-cut/<x.y>` in one
   `git push --atomic`, accepts an existing `release/<x.y>` that is its own cut
-  commit, reuses an existing `release-cut/<x.y>` branch or PR, and states its
+  commit, reuses an existing `release-cut/<x.y>` branch or open PR, does
+  nothing once the cut PR is merged, and states its
   Python ≥ 3.11 requirement instead of failing on `import tomllib`. It closes
   `main`'s `## Unreleased` under `## <x.y>.0 (<date>)`, not `(release/<x.y>)`;
   the 0.27–0.31 headings on `main` now carry the dates their release branches

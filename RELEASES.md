@@ -155,7 +155,8 @@ does the same with their own credentials: it creates the label first, pushes
 `release/0.29` and `release-cut/0.29` together (`git push --atomic`), then
 opens the PR. If it stops part-way, run the same command again: it resumes,
 accepting a `release/0.29` that is its own cut commit on a `main` commit and
-reusing an existing `release-cut/0.29` branch or PR. The script and
+reusing an existing `release-cut/0.29` branch or open PR (a closed, unmerged
+PR is replaced). Once the cut PR is merged, a rerun does nothing. The script and
 `scripts/release_lib.py` are deleted once a release has been cut with
 `release-cut.yml`.
 
