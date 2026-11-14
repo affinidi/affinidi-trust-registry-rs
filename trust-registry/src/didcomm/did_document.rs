@@ -542,7 +542,8 @@ mod tests {
     fn the_published_key_is_the_secrets_public_key() {
         let s = ed25519("did:web:registry.example#key-1");
         let methods =
-            build_verification_methods_for("did:web:registry.example", &[s.clone()]).unwrap();
+            build_verification_methods_for("did:web:registry.example", std::slice::from_ref(&s))
+                .unwrap();
         assert_eq!(
             methods[0].0["publicKeyMultibase"],
             s.get_public_keymultibase().unwrap()

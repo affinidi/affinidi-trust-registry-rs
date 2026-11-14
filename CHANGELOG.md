@@ -389,10 +389,6 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   `ignored-tests.yml` runs the `#[ignore]`d suites daily and on demand:
   `mediator_e2e`, and every `test-trust-registry` mediator test
   (`--include-ignored`, against a Redis service).
-- **`setup-trust-registry` and `generate-secrets` return errors instead of
-  panicking** when key generation, the TDK or a did:webvh log entry fails.
-  Failing to reach the mediator while opening a test DID's account is still
-  reported and skipped.
 - **The test client waits for the registry's answer to each request** (matched
   by thread id, 30 s timeout), says whether it was the expected `#response` or
   `trust-task-error`, and exits: `0` when every step answered as expected, `1`

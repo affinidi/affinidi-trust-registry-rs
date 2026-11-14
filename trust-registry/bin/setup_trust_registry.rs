@@ -1,4 +1,7 @@
 #![cfg(feature = "dev-tools")]
+// The `Args` doc comments are clap's `--help` text, written for a terminal
+// (`<NAME>`, bare URLs), not rustdoc markup.
+#![allow(rustdoc::invalid_html_tags, rustdoc::bare_urls)]
 //! `setup-trust-registry`: write a Trust Registry's `.env`, and with
 //! `--mediator-did` give it a DIDComm identity.
 //!

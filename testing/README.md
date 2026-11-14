@@ -12,7 +12,7 @@ them (`.github/workflows/checks.yaml`).
 | `trqp` | `cargo test -p trqp` | nothing |
 | `test-trust-registry` smoke test | `cargo test -p test-trust-registry` | nothing (in-process registry) |
 | `trust-registry` `http_integration_test` | `cargo test -p trust-registry --test http_integration_test` | a running registry at `LISTEN_ADDRESS` from `.env.test` |
-| `trust-registry` `didcomm_integration_test`, `didcomm_server_test` | `cargo test -p trust-registry --test didcomm_integration_test --test didcomm_server_test` | `.env.test` from `setup-trust-registry --mediator-did …`, a reachable mediator, and (for `didcomm_integration_test`) a running registry |
+| `trust-registry` `didcomm_integration_test`, `didcomm_server_test` | `cargo test -p trust-registry --test didcomm_integration_test --test didcomm_server_test` | `.env.test` from `setup-trust-registry … --with-test-identities`, a reachable mediator, and (for `didcomm_integration_test`) a running registry |
 | `trust-registry` `redis_integration_test` | `cargo test -p trust-registry --test redis_integration_test` | Redis on `redis://127.0.0.1:6379`; each test is skipped (passes) when Redis is not reachable |
 | `trust-registry` `mediator_e2e` | `cargo test -p trust-registry --test mediator_e2e -- --ignored --nocapture` | Docker (starts Redis and the mediator image); `#[ignore]`d by default, see the module docs for its environment variables |
 | `test-trust-registry` mediator tests | `cargo test -p test-trust-registry --features tsp -- --include-ignored` (`tsp` implies `mediator`) | Redis on `127.0.0.1:6379` for the in-process test mediator, and a heavy build; the routed round-trips are `#[ignore]`d |
@@ -27,7 +27,7 @@ The integration tests read `.env.test`. Create it with
 `setup-trust-registry` (see [Set up Trust Registry](../README.md#set-up-trust-registry)):
 
 ```bash
-cargo run --bin setup-trust-registry --features dev-tools -- --mediator-did=<mediator DID>
+cargo run --bin setup-trust-registry --features dev-tools -- --mediator-did <mediator DID> --did-method peer --with-test-identities
 ```
 
 It generates test DIDs for the registry and a test client, writes them to
