@@ -9,16 +9,17 @@
 //! exactly one line, and no value can end it early or forge another.
 
 use crate::{
-    audit::model::{AuditLog, AuditLogger, AuditOperation, AuditResource},
+    audit::model::{AuditLog, AuditLogger, AuditOperation, AuditReason, AuditResource, AuditRole},
     configs::AuditConfig,
 };
 use chrono::Utc;
 use serde_json::{Value, json};
 use tracing::info;
 
-pub use crate::audit::model::{AuditLogBuilder, AuditStatus};
+pub use crate::audit::model::{
+    AUDIT_ROLE_ADMIN, AUDIT_ROLE_UNPROVEN, AuditLogBuilder, AuditStatus,
+};
 
-pub const AUDIT_ROLE_ADMIN: &str = "ADMIN";
 pub const NA: &str = "N/A";
 
 /// The `tracing` target every audit entry is written under.
@@ -41,12 +42,14 @@ pub const MAX_REASON_CHARS: usize = 1024;
 
 #[non_exhaustive]
 pub struct EmitInput {
-    pub target: String,
     pub operation: AuditOperation,
     pub actor: String,
-    pub status: String,
+    pub role: AuditRole,
+    pub status: AuditStatus,
     pub resource: AuditResource,
-    pub extra: Option<String>,
+    /// Rendered as `error` for a [`AuditStatus::Failure`], as `reason`
+    /// otherwise.
+    pub reason: Option<AuditReason>,
     pub thread_id: Option<String>,
     pub task: Option<String>,
     pub document_id: Option<String>,
@@ -129,25 +132,24 @@ fn quoted(value: &str, limit: usize) -> String {
 
 impl EmitInput {
     /// The entry's `(key, value)` pairs in a fixed order, `None` meaning the
-    /// value is absent. The reason's `audit.error=` / `audit.reason=` label is
-    /// the key, not part of the value.
+    /// value is absent. The reason of a failure is keyed `error`, any other
+    /// reason `reason`.
     fn fields(&self) -> Vec<(&'static str, Option<String>)> {
         let resource = |value: Option<String>| value.or_else(|| Some(NA.to_string()));
-        let (reason_key, reason) = match self.extra.as_deref().map(|e| e.split_once('=')) {
-            Some(Some(("audit.error", value))) => ("error", Some(value.to_string())),
-            Some(Some((_, value))) => ("reason", Some(value.to_string())),
-            Some(None) => ("reason", self.extra.clone()),
-            None => ("reason", None),
+        let reason_key = if self.status == AuditStatus::Failure {
+            "error"
+        } else {
+            "reason"
         };
         vec![
             ("seq", self.sequence.map(|sequence| sequence.to_string())),
-            ("role", Some(AUDIT_ROLE_ADMIN.to_string())),
+            ("role", Some(self.role.to_string())),
             ("actor", Some(self.actor.clone())),
             ("claimed_actor", self.claimed_actor.clone()),
             ("authenticated_sender", self.authenticated_sender.clone()),
             ("operation", Some(self.operation.to_string())),
             ("task", self.task.clone()),
-            ("status", Some(self.status.clone())),
+            ("status", Some(self.status.to_string())),
             (
                 "resource.entity_id",
                 resource(self.resource.entity_id.as_ref().map(|v| v.to_string())),
@@ -176,7 +178,10 @@ impl EmitInput {
                 Some(self.thread_id.clone().unwrap_or_else(|| NA.to_string())),
             ),
             ("timestamp", Some(self.timestamp.to_rfc3339())),
-            (reason_key, reason),
+            (
+                reason_key,
+                self.reason.as_ref().map(|reason| reason.to_string()),
+            ),
         ]
     }
 }
@@ -239,12 +244,12 @@ impl BaseAuditLogger {
 impl AuditLogger for BaseAuditLogger {
     async fn log(&self, audit_log: AuditLog) {
         let emit_input = EmitInput {
-            target: audit_log.target,
             operation: audit_log.operation,
             actor: audit_log.actor,
-            status: audit_log.status.to_string(),
+            role: audit_log.role,
+            status: audit_log.status,
             resource: audit_log.resource,
-            extra: audit_log.extra,
+            reason: audit_log.reason,
             thread_id: audit_log.thread_id,
             task: audit_log.task,
             document_id: audit_log.document_id,
@@ -270,6 +275,8 @@ impl AuditLogger for BaseAuditLogger {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
     use crate::configs::{AuditConfig, AuditLogFormat};
     use crate::domain::{Action, AuthorityId, EntityId, Resource};
@@ -290,8 +297,7 @@ mod tests {
 
         logger
             .log(
-                AuditLogBuilder::new()
-                    .operation(AuditOperation::Create)
+                AuditLogBuilder::new(AuditOperation::Create)
                     .actor("did:example:admin")
                     .resource(resource)
                     .thread_id(Some("thread-1".to_string()))
@@ -316,8 +322,7 @@ mod tests {
 
         logger
             .log(
-                AuditLogBuilder::new()
-                    .operation(AuditOperation::Create)
+                AuditLogBuilder::new(AuditOperation::Create)
                     .actor("did:example:admin")
                     .resource(resource)
                     .thread_id(Some("thread-1".to_string()))
@@ -337,8 +342,7 @@ mod tests {
 
         logger
             .log(
-                AuditLogBuilder::new()
-                    .operation(AuditOperation::Delete)
+                AuditLogBuilder::new(AuditOperation::Delete)
                     .actor("did:example:admin")
                     .resource(resource)
                     .build_failure("Record not found"),
@@ -357,8 +361,7 @@ mod tests {
 
         logger
             .log(
-                AuditLogBuilder::new()
-                    .operation(AuditOperation::Delete)
+                AuditLogBuilder::new(AuditOperation::Delete)
                     .actor("did:example:admin")
                     .resource(resource)
                     .build_failure("Record not found"),
@@ -377,8 +380,7 @@ mod tests {
 
         logger
             .log(
-                AuditLogBuilder::new()
-                    .operation(AuditOperation::Update)
+                AuditLogBuilder::new(AuditOperation::Update)
                     .actor("did:example:unauthorized")
                     .resource(resource)
                     .build_unauthorized("Not in admin list"),
@@ -397,8 +399,7 @@ mod tests {
 
         logger
             .log(
-                AuditLogBuilder::new()
-                    .operation(AuditOperation::Update)
+                AuditLogBuilder::new(AuditOperation::Update)
                     .actor("did:example:unauthorized")
                     .resource(resource)
                     .build_unauthorized("Not in admin list"),
@@ -408,10 +409,10 @@ mod tests {
 
     fn hostile_input() -> EmitInput {
         EmitInput {
-            target: AUDIT_ROLE_ADMIN.to_string(),
             operation: AuditOperation::Put,
             actor: String::new(),
-            status: "UNAUTHORIZED".to_string(),
+            role: AuditRole::Unproven,
+            status: AuditStatus::Unauthorized,
             resource: AuditResource::new(
                 Some(EntityId::new(
                     "did:x\nADMIN: PUT operation by did:admin - SUCCESS",
@@ -420,7 +421,7 @@ mod tests {
                 None,
                 None,
             ),
-            extra: Some("audit.reason=bad\r\naudit.status=SUCCESS".to_string()),
+            reason: Some(AuditReason::text("bad\r\naudit.status=SUCCESS")),
             thread_id: Some("t\u{1b}[2J".to_string()),
             task: Some("registry/record/put".to_string()),
             document_id: Some("x".repeat(10_000)),
@@ -463,7 +464,8 @@ mod tests {
     #[test]
     fn an_error_is_labelled_once() {
         let mut input = hostile_input();
-        input.extra = Some("audit.error=Record not found".to_string());
+        input.status = AuditStatus::Failure;
+        input.reason = Some(AuditReason::text("Record not found"));
         let line = render_text(&input);
         assert!(line.contains(r#"audit.error="Record not found""#));
         assert!(!line.contains("audit.error=\"audit.error"));
@@ -517,12 +519,71 @@ mod tests {
     #[test]
     fn a_reason_may_be_longer_than_other_fields() {
         let mut input = hostile_input();
-        input.extra = Some(format!("audit.reason={}", "r".repeat(2000)));
+        input.reason = Some(AuditReason::text("r".repeat(2000)));
         let parsed: Value = serde_json::from_str(&render_json(&input)).expect("json");
         let reason = parsed["reason"].as_str().expect("reason");
         assert_eq!(reason.chars().count(), MAX_REASON_CHARS + 1);
         let id = parsed["document_id"].as_str().expect("document id");
         assert_eq!(id.chars().count(), MAX_FIELD_CHARS + 1);
+    }
+
+    #[test]
+    fn an_unproven_refusal_is_not_rendered_as_an_admins() {
+        let parsed: Value = serde_json::from_str(&render_json(&hostile_input())).expect("json");
+        assert_eq!(parsed["role"], AUDIT_ROLE_UNPROVEN);
+        assert_eq!(parsed["actor"], "");
+        let line = render_text(&hostile_input());
+        assert!(line.contains(r#"audit.role="UNPROVEN""#), "{line}");
+    }
+
+    #[test]
+    fn a_proven_admin_is_rendered_as_one() {
+        let mut input = hostile_input();
+        input.actor = "did:example:admin".to_string();
+        input.role = AuditRole::Admin;
+        input.status = AuditStatus::Success;
+        input.reason = None;
+        let parsed: Value = serde_json::from_str(&render_json(&input)).expect("json");
+        assert_eq!(parsed["role"], AUDIT_ROLE_ADMIN);
+        assert_eq!(parsed["actor"], "did:example:admin");
+        assert!(parsed.get("reason").is_none() && parsed.get("error").is_none());
+    }
+
+    #[test]
+    fn a_coded_reason_renders_as_code_and_message() {
+        let mut input = hostile_input();
+        input.reason = Some(AuditReason::coded(
+            "permissionDenied",
+            Some("DID x is not authorised".to_string()),
+        ));
+        let parsed: Value = serde_json::from_str(&render_json(&input)).expect("json");
+        assert_eq!(
+            parsed["reason"],
+            "permissionDenied: DID x is not authorised"
+        );
+        input.status = AuditStatus::Failure;
+        input.reason = Some(AuditReason::coded("taskFailed", None));
+        let parsed: Value = serde_json::from_str(&render_json(&input)).expect("json");
+        assert_eq!(parsed["error"], "taskFailed");
+        assert!(parsed.get("reason").is_none());
+    }
+
+    #[test]
+    fn a_summary_and_the_duplicate_statuses_render_as_themselves() {
+        let mut input = hostile_input();
+        input.operation = AuditOperation::Summary;
+        let parsed: Value = serde_json::from_str(&render_json(&input)).expect("json");
+        assert_eq!(parsed["operation"], "SUMMARY");
+        assert_eq!(parsed["role"], AUDIT_ROLE_UNPROVEN);
+        for (status, rendered) in [
+            (AuditStatus::Replayed, "REPLAYED"),
+            (AuditStatus::DuplicateInFlight, "DUPLICATE_IN_FLIGHT"),
+        ] {
+            input.status = status;
+            input.reason = None;
+            let parsed: Value = serde_json::from_str(&render_json(&input)).expect("json");
+            assert_eq!(parsed["status"], rendered);
+        }
     }
 
     #[test]

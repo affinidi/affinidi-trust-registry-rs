@@ -22,7 +22,9 @@
 //! The counts are recorded as one summary entry per source when the next
 //! window opens, on a timer ([`BoundedAuditLogger::spawn_flusher`]) and at
 //! shutdown ([`BoundedAuditLogger::flush`]), so they are not lost when no
-//! further entry arrives. A summary keeps the reason codes and task types it
+//! further entry arrives. A summary is an entry of its own operation, `SUMMARY` (status
+//! `UNAUTHORIZED`, role `UNPROVEN`), so it is never counted as a refused
+//! operation on the registry. It keeps the reason codes and task types it
 //! counted and the first few claimed issuers. Entries with a proven actor
 //! always pass through.
 
@@ -34,7 +36,9 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::audit::model::{AuditLog, AuditLogBuilder, AuditLogger, AuditOperation, AuditResource};
+use crate::audit::model::{
+    AuditLog, AuditLogBuilder, AuditLogger, AuditOperation, AuditReason, AuditResource,
+};
 
 /// How many unproven entries from unauthenticated callers are recorded
 /// individually per window.
@@ -141,16 +145,18 @@ impl Suppressed {
     }
 }
 
-/// The reason code of a refusal: the part of its reason before the first `:`.
+/// The reason code of a refusal: its error code, or for a reason that is only
+/// text, the part of it before the first `:`.
 fn reason_code(audit_log: &AuditLog) -> String {
-    let reason = audit_log
-        .extra
-        .as_deref()
-        .and_then(|extra| extra.split_once('=').map(|(_, value)| value))
-        .unwrap_or("unknown");
-    reason
-        .split_once(':')
-        .map_or(reason, |(code, _)| code)
+    let Some(reason) = &audit_log.reason else {
+        return "unknown".to_string();
+    };
+    if let Some(code) = &reason.code {
+        return code.clone();
+    }
+    let text = reason.message.as_deref().unwrap_or("unknown");
+    text.split_once(':')
+        .map_or(text, |(code, _)| code)
         .trim()
         .to_string()
 }
@@ -308,11 +314,10 @@ impl BoundedAuditLogger {
                 );
             }
             self.forward(
-                AuditLogBuilder::new()
-                    .operation(AuditOperation::Update)
+                AuditLogBuilder::new(AuditOperation::Summary)
                     .resource(AuditResource::empty())
                     .authenticated_sender(authenticated_sender)
-                    .build_unauthorized(summary),
+                    .build_unauthorized(AuditReason::text(summary)),
             )
             .await;
         }
@@ -371,6 +376,8 @@ impl AuditLogger for BoundedAuditLogger {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
 
     #[derive(Default)]
@@ -383,14 +390,23 @@ mod tests {
         }
     }
 
+    /// The text an entry records as its reason.
+    fn reason_of(entry: &AuditLog) -> String {
+        entry
+            .reason
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    }
+
     fn unproven() -> AuditLog {
-        AuditLogBuilder::new()
+        AuditLogBuilder::new(AuditOperation::Put)
             .claimed_actor(Some("did:example:anyone".to_string()))
             .build_unauthorized("proofRequired")
     }
 
     fn proven() -> AuditLog {
-        AuditLogBuilder::new()
+        AuditLogBuilder::new(AuditOperation::Put)
             .actor("did:example:admin")
             .build_success()
     }
@@ -416,14 +432,17 @@ mod tests {
         let entries = recording.0.lock().unwrap();
         let summary = &entries[3];
         assert!(
-            summary.extra.as_deref().is_some_and(|extra| extra
+            Some(reason_of(summary)).is_some_and(|extra| extra
                 .contains("3 further unproven refusals")
                 && extra.contains("from unauthenticated callers")
                 && extra.contains("proofRequired=3")
                 && extra.contains("did:example:anyone")),
             "the suppressed count is recorded: {:?}",
-            summary.extra
+            summary.reason
         );
+        // Recorded as a summary, not as a refused operation on the registry.
+        assert_eq!(summary.operation, AuditOperation::Summary);
+        assert_eq!(summary.role, crate::audit::model::AuditRole::Unproven);
         assert_eq!(entries.len(), 5);
     }
 
@@ -456,15 +475,15 @@ mod tests {
         assert!(
             entries
                 .last()
-                .and_then(|entry| entry.extra.as_deref())
+                .map(reason_of)
                 .is_some_and(|extra| extra.contains("1 further unproven refusals")),
             "the count is flushed at shutdown: {:?}",
-            entries.last().map(|e| &e.extra)
+            entries.last().map(|e| &e.reason)
         );
     }
 
     fn unproven_over(sender: &str) -> AuditLog {
-        AuditLogBuilder::new()
+        AuditLogBuilder::new(AuditOperation::Put)
             .claimed_actor(Some(sender.to_string()))
             .authenticated_sender(Some(sender.to_string()))
             .task("registry/record/put")
@@ -516,7 +535,7 @@ mod tests {
             summary.authenticated_sender.as_deref(),
             Some("did:example:noisy")
         );
-        let extra = summary.extra.as_deref().unwrap_or_default();
+        let extra = reason_of(summary);
         assert!(extra.contains("8 further unproven refusals"), "{extra}");
         assert!(extra.contains("proofInvalid=8"), "{extra}");
         assert!(extra.contains("registry/record/put=8"), "{extra}");

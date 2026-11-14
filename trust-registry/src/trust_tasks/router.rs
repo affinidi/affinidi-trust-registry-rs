@@ -1,14 +1,17 @@
-//! Transport-agnostic Trust Task router for the Trust Registry.
+//! The `registry/*` Trust Task handlers and the dispatchers that route to them.
 //!
-//! [`build_dispatcher`] wires the `registry/*` payloads onto a single
-//! [`trust_tasks_rs::Dispatcher`] whose handlers call the existing
-//! [`TrustRecordRepository`]/[`TrustRecordAdminRepository`]. It performs **no
-//! transport work** — a later change plugs this dispatcher into the DIDComm,
-//! HTTP, and TSP bindings. Keeping the routing here means all three transports
-//! share one implementation and cannot diverge.
+//! [`build_dispatcher`] and [`build_query_dispatcher`] register the registry's
+//! own tasks on a [`trust_tasks_rs::Dispatcher`] whose handlers call the
+//! [`TrustRecordRepository`]/[`TrustRecordAdminRepository`]. The
+//! [`CapabilitySet`](crate::capabilities::CapabilitySet) composes them with the
+//! governance surface and the enabled capabilities into the live dispatchers.
 //!
-//! Proof enforcement (`IS_PROOF_REQUIRED` on the write payloads) is applied by
-//! the transport/consume layer where a `ProofVerifier` exists, not here.
+//! Nothing here checks who is asking. Party resolution, proofs, the admin list,
+//! the authority binding, the replay record and the audit entry are applied
+//! before dispatch, for every transport, by
+//! [`TaskHandler`](crate::trust_tasks::TaskHandler); see the numbered list in
+//! [`crate::trust_tasks::handler`]. What each task needs of that pipeline is in
+//! [`crate::trust_tasks::descriptor`].
 //!
 //! `TaskOutcome` carries `trust_tasks_rs::ErrorResponse` in its `Err` variant,
 //! which is intentionally large (a full `trust-task-error` document). Boxing it
@@ -24,8 +27,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
-use trust_tasks_rs::{Dispatcher, ErrorResponse, RejectReason, TrustTask};
+use trust_tasks_rs::{Dispatcher, ErrorResponse, Payload, RejectReason, TrustTask};
 use uuid::Uuid;
 
 use crate::domain::{Evaluation, TrustRecord};
@@ -36,8 +40,8 @@ use crate::storage::repository::{
 use super::payloads::{
     AuthorizationRequest, AuthorizationResponse, AuthorizationResponseMessage, RecognitionRequest,
     RecognitionResponse, RecognitionResponseMessage, RecordDeleteRequest, RecordDeleteResponse,
-    RecordPutRequest, RecordPutResponse, RecordQueryRequest, RecordQueryResponse, query_of,
-    record_from_v1, record_from_v2, record_to_v1, record_to_v2, v2,
+    RecordPutRequest, RecordPutResponse, RecordQueryRequest, RecordQueryResponse, camel, query_of,
+    record_from_v1, record_from_v2, record_to_v1, record_to_v2,
 };
 
 /// Default `registry/record/query` page size when the request names none.
@@ -54,7 +58,8 @@ pub type TaskFuture = BoxFuture<'static, TaskOutcome>;
 /// A [`Dispatcher`] specialised to the Trust Registry's async handlers.
 pub type RegistryDispatcher = Dispatcher<TaskFuture>;
 
-fn new_id() -> String {
+/// A fresh document identifier for a reply.
+pub(crate) fn new_id() -> String {
     Uuid::new_v4().to_string()
 }
 
@@ -79,7 +84,7 @@ fn map_repo_err(err: RepositoryError) -> RejectReason {
 
 /// Build a success response document from a serialisable payload, or an
 /// internal-error response if serialisation fails.
-fn respond<P, T: Serialize>(doc: &TrustTask<P>, payload: T) -> TaskOutcome {
+pub(crate) fn respond<P, T: Serialize>(doc: &TrustTask<P>, payload: T) -> TaskOutcome {
     match serde_json::to_value(payload) {
         Ok(value) => Ok(doc.respond_with(new_id(), value)),
         Err(e) => Err(doc.reject_with(
@@ -97,7 +102,10 @@ fn respond<P, T: Serialize>(doc: &TrustTask<P>, payload: T) -> TaskOutcome {
 /// through their builders and validated at `try_into()`. Every required field
 /// is supplied at each call site, so a failure here means this crate and the
 /// spec crate disagree about the response shape — our bug, not the caller's.
-fn reject_build_err<P>(doc: &TrustTask<P>, err: impl std::fmt::Display) -> ErrorResponse {
+pub(crate) fn reject_build_err<P>(
+    doc: &TrustTask<P>,
+    err: impl std::fmt::Display,
+) -> ErrorResponse {
     doc.reject_with(
         new_id(),
         RejectReason::InternalError {
@@ -106,85 +114,69 @@ fn reject_build_err<P>(doc: &TrustTask<P>, err: impl std::fmt::Display) -> Error
     )
 }
 
-/// Build a [`RegistryDispatcher`] over `repository`.
-///
-/// Registers every `registry/*` Trust Task type. Reads only need
-/// [`TrustRecordRepository`]; the admin bound is taken once so all operations
-/// share one repository handle.
+/// Register the handler `$handler::<_, $payload>` for `$payload` over `$repo`.
+macro_rules! register {
+    ($dispatcher:expr, $repo:expr, $payload:ty, $handler:ident) => {{
+        let repo = $repo.clone();
+        $dispatcher.on::<$payload, _>(move |doc| -> TaskFuture {
+            Box::pin($handler::<_, $payload>(repo.clone(), doc))
+        })
+    }};
+}
+
+/// Build a [`RegistryDispatcher`] over `repository`: the reads of
+/// [`build_query_dispatcher`] plus record put, delete and query, at every
+/// version served. (`registry/did/rotate` is executed by the
+/// [`TaskHandler`](crate::trust_tasks::TaskHandler) itself.)
 pub fn build_dispatcher<R>(repository: Arc<R>) -> RegistryDispatcher
 where
     R: TrustRecordAdminRepository + ?Sized + 'static,
 {
-    Dispatcher::new()
-        .on::<RecognitionRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_recognition(repo.clone(), doc)) }
-        })
-        .on::<AuthorizationRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_authorization(repo.clone(), doc)) }
-        })
-        .on::<RecordPutRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_put(repo.clone(), doc)) }
-        })
-        .on::<RecordQueryRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_query(repo.clone(), doc)) }
-        })
-        .on::<RecordDeleteRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_delete(repo.clone(), doc)) }
-        })
-        .on::<v2::RecognitionRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_recognition_v2(repo.clone(), doc)) }
-        })
-        .on::<v2::AuthorizationRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_authorization_v2(repo.clone(), doc)) }
-        })
-        .on::<v2::RecordPutRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_put_v2(repo.clone(), doc)) }
-        })
-        .on::<v2::RecordQueryRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_query_v2(repo.clone(), doc)) }
-        })
-        .on::<v2::RecordDeleteRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_delete_v2(repo.clone(), doc)) }
-        })
+    let dispatcher = build_query_dispatcher(repository.clone());
+    let dispatcher = register!(dispatcher, repository, RecordPutRequest, handle_put);
+    let dispatcher = register!(dispatcher, repository, camel::RecordPutRequest, handle_put);
+    let dispatcher = register!(dispatcher, repository, RecordQueryRequest, handle_query);
+    let dispatcher = register!(
+        dispatcher,
+        repository,
+        camel::RecordQueryRequest,
+        handle_query
+    );
+    let dispatcher = register!(dispatcher, repository, RecordDeleteRequest, handle_delete);
+    register!(
+        dispatcher,
+        repository,
+        camel::RecordDeleteRequest,
+        handle_delete
+    )
 }
 
 /// Build a read-only [`RegistryDispatcher`] over `repository`.
 ///
-/// Registers only the TRQP query operations (`registry/recognition` and
-/// `registry/authorization`), which need just [`TrustRecordRepository`]. Used by
-/// the HTTP binding, where — mirroring the existing REST TRQP surface — the
-/// registry is read-only and record CRUD stays on the DIDComm transport.
+/// Registers only the public TRQP queries (`registry/recognition` and
+/// `registry/authorization`, every version served), which need just
+/// [`TrustRecordRepository`]. It is the base of the read-only surface (the
+/// HTTP binding, or a host serving callers it does not authenticate), which
+/// never carries record put, delete or query.
 pub fn build_query_dispatcher<R>(repository: Arc<R>) -> RegistryDispatcher
 where
     R: TrustRecordRepository + ?Sized + 'static,
 {
-    Dispatcher::new()
-        .on::<RecognitionRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_recognition(repo.clone(), doc)) }
-        })
-        .on::<AuthorizationRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_authorization(repo.clone(), doc)) }
-        })
-        .on::<v2::RecognitionRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_recognition_v2(repo.clone(), doc)) }
-        })
-        .on::<v2::AuthorizationRequest, _>({
-            let repo = repository.clone();
-            move |doc| -> TaskFuture { Box::pin(handle_authorization_v2(repo.clone(), doc)) }
-        })
+    let dispatcher = Dispatcher::new();
+    let dispatcher = register!(dispatcher, repository, RecognitionRequest, handle_trqp);
+    let dispatcher = register!(
+        dispatcher,
+        repository,
+        camel::RecognitionRequest,
+        handle_trqp
+    );
+    let dispatcher = register!(dispatcher, repository, AuthorizationRequest, handle_trqp);
+    register!(
+        dispatcher,
+        repository,
+        camel::AuthorizationRequest,
+        handle_trqp
+    )
 }
 
 /// Route a raw inbound document and await its handler.
@@ -204,10 +196,11 @@ pub async fn handle_document(
 
 // --- handlers ---------------------------------------------------------------
 //
-// Each task has one core, shared by its versions, and a thin per-version layer
-// that reads that version's payload and builds its response. The versions
-// differ only in wire spelling (and, for records, whether the validity window
-// can be carried), never in what the registry decides.
+// Each task has one generic handler, written against a small trait that each
+// served version's generated payload implements: the trait reads that
+// version's payload and builds its response. The versions differ only in wire
+// spelling (and, for records, whether the validity window can be carried),
+// never in what the registry decides.
 
 /// Look up the record a TRQP query names and evaluate it as of the instant
 /// asked (`context.time`), or the registry's clock when none was asked.
@@ -226,21 +219,36 @@ where
     Ok((record, evaluation))
 }
 
+/// Which of the two TRQP questions a query asks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Question {
+    Recognized,
+    Authorized,
+}
+
 /// The advisory `message`. The spec caps it at 1024 characters, so an answer
 /// whose message would exceed that (pathologically long identifiers) goes
 /// without one rather than failing on a field nothing decides on.
-fn query_message<M>(record: Option<&TrustRecord>, evaluation: &Evaluation, verb: &str) -> Option<M>
+fn query_message<M>(
+    record: Option<&TrustRecord>,
+    evaluation: &Evaluation,
+    question: Question,
+) -> Option<M>
 where
     M: TryFrom<String>,
 {
     let tr = record?;
+    let verb = match question {
+        Question::Recognized => "recognized",
+        Question::Authorized => "authorized",
+    };
     let text = match evaluation.out_of_window_reason(tr) {
         Some(reason) => format!(
             "{} not {verb} by {}: {reason}",
             tr.entity_id().as_str(),
             tr.authority_id().as_str()
         ),
-        None if verb == "authorized" => format!(
+        None if question == Question::Authorized => format!(
             "{} authorized to {}+{} by {}",
             tr.entity_id().as_str(),
             tr.action().as_str(),
@@ -256,90 +264,126 @@ where
     text.try_into().ok()
 }
 
-/// One TRQP query handler per version. `$evaluated`/`$asked` are the builder
+/// One version of a TRQP query (`registry/recognition`,
+/// `registry/authorization`).
+trait TrqpWire: Payload + Send + 'static {
+    const QUESTION: Question;
+    /// The four identifiers asked about.
+    fn ids(&self) -> (&str, &str, &str, &str);
+    /// The instant asked about, if any.
+    fn asked(&self) -> Option<DateTime<Utc>>;
+    /// This version's response: the identifiers echoed, the answer, when it
+    /// was evaluated and the instant asked about, and the advisory message.
+    fn response(
+        &self,
+        holds: bool,
+        asked: Option<DateTime<Utc>>,
+        message: Option<String>,
+    ) -> Result<impl Serialize, String>;
+}
+
+/// [`TrqpWire`] for one version. `$evaluated`/`$asked` are the builder
 /// setters for that version's two time members (`time_evaluated` /
 /// `time_requested` in 0.1, `evaluated_at` / `as_of` in 0.2).
-macro_rules! trqp_handler {
-    ($name:ident, $req:ty, $resp:ty, $msg:ty, $flag:ident, $is:ident, $verb:literal, $evaluated:ident, $asked:ident) => {
-        async fn $name<R>(repository: Arc<R>, doc: TrustTask<$req>) -> TaskOutcome
-        where
-            R: TrustRecordRepository + ?Sized + 'static,
-        {
-            let p = &doc.payload;
-            let asked = p.context.as_ref().and_then(|c| c.time);
-            let (record, evaluation) = match evaluate_query(
-                repository.as_ref(),
-                (&p.entity_id, &p.authority_id, &p.action, &p.resource),
-                asked,
-            )
-            .await
-            {
-                Ok(found) => found,
-                Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
-            };
-            // Outside its window, a record answers false whatever it stores.
-            let holds = evaluation.in_window() && record.as_ref().is_some_and(|tr| tr.$is());
-            let message: Option<$msg> = query_message(record.as_ref(), &evaluation, $verb);
-            let response: $resp = <$resp>::builder()
-                .entity_id(p.entity_id.clone())
-                .authority_id(p.authority_id.clone())
-                .action(p.action.clone())
-                .resource(p.resource.clone())
-                .$flag(holds)
-                .$evaluated(Utc::now())
-                .$asked(asked)
-                .message(message)
-                .try_into()
-                .map_err(|e| reject_build_err(&doc, e))?;
-            respond(&doc, response)
+macro_rules! trqp_wire {
+    ($req:ty, $resp:ty, $msg:ty, $question:ident, $flag:ident, $evaluated:ident, $asked:ident) => {
+        impl TrqpWire for $req {
+            const QUESTION: Question = Question::$question;
+            fn ids(&self) -> (&str, &str, &str, &str) {
+                (
+                    &self.entity_id,
+                    &self.authority_id,
+                    &self.action,
+                    &self.resource,
+                )
+            }
+            fn asked(&self) -> Option<DateTime<Utc>> {
+                self.context.as_ref().and_then(|c| c.time)
+            }
+            fn response(
+                &self,
+                holds: bool,
+                asked: Option<DateTime<Utc>>,
+                message: Option<String>,
+            ) -> Result<impl Serialize, String> {
+                let message: Option<$msg> = message.and_then(|m| m.try_into().ok());
+                let response: Result<$resp, _> = <$resp>::builder()
+                    .entity_id(self.entity_id.clone())
+                    .authority_id(self.authority_id.clone())
+                    .action(self.action.clone())
+                    .resource(self.resource.clone())
+                    .$flag(holds)
+                    .$evaluated(Utc::now())
+                    .$asked(asked)
+                    .message(message)
+                    .try_into();
+                response.map_err(|e| e.to_string())
+            }
         }
     };
 }
 
-trqp_handler!(
-    handle_recognition,
+trqp_wire!(
     RecognitionRequest,
     RecognitionResponse,
     RecognitionResponseMessage,
+    Recognized,
     recognized,
-    is_recognized,
-    "recognized",
     time_evaluated,
     time_requested
 );
-trqp_handler!(
-    handle_authorization,
+trqp_wire!(
     AuthorizationRequest,
     AuthorizationResponse,
     AuthorizationResponseMessage,
+    Authorized,
     authorized,
-    is_authorized,
-    "authorized",
     time_evaluated,
     time_requested
 );
-trqp_handler!(
-    handle_recognition_v2,
-    v2::RecognitionRequest,
-    v2::RecognitionResponse,
-    v2::RecognitionResponseMessage,
+trqp_wire!(
+    camel::RecognitionRequest,
+    camel::RecognitionResponse,
+    camel::RecognitionResponseMessage,
+    Recognized,
     recognized,
-    is_recognized,
-    "recognized",
     evaluated_at,
     as_of
 );
-trqp_handler!(
-    handle_authorization_v2,
-    v2::AuthorizationRequest,
-    v2::AuthorizationResponse,
-    v2::AuthorizationResponseMessage,
+trqp_wire!(
+    camel::AuthorizationRequest,
+    camel::AuthorizationResponse,
+    camel::AuthorizationResponseMessage,
+    Authorized,
     authorized,
-    is_authorized,
-    "authorized",
     evaluated_at,
     as_of
 );
+
+/// `registry/recognition` and `registry/authorization`, every version.
+async fn handle_trqp<R, P>(repository: Arc<R>, doc: TrustTask<P>) -> TaskOutcome
+where
+    R: TrustRecordRepository + ?Sized + 'static,
+    P: TrqpWire,
+{
+    let p = &doc.payload;
+    let asked = p.asked();
+    let (record, evaluation) = match evaluate_query(repository.as_ref(), p.ids(), asked).await {
+        Ok(found) => found,
+        Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
+    };
+    // Outside its window, a record answers false whatever it stores.
+    let holds = evaluation.in_window()
+        && record.as_ref().is_some_and(|tr| match P::QUESTION {
+            Question::Recognized => tr.is_recognized(),
+            Question::Authorized => tr.is_authorized(),
+        });
+    let message: Option<String> = query_message(record.as_ref(), &evaluation, P::QUESTION);
+    let response = p
+        .response(holds, asked, message)
+        .map_err(|e| reject_build_err(&doc, e))?;
+    respond(&doc, response)
+}
 
 /// `registry/record/put` — create or replace at the record's four-part key.
 ///
@@ -371,84 +415,108 @@ where
     }
 }
 
-fn malformed<P>(doc: &TrustTask<P>) -> impl FnOnce(String) -> ErrorResponse + '_ {
-    move |reason| doc.reject_with(new_id(), RejectReason::MalformedRequest { reason })
+/// One version of `registry/record/put`.
+trait PutWire: Payload + Send + 'static {
+    /// The record to store, refused as malformed when it cannot be one.
+    fn record(&self) -> Result<TrustRecord, String>;
+    fn expected_existing(&self) -> Option<bool>;
+    fn response(created: bool) -> Result<impl Serialize, String>;
 }
 
 /// `registry/record/put/0.1`. The record has no validity window, so a put
 /// replaces any window the stored record had.
-async fn handle_put<R>(repository: Arc<R>, doc: TrustTask<RecordPutRequest>) -> TaskOutcome
-where
-    R: TrustRecordAdminRepository + ?Sized + 'static,
-{
-    let record = record_from_v1(&doc.payload.record).map_err(malformed(&doc))?;
-    match put_record(repository.as_ref(), record, doc.payload.expected_existing).await {
-        Ok(created) => {
-            let response: RecordPutResponse = RecordPutResponse::builder()
-                .ok(true)
-                .created(created)
-                .try_into()
-                .map_err(|e| reject_build_err(&doc, e))?;
-            respond(&doc, response)
-        }
-        Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
+impl PutWire for RecordPutRequest {
+    fn record(&self) -> Result<TrustRecord, String> {
+        record_from_v1(&self.record)
+    }
+    fn expected_existing(&self) -> Option<bool> {
+        self.expected_existing
+    }
+    fn response(created: bool) -> Result<impl Serialize, String> {
+        let response: Result<RecordPutResponse, _> = RecordPutResponse::builder()
+            .ok(true)
+            .created(created)
+            .try_into();
+        response.map_err(|e| e.to_string())
     }
 }
 
 /// `registry/record/put/0.3`: lowerCamelCase, with the optional validity
 /// window. A window whose `validFrom` is not before its `validUntil` is
 /// refused as `malformedRequest`.
-async fn handle_put_v2<R>(repository: Arc<R>, doc: TrustTask<v2::RecordPutRequest>) -> TaskOutcome
+impl PutWire for camel::RecordPutRequest {
+    fn record(&self) -> Result<TrustRecord, String> {
+        record_from_v2(&self.record)
+    }
+    fn expected_existing(&self) -> Option<bool> {
+        self.expected_existing
+    }
+    fn response(created: bool) -> Result<impl Serialize, String> {
+        let response: Result<camel::RecordPutResponse, _> = camel::RecordPutResponse::builder()
+            .ok(true)
+            .was_created(created)
+            .try_into();
+        response.map_err(|e| e.to_string())
+    }
+}
+
+async fn handle_put<R, P>(repository: Arc<R>, doc: TrustTask<P>) -> TaskOutcome
 where
     R: TrustRecordAdminRepository + ?Sized + 'static,
+    P: PutWire,
 {
-    let record = record_from_v2(&doc.payload.record).map_err(malformed(&doc))?;
-    match put_record(repository.as_ref(), record, doc.payload.expected_existing).await {
-        Ok(was_created) => {
-            let response: v2::RecordPutResponse = v2::RecordPutResponse::builder()
-                .ok(true)
-                .was_created(was_created)
-                .try_into()
-                .map_err(|e| reject_build_err(&doc, e))?;
+    let record = doc
+        .payload
+        .record()
+        .map_err(|reason| doc.reject_with(new_id(), RejectReason::MalformedRequest { reason }))?;
+    match put_record(repository.as_ref(), record, doc.payload.expected_existing()).await {
+        Ok(created) => {
+            let response = P::response(created).map_err(|e| reject_build_err(&doc, e))?;
             respond(&doc, response)
         }
         Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
     }
 }
 
-async fn handle_delete<R>(repository: Arc<R>, doc: TrustTask<RecordDeleteRequest>) -> TaskOutcome
-where
-    R: TrustRecordAdminRepository + ?Sized + 'static,
-{
-    let p = &doc.payload;
-    let query = query_of(&p.entity_id, &p.authority_id, &p.action, &p.resource);
-    match repository.delete(query).await {
-        Ok(()) => {
-            let response: RecordDeleteResponse = RecordDeleteResponse::builder()
-                .ok(true)
-                .try_into()
-                .map_err(|e| reject_build_err(&doc, e))?;
-            respond(&doc, response)
-        }
-        Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
-    }
+/// One version of `registry/record/delete`.
+trait DeleteWire: Payload + Send + 'static {
+    /// The four-part key of the record to delete.
+    fn key(&self) -> (&str, &str, &str, &str);
+    fn response() -> Result<impl Serialize, String>;
 }
 
-async fn handle_delete_v2<R>(
-    repository: Arc<R>,
-    doc: TrustTask<v2::RecordDeleteRequest>,
-) -> TaskOutcome
+macro_rules! delete_wire {
+    ($req:ty, $resp:ty) => {
+        impl DeleteWire for $req {
+            fn key(&self) -> (&str, &str, &str, &str) {
+                (
+                    &self.entity_id,
+                    &self.authority_id,
+                    &self.action,
+                    &self.resource,
+                )
+            }
+            fn response() -> Result<impl Serialize, String> {
+                let response: Result<$resp, _> = <$resp>::builder().ok(true).try_into();
+                response.map_err(|e| e.to_string())
+            }
+        }
+    };
+}
+
+delete_wire!(RecordDeleteRequest, RecordDeleteResponse);
+delete_wire!(camel::RecordDeleteRequest, camel::RecordDeleteResponse);
+
+async fn handle_delete<R, P>(repository: Arc<R>, doc: TrustTask<P>) -> TaskOutcome
 where
     R: TrustRecordAdminRepository + ?Sized + 'static,
+    P: DeleteWire,
 {
-    let p = &doc.payload;
-    let query = query_of(&p.entity_id, &p.authority_id, &p.action, &p.resource);
+    let (entity_id, authority_id, action, resource) = doc.payload.key();
+    let query = query_of(entity_id, authority_id, action, resource);
     match repository.delete(query).await {
         Ok(()) => {
-            let response: v2::RecordDeleteResponse = v2::RecordDeleteResponse::builder()
-                .ok(true)
-                .try_into()
-                .map_err(|e| reject_build_err(&doc, e))?;
+            let response = P::response().map_err(|e| reject_build_err(&doc, e))?;
             respond(&doc, response)
         }
         Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
@@ -540,72 +608,86 @@ where
     Ok((page, next_cursor))
 }
 
-/// `registry/record/query/0.1`. Its records have no validity window, so a
-/// stored window is left out of the answer.
-async fn handle_query<R>(repository: Arc<R>, doc: TrustTask<RecordQueryRequest>) -> TaskOutcome
-where
-    R: TrustRecordAdminRepository + ?Sized + 'static,
-{
-    let p = &doc.payload;
-    let filter = RecordFilter {
-        entity_id: p.entity_id.as_deref(),
-        authority_id: p.authority_id.as_deref(),
-        action: p.action.as_deref(),
-        resource: p.resource.as_deref(),
-        cursor: p.cursor.as_deref(),
-        limit: p.limit.map(|l| l.get()),
-    };
-    let (page, next_cursor) = query_records(repository.as_ref(), filter)
-        .await
-        .map_err(|reason| doc.reject_with(new_id(), reason))?;
-    let records = page
-        .iter()
-        .map(record_to_v1)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|reason| doc.reject_with(new_id(), RejectReason::InternalError { reason }))?;
-    let response: RecordQueryResponse = RecordQueryResponse::builder()
-        .records(records)
-        .next_cursor(next_cursor)
-        .try_into()
-        .map_err(|e| reject_build_err(&doc, e))?;
-    respond(&doc, response)
+/// One version of `registry/record/query`.
+trait QueryWire: Payload + Send + 'static {
+    /// The record in this version's wire form.
+    type Record: DeserializeOwned;
+    fn filter(&self) -> RecordFilter<'_>;
+    fn to_wire(record: &TrustRecord) -> Result<Self::Record, String>;
+    fn response(
+        records: Vec<Self::Record>,
+        next_cursor: Option<String>,
+    ) -> Result<impl Serialize, String>;
 }
 
-/// `registry/record/query/0.3`: lowerCamelCase records, window included.
-async fn handle_query_v2<R>(
-    repository: Arc<R>,
-    doc: TrustTask<v2::RecordQueryRequest>,
-) -> TaskOutcome
+/// [`QueryWire`] for one version. `$to_wire` is the record mapping: 0.1
+/// records have no validity window, so a stored window is left out of the
+/// answer; 0.3 records are lowerCamelCase, window included.
+macro_rules! query_wire {
+    ($req:ty, $resp:ty, $record:ty, $to_wire:ident) => {
+        impl QueryWire for $req {
+            type Record = $record;
+            fn filter(&self) -> RecordFilter<'_> {
+                RecordFilter {
+                    entity_id: self.entity_id.as_deref(),
+                    authority_id: self.authority_id.as_deref(),
+                    action: self.action.as_deref(),
+                    resource: self.resource.as_deref(),
+                    cursor: self.cursor.as_deref(),
+                    limit: self.limit.map(|l| l.get()),
+                }
+            }
+            fn to_wire(record: &TrustRecord) -> Result<Self::Record, String> {
+                $to_wire(record)
+            }
+            fn response(
+                records: Vec<Self::Record>,
+                next_cursor: Option<String>,
+            ) -> Result<impl Serialize, String> {
+                let response: Result<$resp, _> = <$resp>::builder()
+                    .records(records)
+                    .next_cursor(next_cursor)
+                    .try_into();
+                response.map_err(|e| e.to_string())
+            }
+        }
+    };
+}
+
+query_wire!(
+    RecordQueryRequest,
+    RecordQueryResponse,
+    crate::specs::registry::record::query::v0_1::TrustRecord,
+    record_to_v1
+);
+query_wire!(
+    camel::RecordQueryRequest,
+    camel::RecordQueryResponse,
+    crate::specs::registry::record::query::v0_3::TrustRecord,
+    record_to_v2
+);
+
+async fn handle_query<R, P>(repository: Arc<R>, doc: TrustTask<P>) -> TaskOutcome
 where
     R: TrustRecordAdminRepository + ?Sized + 'static,
+    P: QueryWire,
 {
-    let p = &doc.payload;
-    let filter = RecordFilter {
-        entity_id: p.entity_id.as_deref(),
-        authority_id: p.authority_id.as_deref(),
-        action: p.action.as_deref(),
-        resource: p.resource.as_deref(),
-        cursor: p.cursor.as_deref(),
-        limit: p.limit.map(|l| l.get()),
-    };
-    let (page, next_cursor) = query_records(repository.as_ref(), filter)
+    let (page, next_cursor) = query_records(repository.as_ref(), doc.payload.filter())
         .await
         .map_err(|reason| doc.reject_with(new_id(), reason))?;
     let records = page
         .iter()
-        .map(record_to_v2)
+        .map(P::to_wire)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|reason| doc.reject_with(new_id(), RejectReason::InternalError { reason }))?;
-    let response: v2::RecordQueryResponse = v2::RecordQueryResponse::builder()
-        .records(records)
-        .next_cursor(next_cursor)
-        .try_into()
-        .map_err(|e| reject_build_err(&doc, e))?;
+    let response = P::response(records, next_cursor).map_err(|e| reject_build_err(&doc, e))?;
     respond(&doc, response)
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
     use crate::domain::{
         Action, AuthorityId, EntityId, RecordType, Resource, TrustRecord, TrustRecordBuilder,
@@ -1110,7 +1192,7 @@ mod tests {
     async fn v2_authorization_inside_the_window_is_authorized_and_echoes_as_of() {
         let out = answer(
             windowed_repo(),
-            raw_doc::<v2::AuthorizationRequest>(v2_query(Some("2026-06-01T00:00:00Z"))),
+            raw_doc::<camel::AuthorizationRequest>(v2_query(Some("2026-06-01T00:00:00Z"))),
         )
         .await;
         assert_eq!(out["authorized"], true);
@@ -1132,7 +1214,7 @@ mod tests {
         ] {
             let out = answer(
                 windowed_repo(),
-                raw_doc::<v2::AuthorizationRequest>(v2_query(Some(time))),
+                raw_doc::<camel::AuthorizationRequest>(v2_query(Some(time))),
             )
             .await;
             assert_eq!(out["authorized"], false, "{time}: {out}");
@@ -1149,7 +1231,7 @@ mod tests {
         // named the instant, so it is judged exactly.
         let out = answer(
             windowed_repo(),
-            raw_doc::<v2::RecognitionRequest>(v2_query(Some("2025-12-31T23:59:30Z"))),
+            raw_doc::<camel::RecognitionRequest>(v2_query(Some("2025-12-31T23:59:30Z"))),
         )
         .await;
         assert_eq!(out["recognized"], false, "{out}");
@@ -1178,7 +1260,7 @@ mod tests {
         let dispatcher = build_dispatcher(repo.clone());
         let out = handle_document(
             &dispatcher,
-            raw_doc::<v2::RecordPutRequest>(serde_json::json!({
+            raw_doc::<camel::RecordPutRequest>(serde_json::json!({
                 "record": {
                     "entityId": "did:example:entity",
                     "authorityId": "did:example:authority",
@@ -1205,7 +1287,7 @@ mod tests {
         let dispatcher = build_dispatcher(repo.clone());
         let err = handle_document(
             &dispatcher,
-            raw_doc::<v2::RecordPutRequest>(serde_json::json!({
+            raw_doc::<camel::RecordPutRequest>(serde_json::json!({
                 "record": {
                     "entityId": "e", "authorityId": "a", "action": "x", "resource": "r",
                     "recordType": "recognition",
@@ -1232,7 +1314,7 @@ mod tests {
         };
         let v2_out = answer(
             windowed_repo(),
-            raw_doc::<v2::RecordQueryRequest>(keyed(true)),
+            raw_doc::<camel::RecordQueryRequest>(keyed(true)),
         )
         .await;
         let record = &v2_out["records"][0];
@@ -1253,7 +1335,7 @@ mod tests {
     async fn v2_delete_uses_camel_case_members() {
         let out = answer(
             MockRepo::default(),
-            raw_doc::<v2::RecordDeleteRequest>(serde_json::json!({
+            raw_doc::<camel::RecordDeleteRequest>(serde_json::json!({
                 "entityId": "e", "authorityId": "a", "action": "x", "resource": "r",
             })),
         )
@@ -1270,7 +1352,7 @@ mod tests {
             "action": "issue",
             "resource": "vc",
         });
-        let err = handle_document(&dispatcher, raw_doc::<v2::AuthorizationRequest>(snake))
+        let err = handle_document(&dispatcher, raw_doc::<camel::AuthorizationRequest>(snake))
             .await
             .expect_err("snake_case at 0.2 is malformed");
         assert_eq!(err.payload.code.to_string(), "malformedRequest");
