@@ -46,6 +46,20 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   owner-only file, or use `--tr-did` / `--tr-did-secret-file`.
 - **`trust-registry setup --from` no longer replaces an existing `env_out`**
   unless given `--force`, which backs it up first (#223).
+- **`messaging` (feature `tsp`) no longer uses `affinidi-messaging-delivery`.**
+  `messaging::outbox_store` (`FjallOutboxStore`) and `MessagingStore::outbox`
+  are removed; `build_messaging` takes no outbox keyspace;
+  `RegistryMessaging` has a `transport` (the SDK's `DidCommTransport`) instead
+  of a `service`; `run_inbound_loop` is replaced by a crate-private receive
+  loop. New `messaging::service::start_shared_delivery`.
+- **`tsp::process_tsp_frame` and `tsp::FrameOutcome` are removed**: TSP is
+  received only on the delivery-layer path now, which unpacks in the SDK.
+  `tsp::dispatch_tsp_application` returns `Result<tsp::TspDispatch, String>`
+  (`Err`: not a Trust Task envelope; `TspDispatch::Retryable`: the refusal
+  sent was `retryable`).
+- **`DIDCommError::UnreachableDidDocument` carries the URL that was tried**
+  (`https://{domain}/.well-known/did.json`, or `https://{domain}/{path}/did.json`
+  for a `did:web` with a path).
 - **The registry refuses to start when `ADMIN_DIDS` lists the test client's
   former sample DID** (`did:peer:2.Vz6Mkpun7x…`), whose private keys were
   committed to this repository; anyone could make its proofs. `.env.example`
@@ -119,9 +133,6 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   `build_problem_report` takes the report by reference and no `pthid`. Every
   reply now goes through one sender that only answers the authenticated
   sender.
-- **`tsp::process_tsp_frame` returns a `tsp::FrameOutcome`** (handled,
-  poison, or transient), which decides whether the pickup listener acks the
-  frame.
 
 - **Configuration is strict: a value that does not parse stops startup with an
   error naming the variable**, where it used to be replaced by a default or
@@ -338,6 +349,12 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Changed
 
+- **The unused durable outbox is gone** (#201). A TSP-enabled registry opened
+  a fjall `outbox` keyspace and ran three outbox loops that nothing ever sent
+  through. Replies are sent once, synchronously, from the handler; a reply
+  that cannot be sent is logged, and a client that retries a write with the
+  same document id gets the recorded outcome replayed. An existing `outbox`
+  keyspace in the messaging store is left as it is and no longer read.
 - **The offline sync runs once when the listener starts**, then every 30 s,
   so a backlog queued while the registry was down is drained at once. The
   pickup listener and the integration tests share one ATM bootstrap
@@ -637,6 +654,51 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Fixed
 
+- **A TSP-enabled registry answers DIDComm again.** With `ENABLE_TSP=true`
+  the delivery crate's `MessagingService` started taking messages off the
+  mediator socket as soon as it was built, before the registry subscribed;
+  those it left unanswered and unacked until a reconnect, so DIDComm Trust
+  Tasks timed out. The registry now drives the SDK's `DidCommTransport`
+  itself and only takes messages off the socket when it is ready to handle
+  them.
+- **The TSP-enabled receive path acks a message only after handling it**
+  (R1.6, #198). `MessagingService` acked (deleted at the mediator) each
+  message as soon as it was in a 256-slot broadcast buffer, before the
+  handler ran, so a crash, or a burst while handlers were slow, lost acked
+  messages. The loop now follows the pickup listener's rules and shares its
+  ledger: ack after handling, poison acked, a handler error, panic or 30 s
+  timeout left queued, a message pushed again (on a reconnect) handled once,
+  at most 32 handlers, and the next message taken off the socket only when a
+  handler slot is free (beyond the frames the SDK caches ahead of the
+  stream). A TSP Trust Task the registry refused as `retryable` (storage
+  unavailable, an internal error) is answered and left queued, not acked. A
+  message left queued is offered again when the mediator next pushes the
+  inbox.
+- **The TSP-enabled receive path stops cleanly** (#200). On shutdown it
+  waits for running handlers, deletes what they handled — and what it acked
+  in the last minute — directly at the mediator (the SDK's background
+  deletion queue is dropped by `graceful_shutdown`, so those acks were lost
+  and the messages handled again after a restart), stops the
+  relationship-maintenance sweep,
+  shuts the ATM down (freeing the mediator's one-socket-per-DID slot) and
+  closes the messaging store, so a registry rebuilt in the same process can
+  connect and reopen it. If the mediator stream ends by itself it returns an
+  error, so `/health` reports the listener down instead of "exited cleanly".
+- **TSP over `DidCommSource::SharedAtm` works** (#202). It ran the pickup
+  loop, which cannot record TSP relationship-control frames, so with the
+  SDK's default §7.2.2 gating every TSP Trust Task from a peer was dropped.
+  It now receives through a `DidCommTransport` over the lent connection;
+  relationships are kept in the host ATM's relationship store.
+- **The offline sync of a `--features tsp` build keeps a request's own
+  message id** with `ENABLE_TSP=false`. It used the SDK's DIDComm-only fetch,
+  which replaces the id with the mediator's, so a `trqp/1.0` request without
+  a `thid` got its reply threaded on the mediator's id. A TSP frame it finds
+  is acked as unservable.
+- **The delivery ledger no longer forgets a live message through a stale
+  position**: an id that expired and came back sat twice in the eviction
+  order, and evicting the stale copy removed the live entry.
+- **Inbound-path comments and `CLAUDE.md` describe the current delivery
+  semantics** (#246, #269).
 - **The DIDComm pickup listener deletes a message at the mediator only after
   handling it** (R1.6). The live stream pulled with `auto_delete = true` and
   the 30-second offline sync acked its whole batch as soon as the handlers
@@ -647,9 +709,8 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   queued. With `--features tsp`, an offline frame the SDK could not unpack
   (`(None, id)`) is no longer acked at once, since the SDK does not say
   whether the failure was transient: it is left queued and retried. A TSP
-  frame whose unpack still fails transiently after the in-process retries is
-  also left queued, and a TSP frame that cannot be served because TSP is not
-  enabled is acked and logged. Redelivery is bounded: a message that has
+  frame on the pickup listener (which serves only a registry with TSP
+  disabled) is acked and logged as unservable. Redelivery is bounded: a message that has
   failed 5 times over at least 10 minutes is deleted and logged at `error`.
 - **A message the live stream and the offline sync both fetch is handled
   once** (R1.4). The listener remembers, by mediator message id, what is in

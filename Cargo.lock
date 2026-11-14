@@ -6992,7 +6992,6 @@ version = "0.32.0"
 dependencies = [
  "affinidi-did-common",
  "affinidi-messaging-core",
- "affinidi-messaging-delivery",
  "affinidi-messaging-sdk",
  "affinidi-tdk",
  "anyhow",

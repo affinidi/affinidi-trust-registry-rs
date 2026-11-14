@@ -1,22 +1,54 @@
-//! Delivery-layer messaging for a TSP-enabled registry.
+//! The delivery-layer receive path of a TSP-enabled registry.
 //!
-//! Mirrors `vta-service::messaging::service`: build a [`TDKSharedState`] seeded
-//! with the registry's secrets, an [`ATM`] carrying a **durable** TSP
-//! relationship store, a profile against the mediator, then a bounded
-//! `profile_enable_websocket` before a [`DidCommTransport`] is bound and driven
-//! by a [`MessagingService`].
+//! Builds a [`TDKSharedState`] seeded with the registry's secrets, an [`ATM`]
+//! carrying a **durable** TSP relationship store, a profile against the
+//! mediator, then a bounded `profile_enable_websocket` before the SDK's
+//! [`DidCommTransport`] is bound to it. The receive loop then drives the
+//! transport's inbound stream.
 //!
-//! The point of the delivery layer here is its inbound stream: `DidCommTransport`
-//! records inbound TSP relationship-control frames (Rev 3 §7.2.2) and tags each
-//! [`Inbound`] with its [`InboundKind`], so the registry answers control frames
-//! and never mistakes one for a Trust Task. A DIDComm-only registry does not use
-//! this module at all — it keeps its own pickup loop.
+//! # Delivery semantics
+//!
+//! The transport pulls each frame with `auto_delete = false` and leaves the ack
+//! (the delete at the mediator) to its caller. The loop acks a message
+//! only once it has been handled, with the same rules and the same
+//! `DeliveryLedger` as the pickup listener
+//! (`didcomm::listener::delivery`): poison is acked at once, a handler
+//! error, panic or timeout leaves the message queued, and a message that
+//! arrives again while in flight or after it was handled is not handled twice.
+//!
+//! The registry does not use `affinidi-messaging-delivery`'s
+//! `MessagingService` for this: its dispatcher acks each message as soon as it
+//! is in a broadcast buffer, before the registry's handler has run, and starts
+//! taking messages off the socket when it is built, before anything has
+//! subscribed — it left the first messages unanswered until a reconnect.
+//!
+//! A message left queued is offered again when the mediator next pushes the
+//! stored inbox, which it does whenever live delivery is switched on (each
+//! websocket (re)connect, and each start). Unlike the pickup listener this
+//! path has no periodic offline sync: the SDK's offline fetch would hand TSP
+//! frames back still packed, where relationship-control frames cannot be
+//! recorded.
+//!
+//! Acks are normally handed to the SDK's background deletion handler, which
+//! deletes at the mediator shortly after. That queue does not survive
+//! `ATM::graceful_shutdown`, so from the moment shutdown begins the loop holds
+//! acks back and, once its handlers have finished, deletes them — and the
+//! acks queued in the last minute — directly at the mediator,
+//! waiting for its answer, before the caller shuts the ATM down.
+//!
+//! Replies are sent once, synchronously, from the handler (`atm.tsp().send`,
+//! `atm.forward_and_send_message`); a reply that cannot be sent is logged. A
+//! client that retries a write with the same document id gets the recorded
+//! outcome replayed (see [`crate::dedup`]), so a lost reply costs a retry, not
+//! a second application.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use affinidi_messaging_core::{Inbound, InboundKind, Protocol};
-use affinidi_messaging_delivery::{MessagingService, OutboxStore};
+use std::collections::{HashSet, VecDeque};
+
+use affinidi_messaging_core::{Inbound, InboundKind, MessageTransport, Protocol};
+use affinidi_messaging_sdk::messages::DeleteMessageRequest;
 use affinidi_tdk::common::TDKSharedState;
 use affinidi_tdk::common::config::TDKConfig;
 use affinidi_tdk::didcomm::Message;
@@ -26,16 +58,24 @@ use affinidi_tdk::messaging::profiles::ATMProfile;
 use affinidi_tdk::messaging::{ATM, DidCommTransport};
 use affinidi_tdk::secrets_resolver::SecretsResolver;
 use affinidi_tdk::secrets_resolver::secrets::Secret;
+use async_trait::async_trait;
+use tokio::sync::Semaphore;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::configs::{DidcommConfig, ProfileConfig};
 use crate::didcomm::error::DIDCommError;
 use crate::didcomm::listener::MessageHandler;
-use crate::didcomm::listener::mediator_functions::{acl_failure_outcome, set_mediator_acl_mode};
+use crate::didcomm::listener::delivery::{
+    ACK_TIMEOUT, Ack, Claim, DeliveryLedger, GIVE_UP_ATTEMPTS, GIVE_UP_MIN_AGE, HANDLER_TIMEOUT,
+    MAX_INFLIGHT_HANDLERS, Outcome,
+};
+use crate::didcomm::listener::mediator_functions::{
+    acl_failure_outcome, bounded_value_within, lock_ledger, set_mediator_acl_mode,
+};
 use crate::health::RegistryHealth;
-use crate::messaging::kv::{KvKeyspace, MessagingStore};
-use crate::messaging::outbox_store::FjallOutboxStore;
+use crate::messaging::kv::MessagingStore;
 use crate::messaging::relationship_store::{
     FjallRelationshipKv, RegistryRelationshipStore, mark_active,
 };
@@ -57,13 +97,17 @@ fn messaging_store_path(config: &DidcommConfig, alias: &str) -> std::path::PathB
     base.join(safe)
 }
 
-/// The Managed-source delivery-layer listener: open the durable messaging store,
-/// build the [`MessagingService`] with a persistent relationship store, apply
-/// the mediator ACL mode, spawn the relationship-maintenance sweep once, then
-/// drive inbound off the delivery layer until shutdown.
+/// The `Managed`-source receive path of a TSP-enabled registry: open the
+/// durable messaging store, connect an ATM with a persistent relationship
+/// store, apply the mediator ACL mode, run the relationship-maintenance sweep,
+/// and receive until `shutdown`.
 ///
-/// This replaces the hand-rolled pickup loop for a TSP-enabled registry. It runs
-/// until `shutdown`, mirroring `Listener::start_listening`.
+/// Returns `Ok(())` after `shutdown`, and `Err` when the inbound stream ended
+/// on its own (the profile's websocket is gone), so `/health` reports why.
+/// Either way it stops the sweep, waits for running handlers, shuts the ATM
+/// down (releasing the mediator's one-socket-per-DID slot) and closes the
+/// store before returning, so a registry rebuilt in the same process can
+/// connect and open the store again.
 pub async fn start_managed_delivery<H: MessageHandler>(
     profile_config: ProfileConfig,
     config: Arc<DidcommConfig>,
@@ -77,8 +121,6 @@ pub async fn start_managed_delivery<H: MessageHandler>(
     let path_str = path.to_str().ok_or_else(|| {
         DIDCommError::Messaging(format!("non-UTF-8 messaging store path: {path:?}"))
     })?;
-    // Keep the store (and its fjall DB handle + background threads) alive for the
-    // whole life of the listener — bound here, dropped when the loop returns.
     let store = MessagingStore::open(path_str).map_err(DIDCommError::Messaging)?;
 
     // Bounded: any VID TSP authenticates can form a relationship. Admins'
@@ -99,7 +141,6 @@ pub async fn start_managed_delivery<H: MessageHandler>(
         &profile_config.alias,
         &config.mediator_did,
         relationships,
-        store.outbox.clone(),
     )
     .await
     .map_err(DIDCommError::Messaging)?;
@@ -115,36 +156,127 @@ pub async fn start_managed_delivery<H: MessageHandler>(
         return Err(refused);
     }
 
-    // The relationship-store maintenance sweep runs ONCE, here — never on the
-    // connect path — because it holds the store and does not depend on the
-    // socket (tying it to connect would leak one sweep task per reconnect).
-    tokio::spawn(crate::messaging::relationship_store::maintenance_loop(
-        messaging.relationship_store.clone(),
-        limits,
-    ));
+    // The relationship-store maintenance sweep runs once per start — never on
+    // the connect path, which would leak one sweep per reconnect — and stops
+    // with the receive loop.
+    let stop_maintenance = CancellationToken::new();
+    let maintenance = tokio::spawn({
+        let store = messaging.relationship_store.clone();
+        let stop = stop_maintenance.clone();
+        async move {
+            tokio::select! {
+                _ = crate::messaging::relationship_store::maintenance_loop(store, limits) => {}
+                _ = stop.cancelled() => {}
+            }
+        }
+    });
 
     info!(
-        "[profile = {}] TSP relationship management active; driving inbound off the delivery layer",
+        "[profile = {}] TSP relationship management active; receiving through the delivery layer",
         &profile_config.alias
     );
-    run_inbound_loop(
-        messaging.service.clone(),
-        messaging.atm.clone(),
-        messaging.profile.clone(),
-        messaging.relationship_store.clone(),
+    let sink = Arc::new(RegistryInbound {
+        atm: messaging.atm.clone(),
+        profile: messaging.profile.clone(),
+        relationships: Some(messaging.relationship_store.clone()),
         handler,
         tasks,
+    });
+    let acker = Arc::new(AtmAcker {
+        atm: messaging.atm.clone(),
+        profile: messaging.profile.clone(),
+    });
+    let end = InboundLoop::new(
+        messaging.transport.clone(),
+        acker,
+        sink,
+        &profile_config.alias,
         shutdown,
     )
+    .run()
     .await;
 
+    // Teardown, in order: nothing may still use the store when it closes.
+    // `run` has waited for the handlers and deleted their messages directly
+    // at the mediator (the background deletion queue dies with the ATM); the
+    // sweep is stopped here; the ATM (which holds the relationship store) is
+    // shut down and every handle on it dropped before the store is.
+    stop_maintenance.cancel();
+    if let Err(e) = maintenance.await {
+        warn!(error = %e, "the TSP relationship maintenance task did not stop cleanly");
+    }
+    messaging.atm.graceful_shutdown().await;
+    drop(messaging);
     drop(store);
-    Ok(())
+    info!(
+        "[profile = {}] delivery-layer receive path stopped; mediator connection closed",
+        &profile_config.alias
+    );
+    end.into_result()
+}
+
+/// The `SharedAtm`-source receive path of a TSP-enabled registry: receive
+/// through a [`DidCommTransport`] bound to the host's ATM and profile until
+/// `shutdown`.
+///
+/// The pickup loop cannot serve TSP here: it cannot record inbound
+/// relationship-control frames, so under the SDK's default §7.2.2 gating
+/// every TSP Trust Task from a peer would be dropped. The transport records
+/// them, in the **host's** ATM relationship store: the registry cannot replace
+/// a lent ATM's store, so its durability and bound are the host's (configure
+/// them with `ATMConfigBuilder::with_relationship_store`). The registry does
+/// not stamp or evict those relationships.
+///
+/// The host's ATM and websocket are left running on return; they are the
+/// host's to shut down.
+pub async fn start_shared_delivery<H: MessageHandler>(
+    atm: Arc<ATM>,
+    profile: Arc<ATMProfile>,
+    config: Arc<DidcommConfig>,
+    handler: Arc<H>,
+    tasks: TaskHandler,
+    shutdown: CancellationToken,
+) -> Result<(), DIDCommError> {
+    if let Err(e) = set_mediator_acl_mode(&atm, &profile, config.acl_mode.clone()).await {
+        acl_failure_outcome(&config.acl_mode, &e.to_string())?;
+    }
+    let transport: Arc<dyn MessageTransport> = Arc::new(
+        DidCommTransport::new((*atm).clone(), profile.clone())
+            .await
+            .map_err(|e| {
+                DIDCommError::Messaging(format!(
+                    "TSP over a host-provided connection needs the host's websocket enabled \
+                     for this profile: {e}"
+                ))
+            })?,
+    );
+    info!(
+        "[profile = {}] TSP enabled on a host-provided connection; receiving through the \
+         delivery layer (relationships are kept in the host ATM's relationship store)",
+        &profile.inner.alias
+    );
+    let alias = profile.inner.alias.clone();
+    let acker = Arc::new(AtmAcker {
+        atm: atm.clone(),
+        profile: profile.clone(),
+    });
+    let sink = Arc::new(RegistryInbound {
+        atm,
+        profile,
+        relationships: None,
+        handler,
+        tasks,
+    });
+    InboundLoop::new(transport, acker, sink, &alias, shutdown)
+        .run()
+        .await
+        .into_result()
 }
 
 /// The live delivery-layer wiring for the registry's mediator socket.
 pub struct RegistryMessaging {
-    pub service: Arc<MessagingService>,
+    /// The SDK transport bound to the profile's websocket.
+    pub transport: Arc<dyn MessageTransport>,
     pub atm: Arc<ATM>,
     pub profile: Arc<ATMProfile>,
     /// The durable relationship store — kept so the caller can spawn the
@@ -152,20 +284,19 @@ pub struct RegistryMessaging {
     pub relationship_store: Arc<RegistryRelationshipStore>,
 }
 
-/// Build the delivery-layer [`MessagingService`] over a [`DidCommTransport`]
-/// bound to the registry's single mediator websocket, with a durable TSP
-/// relationship store injected into the ATM.
+/// Connect the registry's ATM to its mediator with a durable TSP relationship
+/// store injected, and bind a [`DidCommTransport`] to the profile's websocket.
 ///
 /// Every error path after `profile_add` must `graceful_shutdown` the ATM — there
 /// is no `Drop` impl, and an abandoned socket keeps auto-reconnecting while
-/// holding the mediator's one-socket-per-DID slot.
+/// holding the mediator's one-socket-per-DID slot. So must the caller, when it
+/// is done with the returned [`RegistryMessaging`].
 pub async fn build_messaging(
     secrets: Vec<Secret>,
     did: &str,
     alias: &str,
     mediator_did: &str,
     relationships: FjallRelationshipKv,
-    outbox_ks: KvKeyspace,
 ) -> Result<RegistryMessaging, String> {
     let tdk_config = TDKConfig::builder()
         .with_load_environment(false)
@@ -221,30 +352,8 @@ pub async fn build_messaging(
         }
     };
 
-    let outbox: Arc<dyn OutboxStore> = Arc::new(FjallOutboxStore::new(outbox_ks));
-    let service = Arc::new(MessagingService::new(transport.clone(), outbox.clone()));
-
-    // Durable outbox loops: drain due entries + retries, outbox-drain confirms
-    // delivery on recipient pickup, confirmation sweep settles expired entries.
-    // Dormant while the registry answers synchronously, but wired for restart
-    // resilience.
-    tokio::spawn(affinidi_messaging_delivery::drain_loop(
-        outbox.clone(),
-        service.primary_handle(),
-        Duration::from_secs(2),
-    ));
-    tokio::spawn(affinidi_messaging_delivery::outbox_drain_loop(
-        service.primary_handle(),
-        outbox.clone(),
-        Duration::from_secs(10),
-    ));
-    tokio::spawn(affinidi_messaging_delivery::confirmation_loop(
-        outbox.clone(),
-        Duration::from_secs(30),
-    ));
-
     Ok(RegistryMessaging {
-        service,
+        transport,
         atm,
         profile,
         relationship_store,
@@ -255,7 +364,7 @@ pub async fn build_messaging(
 async fn connect_transport(
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
-) -> Result<Arc<dyn affinidi_messaging_core::MessageTransport>, String> {
+) -> Result<Arc<dyn MessageTransport>, String> {
     match tokio::time::timeout(
         Duration::from_secs(30),
         atm.profile_enable_websocket(profile),
@@ -278,105 +387,467 @@ async fn connect_transport(
     ))
 }
 
-/// Drive inbound dispatch off [`MessagingService::subscribe`] until shutdown.
-///
-/// DIDComm frames are rehydrated to the registry's existing [`MessageHandler`];
-/// TSP application frames go to the shared Trust-Task spine; TSP
-/// relationship-control frames are answered per [`decide_control`]. The service
-/// owns ack timing (it deletes at the mediator on dispatch), and delivery is
-/// at-least-once — the DIDComm handler and the Trust-Task handler both dedup on
-/// message id, so a redelivery replays rather than duplicates.
-pub async fn run_inbound_loop<H: MessageHandler>(
-    service: Arc<MessagingService>,
+/// How long an ack handed to the SDK's background deletion handler is
+/// remembered, so that shutdown can delete it again directly in case the
+/// queue had not reached it. A repeated delete of a message already gone is
+/// harmless.
+pub(crate) const RECENT_ACK_WINDOW: Duration = Duration::from_secs(60);
+/// Most recently queued acks remembered for that.
+const RECENT_ACK_CAPACITY: usize = 1_024;
+/// Most ids the mediator deletes in one direct request.
+const DIRECT_DELETE_BATCH: usize = 100;
+/// Attempts at each direct delete batch on shutdown.
+const DIRECT_DELETE_ATTEMPTS: u32 = 2;
+
+/// Deletes messages at the mediator for [`InboundLoop`].
+#[async_trait]
+pub(crate) trait Acker: Send + Sync + 'static {
+    /// Hand `id`'s delete to the SDK's background deletion handler. Returns
+    /// once it is queued, not once it is deleted.
+    async fn queue(&self, id: &str) -> Result<(), String>;
+
+    /// Delete `ids` (at most [`DIRECT_DELETE_BATCH`]) at the mediator now,
+    /// waiting for its answer.
+    async fn delete_now(&self, ids: &[String]) -> Result<(), String>;
+}
+
+/// The [`Acker`] over the registry's ATM and profile.
+struct AtmAcker {
     atm: Arc<ATM>,
     profile: Arc<ATMProfile>,
-    relationships: Arc<RegistryRelationshipStore>,
-    handler: Arc<H>,
-    tasks: TaskHandler,
+}
+
+#[async_trait]
+impl Acker for AtmAcker {
+    async fn queue(&self, id: &str) -> Result<(), String> {
+        self.atm
+            .delete_message_background(&self.profile, id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn delete_now(&self, ids: &[String]) -> Result<(), String> {
+        let request = DeleteMessageRequest {
+            message_ids: ids.to_vec(),
+        };
+        let response = self
+            .atm
+            .delete_messages_direct(&self.profile, &request)
+            .await
+            .map_err(|e| e.to_string())?;
+        // An id the mediator names as an error is one it no longer holds —
+        // typically one the background queue already deleted.
+        for (id, error) in &response.errors {
+            debug!("direct delete of message {id} reported: {error}");
+        }
+        Ok(())
+    }
+}
+
+/// Where the loop's acks go: queued in the background while it runs, held
+/// for a direct delete once shutdown has begun.
+#[derive(Debug, Default)]
+struct AckState {
+    /// Shutdown has begun: hold acks for [`InboundLoop::flush_acks`].
+    draining: bool,
+    held: Vec<String>,
+    /// Acks queued in the background lately, for a direct delete at
+    /// shutdown in case the queue did not reach them.
+    recent: VecDeque<(String, Instant)>,
+}
+
+impl AckState {
+    /// Whether to queue `id` now (`true`), or hold it for the shutdown flush.
+    fn take(&mut self, id: &str, now: Instant) -> bool {
+        if self.draining {
+            self.held.push(id.to_string());
+            return false;
+        }
+        self.recent.push_back((id.to_string(), now));
+        while self.recent.len() > RECENT_ACK_CAPACITY
+            || self
+                .recent
+                .front()
+                .is_some_and(|(_, at)| now.saturating_duration_since(*at) > RECENT_ACK_WINDOW)
+        {
+            self.recent.pop_front();
+        }
+        true
+    }
+
+    /// Every id to delete directly at shutdown, each once.
+    fn take_flush(&mut self, now: Instant) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let recent = self
+            .recent
+            .drain(..)
+            .filter(|(_, at)| now.saturating_duration_since(*at) <= RECENT_ACK_WINDOW)
+            .map(|(id, _)| id);
+        let held = std::mem::take(&mut self.held);
+        held.into_iter()
+            .chain(recent)
+            .filter(|id| seen.insert(id.clone()))
+            .collect()
+    }
+}
+
+/// Handles one inbound message for [`InboundLoop`], and says how it ended.
+#[async_trait]
+pub(crate) trait InboundSink: Send + Sync + 'static {
+    async fn handle(&self, inbound: Inbound) -> Outcome;
+}
+
+/// Why [`InboundLoop::run`] returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoopEnd {
+    /// The shutdown token was cancelled.
+    Shutdown,
+    /// The transport's inbound stream ended: the profile has no live websocket
+    /// any more, and nothing will be received again.
+    StreamEnded,
+}
+
+impl LoopEnd {
+    fn into_result(self) -> Result<(), DIDCommError> {
+        match self {
+            Self::Shutdown => Ok(()),
+            Self::StreamEnded => Err(DIDCommError::Messaging(
+                "the mediator inbound stream ended: the profile's websocket is gone".to_string(),
+            )),
+        }
+    }
+}
+
+/// Receives from a [`MessageTransport`] and acks each message only after it
+/// has been handled (R1.6), at most [`MAX_INFLIGHT_HANDLERS`] at a time.
+///
+/// The loop takes the next message off the transport only once a handler
+/// slot is free, so a burst waits at the mediator (beyond the few frames the
+/// SDK's websocket task caches ahead of the stream, up to its fetch cache
+/// limit), and nothing is lost while it waits: no message has
+/// been acked before its handler returns.
+pub(crate) struct InboundLoop<S: InboundSink> {
+    transport: Arc<dyn MessageTransport>,
+    acker: Arc<dyn Acker>,
+    acks: Arc<std::sync::Mutex<AckState>>,
+    sink: Arc<S>,
+    ledger: Arc<std::sync::Mutex<DeliveryLedger>>,
+    permits: Arc<Semaphore>,
+    max_inflight: usize,
+    handler_timeout: Duration,
+    alias: String,
     shutdown: CancellationToken,
-) {
-    use futures::StreamExt;
+}
 
-    let mut stream = service.subscribe();
-    info!("registry messaging connected to mediator — inbound messages will be processed");
+impl<S: InboundSink> InboundLoop<S> {
+    pub(crate) fn new(
+        transport: Arc<dyn MessageTransport>,
+        acker: Arc<dyn Acker>,
+        sink: Arc<S>,
+        alias: &str,
+        shutdown: CancellationToken,
+    ) -> Self {
+        Self {
+            transport,
+            acker,
+            acks: Arc::default(),
+            sink,
+            ledger: Arc::default(),
+            permits: Arc::new(Semaphore::new(MAX_INFLIGHT_HANDLERS)),
+            max_inflight: MAX_INFLIGHT_HANDLERS,
+            handler_timeout: HANDLER_TIMEOUT,
+            alias: alias.to_string(),
+            shutdown,
+        }
+    }
 
-    // Bounded concurrency: a burst (or a hostile sender) must not turn into
-    // unbounded task growth. At the cap the loop waits for a permit.
-    const MAX_INFLIGHT_INBOUND: usize = 32;
-    let inflight = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_INBOUND));
+    /// Bound concurrent handlers to `max` and each to `timeout`.
+    #[cfg(test)]
+    fn with_limits(mut self, max: usize, timeout: Duration) -> Self {
+        self.permits = Arc::new(Semaphore::new(max));
+        self.max_inflight = max;
+        self.handler_timeout = timeout;
+        self
+    }
 
-    loop {
-        tokio::select! {
-            maybe = stream.next() => {
-                let Some(inbound) = maybe else {
-                    warn!("registry inbound stream ended — messaging dispatcher stopping");
-                    break;
-                };
-                let permit = match Arc::clone(&inflight).acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        warn!("inbound concurrency semaphore closed — stopping");
-                        break;
-                    }
-                };
-                let atm = atm.clone();
-                let profile = profile.clone();
-                let relationships = relationships.clone();
-                let handler = handler.clone();
-                let tasks = tasks.clone();
+    /// Receive until shutdown or until the inbound stream ends, then give
+    /// running handlers time to finish, and delete what they and the recent
+    /// background acks handled directly at the mediator.
+    pub(crate) async fn run(&self) -> LoopEnd {
+        use futures::StreamExt;
+
+        // Taken here, when the loop is ready to handle what it yields: the
+        // transport pulls from the socket only while this stream is polled.
+        let mut stream = self.transport.inbound();
+        info!(
+            "[profile = {}] receiving from the mediator; each message is acked once handled",
+            self.alias
+        );
+        let end = loop {
+            let permit = tokio::select! {
+                biased;
+                _ = self.shutdown.cancelled() => break LoopEnd::Shutdown,
+                permit = self.permits.clone().acquire_owned() => permit,
+            };
+            let Ok(permit) = permit else {
+                // The semaphore is never closed; treat it like a shutdown.
+                break LoopEnd::Shutdown;
+            };
+            let next = tokio::select! {
+                biased;
+                _ = self.shutdown.cancelled() => break LoopEnd::Shutdown,
+                next = stream.next() => next,
+            };
+            let Some(inbound) = next else {
+                error!(
+                    "[profile = {}] the mediator inbound stream ended; nothing more will be \
+                     received",
+                    self.alias
+                );
+                break LoopEnd::StreamEnded;
+            };
+            self.dispatch(inbound, permit);
+        };
+        if end == LoopEnd::Shutdown {
+            info!(
+                "[profile = {}] receive loop stopping (shutdown signalled)",
+                self.alias
+            );
+        }
+        // From here acks are held, not queued: the background queue may not
+        // be served again before the caller shuts the ATM down.
+        lock_acks(&self.acks).draining = true;
+        self.drain().await;
+        self.flush_acks().await;
+        end
+    }
+
+    /// Handle `inbound` on its own task, at most once per mediator message id,
+    /// and ack it once the handler has finished.
+    fn dispatch(&self, inbound: Inbound, permit: tokio::sync::OwnedSemaphorePermit) {
+        let id = inbound.ack.0.clone();
+        let claim = lock_ledger(&self.ledger).claim(&id, Instant::now());
+        let acker = self.acker.clone();
+        let acks = self.acks.clone();
+        let alias = self.alias.clone();
+        match claim {
+            Claim::Dispatch => {}
+            Claim::InFlight => {
+                // Pushed again (a reconnect) while its first copy is being
+                // handled; that handler acks it.
+                debug!("[profile = {alias}] message {id} is already being handled; skipped");
+                return;
+            }
+            Claim::AlreadyHandled => {
+                // Handled, but pushed again: the earlier ack did not land. Ack
+                // again; do not answer or apply it a second time.
+                debug!("[profile = {alias}] message {id} was already handled; acking it again");
                 tokio::spawn(async move {
                     let _permit = permit;
-                    handle_inbound(inbound, &atm, &profile, &relationships, &handler, &tasks)
-                        .await;
+                    ack(acker.as_ref(), &acks, &alias, &id).await;
                 });
+                return;
             }
-            _ = shutdown.cancelled() => {
-                info!("registry messaging stopping (shutdown signalled)");
-                break;
+        }
+
+        let sink = self.sink.clone();
+        let ledger = self.ledger.clone();
+        let limit = self.handler_timeout;
+        tokio::spawn(async move {
+            // Held until the ack is sent, so the shutdown drain waits for it.
+            let _permit = permit;
+            let attempt = async move { Ok::<_, String>(sink.handle(inbound).await) };
+            let outcome = bounded_value_within(limit, &alias, "an inbound message", attempt)
+                .await
+                .unwrap_or(Outcome::Retry);
+            let decision = lock_ledger(&ledger).finish(&id, outcome, Instant::now());
+            match decision {
+                Ack::Now => ack(acker.as_ref(), &acks, &alias, &id).await,
+                Ack::Retain => warn!(
+                    "[profile = {alias}] message {id} not handled; left queued at the mediator, \
+                     to be offered again when the mediator next pushes the inbox"
+                ),
+                Ack::GiveUp => {
+                    error!(
+                        "[profile = {alias}] message {id} still failing after \
+                         {GIVE_UP_ATTEMPTS} attempts over at least {GIVE_UP_MIN_AGE:?}; \
+                         deleting it from the mediator as undeliverable"
+                    );
+                    ack(acker.as_ref(), &acks, &alias, &id).await;
+                }
+            }
+        });
+    }
+
+    /// Wait for running handlers (each bounded by the handler timeout) to
+    /// finish and record their acks.
+    async fn drain(&self) {
+        let all = u32::try_from(self.max_inflight).unwrap_or(u32::MAX);
+        let limit = self.handler_timeout + ACK_TIMEOUT;
+        if tokio::time::timeout(limit, self.permits.acquire_many(all))
+            .await
+            .is_err()
+        {
+            warn!(
+                "[profile = {}] handlers still running {limit:?} after the receive loop \
+                 stopped; their messages stay queued at the mediator",
+                self.alias
+            );
+        }
+    }
+
+    /// Delete, directly and waiting for the mediator's answer, every ack held
+    /// since shutdown began and every ack queued in the background within
+    /// [`RECENT_ACK_WINDOW`]. A batch that fails stays queued at the
+    /// mediator: it is pushed again after a restart, re-handled, and a write
+    /// replayed rather than re-applied while the dedup store remembers it.
+    async fn flush_acks(&self) {
+        let ids = lock_acks(&self.acks).take_flush(Instant::now());
+        if ids.is_empty() {
+            return;
+        }
+        let mut deleted = 0usize;
+        for batch in ids.chunks(DIRECT_DELETE_BATCH) {
+            // Twice: the first request can land on a pooled connection the
+            // mediator has since closed.
+            let mut last_error = String::new();
+            for attempt in 1..=DIRECT_DELETE_ATTEMPTS {
+                match tokio::time::timeout(ACK_TIMEOUT, self.acker.delete_now(batch)).await {
+                    Ok(Ok(())) => {
+                        deleted += batch.len();
+                        last_error.clear();
+                        break;
+                    }
+                    Ok(Err(e)) => last_error = e,
+                    Err(_) => last_error = format!("timed out after {ACK_TIMEOUT:?}"),
+                }
+                if attempt < DIRECT_DELETE_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+            if !last_error.is_empty() {
+                warn!(
+                    "[profile = {}] could not delete {} handled message(s) at the mediator on \
+                     shutdown; they stay queued and are handled again after a restart: \
+                     {last_error}",
+                    self.alias,
+                    batch.len()
+                );
+            }
+        }
+        info!(
+            "[profile = {}] deleted {deleted} of {} handled message(s) directly at the mediator \
+             on shutdown",
+            self.alias,
+            ids.len()
+        );
+    }
+}
+
+fn lock_acks(acks: &std::sync::Mutex<AckState>) -> std::sync::MutexGuard<'_, AckState> {
+    // Short, non-panicking critical sections only; a poisoned lock still
+    // holds consistent state.
+    acks.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Ack message `id`: queue its delete in the background while the loop runs,
+/// or hold it for the direct delete at shutdown. A failure is not lost: the
+/// message stays queued, is pushed again, and the ledger acks it again
+/// without handling it again.
+async fn ack(acker: &dyn Acker, acks: &std::sync::Mutex<AckState>, alias: &str, id: &str) {
+    if !lock_acks(acks).take(id, Instant::now()) {
+        debug!(
+            "[profile = {alias}] message {id} handled during shutdown; held for a direct delete"
+        );
+        return;
+    }
+    match tokio::time::timeout(ACK_TIMEOUT, acker.queue(id)).await {
+        Ok(Ok(())) => debug!("[profile = {alias}] message {id} queued for deletion"),
+        Ok(Err(e)) => warn!(
+            "[profile = {alias}] could not ack message {id} (it will be redelivered and acked \
+             again): {e}"
+        ),
+        Err(_) => warn!(
+            "[profile = {alias}] acking message {id} timed out (it will be redelivered and \
+             acked again)"
+        ),
+    }
+}
+
+/// The registry's [`InboundSink`]: routes each message by protocol (and, for
+/// TSP, by kind) to the DIDComm handler, the Trust Task handler, or the
+/// relationship-control policy.
+struct RegistryInbound<H: MessageHandler> {
+    atm: Arc<ATM>,
+    profile: Arc<ATMProfile>,
+    /// The registry's own durable relationship store, which TSP activity is
+    /// stamped on. `None` on a host-provided ATM, whose store is the host's.
+    relationships: Option<Arc<RegistryRelationshipStore>>,
+    handler: Arc<H>,
+    tasks: TaskHandler,
+}
+
+#[async_trait]
+impl<H: MessageHandler> InboundSink for RegistryInbound<H> {
+    async fn handle(&self, inbound: Inbound) -> Outcome {
+        match inbound.message.protocol {
+            Protocol::DIDComm => {
+                handle_didcomm(inbound, &self.atm, &self.profile, &self.handler).await
+            }
+            Protocol::TSP => {
+                handle_tsp(
+                    inbound,
+                    &self.atm,
+                    &self.profile,
+                    self.relationships.as_deref(),
+                    &self.tasks,
+                )
+                .await
+            }
+            // R1.6, deliberate ack without handling, for both arms below:
+            // nothing in this process can ever handle these frames, so leaving
+            // them queued would only have them pushed again until the
+            // mediator's expiry.
+            //
+            // DIDComm v1 (Aries RFC 0019) shares no wire format with v2.1.
+            Protocol::DIDCommV1 => {
+                warn!(
+                    "received an inbound DIDComm v1 frame; the registry speaks v2.1 only — \
+                     dropping"
+                );
+                Outcome::Poison
+            }
+            // `Protocol` is `#[non_exhaustive]`; an unknown one is a minor
+            // release away and must not take the listener down.
+            _ => {
+                warn!("received an inbound frame of an unknown protocol — dropping");
+                Outcome::Poison
             }
         }
     }
-    info!("registry messaging stopped");
 }
 
-/// Route one inbound frame by protocol (and, for TSP, by kind).
-async fn handle_inbound<H: MessageHandler>(
-    inbound: Inbound,
-    atm: &Arc<ATM>,
-    profile: &Arc<ATMProfile>,
-    relationships: &RegistryRelationshipStore,
-    handler: &Arc<H>,
-    tasks: &TaskHandler,
-) {
-    match inbound.message.protocol {
-        Protocol::DIDComm => handle_didcomm(inbound, atm, profile, handler).await,
-        Protocol::TSP => handle_tsp(inbound, atm, profile, relationships, tasks).await,
-        // DIDComm v1 (Aries RFC 0019) shares no wire format with v2.1; drop it.
-        Protocol::DIDCommV1 => {
-            warn!("received an inbound DIDComm v1 frame; the registry speaks v2.1 only — dropping");
-        }
-        // `Protocol` is `#[non_exhaustive]`; an unknown one is a minor release
-        // away and must not take the listener down.
-        _ => warn!("received an inbound frame of an unknown protocol — dropping"),
-    }
-}
-
-/// DIDComm arm: rehydrate the plaintext [`Message`] from the delivery-layer
+/// DIDComm arm: rehydrate the plaintext [`Message`] from the transport's
 /// payload, stamp the **cryptographically-authenticated** sender onto `from`,
-/// synthesize the minimal [`UnpackMetadata`] the handler reads, and dispatch
-/// through the registry's existing handler — behaviourally identical to the
-/// pickup-loop path.
+/// synthesize the [`UnpackMetadata`] the handler reads, and dispatch through
+/// the same [`MessageHandler`] the pickup listener uses.
+///
+/// The handler's result decides the ack exactly as on the pickup path: `Ok`
+/// is handled, `Err` is left queued.
 async fn handle_didcomm<H: MessageHandler>(
     inbound: Inbound,
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
     handler: &Arc<H>,
-) {
+) -> Outcome {
     let mut message: Message = match serde_json::from_slice(&inbound.message.payload) {
         Ok(m) => m,
         Err(e) => {
+            // The SDK serialised this payload from a message it unpacked, so
+            // a failure is a property of the bytes.
             warn!(error = %e, "dropping an inbound DIDComm frame that did not rehydrate");
-            return;
+            return Outcome::Poison;
         }
     };
     // The plaintext `from` header is sender-controlled; the proven sender is
@@ -388,39 +859,49 @@ async fn handle_didcomm<H: MessageHandler>(
     }
     // Only `authenticated` and `anonymous_sender` are read downstream (the
     // mediator-transport spoof guard, and which sender a reply may go to: a
-    // message without a proven sender is not answered); the rest default. `verified` means a
-    // cryptographically-bound sender, so it maps onto both flags. `UnpackMetadata`
-    // is `#[non_exhaustive]`, so it is built from `default()` + field assignment
-    // rather than a struct literal.
+    // message without a proven sender is not answered). The transport sets
+    // `verified` only for a sender bound to the authcrypt key, so it maps onto
+    // both flags. The other fields are left at their defaults: the transport
+    // does not pass them on. `UnpackMetadata` is `#[non_exhaustive]`, so it is
+    // built from `default()` + field assignment rather than a struct literal.
     let mut meta = UnpackMetadata::default();
     meta.authenticated = inbound.message.verified;
     meta.anonymous_sender = inbound.message.sender.is_none();
     meta.encrypted = inbound.message.encrypted;
-    if let Err(e) = handler.handle(atm, profile, message, meta).await {
-        warn!(error = %e, "registry DIDComm handler returned an error");
+    match handler.handle(atm, profile, message, meta).await {
+        Ok(()) => Outcome::Handled,
+        Err(e) => {
+            warn!(error = %e, "registry DIDComm handler returned an error; message left queued");
+            Outcome::Retry
+        }
     }
 }
 
 /// TSP arm: answer a relationship-control frame, or dispatch an application
-/// frame on the shared Trust-Task spine.
+/// frame to the Trust Task handler.
 ///
-/// An accepted relationship and every application frame stamp the
-/// relationship active, so it is kept while in use and evicted once idle.
+/// When the registry owns the relationship store, an accepted relationship and
+/// every application frame stamp the relationship active, so it is kept while
+/// in use and evicted once idle.
 async fn handle_tsp(
     inbound: Inbound,
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
-    relationships: &RegistryRelationshipStore,
+    relationships: Option<&RegistryRelationshipStore>,
     tasks: &TaskHandler,
-) {
+) -> Outcome {
     let Some(sender_vid) = inbound.message.sender.clone() else {
+        // The SDK always authenticates a TSP sender; a frame without one can
+        // never be answered.
         warn!("inbound TSP frame has no authenticated sender VID — dropping");
-        return;
+        return Outcome::Poison;
     };
 
     // A relationship request is not traffic: it carries no envelope, and the
     // transport has already RECORDED it (which admits the application messages
-    // that follow). What is left is the answer, and that is the registry's.
+    // that follow). What is left is the answer, and that is the registry's. A
+    // failed answer is logged and the frame acked: the relationship is
+    // recorded either way, and redelivery would only repeat the answer.
     if let InboundKind::RelationshipControl {
         request,
         thread_digest,
@@ -441,7 +922,7 @@ async fn handle_tsp(
         if shows_activity(Some(&decision)) {
             stamp(profile, relationships, &sender_vid).await;
         }
-        return;
+        return Outcome::Handled;
     }
 
     if shows_activity(None) {
@@ -449,14 +930,22 @@ async fn handle_tsp(
     }
 
     // Application frame: the payload is the already-unpacked binding envelope.
-    crate::tsp::dispatch_tsp_application(
+    match crate::tsp::dispatch_tsp_application(
         atm,
         profile,
         tasks,
         &inbound.message.payload,
         &sender_vid,
     )
-    .await;
+    .await
+    {
+        Ok(crate::tsp::TspDispatch::Answered) => Outcome::Handled,
+        // The refusal sent was `retryable` (storage unavailable, an internal
+        // error): leave the frame queued so it is tried again (R1.6).
+        Ok(crate::tsp::TspDispatch::Retryable) => Outcome::Retry,
+        // Decrypted cleanly but is not a Trust Task envelope.
+        Err(_) => Outcome::Poison,
+    }
 }
 
 /// Whether a TSP frame shows its sender's relationship in use: every
@@ -467,20 +956,36 @@ fn shows_activity(control: Option<&ControlDecision>) -> bool {
 }
 
 /// What to log when an accept could not be sent, given the relationship state
-/// the store holds afterwards: whether the relationship was recorded decides
-/// whether the peer's traffic still flows.
-fn accept_failure_note(recorded: RelationshipState) -> &'static str {
-    if recorded == RelationshipState::None {
-        "could not accept a TSP relationship, and it is not recorded (the relationship \
-         store refused or failed): the peer's messages are not admitted until it invites again"
-    } else {
-        "could not send a TSP relationship accept; the relationship stays recorded, so \
-         traffic still flows, but the peer sees no answer"
+/// the registry's store holds afterwards (`None` when the store is the host's
+/// and was not read): whether the relationship was recorded decides whether
+/// the peer's traffic still flows.
+fn accept_failure_note(recorded: Option<RelationshipState>) -> &'static str {
+    match recorded {
+        Some(RelationshipState::None) => {
+            "could not accept a TSP relationship, and it is not recorded (the relationship \
+             store refused or failed): the peer's messages are not admitted until it invites again"
+        }
+        Some(_) => {
+            "could not send a TSP relationship accept; the relationship stays recorded, so \
+             traffic still flows, but the peer sees no answer"
+        }
+        None => {
+            "could not send a TSP relationship accept; whether the relationship is recorded is \
+             up to the host ATM's relationship store"
+        }
     }
 }
 
-/// Stamp the relationship with `their_vid` as active now.
-async fn stamp(profile: &ATMProfile, relationships: &RegistryRelationshipStore, their_vid: &str) {
+/// Stamp the relationship with `their_vid` as active now, when the registry
+/// owns the relationship store.
+async fn stamp(
+    profile: &ATMProfile,
+    relationships: Option<&RegistryRelationshipStore>,
+    their_vid: &str,
+) {
+    let Some(relationships) = relationships else {
+        return;
+    };
     match profile.dids() {
         Ok((our_vid, _)) => mark_active(relationships, our_vid, their_vid).await,
         Err(e) => warn!(error = %e, "no profile DID to stamp TSP relationship activity under"),
@@ -494,11 +999,11 @@ async fn stamp(profile: &ATMProfile, relationships: &RegistryRelationshipStore, 
 /// check: the ACL gate lives at the Trust Task layer. Nothing here can fail the
 /// listener; a reply that cannot be sent is logged and dropped. The store the
 /// transport records relationships in is bounded
-/// ([`crate::messaging::relationship_store`]).
+/// ([`crate::messaging::relationship_store`]) when the registry owns it.
 async fn handle_tsp_control(
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
-    relationships: &RegistryRelationshipStore,
+    relationships: Option<&RegistryRelationshipStore>,
     sender_vid: &str,
     request: affinidi_messaging_core::RelationshipRequest,
     thread_digest: [u8; 32],
@@ -517,12 +1022,15 @@ async fn handle_tsp_control(
                     "accepted an inbound TSP relationship request",
                 ),
                 Err(e) => {
-                    let recorded = match profile.dids() {
-                        Ok((our_vid, _)) => relationships
-                            .get(our_vid, sender_vid)
-                            .await
-                            .unwrap_or(RelationshipState::None),
-                        Err(_) => RelationshipState::None,
+                    let recorded = match relationships {
+                        Some(relationships) => Some(match profile.dids() {
+                            Ok((our_vid, _)) => relationships
+                                .get(our_vid, sender_vid)
+                                .await
+                                .unwrap_or(RelationshipState::None),
+                            Err(_) => RelationshipState::None,
+                        }),
+                        None => None,
                     };
                     warn!(
                         sender = %sender_vid, error = %e, ?recorded,
@@ -559,24 +1067,4 @@ async fn handle_tsp_control(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Application frames and accepted requests keep a relationship alive;
-    /// cancellations and requests that need no answer do not.
-    #[test]
-    fn activity_is_stamped_for_application_frames_and_accepts_only() {
-        assert!(shows_activity(None));
-        assert!(shows_activity(Some(&ControlDecision::Accept)));
-        assert!(!shows_activity(Some(&ControlDecision::Cancel("x"))));
-        assert!(!shows_activity(Some(&ControlDecision::Nothing)));
-    }
-
-    /// A failed accept says whether the relationship was recorded, since
-    /// that decides whether the peer's traffic is admitted.
-    #[test]
-    fn a_failed_accept_says_whether_the_relationship_was_recorded() {
-        assert!(accept_failure_note(RelationshipState::None).contains("not recorded"));
-        assert!(accept_failure_note(RelationshipState::InviteReceived).contains("stays recorded"));
-    }
-}
+mod tests;

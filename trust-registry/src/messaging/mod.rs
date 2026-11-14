@@ -1,21 +1,27 @@
-//! Delivery-layer messaging for a TSP-enabled registry (feature `tsp`).
+//! The delivery-layer receive path of a TSP-enabled registry (feature `tsp`).
 //!
-//! A DIDComm-only registry drives the mediator socket with the hand-rolled
-//! pickup loop in [`crate::didcomm::listener`]. A TSP-enabled registry instead
-//! drives it through the D1 delivery layer ([`service::build_messaging`] +
-//! [`service::run_inbound_loop`]) so that:
+//! The registry has two receive paths over its one mediator websocket:
 //!
-//! - inbound TSP **relationship-control** frames are recorded and answered
-//!   (Rev 3 §7.2.2), rather than misrouted into the Trust-Task dispatcher; and
-//! - TSP relationship state is **persisted** across a restart
-//!   ([`relationship_store`]), so a restarted registry does not silently drop an
-//!   established peer's traffic.
+//! - **TSP disabled** (`ENABLE_TSP` is not `true`): the DIDComm pickup listener
+//!   in [`crate::didcomm::listener`], with a 30-second offline sync.
+//! - **TSP enabled**, for `DidCommSource::Managed` and
+//!   `DidCommSource::SharedAtm`: [`service`], which receives DIDComm and TSP
+//!   through the SDK's `DidCommTransport`. That transport records inbound TSP
+//!   relationship-control frames (Rev 3 §7.2.2) and tags each message as
+//!   traffic or control, so the registry answers control frames and never
+//!   mistakes one for a Trust Task. On `Managed`, TSP relationship state is
+//!   **persisted** across a restart ([`relationship_store`]), so a restarted
+//!   registry does not silently drop an established peer's traffic.
 //!
-//! The DIDComm arm is behaviourally identical to the pickup loop — the same
-//! [`crate::didcomm::listener::MessageHandler`] handles each rehydrated message.
+//! Both paths ack a message at the mediator only after it has been handled,
+//! and use the same ledger so a message that arrives twice is handled once.
+//! They differ in that the delivery-layer path has no periodic offline sync:
+//! a message left queued after a failed attempt is offered again when the
+//! mediator next pushes the inbox (on each websocket (re)connect). DIDComm
+//! messages on either path go to the same
+//! [`MessageHandler`](crate::didcomm::listener::MessageHandler).
 
 pub mod kv;
-pub mod outbox_store;
 pub mod relationship_store;
 pub mod service;
 pub mod tsp_inbound;

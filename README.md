@@ -645,6 +645,14 @@ Under `SharedAtm` the host must not still be draining that profile's live
 stream — frames go to whichever reader takes them first, so two readers split
 the traffic silently. If the host needs to keep reading, use `HostDriven`.
 
+With TSP enabled, a `SharedAtm` registry receives through the SDK's
+`DidCommTransport` over the lent connection, so inbound TSP relationship
+requests are recorded (Rev 3 §7.2.2). They are recorded in the **host's** ATM
+relationship store — the registry cannot replace a lent ATM's store — so give
+that ATM a durable, bounded store (`ATMConfigBuilder::with_relationship_store`);
+the SDK's default keeps relationships in memory, without a bound. The
+profile's websocket must be enabled before the registry starts.
+
 ### A lean dependency tree
 
 The standalone service's backends are all default-on. An embedded registry
@@ -1216,7 +1224,7 @@ Read only when `ENABLE_DIDCOMM=true` (the default), except the three
 | `DID_CHECK_MAX_ATTEMPTS` | For a `did:web` registry, how many times its DID document URL is fetched before the listener starts; if none succeeds the listener does not start. A positive whole number. | default: `10` |
 | `DID_CHECK_INITIAL_DELAY_SECS` | First delay between those checks, doubling each time. A positive whole number. | default: `2` |
 | `DID_CHECK_MAX_DELAY_SECS` | Cap on that delay. A positive whole number, at least `DID_CHECK_INITIAL_DELAY_SECS`. | default: `20` |
-| `TR_MESSAGING_STORE_PATH` | Directory of the TSP messaging store (relationships and outbox, fjall); a subdirectory named after the profile alias is used. | default: `messaging` under `TR_SECRETS_DATA_DIR`, else `./.trust-registry/messaging` |
+| `TR_MESSAGING_STORE_PATH` | Directory of the TSP messaging store (TSP relationships, fjall); a subdirectory named after the profile alias is used. | default: `messaging` under `TR_SECRETS_DATA_DIR`, else `./.trust-registry/messaging` |
 | `TR_TSP_MAX_RELATIONSHIPS` | The most TSP relationships with non-admin peers the registry keeps. When the store is full, a new peer may only displace a relationship that never completed, or one idle for a quarter of `TR_TSP_RELATIONSHIP_IDLE_SECS` (at least an hour); otherwise it is refused. `/health` reports `"tspRelationships": "full"` (status `degraded`) while the store is at its limit. Relationships with `ADMIN_DIDS` are not counted and never displaced. A value that is not a positive whole number stops startup. | default: `10000` |
 | `TR_TSP_MAX_NEW_RELATIONSHIPS_PER_MINUTE` | The most TSP relationships with new non-admin peers recorded per minute; beyond it an invite is not recorded. | default: `60` |
 | `TR_TSP_RELATIONSHIP_IDLE_SECS` | How long a TSP relationship with no activity (no accepted invite, no application message) is kept before it is evicted. At least `60`. | default: `604800` (7 days) |
