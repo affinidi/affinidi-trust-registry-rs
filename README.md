@@ -12,9 +12,9 @@ The registry answers recognition/authorization queries over three protocols. All
 | --- | --- | --- |
 | **TRQP REST** | HTTPS: `POST /authorization`, `POST /recognition` | The ToIP [Trust Registry Query Protocol v2.0](https://trustoverip.github.io/tswg-trust-registry-protocol/) over plain HTTPS, unsigned. Use this for ToIP interop: callers that speak TRQP directly and expect its REST binding. |
 | **TRQP DIDComm** | The DIDComm `trqp/1.0` protocol (`query-recognition` / `query-authorization`), via the mediator | The same TRQP queries carried as DIDComm messages instead of REST. Use this for ToIP interop over a DIDComm mediator connection. See [DIDCOMM_PROTOCOLS.md](DIDCOMM_PROTOCOLS.md#query-recognition) / [`#query-authorization`](DIDCOMM_PROTOCOLS.md#query-authorization). |
-| **Trust Tasks** | Signed `registry/*` Trust Task documents (`https://trusttasks.org/spec/registry/recognition/0.1`, `.../registry/authorization/0.1`, plus record-management and governance tasks), carried over TSP, DIDComm, or HTTPS `POST /trust-tasks` | Transport-agnostic, cryptographically sender-bound requests. Use this for signed queries/writes and ecosystem integration (VTC/VTA, record management, governance) — see [Trust Task protocol surface](#trust-task-protocol-surface). |
+| **Trust Tasks** | `registry/*` Trust Task documents. Over **TSP or DIDComm**: every task — the `registry/recognition` and `registry/authorization` queries, plus signed record management (`registry/record/*`), `registry/did/rotate` and governance. Over **HTTPS `POST /trust-tasks`**: the two public queries only (`registry/recognition`, `registry/authorization`); the HTTP caller is anonymous, so every other task is refused there | Transport-agnostic, cryptographically sender-bound requests. Use TSP or DIDComm for signed writes and ecosystem integration (VTC/VTA, record management, governance) — see [Trust Task protocol surface](#trust-task-protocol-surface). |
 
-TRQP (REST or DIDComm) is unsigned and read-only, matching the ToIP spec verbatim. Trust Tasks are the superset: the same recognition/authorization reads, plus signed record writes and governance operations, over any of the three transports.
+TRQP (REST or DIDComm) is unsigned and read-only, matching the ToIP spec verbatim. Trust Tasks are the superset: the same recognition/authorization reads over all three transports, plus signed record writes and governance operations over TSP and DIDComm, which authenticate the sender. HTTPS `POST /trust-tasks` is read-only, and is served only by a registry that has a DID of its own (a REST-only or embedded registry with no profile answers it `404`).
 
 ## Table of Contents
 
@@ -148,7 +148,7 @@ This ensures **security**, **compliance**, and **interoperability** across decen
   - Redis
   - Embedded [fjall](https://github.com/fjall-rs/fjall) LSM store (behind the `storage-fjall` feature)
 
-- **Trust Tasks & transports** _(optional)_: Every Trust Registry operation is also modelled as a versioned [Trust Task](https://trusttasks.org) (`registry/*`) that verifiers and communities (VTC/OpenVTC) can invoke over DIDComm, HTTP, or TSP. See [Trust Tasks, Transports & Identity](#trust-tasks-transports--identity).
+- **Trust Tasks & transports** _(optional)_: Every Trust Registry operation is also modelled as a versioned [Trust Task](https://trusttasks.org) (`registry/*`) that verifiers and communities (VTC/OpenVTC) can invoke over DIDComm or TSP (HTTP carries the two public queries only). See [Trust Tasks, Transports & Identity](#trust-tasks-transports--identity).
 
 - **VTA identity** _(optional)_: The Trust Registry can source its DID and keys from a [Verifiable Trust Agent](https://docs.affinidi.com) instead of a local `PROFILE_CONFIG` (behind the `vta` feature).
 
@@ -519,14 +519,24 @@ Both REST endpoints validate the query before looking it up, as TRQP v2.0
 requires:
 
 - `entity_id`, `authority_id`, `action` and `resource` must each be a non-empty
-  RFC 3986 URI reference (DIDs, URLs and plain tokens such as `issue` all
-  qualify; spaces, `<`, `>` and other characters RFC 3986 forbids do not).
+  RFC 3986 URI reference of at most 2048 bytes (DIDs, URLs and plain tokens
+  such as `issue` all qualify; spaces, `<`, `>` and other characters RFC 3986
+  forbids do not).
 - `context`, when present, must be a JSON object, and `context.time`, when
   present, an RFC 3339 date-time.
 
-A query that fails these checks gets `400` with title `invalid_request`. An
-unparseable body or a missing field gets `400` `bad_request`, and a valid query
-with no matching record gets `404` `not_found`.
+The same identifier rules apply to the `registry/recognition` and
+`registry/authorization` Trust Tasks (refused as `malformedRequest`) and to
+every `registry/record/put`, so a record that can be written can always be
+queried. Records stored before these rules are still read, listed and deleted
+as they are.
+
+A query that fails these checks gets `400` with title `invalid_request`. A body
+that is not JSON or lacks a field gets `400` `bad_request`, with the parser's
+reason (for example the missing field) as `detail`; a body not sent as
+`Content-Type: application/json` gets `415` `unsupported_media_type`, and one
+over the body limit `413` `payload_too_large`. A valid query with no matching
+record gets `404` `not_found`.
 
 Errors are RFC 9457 Problem Details, served as `application/problem+json`:
 
@@ -537,12 +547,21 @@ Errors are RFC 9457 Problem Details, served as `application/problem+json`:
 
 `code` repeats `status` for clients written against earlier releases.
 
+The answer always carries the flag asked about, as a boolean: `authorized` from
+`/authorization`, `recognized` from `/recognition` (the other flag is not part
+of the answer and is not sent). It is `true` only when the record is inside its
+[validity window](#record-validity-windows) and stores `true`; a record that
+stores `false`, or no value for that flag, answers `false`. `message` follows
+the answer and says why it is `false`. `context` is the record's stored
+context, exactly as stored: the request's `context` is read for `time` but
+never merged into or echoed in the answer.
+
 `time_requested` echoes `context.time` when one is sent; otherwise it is the
 time the request arrived. `time_evaluated` is the server time the answer was
 produced at. The answer is judged as of `context.time` (or now) against the
-record's [validity window](#record-validity-windows): outside it, the response
-is `200` with `authorized` / `recognized` `false` and a `message` saying why. A
-record that does not exist is still `404`.
+record's validity window: outside it, the response is `200` with `authorized` /
+`recognized` `false` and a `message` saying why. A record that does not exist
+is still `404`.
 
 **Testing Tips:**
 
@@ -597,6 +616,12 @@ let app = host_router.nest("/registry", registry.router());
 `/health`** — both belong to the host, and applying ours would override or
 collide with theirs. Use `registry.health()` to fold the registry's health into
 the host's own endpoint, or `registry.health_router()` for a ready-made one.
+
+With `TrustRegistryConfig::embedded`, which loads no DID profile, the registry
+has no identity of its own: `POST /trust-tasks` answers `404` (a problem
+document saying why) rather than replies with an empty `issuer` and no proof,
+and `/.well-known/did.json` answers `404` unless the host sets
+`didcomm_config.did_document`. The TRQP endpoints work either way.
 
 The routes are unauthenticated. `router()` applies the request body limit
 (`server_config.http_limits.max_body_bytes`); the host must bound request time,
@@ -742,7 +767,10 @@ cargo run --bin trust-registry --features "vta,tsp,secrets-aws"
 Each Trust Registry operation is a versioned Trust Task in the `registry/*` family.
 The **same** typed payloads are served over every transport (DIDComm always-on;
 HTTP; TSP behind the `tsp` feature), so a VTC can talk to the registry with one
-message shape regardless of carrier.
+message shape regardless of carrier. HTTPS (`POST /trust-tasks`) carries only
+the two public queries, `registry/recognition` and `registry/authorization`:
+its caller is anonymous, so writes, `registry/record/query` and governance go
+over DIDComm or TSP.
 
 | Trust Task (`slug`)                                   | Kind  | Auth                          |
 | ----------------------------------------------------- | ----- | ----------------------------- |
@@ -1311,7 +1339,7 @@ Read only when `ENABLE_DIDCOMM=true` (the default), except the three
 | `ENABLE_TSP` | Route multiplexed TSP frames and advertise `TSPTransport`. Requires `ENABLE_DIDCOMM=true` and a binary built with `--features tsp`. `true` or `false`. | default: `false` |
 | `MEDIATOR_DID` | DID of the DIDComm mediator the registry connects through. | **Required** when DIDComm is enabled |
 | `PROFILE_CONFIG` | The registry's DID and private keys, as a [loader value](#profile-config-options). **_Sensitive information, do not share._** Not read when the identity comes from a VTA (`TR_VTA_CREDENTIAL`) or from a configured secret store that holds a profile bundle. | **Required** when DIDComm is enabled and neither of those supplies the identity |
-| `DID_DOCUMENT` | A [loader value](#profile-config-options) holding a DID document JSON to publish instead of the generated one. Must be JSON. | default: generated from the profile |
+| `DID_DOCUMENT` | A [loader value](#profile-config-options) holding a DID document JSON to publish instead of the generated one. Must be a JSON object; anything else stops startup. | default: generated from the profile |
 | `TR_PUBLIC_URL` | Externally reachable base URL of the REST/TRQP surface (e.g. `https://registry.example.org`). When set, the generated DID document advertises a `TRQPRest` service entry so peers can discover the REST endpoint by resolving the registry's DID. Must be `https://` (loopback `http://` allowed for local dev). Unset ⇒ REST is still served, but not advertised. | default: unset |
 | `ADMIN_DIDS` | Comma-separated DIDs that may send record-mutating Trust Tasks. Empty entries are ignored. Unset or empty: no admin (a warning is logged). | default: none |
 | `ADMIN_AUTHORITIES` | JSON object mapping an admin DID to the authority DIDs it may write records under **in addition to its own DID**, e.g. `{"did:web:ops.example": ["did:web:a.example", "did:web:b.example"]}`. Every key must be in `ADMIN_DIDS`; a malformed value stops startup. Unset ⇒ each admin writes only under its own DID. List the registry's own DID for an admin to let it rotate the registry's DID and enable or disable capabilities that have no authority. | default: none |
@@ -1375,7 +1403,9 @@ its URL directly.
 
 > **Note:** with `ENABLE_DIDCOMM=false` no DID document is built at all, since
 > the registry's DID profile is loaded on the DIDComm path. A REST-only registry
-> is reached by URL rather than by resolving its DID.
+> is reached by URL rather than by resolving its DID: its
+> `/.well-known/did.json` answers `404`, and so does `POST /trust-tasks`, since
+> it has no DID to issue or sign replies as.
 
 The document served at `/.well-known/did.json` is the one set in `DID_DOCUMENT`
 (a loader URI, like `PROFILE_CONFIG`), or else built from the profile by the
@@ -1385,7 +1415,8 @@ signing keys (Ed25519, P-256, secp256k1) under `authentication` and
 `assertionMethod` and X25519 keys under `keyAgreement`. A profile with no
 X25519 key (one generated before the move to Curve25519) lists its P-256 /
 secp256k1 keys under `keyAgreement` too. A secret that cannot be published this
-way stops startup.
+way stops startup, and so does a `DID_DOCUMENT` that is not a JSON object. The
+document is parsed once, at startup, and served as is.
 
 ### Profile Config Options
 

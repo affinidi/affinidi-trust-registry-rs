@@ -1,60 +1,94 @@
+//! The TRQP v2.0 REST endpoints, `POST /authorization` and `POST /recognition`.
+//!
+//! Each answers one question about one stored record, decided by
+//! [`Evaluation::answer`], the same decision the `registry/*` Trust Tasks and
+//! the DIDComm `trqp/1.0` protocol use, so the surfaces cannot disagree:
+//!
+//! - the queried flag (`authorized` on `/authorization`, `recognized` on
+//!   `/recognition`) is always present and always a boolean. It is `true`
+//!   only when the record is inside its validity window and stores `true`; a
+//!   stored `false`, or no stored value, answers `false` (R3.4). The other
+//!   flag is not part of the answer and is not sent;
+//! - `message` follows that answer;
+//! - `context` is the record's stored context, exactly as stored. The
+//!   request's `context` is read (for `context.time`) but never merged into
+//!   the answer or echoed, as on the Trust Task answers, so nothing in the
+//!   response is attributed to the registry that it does not hold.
+//!
+//! The identifiers are validated with the domain's own rules
+//! ([`crate::domain::parse_ids`]) before the lookup, so an invalid one is a
+//! `400` rather than the `404` that means "valid but not recognised".
+
 use crate::{
-    domain::{Context, Evaluation, TrustRecord, TrustRecordIds},
+    domain::{
+        Action, Answer, AuthorityId, Context, EntityId, Evaluation, Question, RecordType, Resource,
+        TrustRecord, parse_ids,
+    },
     storage::repository::{TrustRecordQuery, TrustRecordRepository, find_either_spelling},
 };
-use anyhow::anyhow;
 use axum::{
     Json,
     extract::{State, rejection::JsonRejection},
 };
 use chrono::{DateTime, SecondsFormat, Utc};
-use fluent_uri::UriRef;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::SharedData;
 use crate::http::error::AppError;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct OutputDto {
-    #[serde(flatten)]
-    trust_record: TrustRecord,
-    time_requested: String,
-    time_evaluated: String,
-    message: String,
+/// The members every TRQP answer carries, besides its one flag.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AnswerFields {
+    pub entity_id: EntityId,
+    pub authority_id: AuthorityId,
+    pub action: Action,
+    pub resource: Resource,
+    /// The stored record's context, as stored.
+    pub context: Context,
+    pub record_type: RecordType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<DateTime<Utc>>,
+    pub time_requested: String,
+    pub time_evaluated: String,
+    pub message: String,
 }
 
+/// The `POST /authorization` answer: `authorized` is always present.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AuthorizationAnswer {
+    #[serde(flatten)]
+    pub fields: AnswerFields,
+    pub authorized: bool,
+}
+
+/// The `POST /recognition` answer: `recognized` is always present.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RecognitionAnswer {
+    #[serde(flatten)]
+    pub fields: AnswerFields,
+    pub recognized: bool,
+}
+
+/// A TRQP query as sent. The identifiers are plain strings here and are
+/// validated with [`parse_ids`] before the lookup, so a bad one is named in
+/// the `400`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InputDto {
-    #[serde(flatten)]
-    ids: TrustRecordIds,
-    context: Option<Context>,
+    pub entity_id: String,
+    pub authority_id: String,
+    pub action: String,
+    pub resource: String,
+    pub context: Option<Context>,
 }
 
 /// A TRQP query that passed validation.
 struct ValidQuery {
-    ids: TrustRecordIds,
-    context: Option<Context>,
+    query: TrustRecordQuery,
     /// `context.time`, when the client supplied one.
     time: Option<DateTime<Utc>>,
-}
-
-/// TRQP v2.0 Identifiers: every identifier is a single RFC 3986 string, and
-/// none of the four may be empty (`action`/`resource` by the spec's own rule,
-/// `entity_id`/`authority_id` because an empty string identifies nothing).
-///
-/// Invalid identifiers are refused here, before the lookup, so they get a 400
-/// rather than the 404 that means "valid but not recognised".
-fn validate_identifier(field: &str, value: &str) -> Result<(), AppError> {
-    if value.is_empty() {
-        return Err(AppError::InvalidRequest {
-            detail: format!("`{field}` must not be empty"),
-        });
-    }
-    UriRef::parse(value).map_err(|e| AppError::InvalidRequest {
-        detail: format!("`{field}` is not an RFC 3986 URI reference: {e}"),
-    })?;
-    Ok(())
 }
 
 /// TRQP v2.0: `context`, when present, is a JSON object, and its `time` member
@@ -81,62 +115,31 @@ fn validate_context(context: &Context) -> Result<Option<DateTime<Utc>>, AppError
 }
 
 fn validate(input: InputDto) -> Result<ValidQuery, AppError> {
-    let ids = input.ids;
-    validate_identifier("entity_id", ids.entity_id().as_str())?;
-    validate_identifier("authority_id", ids.authority_id().as_str())?;
-    validate_identifier("action", ids.action().as_str())?;
-    validate_identifier("resource", ids.resource().as_str())?;
+    let (_, _, action, resource) = parse_ids(
+        &input.entity_id,
+        &input.authority_id,
+        &input.action,
+        &input.resource,
+    )
+    .map_err(|e| AppError::InvalidRequest {
+        detail: e.to_string(),
+    })?;
     let time = match &input.context {
         Some(c) => validate_context(c)?,
         None => None,
     };
+    // Validated above. The party references go in as written so the lookup
+    // ([`find_either_spelling`]) tries the normalised key first and can fall
+    // back to a record stored under a did:scid `?src=` spelling.
     Ok(ValidQuery {
-        ids,
-        context: input.context,
+        query: TrustRecordQuery::new(
+            EntityId::as_written(input.entity_id),
+            AuthorityId::as_written(input.authority_id),
+            action,
+            resource,
+        ),
         time,
     })
-}
-
-async fn handle_trqp<R>(
-    state: SharedData<R>,
-    payload: Result<Json<InputDto>, JsonRejection>,
-) -> Result<(TrustRecord, Option<DateTime<Utc>>), AppError>
-where
-    R: TrustRecordRepository + Send + ?Sized + 'static,
-{
-    let body = payload.map_err(|e| {
-        if e.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
-            AppError::PayloadTooLarge {
-                max_bytes: state.config.server_config.http_limits.max_body_bytes,
-            }
-        } else {
-            AppError::BadRequest {
-                details: Some(json!([{ "issue": e.body_text() }])),
-                internal_error: e.into(),
-            }
-        }
-    })?;
-    let query = validate(body.0)?;
-    let query_result = find_either_spelling(
-        state.repository.as_ref(),
-        TrustRecordQuery::from_ids(query.ids),
-    )
-    .await;
-    let mut trust_record = query_result
-        .map_err(|e| AppError::Internal {
-            internal_error: e.into(),
-            details: None,
-        })?
-        .ok_or(AppError::NotFound {
-            internal_error: anyhow!("Trust record not found"),
-            details: None,
-        })?;
-
-    if let Some(c) = query.context {
-        trust_record = trust_record.merge_contexts(c);
-    }
-
-    Ok((trust_record, query.time))
 }
 
 /// `time_requested` echoes `context.time` when the client sent one (the TRQP
@@ -144,8 +147,8 @@ where
 /// falls back to the time the request arrived.
 ///
 /// The answer is judged against the record's validity window as of that
-/// instant (see [`apply_window`]); the registry keeps current records, not
-/// their history. `time_evaluated` is the server time the answer was produced.
+/// instant; the registry keeps current records, not their history.
+/// `time_evaluated` is the server time the answer was produced.
 fn response_times(asked: Option<DateTime<Utc>>, received_at: DateTime<Utc>) -> (String, String) {
     let requested = asked.map_or_else(
         || received_at.to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -155,93 +158,67 @@ fn response_times(asked: Option<DateTime<Utc>>, received_at: DateTime<Utc>) -> (
     (requested, evaluated)
 }
 
-/// Answer `false` for a record outside its validity window, and say why.
-///
-/// The record exists, so its identifiers are recognised and the answer is not
-/// a 404: it is a statement that does not hold at the instant asked. Returns
-/// the record with its flag set accordingly, and the reason when it was out of
-/// window.
-fn apply_window(
-    record: TrustRecord,
-    asked: Option<DateTime<Utc>>,
-    authorization: bool,
-) -> (TrustRecord, Option<String>) {
-    let evaluation = Evaluation::of(Some(&record), asked, Utc::now());
-    match evaluation.out_of_window_reason(&record) {
-        None => (record, None),
-        Some(reason) if authorization => (record.with_authorized(false), Some(reason)),
-        Some(reason) => (record.with_recognized(false), Some(reason)),
-    }
+/// Validate the query, find its record and answer `question` about it.
+async fn answer<R>(
+    state: SharedData<R>,
+    payload: Result<Json<InputDto>, JsonRejection>,
+    question: Question,
+) -> Result<(AnswerFields, bool), AppError>
+where
+    R: TrustRecordRepository + Send + ?Sized + 'static,
+{
+    let received_at = Utc::now();
+    let max_bytes = state.config.server_config.http_limits.max_body_bytes;
+    let Json(input) = payload.map_err(|e| AppError::from_json_rejection(e, max_bytes))?;
+    let query = validate(input)?;
+    let record: TrustRecord = find_either_spelling(state.repository.as_ref(), query.query)
+        .await
+        .map_err(|e| AppError::Internal {
+            internal_error: e.into(),
+        })?
+        .ok_or_else(|| AppError::NotFound {
+            detail: "No trust record matches the four identifiers".into(),
+        })?;
+
+    let Answer { holds, message } =
+        Evaluation::of(Some(&record), query.time, Utc::now()).answer(&record, question);
+    let (time_requested, time_evaluated) = response_times(query.time, received_at);
+    let fields = AnswerFields {
+        entity_id: record.entity_id().clone(),
+        authority_id: record.authority_id().clone(),
+        action: record.action().clone(),
+        resource: record.resource().clone(),
+        context: record.context().clone(),
+        record_type: record.record_type().clone(),
+        valid_from: record.valid_from(),
+        valid_until: record.valid_until(),
+        time_requested,
+        time_evaluated,
+        message,
+    };
+    Ok((fields, holds))
 }
 
 pub async fn handle_trqp_authorization<R>(
     State(state): State<SharedData<R>>,
     payload: Result<Json<InputDto>, JsonRejection>,
-) -> Result<Json<OutputDto>, AppError>
+) -> Result<Json<AuthorizationAnswer>, AppError>
 where
     R: TrustRecordRepository + Send + ?Sized + 'static,
 {
-    let received_at = Utc::now();
-    let (trust_record, asked) = handle_trqp(state, payload).await?;
-    let (trust_record, out_of_window) = apply_window(trust_record, asked, true);
-    // in order to follow spec remove this field from output
-    let trust_record = trust_record.none_recognized();
-    let message = match out_of_window {
-        Some(reason) => format!(
-            "{} not authorized by {}: {reason}",
-            trust_record.entity_id(),
-            trust_record.authority_id()
-        ),
-        None => format!(
-            "{} authorized to {}+{} by {}",
-            trust_record.entity_id(),
-            trust_record.action(),
-            trust_record.resource(),
-            trust_record.authority_id()
-        ),
-    };
-    let (time_requested, time_evaluated) = response_times(asked, received_at);
-
-    Ok(Json(OutputDto {
-        trust_record,
-        time_requested,
-        time_evaluated,
-        message,
-    }))
+    let (fields, authorized) = answer(state, payload, Question::Authorized).await?;
+    Ok(Json(AuthorizationAnswer { fields, authorized }))
 }
 
 pub async fn handle_trqp_recognition<R>(
     State(state): State<SharedData<R>>,
     payload: Result<Json<InputDto>, JsonRejection>,
-) -> Result<Json<OutputDto>, AppError>
+) -> Result<Json<RecognitionAnswer>, AppError>
 where
     R: TrustRecordRepository + Send + ?Sized + 'static,
 {
-    let received_at = Utc::now();
-    let (trust_record, asked) = handle_trqp(state, payload).await?;
-    let (trust_record, out_of_window) = apply_window(trust_record, asked, false);
-    // in order to follow spec remove this field from output
-    let trust_record = trust_record.none_authorized();
-    let message = match out_of_window {
-        Some(reason) => format!(
-            "{} not recognized by {}: {reason}",
-            trust_record.entity_id(),
-            trust_record.authority_id()
-        ),
-        None => format!(
-            "{} recognized by {}",
-            trust_record.entity_id(),
-            trust_record.authority_id()
-        ),
-    };
-    let (time_requested, time_evaluated) = response_times(asked, received_at);
-
-    Ok(Json(OutputDto {
-        trust_record,
-        time_requested,
-        time_evaluated,
-        message,
-    }))
+    let (fields, recognized) = answer(state, payload, Question::Recognized).await?;
+    Ok(Json(RecognitionAnswer { fields, recognized }))
 }
 
 #[cfg(test)]
@@ -267,6 +244,9 @@ mod tests {
     const ENTITY: &str = "did:example:entity";
     const AUTHORITY: &str = "did:example:authority";
     const WINDOWED: &str = "did:example:windowed";
+    const REVOKED: &str = "did:example:revoked";
+    const RECOGNIZED_ONLY: &str = "did:example:recognized-only";
+    const AUTHORIZED_ONLY: &str = "did:example:authorized-only";
 
     fn record(entity: &str) -> TrustRecord {
         TrustRecordBuilder::new()
@@ -283,6 +263,10 @@ mod tests {
     }
 
     async fn app() -> axum::Router {
+        app_with(TrustRegistryConfig::embedded("/tmp/tr-trqp-test")).await
+    }
+
+    async fn app_with(config: TrustRegistryConfig) -> axum::Router {
         let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::new());
         repository.create(record(ENTITY)).await.expect("seeded");
         // Seeded so the invalid-identifier test proves validation runs before
@@ -322,7 +306,31 @@ mod tests {
             .build()
             .expect("valid record");
         repository.create(legacy).await.expect("seeded");
-        TrustRegistry::builder(TrustRegistryConfig::embedded("/tmp/tr-trqp-test"))
+        // In window, but storing `false` (as after a git-trust revoke) or no
+        // value at all for one of the flags.
+        for (entity, recognized, authorized) in [
+            (REVOKED, Some(false), Some(false)),
+            (RECOGNIZED_ONLY, Some(true), None),
+            (AUTHORIZED_ONLY, None, Some(true)),
+        ] {
+            let mut builder = TrustRecordBuilder::new()
+                .entity_id(EntityId::new(entity))
+                .authority_id(AuthorityId::new(AUTHORITY))
+                .action(Action::new("issue"))
+                .resource(Resource::new("vc"))
+                .record_type(RecordType::Authorization);
+            if let Some(r) = recognized {
+                builder = builder.recognized(r);
+            }
+            if let Some(a) = authorized {
+                builder = builder.authorized(a);
+            }
+            repository
+                .create(builder.build().expect("valid record"))
+                .await
+                .expect("seeded");
+        }
+        TrustRegistry::builder(config)
             .repository(repository)
             .capability_store(Box::new(MemoryCapabilityStore::default()))
             .build()
@@ -341,16 +349,21 @@ mod tests {
     }
 
     async fn post_raw(path: &str, body: String) -> (StatusCode, String, Value) {
+        send(path, Some("application/json"), body).await
+    }
+
+    async fn send(
+        path: &str,
+        content_type: Option<&str>,
+        body: String,
+    ) -> (StatusCode, String, Value) {
+        let mut request = Request::builder().method("POST").uri(path);
+        if let Some(content_type) = content_type {
+            request = request.header(header::CONTENT_TYPE, content_type);
+        }
         let response = app()
             .await
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(path)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .expect("request"),
-            )
+            .oneshot(request.body(Body::from(body)).expect("request"))
             .await
             .expect("router responds");
         let status = response.status();
@@ -422,13 +435,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_field_is_a_400_problem() {
+    async fn missing_field_is_a_400_problem_that_names_it() {
         let mut body = query();
         body.as_object_mut().unwrap().remove("action");
+        let got = post("/authorization", body).await;
+        assert_problem(&got, StatusCode::BAD_REQUEST, "bad_request");
+        assert!(
+            got.2["detail"].as_str().unwrap().contains("action"),
+            "the extractor's reason is passed on: {}",
+            got.2
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_json_says_where() {
+        let got = post_raw("/recognition", "{not json".into()).await;
+        let detail = got.2["detail"].as_str().unwrap();
+        assert!(detail.contains("line 1"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn a_body_not_declared_as_json_is_a_415_problem() {
+        for content_type in [None, Some("text/plain")] {
+            let got = send("/authorization", content_type, query().to_string()).await;
+            assert_problem(
+                &got,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_oversize_body_is_a_413_problem() {
+        let filler = "x".repeat(crate::http::limits::DEFAULT_MAX_BODY_BYTES + 1);
+        let body = with(query(), "context", json!({ "filler": filler }));
         assert_problem(
             &post("/authorization", body).await,
-            StatusCode::BAD_REQUEST,
-            "bad_request",
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
         );
     }
 
@@ -467,20 +512,64 @@ mod tests {
         }
     }
 
-    /// The identifiers vtc-service sends (and other typical ones) must keep
-    /// working: relative references like `issue` are RFC 3986 strings.
-    #[test]
-    fn typical_identifiers_are_accepted() {
-        for id in [
-            "did:webvh:QmHash:example.com%3A8080:path",
-            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
-            "did:example:entity#key-1",
-            "https://example.com/schemas/vc?x=1",
-            "recognise",
-            "trust-graph",
-            "auth-service-A",
+    #[tokio::test]
+    async fn an_overlong_identifier_is_refused() {
+        let long = format!("did:example:{}", "a".repeat(MAX_IDENTIFIER_BYTES));
+        let got = post("/recognition", with(query(), "entity_id", json!(long))).await;
+        assert_problem(&got, StatusCode::BAD_REQUEST, "invalid_request");
+    }
+
+    /// In window, a stored `false` or no stored value answers an explicit
+    /// `false`, and the message does not claim the opposite (#208, #209).
+    #[tokio::test]
+    async fn a_false_or_absent_flag_answers_an_explicit_false() {
+        for (path, flag, entity) in [
+            ("/authorization", "authorized", REVOKED),
+            ("/recognition", "recognized", REVOKED),
+            ("/authorization", "authorized", RECOGNIZED_ONLY),
+            ("/recognition", "recognized", AUTHORIZED_ONLY),
         ] {
-            assert!(super::validate_identifier("entity_id", id).is_ok(), "{id}");
+            let (status, _, body) = post(path, with(query(), "entity_id", json!(entity))).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body[flag], false, "{path} {entity}: {body}");
+            let message = body["message"].as_str().unwrap();
+            assert!(
+                message.contains(&format!("not {flag}")),
+                "{path} {entity}: {message}"
+            );
+        }
+    }
+
+    /// Each endpoint answers its own question only.
+    #[tokio::test]
+    async fn only_the_queried_flag_is_sent() {
+        let (_, _, body) = post("/authorization", query()).await;
+        assert!(body.get("recognized").is_none(), "{body}");
+        let (_, _, body) = post("/recognition", query()).await;
+        assert!(body.get("authorized").is_none(), "{body}");
+        assert_eq!(body["recognized"], true);
+        assert_eq!(
+            body["message"],
+            format!("{ENTITY} recognized by {AUTHORITY}")
+        );
+    }
+
+    /// The request `context` never overrides or extends the stored one
+    /// (#247): the answer's `context` is the record's, as stored.
+    #[tokio::test]
+    async fn the_stored_context_is_returned_as_stored() {
+        for path in ["/authorization", "/recognition"] {
+            let (status, _, body) = post(
+                path,
+                with(
+                    query(),
+                    "context",
+                    json!({ "seeded": "overridden", "extra": 1 }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["context"], json!({"seeded": "yes"}), "{body}");
         }
     }
 
@@ -533,9 +622,8 @@ mod tests {
                 body["time_evaluated"], echoed,
                 "evaluated is the server clock"
             );
-            // The request context still merges into the record's.
-            assert_eq!(body["context"]["seeded"], "yes");
-            assert_eq!(body["context"]["extra"]["a"], 1);
+            // The request context is read, not merged into the answer.
+            assert_eq!(body["context"], json!({"seeded": "yes"}));
         }
     }
 
@@ -610,5 +698,76 @@ mod tests {
                     .parse::<chrono::DateTime<chrono::Utc>>()
                     .unwrap();
         assert_eq!(body_now["authorized"], expected, "{body_now}");
+    }
+
+    // The registry's other routes, as mounted next to these (#211, #251).
+
+    async fn call(router: axum::Router, request: Request<Body>) -> (StatusCode, String, Value) {
+        let response = router.oneshot(request).await.expect("router responds");
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (
+            status,
+            content_type,
+            serde_json::from_slice(&bytes).expect("JSON"),
+        )
+    }
+
+    fn get_did_json() -> Request<Body> {
+        Request::get("/.well-known/did.json")
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    /// A registry with no DID (REST-only, embedded) does not serve Trust
+    /// Tasks: never a reply issued by `""` without a proof.
+    #[tokio::test]
+    async fn without_a_did_trust_tasks_are_not_served() {
+        let task = json!({
+            "id": "req-1",
+            "type": "https://trusttasks.org/spec/registry/recognition/0.1",
+            "payload": {
+                "entity_id": ENTITY, "authority_id": AUTHORITY,
+                "action": "issue", "resource": "vc"
+            }
+        });
+        let got = call(
+            app().await,
+            Request::post("/trust-tasks")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(task.to_string()))
+                .expect("request"),
+        )
+        .await;
+        assert_problem(&got, StatusCode::NOT_FOUND, "not_found");
+        assert!(
+            got.2["detail"].as_str().unwrap().contains("no DID"),
+            "{}",
+            got.2
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_did_document_did_json_is_a_404() {
+        let got = call(app().await, get_did_json()).await;
+        assert_problem(&got, StatusCode::NOT_FOUND, "not_found");
+    }
+
+    #[tokio::test]
+    async fn a_configured_did_document_is_served_as_configured() {
+        let document = json!({"id": "did:web:registry.example", "service": []});
+        let mut config = TrustRegistryConfig::embedded("/tmp/tr-trqp-test");
+        config.didcomm_config.did_document = Some(document.clone());
+        let (status, _, body) = call(app_with(config).await, get_did_json()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, document);
     }
 }

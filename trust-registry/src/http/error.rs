@@ -5,123 +5,102 @@
 //! `application/problem+json` media type, so every error is served with it.
 //!
 //! The body carries the RFC 9457 members `type`, `title`, `status` and
-//! `detail`. `code` duplicates `status`; it is an extension member kept for
-//! clients written against earlier releases.
+//! `detail`. `title` is stable per kind of error; `detail` says what was wrong
+//! with this request (for a body that could not be read, the specific reason,
+//! such as the missing field). `code` duplicates `status`; it is an extension
+//! member kept for clients written against earlier releases.
 
 use anyhow::Error;
 use axum::{
+    extract::rejection::JsonRejection,
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde_json::{Map, Value};
 use tracing::{debug, error};
 
-const LAST_WARNING_ERROR_CODE: u16 = 499;
-
 /// The RFC 9457 media type for a JSON problem details document.
 pub const PROBLEM_JSON: &str = "application/problem+json";
 
+#[derive(Debug)]
 pub enum AppError {
-    /// The body is not JSON, or a required field is missing.
-    BadRequest {
-        internal_error: Error,
-        details: Option<Value>,
-    },
+    /// The body is not JSON, or does not have the query's shape (a missing
+    /// field, a member of the wrong type). `detail` is the extractor's
+    /// explanation, which describes only the client's own input.
+    BadRequest { detail: String },
+    /// The request did not say its body is JSON (`Content-Type` missing or
+    /// not `application/json`): `415`.
+    UnsupportedMediaType { detail: String },
     /// The request parsed but a field breaks the TRQP rules (an identifier
-    /// that is empty or not an RFC 3986 string, a non-object `context`, a
-    /// `context.time` that is not RFC 3339). `detail` is sent to the client,
-    /// so it must only describe the client's own input.
+    /// that is empty, too long or not an RFC 3986 string, a non-object
+    /// `context`, a `context.time` that is not RFC 3339). `detail` is sent to
+    /// the client, so it must only describe the client's own input.
     InvalidRequest { detail: String },
     /// The body is larger than the server accepts.
     PayloadTooLarge { max_bytes: usize },
-    NotFound {
-        internal_error: Error,
-        details: Option<Value>,
-    },
-    Internal {
-        internal_error: Error,
-        details: Option<Value>,
-    },
-}
-
-struct Parts {
-    status: StatusCode,
-    title: &'static str,
-    detail: String,
-    details: Option<Value>,
-    internal_error: Option<Error>,
+    /// Nothing here answers the request. `detail` is sent to the client.
+    NotFound { detail: String },
+    /// The registry failed. The error is logged, never sent.
+    Internal { internal_error: Error },
 }
 
 impl AppError {
-    fn into_parts(self) -> Parts {
+    /// The error for a body the JSON extractor refused: `413` when it is over
+    /// `max_bytes`, `415` when it is not declared as JSON, and otherwise `400`
+    /// with the extractor's reason as `detail`.
+    pub fn from_json_rejection(rejection: JsonRejection, max_bytes: usize) -> Self {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            return AppError::PayloadTooLarge { max_bytes };
+        }
+        let detail = rejection.body_text();
+        match rejection {
+            JsonRejection::MissingJsonContentType(_) => AppError::UnsupportedMediaType { detail },
+            _ => AppError::BadRequest { detail },
+        }
+    }
+
+    fn into_parts(self) -> (StatusCode, &'static str, String, Option<Error>) {
         match self {
-            AppError::BadRequest {
-                internal_error,
-                details,
-            } => Parts {
-                status: StatusCode::BAD_REQUEST,
-                title: "bad_request",
-                detail: "The request is not valid JSON or is missing required fields".into(),
-                details,
-                internal_error: Some(internal_error),
-            },
-            AppError::PayloadTooLarge { max_bytes } => Parts {
-                status: StatusCode::PAYLOAD_TOO_LARGE,
-                title: "payload_too_large",
-                detail: format!("The request body is larger than {max_bytes} bytes"),
-                details: None,
-                internal_error: None,
-            },
-            AppError::InvalidRequest { detail } => Parts {
-                status: StatusCode::BAD_REQUEST,
-                title: "invalid_request",
+            AppError::BadRequest { detail } => {
+                (StatusCode::BAD_REQUEST, "bad_request", detail, None)
+            }
+            AppError::UnsupportedMediaType { detail } => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
                 detail,
-                details: None,
-                internal_error: None,
-            },
-            AppError::NotFound {
-                internal_error,
-                details,
-            } => Parts {
-                status: StatusCode::NOT_FOUND,
-                title: "not_found",
-                detail: "The requested resource could not be found".into(),
-                details,
-                internal_error: Some(internal_error),
-            },
-            AppError::Internal {
-                internal_error,
-                details,
-            } => Parts {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                title: "internal_error",
-                detail: "An unexpected error occurred".into(),
-                details,
-                internal_error: Some(internal_error),
-            },
+                None,
+            ),
+            AppError::PayloadTooLarge { max_bytes } => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                format!("The request body is larger than {max_bytes} bytes"),
+                None,
+            ),
+            AppError::InvalidRequest { detail } => {
+                (StatusCode::BAD_REQUEST, "invalid_request", detail, None)
+            }
+            AppError::NotFound { detail } => (StatusCode::NOT_FOUND, "not_found", detail, None),
+            AppError::Internal { internal_error } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "An unexpected error occurred".into(),
+                Some(internal_error),
+            ),
         }
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let Parts {
-            status,
-            title,
-            detail,
-            details,
-            internal_error,
-        } = self.into_parts();
-        let internal_error = internal_error
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| detail.clone());
-        if status.as_u16() > LAST_WARNING_ERROR_CODE {
-            error!(%internal_error, title, %detail, "HTTP request failed with error. details: {:?}", details);
-        } else {
+        let (status, title, detail, internal_error) = self.into_parts();
+        match internal_error {
+            Some(internal_error) => {
+                error!(%internal_error, title, %detail, "HTTP request failed with an error");
+            }
             // A 4xx is an ordinary answer to the caller's request, such as a
             // record that does not exist: logged for debugging, not as a
             // warning, so callers do not decide the warning log's volume.
-            debug!(%internal_error, title, %detail, "HTTP request failed with exception. details: {:?}", details);
+            None => debug!(title, %detail, status = status.as_u16(), "HTTP request refused"),
         }
 
         let mut payload = Map::new();

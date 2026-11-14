@@ -36,99 +36,208 @@ mod reference_tests {
             "did:web:example.com?src=x"
         );
     }
+
+    /// The validating constructor normalises exactly as `new` does, so a
+    /// write through it cannot store a located spelling again.
+    #[test]
+    fn parse_normalises_party_references_like_new() {
+        assert_eq!(
+            AuthorityId::parse("did:scid:vh:1:abc?src=example.com")
+                .unwrap()
+                .as_str(),
+            "did:scid:vh:1:abc"
+        );
+        assert_eq!(
+            EntityId::try_from("did:scid:vh:1:abc?src=example.com#key-1")
+                .unwrap()
+                .as_str(),
+            "did:scid:vh:1:abc#key-1"
+        );
+        // Action and resource are not party references and are kept as is.
+        assert_eq!(
+            Resource::parse("did:scid:vh:1:abc?src=example.com")
+                .unwrap()
+                .as_str(),
+            "did:scid:vh:1:abc?src=example.com"
+        );
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub struct EntityId(String);
+/// The longest identifier accepted from a client, in bytes.
+///
+/// Generous enough for any DID in use (long `did:peer:2` and `did:webvh`
+/// values included) while bounding what a client can make the registry store
+/// as a key or echo in a message.
+pub const MAX_IDENTIFIER_BYTES: usize = 2048;
 
-impl EntityId {
-    /// A did:scid reference is kept without its `?src=` locator
-    /// ([`normalise_reference`]), so it is stored, keyed and compared in one
-    /// form however the caller wrote it.
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(normalise_reference(id.into()))
-    }
-
-    /// The reference exactly as written, not normalised: only for reaching a
-    /// record an earlier release stored with a did:scid `?src=` locator.
-    pub fn as_written(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+/// Why a client-supplied identifier was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentifierError {
+    /// The identifier's wire name (`entity_id`, `authority_id`, `action`,
+    /// `resource`).
+    pub field: &'static str,
+    /// What is wrong with it. Describes only the client's own input, so it is
+    /// safe to return to the client.
+    pub reason: String,
 }
 
-impl fmt::Display for EntityId {
+impl fmt::Display for IdentifierError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "`{}` {}", self.field, self.reason)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub struct AuthorityId(String);
+impl std::error::Error for IdentifierError {}
 
-impl AuthorityId {
-    /// A did:scid reference is kept without its `?src=` locator
-    /// ([`normalise_reference`]), so it is stored, keyed and compared in one
-    /// form however the caller wrote it.
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(normalise_reference(id.into()))
+/// TRQP v2.0 Identifiers: every identifier is a single RFC 3986 string, and
+/// none of the four may be empty (`action`/`resource` by the spec's own rule,
+/// `entity_id`/`authority_id` because an empty string identifies nothing).
+/// [`MAX_IDENTIFIER_BYTES`] bounds the length.
+fn check_identifier(field: &'static str, value: &str) -> Result<(), IdentifierError> {
+    let refuse = |reason: String| Err(IdentifierError { field, reason });
+    if value.is_empty() {
+        return refuse("must not be empty".into());
     }
-
-    /// The reference exactly as written, not normalised: only for reaching a
-    /// record an earlier release stored with a did:scid `?src=` locator.
-    pub fn as_written(id: impl Into<String>) -> Self {
-        Self(id.into())
+    if value.len() > MAX_IDENTIFIER_BYTES {
+        return refuse(format!("is longer than {MAX_IDENTIFIER_BYTES} bytes"));
     }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
+    if let Err(e) = fluent_uri::UriRef::parse(value) {
+        return refuse(format!("is not an RFC 3986 URI reference: {e}"));
     }
+    Ok(())
 }
 
-impl fmt::Display for AuthorityId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
+/// The identity normalisation, for identifiers that are not party references.
+fn as_is(value: String) -> String {
+    value
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub struct Action(String);
+/// Defines one of the four TRQP identifier newtypes.
+///
+/// Each has two ways in, chosen by where the value comes from:
+///
+/// - `parse` (and `TryFrom<String>` / `TryFrom<&str>`) for anything a client
+///   sent. It enforces the TRQP identifier rules (non-empty, at most
+///   [`MAX_IDENTIFIER_BYTES`], RFC 3986). Every `registry/record/put` and
+///   every TRQP query, on every binding, goes through it.
+/// - `new` and `Deserialize` skip those rules. They are for values the
+///   registry already holds: records read back from storage, which may predate
+///   the rules and must stay readable, listable and deletable by their exact
+///   key; and registry-internal values.
+///
+/// `parse` and `new` both normalise the same way: the party references
+/// (`EntityId`, `AuthorityId`) through [`normalise_reference`], which drops a
+/// did:scid `?src=` locator; `Action` and `Resource` not at all. The party
+/// references also have `as_written`, which keeps the spelling exactly.
+/// `Deserialize` neither validates nor normalises (stored records are read
+/// with it).
+///
+/// There is no `Default`: an empty identifier identifies nothing.
+macro_rules! identifier {
+    ($(#[$doc:meta])* $name:ident, $field:literal, $normalise:path) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub struct $name(String);
 
-impl Action {
-    pub fn new(action: impl Into<String>) -> Self {
-        Self(action.into())
-    }
+        impl $name {
+            /// The identifier's wire name, as used in error messages.
+            pub const FIELD: &'static str = $field;
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+            /// Take `id` without checking the TRQP identifier rules (but
+            /// normalised as every stored identifier is): for values the
+            /// registry already holds. A client-supplied value goes through
+            /// [`Self::parse`].
+            pub fn new(id: impl Into<String>) -> Self {
+                Self($normalise(id.into()))
+            }
+
+            /// Validate a client-supplied identifier (non-empty, at most
+            /// [`MAX_IDENTIFIER_BYTES`] bytes, an RFC 3986 URI reference),
+            /// then normalise it exactly as [`Self::new`] does.
+            pub fn parse(id: impl Into<String>) -> Result<Self, IdentifierError> {
+                let id = id.into();
+                check_identifier($field, &id)?;
+                Ok(Self::new(id))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = IdentifierError;
+            fn try_from(id: String) -> Result<Self, IdentifierError> {
+                Self::parse(id)
+            }
+        }
+
+        impl TryFrom<&str> for $name {
+            type Error = IdentifierError;
+            fn try_from(id: &str) -> Result<Self, IdentifierError> {
+                Self::parse(id)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+    };
+    (party $(#[$doc:meta])* $name:ident, $field:literal) => {
+        identifier!($(#[$doc])* $name, $field, normalise_reference);
+
+        impl $name {
+            /// The reference exactly as written, not normalised: only for
+            /// reaching a record an earlier release stored with a did:scid
+            /// `?src=` locator.
+            pub fn as_written(id: impl Into<String>) -> Self {
+                Self(id.into())
+            }
+        }
+    };
 }
 
-impl fmt::Display for Action {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub struct Resource(String);
+identifier!(party
+    /// The entity a statement is about (`entity_id`). A did:scid reference is
+    /// kept without its `?src=` locator ([`normalise_reference`]).
+    EntityId,
+    "entity_id"
+);
+identifier!(party
+    /// The authority that makes a statement (`authority_id`). A did:scid
+    /// reference is kept without its `?src=` locator ([`normalise_reference`]).
+    AuthorityId,
+    "authority_id"
+);
+identifier!(
+    /// What the entity is authorized to do (`action`).
+    Action,
+    "action",
+    as_is
+);
+identifier!(
+    /// What the action applies to (`resource`).
+    Resource,
+    "resource",
+    as_is
+);
 
-impl Resource {
-    pub fn new(resource: impl Into<String>) -> Self {
-        Self(resource.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for Resource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
+/// The four identifiers of a TRQP query, each validated (and normalised) with
+/// its `parse`.
+pub fn parse_ids(
+    entity_id: &str,
+    authority_id: &str,
+    action: &str,
+    resource: &str,
+) -> Result<(EntityId, AuthorityId, Action, Resource), IdentifierError> {
+    Ok((
+        EntityId::parse(entity_id)?,
+        AuthorityId::parse(authority_id)?,
+        Action::parse(action)?,
+        Resource::parse(resource)?,
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,8 +421,8 @@ impl Evaluation {
         self.validity == Some(Validity::Valid)
     }
 
-    /// Why a record that exists does not answer `true`, for the response
-    /// `message`. `None` when the record is in its window or absent.
+    /// Why a record that exists is outside its window at this instant.
+    /// `None` when the record is in its window or absent.
     pub fn out_of_window_reason(&self, record: &TrustRecord) -> Option<String> {
         let fmt = |t: DateTime<Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
         match self.validity? {
@@ -328,6 +437,84 @@ impl Evaluation {
             )),
         }
     }
+
+    /// The answer `record` gives to `question` as of this evaluation, which
+    /// must have been made of that record.
+    ///
+    /// The one place a TRQP answer is decided, shared by every surface (the
+    /// HTTP endpoints, the `registry/*` Trust Tasks and the legacy DIDComm
+    /// `trqp/1.0` protocol), so they cannot disagree. The statement holds
+    /// only when the record is inside its window **and** stores `true` for
+    /// the flag asked about; a stored `false`, or no stored value at all,
+    /// answers `false`. The `message` follows the answer: the positive
+    /// sentence only when it holds, otherwise a negative one with the reason.
+    pub fn answer(&self, record: &TrustRecord, question: Question) -> Answer {
+        let stored = match question {
+            Question::Recognized => record.recognized_value(),
+            Question::Authorized => record.authorized_value(),
+        };
+        let reason = match (self.out_of_window_reason(record), stored) {
+            (Some(reason), _) => Some(reason),
+            (None, Some(true)) => None,
+            (None, Some(false)) => Some(format!("the record states {question} false")),
+            (None, None) => Some(format!("the record does not state {question}")),
+        };
+        let (entity, authority) = (record.entity_id(), record.authority_id());
+        let statement = match question {
+            Question::Authorized => format!(
+                "authorized to {}+{} by {authority}",
+                record.action(),
+                record.resource()
+            ),
+            Question::Recognized => format!("recognized by {authority}"),
+        };
+        match reason {
+            None => Answer {
+                holds: true,
+                message: format!("{entity} {statement}"),
+            },
+            Some(reason) => Answer {
+                holds: false,
+                message: format!("{entity} not {statement}: {reason}"),
+            },
+        }
+    }
+}
+
+/// Which of the two TRQP questions a query asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Question {
+    /// Is the entity recognized by the authority?
+    Recognized,
+    /// Is the entity authorized by the authority for the action on the
+    /// resource?
+    Authorized,
+}
+
+impl Question {
+    /// The flag's wire name: `recognized` or `authorized`.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Self::Recognized => "recognized",
+            Self::Authorized => "authorized",
+        }
+    }
+}
+
+impl fmt::Display for Question {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.flag())
+    }
+}
+
+/// A record's answer to a TRQP question (see [`Evaluation::answer`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    /// Whether the statement holds: the value of `recognized` /
+    /// `authorized` in the response.
+    pub holds: bool,
+    /// The advisory human-readable `message`, consistent with `holds`.
+    pub message: String,
 }
 
 impl fmt::Display for TrustRecord {
@@ -1059,5 +1246,125 @@ mod tests {
     fn test_record_type_display() {
         assert_eq!(RecordType::Authorization.to_string(), "authorization");
         assert_eq!(RecordType::Recognition.to_string(), "recognition");
+    }
+
+    /// The identifiers vtc-service sends (and other typical ones) must keep
+    /// working: relative references like `issue` are RFC 3986 strings.
+    #[test]
+    fn typical_identifiers_parse() {
+        for id in [
+            "did:webvh:QmHash:example.com%3A8080:path",
+            "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "did:example:entity#key-1",
+            "https://example.com/schemas/vc?x=1",
+            "recognise",
+            "trust-graph",
+            "auth-service-A",
+        ] {
+            assert!(EntityId::parse(id).is_ok(), "{id}");
+            assert!(Resource::try_from(id).is_ok(), "{id}");
+        }
+        let longest = "a".repeat(MAX_IDENTIFIER_BYTES);
+        assert!(Action::parse(longest).is_ok());
+    }
+
+    #[test]
+    fn invalid_identifiers_are_refused_and_named() {
+        let too_long = "a".repeat(MAX_IDENTIFIER_BYTES + 1);
+        for (bad, says) in [
+            ("", "must not be empty"),
+            ("has spaces", "RFC 3986"),
+            ("<angle>", "RFC 3986"),
+            (too_long.as_str(), "longer than"),
+        ] {
+            let err = AuthorityId::parse(bad).unwrap_err();
+            assert_eq!(err.field, "authority_id");
+            let text = err.to_string();
+            assert!(text.starts_with("`authority_id`"), "{text}");
+            assert!(text.contains(says), "{text}");
+        }
+        assert!(parse_ids("e", "a", "x", "").is_err());
+    }
+
+    /// Records stored before the identifier rules must stay readable (and so
+    /// listable and deletable): deserialising does not validate.
+    #[test]
+    fn a_stored_record_with_a_non_conforming_identifier_still_deserializes() {
+        let r: TrustRecord = serde_json::from_value(json!({
+            "entity_id": "has spaces <x>", "authority_id": "", "action": "x",
+            "resource": "r", "authorized": true, "record_type": "authorization"
+        }))
+        .unwrap();
+        assert_eq!(r.entity_id().as_str(), "has spaces <x>");
+        assert_eq!(r.authority_id().as_str(), "");
+    }
+
+    fn flags(recognized: Option<bool>, authorized: Option<bool>) -> TrustRecord {
+        let mut builder = TrustRecordBuilder::new()
+            .entity_id(EntityId::new("did:e"))
+            .authority_id(AuthorityId::new("did:a"))
+            .action(Action::new("sign"))
+            .resource(Resource::new("repo"))
+            .record_type(RecordType::Authorization);
+        if let Some(r) = recognized {
+            builder = builder.recognized(r);
+        }
+        if let Some(a) = authorized {
+            builder = builder.authorized(a);
+        }
+        builder.build().unwrap()
+    }
+
+    #[test]
+    fn the_answer_holds_only_for_a_stored_true_in_window() {
+        let now = at("2026-06-01T00:00:00Z");
+        let answer = |r: &TrustRecord, q| Evaluation::of(Some(r), None, now).answer(r, q);
+
+        let yes = flags(Some(true), Some(true));
+        assert_eq!(
+            answer(&yes, Question::Authorized),
+            Answer {
+                holds: true,
+                message: "did:e authorized to sign+repo by did:a".into()
+            }
+        );
+        assert_eq!(
+            answer(&yes, Question::Recognized).message,
+            "did:e recognized by did:a"
+        );
+
+        let revoked = flags(Some(false), Some(false));
+        let a = answer(&revoked, Question::Authorized);
+        assert!(!a.holds);
+        assert_eq!(
+            a.message,
+            "did:e not authorized to sign+repo by did:a: the record states authorized false"
+        );
+        let r = answer(&revoked, Question::Recognized);
+        assert!(!r.holds);
+        assert!(
+            r.message.starts_with("did:e not recognized by did:a"),
+            "{r:?}"
+        );
+
+        let silent = flags(None, None);
+        for q in [Question::Authorized, Question::Recognized] {
+            let a = answer(&silent, q);
+            assert!(!a.holds);
+            assert!(a.message.contains(&format!("does not state {q}")), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn out_of_window_the_answer_is_false_whatever_is_stored() {
+        let r = windowed(Some("2026-01-01T00:00:00Z"), Some("2027-01-01T00:00:00Z"));
+        let a = Evaluation::of(
+            Some(&r),
+            Some(at("2027-06-01T00:00:00Z")),
+            at("2027-06-01T00:00:00Z"),
+        )
+        .answer(&r, Question::Authorized);
+        assert!(!a.holds);
+        assert!(a.message.contains("stopped being valid"), "{a:?}");
     }
 }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::{
     didcomm::{problem_report::ProblemReport, transport},
-    domain::{Evaluation, TrustRecord},
+    domain::{Answer, Evaluation, Question, TrustRecord, parse_ids},
     storage::repository::{TrustRecordQuery, TrustRecordRepository, find_either_spelling},
 };
 use affinidi_tdk::didcomm::Message;
@@ -107,6 +107,11 @@ where
         query.action.as_str().to_string(),
         query.resource.as_str().to_string(),
     );
+    // The same identifier rules as every other TRQP surface. The query itself
+    // keeps the spelling sent, so the lookup can fall back to a record stored
+    // under a did:scid `?src=` spelling.
+    parse_ids(&ids.0, &ids.1, &ids.2, &ids.3)
+        .map_err(|e| ProblemReport::bad_request(format!("Invalid trqp/1.0 query: {e}")))?;
     let record = find_either_spelling(repository, query).await.map_err(|e| {
         error!("trqp/1.0 repository lookup failed: {e}");
         ProblemReport::internal_error("The registry could not complete the lookup")
@@ -156,44 +161,31 @@ fn found_body(
     verb: &str,
     evaluated_at: DateTime<Utc>,
 ) -> Result<(Value, String), ProblemReport> {
-    let evaluation = Evaluation::of(Some(&tr), None, evaluated_at);
-    let out_of_window = evaluation.out_of_window_reason(&tr);
-    let tr = match (&out_of_window, is_authorization) {
-        (None, _) => tr,
-        (Some(_), true) => tr.with_authorized(false),
-        (Some(_), false) => tr.with_recognized(false),
+    // The one shared decision: `true` only inside the window and when the
+    // record stores `true`; the message follows the answer.
+    let question = if is_authorization {
+        Question::Authorized
+    } else {
+        Question::Recognized
     };
+    let Answer { holds, message } =
+        Evaluation::of(Some(&tr), None, evaluated_at).answer(&tr, question);
     // Only the flag asked about is returned, as on the HTTP TRQP endpoint.
     let tr = if is_authorization {
         tr.none_recognized()
     } else {
         tr.none_authorized()
     };
-    let message_text = match out_of_window {
-        Some(reason) => format!(
-            "{} not {verb} by {}: {reason}",
-            tr.entity_id(),
-            tr.authority_id()
-        ),
-        None if is_authorization => format!(
-            "{} authorized to {}+{} by {}",
-            tr.entity_id(),
-            tr.action(),
-            tr.resource(),
-            tr.authority_id()
-        ),
-        None => format!("{} recognized by {}", tr.entity_id(), tr.authority_id()),
-    };
     let mut body = serde_json::to_value(&tr).map_err(|e| {
         error!("trqp/1.0 could not serialise a record: {e}");
         ProblemReport::internal_error("The registry could not encode the answer")
     })?;
-    // A stored record always carries both flags, but say `false` rather than
-    // omit the field if one ever does not: absence is not an answer (R3.4).
+    // Always the decided boolean, never the stored value or its absence:
+    // absence is not an answer (R3.4).
     if let Some(obj) = body.as_object_mut() {
-        obj.entry(verb.to_string()).or_insert(json!(false));
+        obj.insert(verb.to_string(), json!(holds));
     }
-    Ok((body, message_text))
+    Ok((body, message))
 }
 
 #[cfg(test)]
@@ -286,6 +278,29 @@ mod tests {
         assert!(body.get("recognized").is_none(), "{body}");
     }
 
+    /// A record storing `authorized: false` (as after a git-trust revoke)
+    /// answers `false` with a message that says so (#208).
+    #[tokio::test]
+    async fn a_stored_false_is_answered_false_with_a_negative_message() {
+        let record = TrustRecordBuilder::new()
+            .entity_id(EntityId::new("did:example:revoked"))
+            .authority_id(AuthorityId::new("did:example:authority"))
+            .action(Action::new("issue"))
+            .resource(Resource::new("credential"))
+            .recognized(true)
+            .authorized(false)
+            .record_type(RecordType::Authorization)
+            .build()
+            .unwrap();
+        let repo = LocalStorage::with_records(vec![record]).unwrap();
+        let body = answer(&repo, true, query("did:example:revoked"), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(body["authorized"], false, "{body}");
+        let message = body["message"].as_str().unwrap();
+        assert!(message.contains("not authorized"), "{message}");
+    }
+
     /// Every message example in `DIDCOMM_PROTOCOLS.md` is valid JSON that
     /// parses as a DIDComm message — so it names its type with `type`, the
     /// wire member — and the documented problem codes are the ones defined.
@@ -332,5 +347,17 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(report.code, codes::ERROR_BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_identifier_is_a_bad_request() {
+        let repo = seeded().await;
+        for bad in ["", "has spaces <x>"] {
+            let report = answer(&repo, true, query(bad), Utc::now())
+                .await
+                .unwrap_err();
+            assert_eq!(report.code, codes::ERROR_BAD_REQUEST, "{bad:?}");
+            assert!(report.comment.contains("entity_id"), "{}", report.comment);
+        }
     }
 }

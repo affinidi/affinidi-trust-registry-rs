@@ -33,8 +33,8 @@ use serde_json::Value;
 use trust_tasks_rs::{Dispatcher, ErrorResponse, Payload, RejectReason, TrustTask};
 use uuid::Uuid;
 
-use crate::domain::{Action, AuthorityId, EntityId, Resource};
-use crate::domain::{Evaluation, TrustRecord};
+use crate::domain::{AuthorityId, EntityId};
+use crate::domain::{Evaluation, Question, TrustRecord, parse_ids};
 use crate::storage::repository::{
     RepositoryError, TrustRecordAdminRepository, TrustRecordQuery, TrustRecordRepository,
     find_either_spelling,
@@ -227,71 +227,38 @@ pub async fn handle_document(
 
 /// Look up the record a TRQP query names and evaluate it as of the instant
 /// asked (`context.time`), or the registry's clock when none was asked.
+///
+/// The identifiers are validated first ([`parse_ids`]), as on the HTTP
+/// endpoints and the write path, so every surface agrees on what an
+/// identifier is: an invalid one is refused as `malformedRequest`.
 async fn evaluate_query<R>(
     repository: &R,
     ids: (&str, &str, &str, &str),
     asked: Option<DateTime<Utc>>,
-) -> Result<(Option<TrustRecord>, Evaluation), RepositoryError>
+) -> Result<(Option<TrustRecord>, Evaluation), RejectReason>
 where
     R: TrustRecordRepository + ?Sized,
 {
+    let (_, _, action, resource) =
+        parse_ids(ids.0, ids.1, ids.2, ids.3).map_err(|e| RejectReason::MalformedRequest {
+            reason: e.to_string(),
+        })?;
+    // Validated above; the party references go in as written so the lookup
+    // can fall back to a record an earlier release stored under a did:scid
+    // `?src=` spelling (it tries the normalised key first).
     let record = find_either_spelling(
         repository,
         TrustRecordQuery::new(
             EntityId::as_written(ids.0),
             AuthorityId::as_written(ids.1),
-            Action::new(ids.2),
-            Resource::new(ids.3),
+            action,
+            resource,
         ),
     )
-    .await?;
+    .await
+    .map_err(map_repo_err)?;
     let evaluation = Evaluation::of(record.as_ref(), asked, Utc::now());
     Ok((record, evaluation))
-}
-
-/// Which of the two TRQP questions a query asks.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Question {
-    Recognized,
-    Authorized,
-}
-
-/// The advisory `message`. The spec caps it at 1024 characters, so an answer
-/// whose message would exceed that (pathologically long identifiers) goes
-/// without one rather than failing on a field nothing decides on.
-fn query_message<M>(
-    record: Option<&TrustRecord>,
-    evaluation: &Evaluation,
-    question: Question,
-) -> Option<M>
-where
-    M: TryFrom<String>,
-{
-    let tr = record?;
-    let verb = match question {
-        Question::Recognized => "recognized",
-        Question::Authorized => "authorized",
-    };
-    let text = match evaluation.out_of_window_reason(tr) {
-        Some(reason) => format!(
-            "{} not {verb} by {}: {reason}",
-            tr.entity_id().as_str(),
-            tr.authority_id().as_str()
-        ),
-        None if question == Question::Authorized => format!(
-            "{} authorized to {}+{} by {}",
-            tr.entity_id().as_str(),
-            tr.action().as_str(),
-            tr.resource().as_str(),
-            tr.authority_id().as_str()
-        ),
-        None => format!(
-            "{} recognized by {}",
-            tr.entity_id().as_str(),
-            tr.authority_id().as_str()
-        ),
-    };
-    text.try_into().ok()
 }
 
 /// One version of a TRQP query (`registry/recognition`,
@@ -400,15 +367,20 @@ where
     let asked = p.asked();
     let (record, evaluation) = match evaluate_query(repository.as_ref(), p.ids(), asked).await {
         Ok(found) => found,
-        Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
+        Err(reason) => return Err(doc.reject_with(new_id(), reason)),
     };
-    // Outside its window, a record answers false whatever it stores.
-    let holds = evaluation.in_window()
-        && record.as_ref().is_some_and(|tr| match P::QUESTION {
-            Question::Recognized => tr.is_recognized(),
-            Question::Authorized => tr.is_authorized(),
-        });
-    let message: Option<String> = query_message(record.as_ref(), &evaluation, P::QUESTION);
+    // The answer and its message come from the one shared decision
+    // (`Evaluation::answer`); no record answers `false` with no message. The
+    // spec caps `message` at 1024 characters, so `response` drops one that
+    // would exceed it (pathologically long identifiers) rather than failing
+    // on a field nothing decides on.
+    let (holds, message) = match record.as_ref() {
+        Some(tr) => {
+            let answer = evaluation.answer(tr, P::QUESTION);
+            (answer.holds, Some(answer.message))
+        }
+        None => (false, None),
+    };
     let response = p
         .response(holds, asked, message)
         .map_err(|e| reject_build_err(&doc, e))?;
@@ -1542,6 +1514,116 @@ mod tests {
         .expect_err("refused");
         assert_eq!(err.payload.code.to_string(), "malformedRequest");
         assert!(repo.created.lock().expect("lock").is_empty());
+    }
+
+    /// A record that is written must be queryable over every TRQP surface, so
+    /// a put with an identifier no surface can query is refused (#210).
+    #[tokio::test]
+    async fn put_with_an_invalid_identifier_is_malformed() {
+        let long = "a".repeat(crate::domain::MAX_IDENTIFIER_BYTES + 1);
+        for (field, bad) in [
+            ("entityId", ""),
+            ("authorityId", "has spaces <x>"),
+            ("action", ""),
+            ("resource", long.as_str()),
+        ] {
+            let repo = Arc::new(MockRepo::default());
+            let dispatcher = build_dispatcher(repo.clone());
+            let mut record = serde_json::json!({
+                "entityId": "did:example:e", "authorityId": "did:example:a",
+                "action": "x", "resource": "r", "recordType": "recognition",
+            });
+            record[field] = serde_json::json!(bad);
+            let err = handle_document(
+                &dispatcher,
+                raw_doc::<camel::RecordPutRequest>(serde_json::json!({ "record": record })),
+            )
+            .await
+            .expect_err("refused");
+            assert_eq!(err.payload.code.to_string(), "malformedRequest", "{field}");
+            assert!(repo.created.lock().expect("lock").is_empty(), "{field}");
+        }
+    }
+
+    /// The validated write path still normalises party references: a put
+    /// naming a did:scid with its `?src=` locator stores the bare DID.
+    #[tokio::test]
+    async fn a_validated_put_stores_normalised_party_references() {
+        let repo = Arc::new(MockRepo::default());
+        let dispatcher = build_dispatcher(repo.clone());
+        handle_document(
+            &dispatcher,
+            raw_doc::<camel::RecordPutRequest>(serde_json::json!({
+                "record": {
+                    "entityId": "did:scid:vh:1:entity?src=example.com",
+                    "authorityId": "did:scid:vh:1:authority?src=example.com",
+                    "action": "x", "resource": "r", "recordType": "recognition",
+                }
+            })),
+        )
+        .await
+        .expect("stored");
+        let created = repo.created.lock().expect("lock");
+        assert_eq!(created[0].entity_id().as_str(), "did:scid:vh:1:entity");
+        assert_eq!(
+            created[0].authority_id().as_str(),
+            "did:scid:vh:1:authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_trqp_query_with_an_invalid_identifier_is_malformed() {
+        let err = handle_document(
+            &build_dispatcher(Arc::new(MockRepo {
+                record: Some(sample_record()),
+                ..Default::default()
+            })),
+            value_doc(recognition_request(
+                "",
+                "did:example:authority",
+                "issue",
+                "vc",
+            )),
+        )
+        .await
+        .expect_err("refused");
+        assert_eq!(err.payload.code.to_string(), "malformedRequest");
+    }
+
+    /// In window, a stored `false` or no stored value answers `false`, and
+    /// the message says so rather than the positive sentence (#208).
+    #[tokio::test]
+    async fn a_false_or_absent_flag_answers_false_with_a_negative_message() {
+        let base = || {
+            TrustRecordBuilder::new()
+                .entity_id(EntityId::new("did:example:entity"))
+                .authority_id(AuthorityId::new("did:example:authority"))
+                .action(Action::new("issue"))
+                .resource(Resource::new("vc"))
+                .record_type(RecordType::Authorization)
+        };
+        let ids = serde_json::json!({
+            "entityId": "did:example:entity", "authorityId": "did:example:authority",
+            "action": "issue", "resource": "vc",
+        });
+        for record in [
+            base().authorized(false).recognized(false).build(),
+            base().build(),
+        ] {
+            let record = record.expect("valid record");
+            let repo = || MockRepo {
+                record: Some(record.clone()),
+                ..Default::default()
+            };
+            let out = answer(repo(), raw_doc::<camel::AuthorizationRequest>(ids.clone())).await;
+            assert_eq!(out["authorized"], false, "{out}");
+            let message = out["message"].as_str().expect("a message");
+            assert!(message.contains("not authorized"), "{message}");
+            let out = answer(repo(), raw_doc::<camel::RecognitionRequest>(ids.clone())).await;
+            assert_eq!(out["recognized"], false, "{out}");
+            let message = out["message"].as_str().expect("a message");
+            assert!(message.contains("not recognized"), "{message}");
+        }
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fmt;
 use tracing::warn;
 
-use crate::didcomm::did_document::{TransportFlags, build_did_document, validate_public_url};
+use crate::didcomm::did_document::{TransportFlags, build_did_document_value, validate_public_url};
 
 use super::{
     Configs,
@@ -288,7 +288,10 @@ pub struct DidcommConfig {
     pub acl_mode: AccessListModeType,
     pub profile_config: ProfileConfig,
     pub mediator_did: String,
-    pub did_document: String,
+    /// The DID document served at `/.well-known/did.json`, parsed once when
+    /// the configuration is loaded. `None` (REST-only and embedded configs)
+    /// means none is published, and that route answers `404`.
+    pub did_document: Option<serde_json::Value>,
     pub admin_config: AdminConfig,
     pub retry_config: DidDocumentRetryConfig,
     /// Base directory of the TSP messaging store; the profile alias names a
@@ -398,11 +401,15 @@ pub fn parse_audit_log_format(raw: Option<&str>) -> Result<AuditLogFormat, Strin
     }
 }
 
-/// Parse `DID_DOCUMENT`'s loaded content, which must be a JSON document.
-fn check_did_document(content: &str) -> Result<(), String> {
-    serde_json::from_str::<serde_json::Value>(content)
-        .map(|_| ())
-        .map_err(|e| format!("DID_DOCUMENT is not a JSON document: {e}"))
+/// Parse `DID_DOCUMENT`'s loaded content, which must be a JSON object (a DID
+/// document is one). Parsed once, here, so a bad value stops startup rather
+/// than surfacing when someone fetches `/.well-known/did.json`.
+fn check_did_document(content: &str) -> Result<serde_json::Value, String> {
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(document @ serde_json::Value::Object(_)) => Ok(document),
+        Ok(_) => Err("DID_DOCUMENT is not a JSON object".to_string()),
+        Err(e) => Err(format!("DID_DOCUMENT is not a JSON document: {e}")),
+    }
 }
 
 /// Parse `ACL_MODE`: `ExplicitDeny` (public: anyone may send to the registry
@@ -522,11 +529,11 @@ impl Configs for DidcommConfig {
 
         let did_document = if let Some(doc) = non_empty_env("DID_DOCUMENT") {
             let content = load_setting("DID_DOCUMENT", &doc).await?;
-            check_did_document(&content)?;
-            content
+            check_did_document(&content)?
         } else {
-            build_did_document(
-                &profile_config,
+            build_did_document_value(
+                &profile_config.did,
+                &profile_config.secrets,
                 &mediator_did,
                 public_url.as_deref(),
                 transport_flags,
@@ -542,7 +549,7 @@ impl Configs for DidcommConfig {
             acl_mode,
             mediator_did,
             profile_config,
-            did_document,
+            did_document: Some(did_document),
             admin_config,
             retry_config,
             messaging_store_path: messaging_store_path_from_env(),
@@ -742,6 +749,13 @@ mod strictness_tests {
         assert!(check_did_document(r#"{"id":"did:example:1"}"#).is_ok());
         let err = check_did_document("aws_secret://tr/doc").unwrap_err();
         assert!(err.contains("DID_DOCUMENT"), "{err}");
+        // Valid JSON that cannot be a DID document stops startup too.
+        for not_a_document in ["[]", "\"did:example:1\"", "null", "{}x"] {
+            assert!(
+                check_did_document(not_a_document).is_err(),
+                "{not_a_document}"
+            );
+        }
     }
 
     const RETRY_VARS: [&str; 3] = [
