@@ -38,6 +38,19 @@ impl<H: MessageHandler> Listener<H> {
         // would only poll a dead profile.
         sync.abort();
         self.drain_handlers().await;
+        // Deletions the handlers queued may still sit in the SDK's background
+        // handler, which a closing connection does not drain: send them now.
+        if tokio::time::timeout(mediator_functions::ACK_FLUSH_TIMEOUT, self.flush_acks())
+            .await
+            .is_err()
+        {
+            warn!(
+                "[profile = {}] sending the deletions of recently handled messages took longer \
+                 than {:?}; the rest stay queued at the mediator and are redelivered",
+                self.profile.inner.alias,
+                mediator_functions::ACK_FLUSH_TIMEOUT
+            );
+        }
         result
     }
 

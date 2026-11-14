@@ -47,7 +47,7 @@ use std::time::Duration;
 
 use std::collections::{HashSet, VecDeque};
 
-use affinidi_messaging_core::{Inbound, InboundKind, MessageTransport, Protocol};
+use affinidi_messaging_core::{ConnState, Inbound, InboundKind, MessageTransport, Protocol};
 use affinidi_messaging_sdk::messages::DeleteMessageRequest;
 use affinidi_tdk::common::TDKSharedState;
 use affinidi_tdk::common::config::TDKConfig;
@@ -72,7 +72,8 @@ use crate::didcomm::listener::delivery::{
     MAX_INFLIGHT_HANDLERS, Outcome,
 };
 use crate::didcomm::listener::mediator_functions::{
-    acl_failure_outcome, bounded_value_within, lock_ledger, set_mediator_acl_mode,
+    ACK_FLUSH_TIMEOUT, acl_failure_outcome, bounded_value_within, lock_ledger,
+    set_mediator_acl_mode,
 };
 use crate::health::RegistryHealth;
 use crate::messaging::kv::MessagingStore;
@@ -130,7 +131,7 @@ pub async fn start_managed_delivery<H: MessageHandler>(
         store.relationships.clone(),
         limits,
         config.admin_config.admin_dids.clone(),
-        health,
+        health.clone(),
     )
     .await
     .map_err(|e| DIDCommError::Messaging(format!("open the TSP relationship store: {e}")))?;
@@ -193,6 +194,7 @@ pub async fn start_managed_delivery<H: MessageHandler>(
         &profile_config.alias,
         shutdown,
     )
+    .with_health(health)
     .run()
     .await;
 
@@ -205,7 +207,14 @@ pub async fn start_managed_delivery<H: MessageHandler>(
     if let Err(e) = maintenance.await {
         warn!(error = %e, "the TSP relationship maintenance task did not stop cleanly");
     }
-    messaging.atm.graceful_shutdown().await;
+    // Bounded, so the stop stays within the server's shutdown grace.
+    let close = crate::didcomm::listener::CONNECTION_CLOSE_TIMEOUT;
+    if tokio::time::timeout(close, messaging.atm.graceful_shutdown())
+        .await
+        .is_err()
+    {
+        warn!("closing the mediator connection took longer than {close:?}");
+    }
     drop(messaging);
     drop(store);
     info!(
@@ -229,12 +238,16 @@ pub async fn start_managed_delivery<H: MessageHandler>(
 ///
 /// The host's ATM and websocket are left running on return; they are the
 /// host's to shut down.
+///
+/// `health`, when given, follows the host connection's state and counts the
+/// messages given up on, as on the registry's own connection.
 pub async fn start_shared_delivery<H: MessageHandler>(
     atm: Arc<ATM>,
     profile: Arc<ATMProfile>,
     config: Arc<DidcommConfig>,
     handler: Arc<H>,
     tasks: TaskHandler,
+    health: Option<Arc<RegistryHealth>>,
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
     if let Err(e) = set_mediator_acl_mode(&atm, &profile, config.acl_mode.clone()).await {
@@ -268,6 +281,7 @@ pub async fn start_shared_delivery<H: MessageHandler>(
         tasks,
     });
     InboundLoop::new(transport, acker, sink, &alias, shutdown)
+        .with_health(health)
         .run()
         .await
         .into_result()
@@ -537,6 +551,8 @@ pub(crate) struct InboundLoop<S: InboundSink> {
     handler_timeout: Duration,
     alias: String,
     shutdown: CancellationToken,
+    /// Where the connection's state and given-up messages are reported.
+    health: Option<Arc<RegistryHealth>>,
 }
 
 impl<S: InboundSink> InboundLoop<S> {
@@ -558,7 +574,18 @@ impl<S: InboundSink> InboundLoop<S> {
             handler_timeout: HANDLER_TIMEOUT,
             alias: alias.to_string(),
             shutdown,
+            health: None,
         }
+    }
+
+    /// Report the transport's connection state (`writes`) and the messages
+    /// given up on (`givenUpMessages`) on `health`.
+    pub(crate) fn with_health(mut self, health: Option<Arc<RegistryHealth>>) -> Self {
+        if let Some(health) = &health {
+            health.attach_pickup_listener();
+        }
+        self.health = health;
+        self
     }
 
     /// Bound concurrent handlers to `max` and each to `timeout`.
@@ -579,6 +606,15 @@ impl<S: InboundSink> InboundLoop<S> {
         // Taken here, when the loop is ready to handle what it yields: the
         // transport pulls from the socket only while this stream is polled.
         let mut stream = self.transport.inbound();
+        // `/health` follows the transport's connection state, which changes on
+        // every drop and reconnect (R6.2).
+        let watcher = self.health.clone().map(|health| {
+            tokio::spawn(report_connection_state(
+                self.transport.connection_state(),
+                health,
+                self.alias.clone(),
+            ))
+        });
         info!(
             "[profile = {}] receiving from the mediator; each message is acked once handled",
             self.alias
@@ -614,11 +650,24 @@ impl<S: InboundSink> InboundLoop<S> {
                 self.alias
             );
         }
+        if let Some(watcher) = watcher {
+            watcher.abort();
+        }
         // From here acks are held, not queued: the background queue may not
         // be served again before the caller shuts the ATM down.
         lock_acks(&self.acks).draining = true;
         self.drain().await;
-        self.flush_acks().await;
+        if tokio::time::timeout(ACK_FLUSH_TIMEOUT, self.flush_acks())
+            .await
+            .is_err()
+        {
+            warn!(
+                "[profile = {}] deleting handled messages directly took longer than \
+                 {ACK_FLUSH_TIMEOUT:?}; the rest stay queued at the mediator and are handled \
+                 again after a restart",
+                self.alias
+            );
+        }
         end
     }
 
@@ -653,6 +702,7 @@ impl<S: InboundSink> InboundLoop<S> {
         let sink = self.sink.clone();
         let ledger = self.ledger.clone();
         let limit = self.handler_timeout;
+        let health = self.health.clone();
         tokio::spawn(async move {
             // Held until the ack is sent, so the shutdown drain waits for it.
             let _permit = permit;
@@ -673,6 +723,9 @@ impl<S: InboundSink> InboundLoop<S> {
                          {GIVE_UP_ATTEMPTS} attempts over at least {GIVE_UP_MIN_AGE:?}; \
                          deleting it from the mediator as undeliverable"
                     );
+                    if let Some(health) = &health {
+                        health.record_given_up();
+                    }
                     ack(acker.as_ref(), &acks, &alias, &id).await;
                 }
             }
@@ -741,6 +794,34 @@ impl<S: InboundSink> InboundLoop<S> {
             self.alias,
             ids.len()
         );
+    }
+}
+
+/// Mirror the transport's connection state on `health` until aborted:
+/// connected is `ok`, dropped is `unavailable` until it reconnects, and
+/// still connecting stays `starting` (which turns `unavailable` if it lasts).
+async fn report_connection_state(
+    mut state: tokio::sync::watch::Receiver<ConnState>,
+    health: Arc<RegistryHealth>,
+    alias: String,
+) {
+    loop {
+        let current = *state.borrow_and_update();
+        match current {
+            ConnState::Connected => health.mark_writes_ok(),
+            ConnState::Disconnected => {
+                warn!("[profile = {alias}] the mediator connection dropped; reconnecting");
+                health.mark_writes_unavailable(
+                    "the mediator connection dropped; reconnecting (see the registry's log)",
+                );
+            }
+            _ => {}
+        }
+        if state.changed().await.is_err() {
+            // The transport is gone: nothing will report again.
+            health.mark_writes_unavailable("the mediator connection closed");
+            return;
+        }
     }
 }
 

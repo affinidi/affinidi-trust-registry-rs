@@ -788,8 +788,6 @@ pub enum TrustRecordError {
     MissingAuthorityId,
     MissingAction,
     MissingResource,
-    MissingTimeRequested,
-    MissingTimeEvaluated,
     MissingRecordType,
     InvalidRecordType,
     /// `valid_from` is not earlier than `valid_until`.
@@ -803,8 +801,6 @@ impl fmt::Display for TrustRecordError {
             Self::MissingAuthorityId => write!(f, "Authority ID is required"),
             Self::MissingAction => write!(f, "Action is required"),
             Self::MissingResource => write!(f, "Resource is required"),
-            Self::MissingTimeRequested => write!(f, "Time requested is required"),
-            Self::MissingTimeEvaluated => write!(f, "Time evaluated is required"),
             Self::MissingRecordType => write!(f, "Record type is required"),
             Self::InvalidRecordType => write!(f, "Record type is invalid"),
             Self::InvalidValidityWindow => {

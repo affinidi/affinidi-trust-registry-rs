@@ -98,6 +98,8 @@ tempfile.workspace = true
 vta-sdk = { workspace = true, features = ["provision-client", "test-support"] }
 serial_test.workspace = true
 tower.workspace = true
+# Paused-clock tests (`tokio::time::advance`).
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bin]]
 name = "trust-registry"

@@ -291,3 +291,48 @@ async fn an_unpackable_copy_of_an_in_flight_message_is_left_alone() {
     assert_eq!(listener.undeliverable_at("m1", Instant::now()).await, None);
     fake.release.notify_waiters();
 }
+
+/// A handled message's id is kept for the shutdown flush, which sends its
+/// deletion directly rather than trusting the background handler's queue to
+/// be sent before the connection closes.
+#[tokio::test]
+async fn a_handled_message_is_kept_for_the_shutdown_flush() {
+    let (listener, _fake) = listener(Behaviour::Succeed, 4).await;
+    listener.dispatch("m1".into(), work()).await;
+    until("the ack to be recorded", || {
+        let ids = listener.acks.take_recent(Instant::now());
+        let found = ids.iter().any(|id| id == "m1");
+        for id in ids {
+            listener.acks.record(&id, Instant::now());
+        }
+        found
+    })
+    .await;
+
+    // The flush takes them (its direct deletes fail here: no mediator).
+    listener.flush_acks().await;
+    assert!(listener.acks.take_recent(Instant::now()).is_empty());
+}
+
+#[test]
+fn recent_acks_forget_ids_outside_the_window() {
+    let acks = mediator_functions::RecentAcks::default();
+    let start = Instant::now();
+    acks.record("old", start);
+    acks.record("new", start + mediator_functions::RECENT_ACK_WINDOW);
+    let later = start + mediator_functions::RECENT_ACK_WINDOW + Duration::from_secs(1);
+    assert_eq!(acks.take_recent(later), vec!["new".to_string()]);
+}
+
+/// Closing the registry's own connection is bounded, even when there is no
+/// mediator to say goodbye to.
+#[tokio::test]
+async fn closing_an_owned_connection_is_bounded() {
+    let (listener, _fake) = listener(Behaviour::Succeed, 4).await;
+    tokio::time::timeout(
+        CONNECTION_CLOSE_TIMEOUT + Duration::from_secs(5),
+        close_owned_connection(&listener.atm),
+    )
+    .await
+    .expect("bounded");
+}

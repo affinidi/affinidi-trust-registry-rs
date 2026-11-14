@@ -108,6 +108,11 @@ pub struct Listener<H: MessageHandler> {
     /// Handler slots; see [`delivery::MAX_INFLIGHT_HANDLERS`].
     pub(crate) permits: Arc<tokio::sync::Semaphore>,
     pub(crate) max_inflight: usize,
+    /// Where mediator round trips and given-up messages are reported.
+    pub(crate) health: Option<Arc<crate::health::RegistryHealth>>,
+    /// Ids recently queued for background deletion, sent again directly on
+    /// shutdown ([`mediator_functions::RecentAcks`]).
+    pub(crate) acks: Arc<mediator_functions::RecentAcks>,
 }
 
 impl<H: MessageHandler> Listener<H> {
@@ -125,7 +130,22 @@ impl<H: MessageHandler> Listener<H> {
             ledger: Arc::default(),
             permits: Arc::new(tokio::sync::Semaphore::new(delivery::MAX_INFLIGHT_HANDLERS)),
             max_inflight: delivery::MAX_INFLIGHT_HANDLERS,
+            health: None,
+            acks: Arc::default(),
         }
+    }
+
+    /// Report mediator round trips (`writes`) and given-up messages
+    /// (`givenUpMessages`) on `health`.
+    pub(crate) fn with_health(
+        mut self,
+        health: Option<Arc<crate::health::RegistryHealth>>,
+    ) -> Self {
+        if let Some(health) = &health {
+            health.attach_pickup_listener();
+        }
+        self.health = health;
+        self
     }
 
     /// Bound concurrent handlers to `max` instead of
@@ -227,33 +247,27 @@ pub(crate) async fn start_one_did_listener(
     health: Option<Arc<crate::health::RegistryHealth>>,
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
-    // Only the TSP relationship store reports to health.
-    #[cfg(not(feature = "tsp"))]
-    let _ = health;
-    // Does the document peers actually resolve match what this binary serves?
-    // Checked here, before any source-specific setup, because every source has
-    // the same exposure — the published document is written by the provisioning
-    // VTA, not by us, so no runtime flag validation can catch a stale entry.
-    // Advisory only: it logs, it never refuses to start.
-    crate::didcomm::transport_capability::report_at_startup(
-        &profile_config.did,
-        &config.transport_flags,
-    )
-    .await;
-
+    // The advertised-vs-served transport check runs from `TrustRegistryBuilder::build`
+    // for every transport configuration, not here.
     let handler = BaseHandler::build_from_arc(repository, tasks.clone());
 
+    // Only a connection the registry opened is the registry's to close; a
+    // host's lent ATM is left alone.
+    let owns_connection = matches!(source, DidCommSource::Managed);
     let listener = match source {
         DidCommSource::Managed => {
             // We are about to publish this DID as reachable, so refuse to start
-            // until its DID document actually resolves.
-            check_did_document_availability(
-                &profile_config.did,
-                config.retry_config.max_attempts,
-                config.retry_config.initial_delay_secs,
-                config.retry_config.max_delay_secs,
-            )
-            .await?;
+            // until its DID document actually resolves. Its retries can take
+            // minutes, so a shutdown meanwhile stops it rather than waiting.
+            tokio::select! {
+                checked = check_did_document_availability(
+                    &profile_config.did,
+                    config.retry_config.max_attempts,
+                    config.retry_config.initial_delay_secs,
+                    config.retry_config.max_delay_secs,
+                ) => checked?,
+                _ = shutdown.cancelled() => return Ok(()),
+            }
 
             // A TSP-enabled registry receives through the SDK's
             // `DidCommTransport` instead of the pickup loop: that transport
@@ -306,6 +320,7 @@ pub(crate) async fn start_one_did_listener(
                     config,
                     Arc::new(handler),
                     tasks,
+                    health,
                     shutdown,
                 )
                 .await;
@@ -338,8 +353,29 @@ pub(crate) async fn start_one_did_listener(
         &listener.profile.inner.alias
     );
 
-    Arc::new(listener).start_listening(config).await?;
-    Ok(())
+    let atm = listener.atm.clone();
+    let result = Arc::new(listener.with_health(health))
+        .start_listening(config)
+        .await;
+    if owns_connection {
+        close_owned_connection(&atm).await;
+    }
+    result
+}
+
+/// How long closing the registry's own mediator connection may take.
+pub(crate) const CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Close a mediator connection the registry opened itself, once the listener
+/// has drained its handlers and sent their deletions directly
+/// ([`Listener::flush_acks`]). Bounded by [`CONNECTION_CLOSE_TIMEOUT`].
+async fn close_owned_connection(atm: &ATM) {
+    if tokio::time::timeout(CONNECTION_CLOSE_TIMEOUT, atm.graceful_shutdown())
+        .await
+        .is_err()
+    {
+        warn!("closing the mediator connection took longer than {CONNECTION_CLOSE_TIMEOUT:?}");
+    }
 }
 
 /// starts DIDComm listener for the configured DID profile
