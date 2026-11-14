@@ -180,12 +180,20 @@ impl TrustRecordKey {
 /// Only the leading run of `Some`s is used: `TR#` alone when the authority is
 /// `None`. The escaped prefix comes first; the unescaped one an older release
 /// would have written follows when it differs.
+///
+/// A record an earlier release stored under a did:scid reference with its
+/// `?src=` locator (before references were normalised) has a key no prefix
+/// of the normalised reference covers. So a did:scid authority also yields
+/// `TR#<authority>?src=`, which covers every locator, and a did:scid entity
+/// is left out of the run (it is the last component, so this only widens a
+/// fully keyed prefix to its resource).
 pub(crate) fn storage_key_prefixes(
     authority: Option<&AuthorityId>,
     action: Option<&Action>,
     resource: Option<&Resource>,
     entity: Option<&EntityId>,
 ) -> Vec<String> {
+    let entity = entity.filter(|entity| !entity.as_str().starts_with(SCID_PREFIX));
     let leading: Vec<&str> = [
         authority.map(AuthorityId::as_str),
         action.map(Action::as_str),
@@ -210,14 +218,29 @@ pub(crate) fn storage_key_prefixes(
         }
         prefix
     };
-    let escaped = join(true);
+    let mut prefixes = vec![join(true)];
     let literal = join(false);
-    if literal == escaped {
-        vec![escaped]
-    } else {
-        vec![escaped, literal]
+    if !prefixes.contains(&literal) {
+        prefixes.push(literal);
     }
+    if let Some(authority) = authority.filter(|a| a.as_str().starts_with(SCID_PREFIX)) {
+        for located in [
+            format!(
+                "{TR_SK_PREFIX}{}?src=",
+                escape_component(authority.as_str())
+            ),
+            format!("{TR_SK_PREFIX}{}?src=", authority.as_str()),
+        ] {
+            if !prefixes.contains(&located) {
+                prefixes.push(located);
+            }
+        }
+    }
+    prefixes
 }
+
+/// References of this method may carry a `?src=` locator.
+const SCID_PREFIX: &str = "did:scid:";
 
 impl fmt::Display for TrustRecordKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -444,6 +467,30 @@ mod tests {
         }
 
         assert_eq!(dedupe_listing(vec![(legacy, old.clone())]), vec![old]);
+    }
+
+    #[test]
+    fn a_did_scid_filter_covers_keys_stored_with_a_locator() {
+        let authority = AuthorityId::new("did:scid:vh:1:abc");
+        let entity = EntityId::new("did:scid:vh:1:xyz#key-1");
+        let action = Action::new("issue");
+        let resource = Resource::new("vc");
+        let prefixes = storage_key_prefixes(
+            Some(&authority),
+            Some(&action),
+            Some(&resource),
+            Some(&entity),
+        );
+        for stored in [
+            "TR#did:scid:vh:1:abc#issue#vc#did:scid:vh:1:xyz%23key-1",
+            "TR#did:scid:vh:1:abc?src=example.com#issue#vc#did:scid:vh:1:xyz%23key-1",
+            "TR#did:scid:vh:1:abc#issue#vc#did:scid:vh:1:xyz?src=example.com%23key-1",
+        ] {
+            assert!(
+                prefixes.iter().any(|p| stored.starts_with(p.as_str())),
+                "{stored} under {prefixes:?}"
+            );
+        }
     }
 
     #[test]

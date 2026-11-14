@@ -241,8 +241,12 @@ impl TrustRecordFilter {
         Self::default()
     }
 
+    /// Compared in the normalised form (a did:scid without its `?src=`
+    /// locator) on both sides, so a record an earlier release stored with a
+    /// locator matches a filter naming the bare DID, and the other way round.
     fn field_matches(wanted: Option<&str>, value: &str) -> bool {
-        wanted.is_none_or(|wanted| wanted == value)
+        use affinidi_did_common::scid::strip_scid_src;
+        wanted.is_none_or(|wanted| strip_scid_src(wanted) == strip_scid_src(value))
     }
 
     fn matches_parts(&self, entity: &str, authority: &str, action: &str, resource: &str) -> bool {
@@ -286,11 +290,21 @@ impl TrustRecordFilter {
     /// unescaped form is ambiguous, and later identifiers are not part of it),
     /// so a caller still applies [`Self::matches`].
     pub fn storage_key_prefixes(&self) -> Vec<String> {
+        // From the normalised references (`new` drops a did:scid locator), so
+        // a filter written with a locator scans what the bare DID covers.
+        let authority = self
+            .authority_id
+            .as_ref()
+            .map(|authority| AuthorityId::new(authority.as_str()));
+        let entity = self
+            .entity_id
+            .as_ref()
+            .map(|entity| EntityId::new(entity.as_str()));
         crate::domain::key::storage_key_prefixes(
-            self.authority_id.as_ref(),
+            authority.as_ref(),
             self.action.as_ref(),
             self.resource.as_ref(),
-            self.entity_id.as_ref(),
+            entity.as_ref(),
         )
     }
 }

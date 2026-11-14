@@ -658,6 +658,56 @@ pub(crate) async fn list_matching_returns_what_the_filter_matches(fixture: &Fixt
     sibling.cleanup(repo).await;
 }
 
+/// A record an earlier release stored under a did:scid reference with its
+/// `?src=` locator is found by a filter naming the bare (normalised) DID, as
+/// authority or as entity, and by one naming another locator.
+pub(crate) async fn list_matching_finds_records_stored_with_a_locator(fixture: &Fixture) {
+    let repo = fixture.repo();
+    let bare = format!("did:scid:vh:1:conformance-{}", uuid::Uuid::new_v4());
+    let located = format!("{bare}?src=example.com");
+    let entity_bare = format!("{bare}-holder#key-1");
+    let entity_located = format!("{bare}-holder?src=example.com#key-1");
+    let stored = TrustRecordBuilder::new()
+        .entity_id(EntityId::as_written(entity_located.as_str()))
+        .authority_id(AuthorityId::as_written(located.as_str()))
+        .action(Action::new("issue"))
+        .resource(Resource::new("vc"))
+        .recognized(true)
+        .authorized(true)
+        .record_type(RecordType::Authorization)
+        .build()
+        .expect("valid record");
+    assert_eq!(stored.authority_id().as_str(), located, "stored as written");
+    repo.create(stored.clone()).await.expect("create");
+
+    let filters = [
+        TrustRecordFilter {
+            authority_id: Some(AuthorityId::new(bare.as_str())),
+            ..Default::default()
+        },
+        TrustRecordFilter {
+            authority_id: Some(AuthorityId::as_written(format!("{bare}?src=other.example"))),
+            action: Some(Action::new("issue")),
+            ..Default::default()
+        },
+        TrustRecordFilter {
+            authority_id: Some(AuthorityId::new(bare.as_str())),
+            action: Some(Action::new("issue")),
+            resource: Some(Resource::new("vc")),
+            entity_id: Some(EntityId::new(entity_bare.as_str())),
+        },
+    ];
+    let mut found = Vec::new();
+    for filter in &filters {
+        found.push(matching(repo, filter).await);
+    }
+    let _ = repo.delete(query_for(&stored)).await;
+
+    for (filter, found) in filters.iter().zip(found) {
+        assert_eq!(found, vec![stored.clone()], "{filter:?}");
+    }
+}
+
 /// Expand the conformance suite as `#[tokio::test]`s in a `conformance`
 /// child module.
 ///
@@ -683,7 +733,8 @@ macro_rules! repository_conformance_tests {
                 concurrent_creates_of_one_key,
                 concurrent_creates_of_distinct_keys,
                 corrupt_value_is_an_error,
-                list_matching_returns_what_the_filter_matches
+                list_matching_returns_what_the_filter_matches,
+                list_matching_finds_records_stored_with_a_locator
             );
         }
     };
