@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::domain::key::TrustRecordKey;
 use crate::domain::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,11 +15,76 @@ pub struct TrustRecordQuery {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustRecordList {
     records: Vec<TrustRecord>,
+    /// Stored values a listing found but could not decode. Never serialised:
+    /// it holds other records' storage keys.
+    #[serde(skip)]
+    unreadable: Vec<UnreadableRecord>,
+}
+
+/// A stored value a listing could not decode, known only by its storage key.
+///
+/// The adapter logs it at `error`. A caller filtering the listing decides
+/// with [`Self::could_match`] whether it must fail rather than answer without
+/// it. The storage key is for logs only: it may name another authority's
+/// record, so it must not reach a client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableRecord {
+    storage_key: String,
+}
+
+impl UnreadableRecord {
+    pub fn new(storage_key: impl Into<String>) -> Self {
+        Self {
+            storage_key: storage_key.into(),
+        }
+    }
+
+    pub fn storage_key(&self) -> &str {
+        &self.storage_key
+    }
+
+    /// Whether the record stored here could satisfy `matches`: true when any
+    /// identifier tuple its key can stand for does, or when the key does not
+    /// decode at all, so nothing about it can be ruled out.
+    pub fn could_match(&self, matches: impl Fn(&TrustRecordKey) -> bool) -> bool {
+        let candidates = TrustRecordKey::candidates_for_storage_key(&self.storage_key);
+        candidates.is_empty() || candidates.iter().any(matches)
+    }
+}
+
+/// Log a stored value a listing could not decode and note it as unreadable.
+pub(crate) fn skip_unreadable(
+    storage_key: String,
+    error: &RepositoryError,
+    unreadable: &mut Vec<UnreadableRecord>,
+) {
+    tracing::error!(
+        storage_key = %storage_key,
+        %error,
+        "stored trust record does not decode; leaving it out of the listing"
+    );
+    unreadable.push(UnreadableRecord::new(storage_key));
 }
 
 impl TrustRecordList {
     pub fn new(records: Vec<TrustRecord>) -> Self {
-        Self { records }
+        Self {
+            records,
+            unreadable: Vec::new(),
+        }
+    }
+
+    /// A listing that also reports the stored values it could not decode.
+    pub fn with_unreadable(records: Vec<TrustRecord>, unreadable: Vec<UnreadableRecord>) -> Self {
+        Self {
+            records,
+            unreadable,
+        }
+    }
+
+    /// The stored values this listing skipped because they did not decode.
+    pub fn unreadable(&self) -> &[UnreadableRecord] {
+        &self.unreadable
     }
 
     pub fn records(&self) -> &[TrustRecord] {
@@ -56,6 +122,28 @@ impl TrustRecordQuery {
     }
 }
 
+/// Errors a repository reports.
+///
+/// Every adapter reports the same condition with the same variant and the same
+/// message, so a client's reject reason does not depend on the backend:
+///
+/// - a strict create of a key that holds a record: [`Self::RecordAlreadyExists`]
+///   carrying the record's storage key ([`TrustRecordKey::sk`]), built with
+///   [`RepositoryError::already_exists`];
+/// - an update, delete or read of a key that holds none: [`Self::RecordNotFound`]
+///   carrying the storage key, built with [`RepositoryError::not_found`];
+/// - a stored record that cannot be decoded: [`Self::SerializationFailed`]
+///   from a lookup of its key. A listing does not fail on it: it leaves the
+///   record out, logs it, and reports it in [`TrustRecordList::unreadable`],
+///   so a caller filtering the listing can fail when it might have matched;
+/// - the backend unreachable (connection refused, timeout):
+///   [`Self::ConnectionFailed`]; the backend answered with an error:
+///   [`Self::QueryFailed`].
+///
+/// The conformance suite in `storage::conformance` checks this for every
+/// adapter.
+///
+/// [`TrustRecordKey::sk`]: crate::domain::key::TrustRecordKey::sk
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RepositoryError {
     #[error("Connection failed: {0}")]
@@ -74,6 +162,18 @@ pub enum RepositoryError {
     LockPoisoned,
 }
 
+impl RepositoryError {
+    /// A strict create found `key` already holding its record.
+    pub fn already_exists(key: &TrustRecordKey) -> Self {
+        Self::RecordAlreadyExists(key.sk())
+    }
+
+    /// No record is stored for `key`.
+    pub fn not_found(key: &TrustRecordKey) -> Self {
+        Self::RecordNotFound(key.sk())
+    }
+}
+
 /// Read-only repository trait for querying trust records
 #[async_trait::async_trait]
 pub trait TrustRecordRepository: Send + Sync {
@@ -90,7 +190,18 @@ pub trait TrustRecordAdminRepository: TrustRecordRepository {
     async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError>;
     async fn delete(&self, query: TrustRecordQuery) -> Result<(), RepositoryError>;
     async fn list(&self) -> Result<TrustRecordList, RepositoryError>;
-    async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError>;
+
+    /// The record `query` names, or [`RepositoryError::RecordNotFound`].
+    ///
+    /// The same lookup as [`TrustRecordRepository::find_by_query`], with
+    /// absence as an error. Adapters do not override it, so the two can never
+    /// disagree.
+    async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
+        let key = TrustRecordKey::from_query(&query);
+        self.find_by_query(query)
+            .await?
+            .ok_or_else(|| RepositoryError::not_found(&key))
+    }
 }
 
 #[cfg(test)]

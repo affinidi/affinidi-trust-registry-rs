@@ -116,6 +116,63 @@ impl TrustRecordKey {
     }
 }
 
+/// Undo [`escape_component`]. `None` for a `%` not starting `%23` or `%25`,
+/// which no current key contains.
+fn unescape_component(component: &str) -> Option<String> {
+    let mut unescaped = String::with_capacity(component.len());
+    let mut rest = component;
+    while let Some(at) = rest.find('%') {
+        unescaped.push_str(&rest[..at]);
+        let sequence = rest.get(at..at + 3)?;
+        match sequence {
+            "%23" => unescaped.push(SEPARATOR),
+            "%25" => unescaped.push('%'),
+            _ => return None,
+        }
+        rest = &rest[at + 3..];
+    }
+    unescaped.push_str(rest);
+    Some(unescaped)
+}
+
+impl TrustRecordKey {
+    /// Every identifier 4-tuple whose record could be stored under
+    /// `storage_key`: the escaped reading ([`Self::sk`]) and, for a key that
+    /// may date from before escaping, the literal one ([`Self::legacy_sk`]).
+    ///
+    /// Empty when the string is not a trust record key of four components,
+    /// in which case nothing can be ruled out about whose record it holds.
+    pub fn candidates_for_storage_key(storage_key: &str) -> Vec<TrustRecordKey> {
+        let Some(body) = storage_key.strip_prefix(TR_SK_PREFIX) else {
+            return Vec::new();
+        };
+        let parts: Vec<&str> = body.split(SEPARATOR).collect();
+        let [authority, action, resource, entity] = parts.as_slice() else {
+            return Vec::new();
+        };
+        let key = |authority: &str, action: &str, resource: &str, entity: &str| TrustRecordKey {
+            authority_id: AuthorityId::new(authority),
+            action: Action::new(action),
+            resource: Resource::new(resource),
+            entity_id: EntityId::new(entity),
+        };
+        let mut candidates = Vec::with_capacity(2);
+        if let (Some(authority), Some(action), Some(resource), Some(entity)) = (
+            unescape_component(authority),
+            unescape_component(action),
+            unescape_component(resource),
+            unescape_component(entity),
+        ) {
+            candidates.push(key(&authority, &action, &resource, &entity));
+        }
+        let literal = key(authority, action, resource, entity);
+        if !candidates.contains(&literal) {
+            candidates.push(literal);
+        }
+        candidates
+    }
+}
+
 impl fmt::Display for TrustRecordKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.sk())
@@ -253,6 +310,27 @@ mod tests {
             literal.legacy_sk().as_deref(),
             Some("TR#did:a#act#x%23y#did:e")
         );
+    }
+
+    #[test]
+    fn a_storage_key_decodes_to_the_tuples_it_can_hold() {
+        let plain = key("did:a", "issue", "vc", "did:e");
+        assert_eq!(
+            TrustRecordKey::candidates_for_storage_key(&plain.sk()),
+            vec![plain]
+        );
+
+        let escaped = key("did:a", "act", "x#y", "did:e");
+        let literal = key("did:a", "act", "x%23y", "did:e");
+        let candidates = TrustRecordKey::candidates_for_storage_key(&escaped.sk());
+        assert_eq!(candidates, vec![escaped, literal]);
+
+        for undecodable in ["", "other", "TR#a#b#c", "TR#a#b#c#d#e"] {
+            assert!(
+                TrustRecordKey::candidates_for_storage_key(undecodable).is_empty(),
+                "{undecodable}"
+            );
+        }
     }
 
     #[test]

@@ -56,6 +56,8 @@ TRQP (REST or DIDComm) is unsigned and read-only, matching the ToIP spec verbati
   - [Secret-store backends (`secrets-*`)](#secret-store-backends-secrets-)
   - [DynamoDB storage (`storage-ddb`)](#dynamodb-storage-storage-ddb)
   - [Embedded fjall storage (`storage-fjall`)](#embedded-fjall-storage-storage-fjall)
+  - [CSV file storage](#csv-file-storage)
+  - [Storage key layout](#storage-key-layout)
 - [Environment Variables](#environment-variables)
   - [Profile Config Options](#profile-config-options)
 - [Additional Resources](#additional-resources)
@@ -340,7 +342,8 @@ Redis is a high-performance, in-memory data store that can be used as a storage 
 - **Fast Operations**: In-memory storage provides sub-millisecond response times
 - **Persistence**: Redis can be configured for data persistence using RDB snapshots or AOF (Append Only File)
 - **Scalability**: Supports clustering and replication for high availability
-- **Data Structure**: Trust records are stored as JSON strings with keys formatted as `entity_id|authority_id|action|resource`
+- **Data Structure**: Trust records are stored as JSON strings under keys of the form `TR#<authority_id>#<action>#<resource>#<entity_id>` (see [Storage key layout](#storage-key-layout) for how `#` and `%` in an identifier are escaped)
+- **Atomic writes**: Each create, update and delete reads the keys it depends on under `WATCH` and applies its change in one `MULTI`/`EXEC`, so registry replicas sharing one Redis cannot both create the same record, and an update racing a delete cannot bring the record back
 
 ### Production Considerations
 
@@ -444,17 +447,31 @@ redis-cli -h localhost -p 6379 ping
 
 **View stored records:**
 ```bash
-# List all keys
-redis-cli KEYS "*|*|*|*"
+# List the trust record keys (SCAN does not block the server the way KEYS does)
+redis-cli --scan --pattern 'TR#*'
 
-# Get a specific record
-redis-cli GET "did:example:entity1|did:example:authority1|action1|resource1"
+# Get a specific record: TR#<authority_id>#<action>#<resource>#<entity_id>
+redis-cli GET 'TR#did:example:authority1#action1#resource1#did:example:entity1'
 ```
 
-**Clear all test data:**
+An identifier containing `#` or `%` appears escaped in its key (`%23`, `%25`);
+see [Storage key layout](#storage-key-layout).
+
+**Running the Redis tests:** the adapter's tests run only when
+`TR_TEST_REDIS_URL` is set, and fail if it is set but unreachable. Point it at a
+dedicated database, never at one holding registry data; the tests delete only
+the keys they write, but a dedicated database keeps them apart entirely:
+
 ```bash
-redis-cli FLUSHDB
+TR_TEST_REDIS_URL=redis://127.0.0.1:6379/15 cargo test -p trust-registry --lib redis_storage
 ```
+
+The DynamoDB adapter's tests likewise run only when `TR_TEST_DYNAMODB_ENDPOINT`
+names a DynamoDB Local or LocalStack endpoint (for example
+`http://localhost:4566`); they create the table `TR_TEST_DYNAMODB_TABLE`
+(default `trust-registry-conformance`) if it is missing. With
+`TR_TEST_REQUIRE_SERVICES=true` (as CI sets it), an unset service variable
+fails the tests instead of skipping them.
 
 ## Test the API
 
@@ -1062,6 +1079,69 @@ single-node, on-disk option that needs no external database.
 | Variable         | Description                                                | Required                                       |
 | ---------------- | ---------------------------------------------------------- | ---------------------------------------------- |
 | `TR_FJALL_PATH`  | Directory for the embedded fjall keyspace.                 | default: `./trust_records.fjall`               |
+
+Each create, update or delete is `fsync`ed (fjall `PersistMode::SyncAll`) before
+it is acknowledged, so an acknowledged write survives a host crash or power
+loss, not only a process crash. Records use the shared
+[storage key layout](#storage-key-layout).
+
+### CSV file storage
+
+The CSV backend (`TR_STORAGE_BACKEND=csv`, the default) keeps the records in
+memory and rewrites `FILE_STORAGE_PATH` on every create, update or delete:
+
+- Writes are serialised, and each one goes to a temporary file in the same
+  directory that is `fsync`ed and renamed over the file, so a crash leaves the
+  old file or the new one, never a truncated one. The change is applied in
+  memory only after the file write succeeds.
+- The file is re-read every `FILE_STORAGE_UPDATE_INTERVAL_SEC` seconds and
+  before every write, and compared by content with what the registry last read
+  or wrote. An operator's edit is loaded, not overwritten. An edit that does
+  not parse (including a context cell that is not base64 of JSON) is neither
+  loaded nor overwritten: writes fail until it is fixed, and queries keep
+  answering from the last good contents. An emptied file is treated the same
+  way.
+- Rows are written sorted by storage key, always with the header row.
+
+The file has one writer: do not point two registry processes at the same file.
+Use Redis, DynamoDB or fjall for that. Hand edits are best effort too:
+
+- An edit saved while the registry is writing can be lost. The registry reads
+  the file, applies its change and renames its new copy into place; an edit
+  that lands between the read and the rename is replaced. Edit while no writes
+  are arriving, or make changes through the Trust Task API.
+- An editor that truncates the file and rewrites it in place can be caught
+  half-way by a reload. A half-written file that does not parse (or is empty)
+  is refused and the current records are kept, but one cut at a row boundary
+  parses and is loaded as it stands; a registry write at that moment saves the
+  shortened file and the rest of the edit is lost. Save by writing a new file
+  and renaming it over the old one where your editor allows.
+
+Because the file is replaced by renaming a new file over it:
+
+- The directory holding the file must be writable by the registry, not only
+  the file (the temporary file is created there). The Docker image creates
+  `/app/sample-data` owned by its `trustregistry` user.
+- Mount the directory into a container, never the file alone: renaming over a
+  single-file bind mount fails (`EBUSY`), so every write would fail.
+- A `FILE_STORAGE_PATH` that is a symbolic link is replaced by a regular file
+  on the first write; the link's target is left unchanged.
+- The file gets a new inode on every write. Its permissions are carried over.
+
+### Storage key layout
+
+The Redis, DynamoDB and fjall backends store each record under the key
+
+```text
+TR#<authority_id>#<action>#<resource>#<entity_id>
+```
+
+with `%` in an identifier written as `%25` and `#` as `%23`, so that distinct
+records never share a key; an identifier containing neither is used as is.
+DynamoDB puts this in the sort key `SK` under the partition key `PK = TR`.
+Records written by releases before the escaping was introduced may still be
+stored under the unescaped form; they are read from there and moved to the
+escaped key on their next update.
 
 ## Environment Variables
 

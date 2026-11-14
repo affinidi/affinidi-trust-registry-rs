@@ -1,7 +1,7 @@
 use redis::{AsyncCommands, Client, aio::MultiplexedConnection};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::domain::key::{TR_SK_PREFIX, TrustRecordKey, dedupe_listing};
 use crate::domain::*;
@@ -14,6 +14,12 @@ use crate::storage::repository::*;
 /// Keys are formatted as: TR#{authority}#{action}#{resource}#{entity}, each
 /// identifier escaped (see `TrustRecordKey::sk`)
 /// Values are JSON-serialized TrustRecord objects
+///
+/// Every write is atomic across registry replicas sharing one Redis: it reads
+/// the keys it depends on under `WATCH` and applies its changes in one
+/// `MULTI`/`EXEC`, which Redis aborts if any watched key changed; the write
+/// then re-plans. So two strict creates of one key never both succeed, and an
+/// update racing a delete cannot bring the record back.
 #[derive(Clone)]
 pub struct RedisStorage {
     /// One multiplexed connection. Every use must hold the write lock for the
@@ -24,7 +30,7 @@ pub struct RedisStorage {
 }
 
 impl RedisStorage {
-    pub async fn new(redis_url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(redis_url: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         info!(
             "Connecting to Redis at {}",
             crate::configs::storage::redact_url_credentials(redis_url)
@@ -48,10 +54,6 @@ impl RedisStorage {
             RepositoryError::SerializationFailed(format!("Failed to deserialize record: {e}"))
         })
     }
-}
-
-fn not_found(key: &TrustRecordKey) -> RepositoryError {
-    RepositoryError::RecordNotFound(format!("Record not found: {}", key.sk()))
 }
 
 /// How many times a write is re-planned when a key it read changed before it
@@ -266,6 +268,7 @@ impl TrustRecordAdminRepository for RedisStorage {
 
         let mut conn = self.connection.write().await;
         let mut entries = Vec::new();
+        let mut unreadable = Vec::new();
 
         // Use SCAN instead of KEYS to avoid blocking Redis
         // SCAN is O(1) per call and iterates incrementally
@@ -291,9 +294,7 @@ impl TrustRecordAdminRepository for RedisStorage {
                 if let Some(data) = data {
                     match Self::deserialize_record(&data) {
                         Ok(record) => entries.push((key, record)),
-                        Err(e) => {
-                            error!("Failed to deserialize record for key {}: {}", key, e);
-                        }
+                        Err(e) => skip_unreadable(key, &e, &mut unreadable),
                     }
                 }
             }
@@ -306,13 +307,7 @@ impl TrustRecordAdminRepository for RedisStorage {
 
         let records = dedupe_listing(entries);
         info!("Listed {} records", records.len());
-        Ok(TrustRecordList::new(records))
-    }
-
-    async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
-        let key = TrustRecordKey::from_query(&query);
-        debug!("Reading record with key: {}", key);
-        self.find(&key).await?.ok_or_else(|| not_found(&key))
+        Ok(TrustRecordList::with_unreadable(records, unreadable))
     }
 }
 
@@ -343,17 +338,52 @@ mod tests {
             .unwrap()
     }
 
+    /// The Redis named by `TR_TEST_REDIS_URL`, or `None` (the test is
+    /// skipped, loudly) when it is unset. Each test deletes only the keys it
+    /// wrote, but point it at a dedicated database (`redis://host:6379/15`).
     async fn get_test_storage() -> Option<RedisStorage> {
-        let url = std::env::var("TR_TEST_REDIS_URL")
-            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
-        match RedisStorage::new(&url).await {
-            Ok(storage) => Some(storage),
-            Err(_) => {
-                println!("Redis not available, skipping test");
-                None
-            }
-        }
+        let url = crate::storage::conformance::redis_test_url()?;
+        Some(
+            RedisStorage::new(&url)
+                .await
+                .expect("TR_TEST_REDIS_URL is set but Redis is unreachable"),
+        )
     }
+
+    async fn conformance_fixture() -> Option<crate::storage::conformance::Fixture> {
+        let storage = get_test_storage().await?;
+        // A second connection, as a second registry replica would hold.
+        let peer = get_test_storage().await?;
+        let writer = storage.clone();
+        let remover = storage.clone();
+        Some(
+            crate::storage::conformance::Fixture::new(storage)
+                .with_peer(peer)
+                .with_corrupter(
+                    move |storage_key: String| {
+                        let storage = writer.clone();
+                        Box::pin(async move {
+                            let mut conn = storage.connection.write().await;
+                            let result: redis::RedisResult<()> =
+                                conn.set(&storage_key, "{not json").await;
+                            result.expect("Redis SET");
+                        })
+                    },
+                    move |storage_key: String| {
+                        let storage = remover.clone();
+                        Box::pin(async move {
+                            let mut conn = storage.connection.write().await;
+                            let _: Result<(), _> = conn.del(&storage_key).await;
+                        })
+                    },
+                ),
+        )
+    }
+
+    // Every Redis test here runs in the `redis` serial group, the suite's
+    // included: they share one database, and one test's planted or leftover
+    // keys must not be visible to another's listing mid-run.
+    crate::storage::conformance::repository_conformance_tests!(redis, conformance_fixture().await);
 
     async fn cleanup_test_data(storage: &RedisStorage, records: &[TrustRecord]) {
         let mut conn = storage.connection.write().await;
@@ -367,7 +397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(redis)]
     async fn test_create_and_read_record() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -402,7 +432,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(redis)]
     async fn test_create_duplicate_fails() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -431,7 +461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(redis)]
     async fn test_update_record() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -477,7 +507,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(redis)]
     async fn test_delete_record() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -511,7 +541,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(redis)]
     async fn test_list_records() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -541,14 +571,16 @@ mod tests {
         storage.create(record1.clone()).await.unwrap();
         storage.create(record2.clone()).await.unwrap();
 
+        // The database may hold other records; this test's two must be there.
         let list = storage.list().await.unwrap();
-        assert_eq!(list.records().len(), 2);
+        assert!(list.records().contains(&record1));
+        assert!(list.records().contains(&record2));
 
         cleanup_test_data(&storage, &[record1, record2]).await;
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(redis)]
     async fn test_find_by_query() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -604,7 +636,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(redis)]
     async fn test_records_with_separator_in_identifiers_stay_distinct() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -647,7 +679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(redis)]
     async fn test_record_under_earlier_key_is_read_updated_and_deleted() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -744,7 +776,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(redis)]
     async fn test_missing_record_writes_leave_the_record_under_its_key_string() {
         let Some(storage) = get_test_storage().await else {
             return;
@@ -775,7 +807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(redis)]
     async fn test_create_moves_the_record_under_its_key_string_aside() {
         let Some(storage) = get_test_storage().await else {
             return;

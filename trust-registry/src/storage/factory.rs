@@ -22,13 +22,17 @@ use crate::{
     ),
     allow(dead_code)
 )]
-fn backend_not_compiled(selected: &str, feature: &str) -> Box<dyn std::error::Error> {
+fn backend_not_compiled(selected: &str, feature: &str) -> BoxError {
     anyhow!(
         "TR_STORAGE_BACKEND={selected} was selected but that backend is not compiled in; \
          rebuild with --features {feature}"
     )
     .into()
 }
+
+/// The error [`TrustStorageRepoFactory::create`] returns: the backend's own
+/// error, unflattened, and `Send + Sync` so it can cross tasks.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 pub struct TrustStorageRepoFactory {
     config: Arc<TrustRegistryConfig>,
@@ -54,9 +58,7 @@ impl TrustStorageRepoFactory {
         )),
         allow(unreachable_code, unused_variables)
     )]
-    pub async fn create(
-        &self,
-    ) -> Result<Arc<dyn TrustRecordAdminRepository>, Box<dyn std::error::Error>> {
+    pub async fn create(&self) -> Result<Arc<dyn TrustRecordAdminRepository>, BoxError> {
         let repository: Arc<dyn TrustRecordAdminRepository> =
             match self.config.storage_config.storage_backend {
                 TrustStorageBackend::Csv => {
@@ -68,8 +70,7 @@ impl TrustStorageRepoFactory {
                                 config.path,
                                 config.update_interval_sec,
                             )
-                            .await
-                            .map_err(|e| anyhow!(e.to_string()))?;
+                            .await?;
                         Arc::new(file_storage)
                     }
                     #[cfg(not(feature = "storage-csv"))]
@@ -81,8 +82,7 @@ impl TrustStorageRepoFactory {
                         let ddb_config = self.config.storage_config.ddb_storage_config.clone();
                         let ddb =
                             crate::storage::adapters::ddb_storage::DynamoDbStorage::new(ddb_config)
-                                .await
-                                .map_err(|e| anyhow!(e.to_string()))?;
+                                .await?;
                         Arc::new(ddb)
                     }
                     #[cfg(not(feature = "storage-ddb"))]
@@ -95,8 +95,7 @@ impl TrustStorageRepoFactory {
                         let redis = crate::storage::adapters::redis_storage::RedisStorage::new(
                             &redis_config.redis_url,
                         )
-                        .await
-                        .map_err(|e| anyhow!(e.to_string()))?;
+                        .await?;
                         Arc::new(redis)
                     }
                     #[cfg(not(feature = "storage-redis"))]
@@ -108,8 +107,7 @@ impl TrustStorageRepoFactory {
                         let fjall_config = self.config.storage_config.fjall_storage_config.clone();
                         let fjall = crate::storage::adapters::fjall_storage::FjallStorage::new(
                             &fjall_config.path,
-                        )
-                        .map_err(|e| anyhow!(e.to_string()))?;
+                        )?;
                         Arc::new(fjall)
                     }
                     #[cfg(not(feature = "storage-fjall"))]

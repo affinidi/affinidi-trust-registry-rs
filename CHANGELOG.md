@@ -246,6 +246,26 @@ release goes GA (`## 0.27.0 (date)`).
   placeholder whose binary printed a greeting. The versions already on
   crates.io are left as they are.
 
+- **Storage API cleanup.** `LocalStorage::save` (a second copy of `create`)
+  is removed. `TrustRecordAdminRepository::read` has a default implementation
+  in terms of `find_by_query`, and no adapter overrides it any more (an
+  external implementation still may). The `is_enabled` fields of
+  `FileStorageConfig`, `DynamoDbStorageConfig`, `RedisStorageConfig` and
+  `FjallStorageConfig`, which nothing read, are removed. The unused
+  `configs::server::ProfileConfig` is removed (`configs::ProfileConfig`, from
+  `configs::didcomm`, is unchanged).
+  `TrustStorageRepoFactory::create`, `RedisStorage::new` and
+  `FjallStorage::new` return `Box<dyn Error + Send + Sync>`, and the factory
+  passes the backend's error through instead of flattening it to a string.
+- **Repository error payloads are the storage key.** Every adapter reports a
+  duplicate create as `RecordAlreadyExists(<key>)` and a missing record as
+  `RecordNotFound(<key>)`, where `<key>` is `TR#<authority>#<action>#<resource>#<entity>`
+  (new `RepositoryError::already_exists` / `not_found`). Messages read
+  `Record already exists: TR#…` instead of `Record already exists: Record
+  already exists: …`, and the CSV backend no longer uses its own
+  `entity|authority|action|resource` format. These strings reach clients as
+  the `TaskFailed` reason.
+
 ### Added
 
 - **`trql-client`: `trql_client::trust_tasks`** re-exports `TrustTask`,
@@ -266,6 +286,14 @@ release goes GA (`## 0.27.0 (date)`).
   binding under `spawn_with_mediator` (a `tsp` build alone never did, so the
   routed TSP test could not pass). New tests query the real registry through
   `trql-client` over HTTPS, DIDComm and TSP.
+- **One conformance suite for every storage adapter** (#256, #213). The
+  in-memory, CSV and fjall adapters run it always; Redis when
+  `TR_TEST_REDIS_URL` is set, DynamoDB when `TR_TEST_DYNAMODB_ENDPOINT` is. It
+  checks strict create, strict update and delete semantics, `read` and
+  `find_by_query` agreement, field round trips, error variants and messages,
+  corrupt-value handling, and that concurrent strict creates of one key
+  (split across two handles where the backend allows) produce exactly one
+  success.
 - **Audit entries for writes carry `document_digest`**, the SHA-256 (hex) of
   the canonical JSON of the whole signed document, proof included, so an
   archived copy of a request can be matched to its entry and its proof checked
@@ -534,6 +562,14 @@ release goes GA (`## 0.27.0 (date)`).
   policy, which accepts authcrypt only, nothing changes; it matters for a host
   that lends the registry an ATM with a wider policy. Queries without a
   DIDComm identity use the REST TRQP endpoints.
+- **The CSV file is replaced by rename on every write, so its directory must
+  be writable by the registry, and it must not be bind-mounted on its own**
+  (#190). The temporary file is created next to the CSV; a rename over a
+  single-file bind mount fails (`EBUSY`), so mount the directory. A
+  `FILE_STORAGE_PATH` that is a symbolic link becomes a regular file on the
+  first write. The Docker image now creates `/app/sample-data` owned by the
+  `trustregistry` user. Hand edits remain single-writer: an edit saved while
+  the registry is writing can be lost (see the README's CSV section).
 
 ### Fixed
 
@@ -722,6 +758,69 @@ release goes GA (`## 0.27.0 (date)`).
 - The CSV backend's per-poll messages are logged at `debug`, not `info`
   (#255).
 - `file://` loader values are read without blocking the async runtime (#219).
+
+- **CSV backend writes are serialised, atomic and durable** (#190). A
+  mutation now holds one lock from re-reading the file to publishing the
+  result, writes a temporary file that is `fsync`ed and renamed over the
+  target (then `fsync`s the directory), and changes memory only after the
+  write succeeds. Before, concurrent writes could land on disk out of order and
+  lose an acknowledged record, a failed write stayed live in memory until
+  restart, a crash mid-write truncated the registry, and the reload task could
+  read a half-written file and empty the registry. The reload compares file
+  contents instead of modification times, takes the same lock, and refuses an
+  empty file; an operator's edit is loaded before the next write instead of
+  being overwritten, and an edit that does not parse is kept and makes writes
+  fail until it is fixed. A context cell that is not base64 of JSON now fails
+  the load instead of silently becoming an empty context. Rows are written in
+  key order, always with a header. Dropping a clone of `FileStorage` no longer
+  stops its reload task.
+- **fjall writes are `fsync`ed before they are acknowledged** (#254). Each
+  mutation's batch is committed with `PersistMode::SyncAll`; before, the
+  journal was only flushed to OS buffers, so a host crash could drop
+  acknowledged writes.
+- **DynamoDB: concurrent strict creates of one record no longer all succeed**
+  (#213). A create checked that the record was absent, then read its key
+  again to plan the write; when a concurrent create landed between the two
+  reads, the plan became "replace the record this key holds", whose
+  condition held, so the second create silently overwrote the first and both
+  reported success. The conformance suite caught it against LocalStack (up to
+  7 of 16 concurrent creates "won"). A create now fails with
+  `RecordAlreadyExists` when that second read finds the record. Redis (whose
+  `WATCH` covers both reads) and fjall (one lock) were not affected.
+- **DynamoDB: only a stale read re-plans a write** (#189). A cancelled
+  `TransactWriteItems` is re-planned only when every cancellation reason is
+  `ConditionalCheckFailed`, `TransactionConflict` or `None`, read from the
+  typed service error; any other reason (throttling, validation) is reported.
+  `GetItem`, `TransactGetItems` and `Query` failures are `ConnectionFailed`
+  only when DynamoDB could not be reached and `QueryFailed` otherwise, and
+  carry the service's error code and message instead of the SDK's fixed
+  "service error".
+- **An undecodable stored record no longer disappears silently, and no
+  longer fails unrelated queries** (#256). Redis and fjall dropped it from
+  `list` with a log line, so a partially keyed `registry/record/query` that
+  should have returned it answered without it; DynamoDB failed the whole
+  listing, so one bad item failed every such query, with an error naming the
+  item's key, which can belong to another authority. Now every keyed backend
+  leaves it out of `list`, logs it at `error`, and reports it in the new
+  `TrustRecordList::unreadable`. `registry/record/query` fails with an
+  internal error that names no key only when the unreadable record could
+  match its filter (judged from the storage key; a key that does not decode
+  could match anything), and answers otherwise. A lookup of the key itself
+  still fails with `SerializationFailed`.
+- **The Redis tests no longer pass without Redis or touch real data** (#228).
+  They run against `TR_TEST_REDIS_URL` only, are skipped with a message when
+  it is unset and fail when it is set but unreachable, and delete only the
+  keys they wrote. `tests/redis_integration_test.rs`, which used a hard-coded
+  `redis://127.0.0.1:6379` and deleted every record it found there, is
+  removed. CI's test job now runs the Redis tests against a Redis service and
+  the DynamoDB tests against LocalStack, and fails rather than skips them if
+  their variables are missing (`TR_TEST_REQUIRE_SERVICES`). The dead CSV
+  setup in `tests/http_integration_test.rs`, which could not affect the
+  separately started server, is removed.
+- **README: the Redis key format and `redis-cli` commands match what the
+  registry writes** (#231), `FLUSHDB` is gone from the operator
+  troubleshooting steps, and the shared storage key layout, the CSV write
+  guarantees and the fjall durability are documented.
 
 ## 0.31.0 (release/0.31)
 

@@ -577,6 +577,23 @@ where
     let list = repository.list().await.map_err(map_repo_err)?;
     let field_matches =
         |filter: Option<&str>, value: &str| filter.is_none_or(|wanted| wanted == value);
+    // A stored record the backend could not decode fails the query only if it
+    // could be one of the matches: answering without it would silently drop a
+    // result. One that cannot match is left out (the adapter logged it). The
+    // reason names no key: the record may belong to another authority.
+    let unreadable_could_match = list.unreadable().iter().any(|unreadable| {
+        unreadable.could_match(|key| {
+            field_matches(f.entity_id, key.entity_id().as_str())
+                && field_matches(f.authority_id, key.authority_id().as_str())
+                && field_matches(f.action, key.action().as_str())
+                && field_matches(f.resource, key.resource().as_str())
+        })
+    });
+    if unreadable_could_match {
+        return Err(RejectReason::InternalError {
+            reason: "a stored record that may match this query could not be read".to_string(),
+        });
+    }
     let mut matches: Vec<TrustRecord> = list
         .into_records()
         .into_iter()
@@ -692,7 +709,7 @@ mod tests {
     use crate::domain::{
         Action, AuthorityId, EntityId, RecordType, Resource, TrustRecord, TrustRecordBuilder,
     };
-    use crate::storage::repository::{TrustRecordList, TrustRecordQuery};
+    use crate::storage::repository::{TrustRecordList, TrustRecordQuery, UnreadableRecord};
     use std::sync::Mutex;
     use trust_tasks_rs::Payload;
 
@@ -702,6 +719,8 @@ mod tests {
         /// Extra records returned by `list` (after `record`), for enumeration
         /// and pagination tests.
         listing: Vec<TrustRecord>,
+        /// Stored values `list` reports as undecodable.
+        unreadable: Vec<UnreadableRecord>,
         created: Mutex<Vec<TrustRecord>>,
         updated: Mutex<Vec<TrustRecord>>,
         /// When set, `create` reports the key as already taken.
@@ -758,12 +777,13 @@ mod tests {
             Ok(())
         }
         async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
-            Ok(TrustRecordList::new(
+            Ok(TrustRecordList::with_unreadable(
                 self.record
                     .clone()
                     .into_iter()
                     .chain(self.listing.iter().cloned())
                     .collect(),
+                self.unreadable.clone(),
             ))
         }
         async fn read(&self, _query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
@@ -771,6 +791,73 @@ mod tests {
                 .clone()
                 .ok_or_else(|| RepositoryError::RecordNotFound("none".into()))
         }
+    }
+
+    fn filter<'a>(authority_id: Option<&'a str>, action: Option<&'a str>) -> RecordFilter<'a> {
+        RecordFilter {
+            entity_id: None,
+            authority_id,
+            action,
+            resource: None,
+            cursor: None,
+            limit: None,
+        }
+    }
+
+    /// An undecodable stored record fails a query it could match, and only
+    /// such a query; the reason never names its key.
+    #[tokio::test]
+    async fn an_unreadable_record_fails_only_a_query_it_could_match() {
+        let other = crate::domain::key::TrustRecordKey::from_record(
+            &TrustRecordBuilder::new()
+                .entity_id(EntityId::new("did:example:e"))
+                .authority_id(AuthorityId::new("did:example:other#authority"))
+                .action(Action::new("issue"))
+                .resource(Resource::new("vc"))
+                .recognized(true)
+                .authorized(true)
+                .record_type(RecordType::Authorization)
+                .build()
+                .expect("valid record"),
+        )
+        .sk();
+        let repo = MockRepo {
+            record: Some(sample_record()),
+            unreadable: vec![UnreadableRecord::new(other.clone())],
+            ..Default::default()
+        };
+
+        // A query for another authority answers without it.
+        let (page, _) = query_records(&repo, filter(Some("did:example:authority"), None))
+            .await
+            .expect("answered");
+        assert_eq!(page, vec![sample_record()]);
+
+        // A query it could match fails, without naming its key.
+        for could_match in [
+            filter(Some("did:example:other#authority"), None),
+            filter(None, Some("issue")),
+            filter(None, None),
+        ] {
+            match query_records(&repo, could_match).await {
+                Err(RejectReason::InternalError { reason }) => {
+                    assert!(!reason.contains("other"), "{reason}");
+                }
+                other => panic!("expected an internal error, got {other:?}"),
+            }
+        }
+
+        // A key that does not decode could be anything: fail closed.
+        let repo = MockRepo {
+            record: Some(sample_record()),
+            unreadable: vec![UnreadableRecord::new("TR#not-a-key")],
+            ..Default::default()
+        };
+        assert!(
+            query_records(&repo, filter(Some("did:example:authority"), None))
+                .await
+                .is_err()
+        );
     }
 
     fn value_doc<P: Payload>(payload: P) -> TrustTask<Value> {

@@ -97,10 +97,41 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    # The Redis and DynamoDB storage adapters' tests (conformance suite
+    # included) run only when TR_TEST_REDIS_URL / TR_TEST_DYNAMODB_ENDPOINT are
+    # set. Redis database 15 keeps them apart from anything else; the DynamoDB
+    # tests create their table in LocalStack if it is missing.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      localstack:
+        # The image docker-compose.yaml uses.
+        image: localstack/localstack:3.6.0
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: dynamodb
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
     env:
       # Read by trust-registry/tests/didcomm_integration_test.rs (longer waits).
       IN_PIPELINE: 'true'
       MEDIATOR_DID: ${{ vars.MEDIATOR_DID }}
+      TR_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      TR_TEST_DYNAMODB_ENDPOINT: http://127.0.0.1:4566
+      TR_TEST_DYNAMODB_TABLE: trust-registry-conformance
+      # Fail, rather than skip, a storage test whose service variable is unset.
+      TR_TEST_REQUIRE_SERVICES: 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         # No `ref:`: a pull_request run tests the PR merged into its base

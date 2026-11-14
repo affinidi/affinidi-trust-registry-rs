@@ -160,12 +160,16 @@ pub async fn plan_create(
 ) -> Result<Vec<Op>, RepositoryError> {
     let key = TrustRecordKey::from_record(record);
     if lookup(reader, &key).await?.is_some() {
-        return Err(RepositoryError::RecordAlreadyExists(format!(
-            "Record already exists: {}",
-            key.sk()
-        )));
+        return Err(RepositoryError::already_exists(&key));
     }
     let (mut ops, slot_expect) = make_room(reader, &key).await?;
+    // `make_room` reads the key again. If the record appeared there after the
+    // lookup (a concurrent create), the plan would otherwise be "overwrite the
+    // record this key holds", which the backend's condition accepts: the
+    // second create would silently replace the first.
+    if slot_expect == Expect::Holds(key.clone()) {
+        return Err(RepositoryError::already_exists(&key));
+    }
     ops.push(Op {
         storage_key: key.sk(),
         expect: slot_expect,
@@ -182,10 +186,7 @@ pub async fn plan_update(
 ) -> Result<Vec<Op>, RepositoryError> {
     let key = TrustRecordKey::from_record(record);
     let Some((found_under, _)) = lookup(reader, &key).await? else {
-        return Err(RepositoryError::RecordNotFound(format!(
-            "Record not found: {}",
-            key.sk()
-        )));
+        return Err(RepositoryError::not_found(&key));
     };
     let current = key.sk();
     if found_under == current {
@@ -226,10 +227,7 @@ pub async fn plan_delete(
         }
     }
     if ops.is_empty() {
-        return Err(RepositoryError::RecordNotFound(format!(
-            "Record not found: {}",
-            key.sk()
-        )));
+        return Err(RepositoryError::not_found(key));
     }
     Ok(ops)
 }
@@ -320,6 +318,44 @@ mod tests {
                 .expect("lookup");
             assert_eq!(found.map(|(_, record)| record).as_ref(), Some(wanted));
         }
+    }
+
+    /// Reads `stored` from every read after the first, as if a concurrent
+    /// create landed between them.
+    struct AppearsAfterFirstRead {
+        reads: usize,
+        stored: TrustRecord,
+    }
+
+    #[async_trait::async_trait]
+    impl KeyedReader for AppearsAfterFirstRead {
+        async fn read_at(
+            &mut self,
+            storage_key: &str,
+        ) -> Result<Option<TrustRecord>, RepositoryError> {
+            self.reads += 1;
+            let present =
+                self.reads > 1 && storage_key == TrustRecordKey::from_record(&self.stored).sk();
+            Ok(present.then(|| self.stored.clone()))
+        }
+    }
+
+    /// A create whose key gains the record between the existence check and
+    /// the slot read is rejected, not planned as an overwrite. The conformance
+    /// suite found this on DynamoDB, where it let several concurrent strict
+    /// creates of one key all succeed.
+    #[tokio::test]
+    async fn a_record_created_concurrently_is_not_overwritten() {
+        let winner = record("vc");
+        let mut reader = AppearsAfterFirstRead {
+            reads: 0,
+            stored: winner.clone(),
+        };
+        let result = plan_create(&mut reader, &winner.clone().with_authorized(false)).await;
+        assert!(
+            matches!(result, Err(RepositoryError::RecordAlreadyExists(_))),
+            "{result:?}"
+        );
     }
 
     #[tokio::test]

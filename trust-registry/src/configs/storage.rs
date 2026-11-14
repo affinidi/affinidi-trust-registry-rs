@@ -20,7 +20,6 @@ pub const DEFAULT_FJALL_PATH: &str = "./trust_records.fjall";
 
 #[derive(Debug, Clone)]
 pub struct FileStorageConfig {
-    pub is_enabled: bool,
     pub path: String,
     /// How often the file is checked for changes. Must be at least one.
     pub update_interval_sec: u64,
@@ -31,7 +30,6 @@ pub struct FileStorageConfig {
 impl Default for FileStorageConfig {
     fn default() -> Self {
         Self {
-            is_enabled: false,
             path: DEFAULT_TRUST_REGISTRY_FILE_PATH.to_string(),
             update_interval_sec: DEFAULT_TRUST_REGISTRY_UPDATE_INTERVAL_SEC,
         }
@@ -40,7 +38,6 @@ impl Default for FileStorageConfig {
 
 #[derive(Clone, Default)]
 pub struct DynamoDbStorageConfig {
-    pub is_enabled: bool,
     pub table_name: String,
     /// `None` lets the AWS SDK resolve the region (`AWS_DEFAULT_REGION`, the
     /// profile, instance metadata).
@@ -55,7 +52,6 @@ pub struct DynamoDbStorageConfig {
 impl std::fmt::Debug for DynamoDbStorageConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DynamoDbStorageConfig")
-            .field("is_enabled", &self.is_enabled)
             .field("table_name", &self.table_name)
             .field("region", &self.region)
             .field("profile", &self.profile)
@@ -75,14 +71,12 @@ impl std::fmt::Debug for DynamoDbStorageConfig {
 /// never writes them out.
 #[derive(Clone, Default)]
 pub struct RedisStorageConfig {
-    pub is_enabled: bool,
     pub redis_url: String,
 }
 
 impl std::fmt::Debug for RedisStorageConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RedisStorageConfig")
-            .field("is_enabled", &self.is_enabled)
             .field("redis_url", &redact_url_credentials(&self.redis_url))
             .finish()
     }
@@ -135,7 +129,6 @@ pub fn redact_url_credentials(raw: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub struct FjallStorageConfig {
-    pub is_enabled: bool,
     pub path: String,
 }
 
@@ -143,7 +136,6 @@ pub struct FjallStorageConfig {
 impl Default for FjallStorageConfig {
     fn default() -> Self {
         Self {
-            is_enabled: false,
             path: DEFAULT_FJALL_PATH.to_string(),
         }
     }
@@ -187,7 +179,6 @@ fn load_storage_backend() -> Result<TrustStorageBackend, String> {
 impl FileStorageConfig {
     fn from_env() -> Result<Self, String> {
         Ok(FileStorageConfig {
-            is_enabled: true,
             path: env_or("FILE_STORAGE_PATH", DEFAULT_TRUST_REGISTRY_FILE_PATH),
             update_interval_sec: positive_env(
                 "FILE_STORAGE_UPDATE_INTERVAL_SEC",
@@ -200,7 +191,6 @@ impl FileStorageConfig {
 impl DynamoDbStorageConfig {
     fn from_env() -> Result<Self, String> {
         Ok(DynamoDbStorageConfig {
-            is_enabled: true,
             table_name: required_env("DDB_TABLE_NAME")?,
             // Unset: the AWS SDK resolves the region itself (AWS_DEFAULT_REGION,
             // the selected profile, instance metadata).
@@ -235,7 +225,6 @@ fn ddb_endpoint_from_env() -> Result<Option<String>, String> {
 impl RedisStorageConfig {
     fn from_env() -> Result<Self, String> {
         Ok(RedisStorageConfig {
-            is_enabled: true,
             redis_url: required_env("REDIS_URL")?,
         })
     }
@@ -244,14 +233,13 @@ impl RedisStorageConfig {
 impl FjallStorageConfig {
     fn from_env() -> Self {
         FjallStorageConfig {
-            is_enabled: true,
             path: env_or("TR_FJALL_PATH", DEFAULT_FJALL_PATH),
         }
     }
 }
 
 /// Each sub-config loads its own settings only when `TR_STORAGE_BACKEND`
-/// selects it, and the default (disabled) value otherwise.
+/// selects it, and the default value otherwise.
 macro_rules! load_when_selected {
     ($ty:ty, $backend:expr, $from_env:expr) => {
         #[async_trait::async_trait]
@@ -529,7 +517,6 @@ mod tests {
         let config = crate::configs::TrustRegistryConfig {
             storage_config: StorageConfig {
                 redis_storage_config: RedisStorageConfig {
-                    is_enabled: true,
                     redis_url: "redis://alice:s3cr3t-pw@cache.internal:6379".to_string(),
                 },
                 ddb_storage_config: DynamoDbStorageConfig {
