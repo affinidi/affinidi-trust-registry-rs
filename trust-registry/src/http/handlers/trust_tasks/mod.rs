@@ -27,9 +27,7 @@ use trust_tasks_rs::{ErrorResponse, RejectReason, TransportHandler, TrustTask};
 use uuid::Uuid;
 
 use crate::SharedData;
-use crate::embed::with_reply_signer;
 use crate::storage::repository::TrustRecordRepository;
-use crate::trust_tasks::TaskHandler;
 
 fn new_id() -> String {
     Uuid::new_v4().to_string()
@@ -88,21 +86,13 @@ where
         }
     };
 
-    // The read-only query dispatcher, and no dedup store: there is no mutation
-    // to replay, and keying read answers by message id would change their
-    // semantics. `sender_did: None` says the caller is unauthenticated, so the
-    // shared handler denies any write outright — the surface stays read-only
-    // even if it is ever pointed at a dispatcher that does register writes.
-    let tasks = with_reply_signer(
-        TaskHandler::new(
-            state.query_dispatcher.clone(),
-            my_vid.clone(),
-            Vec::new(),
-            state.verifier.clone(),
-        )
-        .with_audit(state.audit.clone()),
-        &state.config,
-    );
+    // The registry's one read-only handler: the query dispatcher, and no dedup
+    // store: there is no mutation to replay, and keying read answers by
+    // message id would change their semantics. `sender_did: None` says the
+    // caller is unauthenticated, so the handler denies any write outright —
+    // the surface stays read-only even if it is ever pointed at a dispatcher
+    // that does register writes.
+    let tasks = &state.query_tasks;
 
     // HTTP transport: anonymous caller (no bearer auth wired yet), our VID local.
     let transport = HttpsHandler::new(Some(my_vid), None);

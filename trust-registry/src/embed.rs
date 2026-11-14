@@ -53,7 +53,6 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
@@ -67,13 +66,11 @@ use crate::capabilities::{
 use crate::configs::TrustRegistryConfig;
 use crate::dedup::{MemoryMessageIdStore, MessageIdStore};
 use crate::didcomm::listener::DidCommSource;
-use crate::health::RegistryHealth;
+use crate::health::{RegistryHealth, WriteStatus};
 use crate::http::application_routes;
 use crate::storage::repository::{TrustRecordAdminRepository, TrustRecordRepository};
 use crate::trust_tasks::{ReplySigner, TaskHandler};
-use crate::{SharedData, server::ServerHandle};
-
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
+use crate::{BoxError, SharedData, server::ServerHandle};
 
 /// A Trust Registry assembled but not yet serving.
 ///
@@ -83,16 +80,20 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// health surface, and [`repository`](Self::repository) to read records
 /// directly.
 pub struct TrustRegistry {
-    config: Arc<TrustRegistryConfig>,
-    repository: Arc<dyn TrustRecordAdminRepository>,
-    capabilities: Arc<CapabilitySet>,
-    verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
-    dedup: Arc<dyn MessageIdStore>,
-    audit: Arc<BoundedAuditLogger>,
-    health: Arc<RegistryHealth>,
-    didcomm_source: DidCommSource,
-    shutdown: CancellationToken,
-    service_start_timestamp: DateTime<Utc>,
+    pub(crate) config: Arc<TrustRegistryConfig>,
+    pub(crate) repository: Arc<dyn TrustRecordAdminRepository>,
+    pub(crate) capabilities: Arc<CapabilitySet>,
+    pub(crate) audit: Arc<BoundedAuditLogger>,
+    pub(crate) health: Arc<RegistryHealth>,
+    pub(crate) didcomm_source: DidCommSource,
+    pub(crate) shutdown: CancellationToken,
+    /// The one write-carrying Trust Task handler. Every binding and every
+    /// [`task_handler`](Self::task_handler) call gets a clone, so they share
+    /// its replay records and reply signer.
+    pub(crate) tasks: TaskHandler,
+    /// The one read-only Trust Task handler, shared the same way by the HTTP
+    /// surface and [`query_task_handler`](Self::query_task_handler).
+    pub(crate) query_tasks: TaskHandler,
 }
 
 impl TrustRegistry {
@@ -136,11 +137,14 @@ impl TrustRegistry {
     /// host nesting the registry under a prefix should serve the registry's DID
     /// document itself, or mount at the root.
     pub fn router(&self) -> axum::Router {
-        application_routes("", self.shared_data())
+        application_routes(self.shared_data())
     }
 
     /// A standalone `GET /health` router, for a host that wants to expose the
     /// registry's health as its own endpoint rather than merging the state.
+    /// The standalone service serves this same router. Each request refreshes
+    /// the storage probe when the cached one has expired
+    /// ([`RegistryHealth::report`]).
     pub fn health_router(&self) -> axum::Router {
         use axum::{Json, routing::get};
 
@@ -149,7 +153,7 @@ impl TrustRegistry {
             "/health",
             get(move || {
                 let health = health.clone();
-                async move { Json(health.to_json()) }
+                async move { Json(health.report().await) }
             }),
         )
     }
@@ -165,14 +169,11 @@ impl TrustRegistry {
     /// `None` for `sender_did` on an unauthenticated caller; writes are then
     /// denied. An authenticated sender alone never authorises a write: the
     /// document must also carry a valid proof by the same DID.
+    ///
+    /// Every call returns a clone of the same handler, so documents fed in
+    /// through any of them share one record of accepted identifiers.
     pub fn task_handler(&self) -> TaskHandler {
-        write_task_handler(
-            &self.config,
-            &self.capabilities,
-            &self.verifier,
-            &self.dedup,
-            &self.audit,
-        )
+        self.tasks.clone()
     }
 
     /// Route a Trust Task that arrived over DIDComm on a socket the **host**
@@ -192,7 +193,7 @@ impl TrustRegistry {
     ) -> Option<Result<trust_tasks_rs::TrustTask<serde_json::Value>, trust_tasks_rs::ErrorResponse>>
     {
         crate::didcomm::handlers::trust_tasks::route_envelope_body(
-            &self.task_handler(),
+            &self.tasks,
             body,
             Some(sender_did),
         )
@@ -202,16 +203,9 @@ impl TrustRegistry {
     /// A read-only Trust Task handler over the query dispatcher, with no dedup
     /// store — the shape the HTTP surface uses. For a host exposing queries to
     /// callers it does not authenticate. Writes offered to it are refused and
-    /// audited.
+    /// audited. A clone of the handler the HTTP surface uses.
     pub fn query_task_handler(&self) -> TaskHandler {
-        let handler = TaskHandler::new(
-            self.capabilities.query_dispatcher(),
-            self.config.didcomm_config.profile_config.did.clone(),
-            Vec::new(),
-            self.verifier.clone(),
-        )
-        .with_audit(self.audit.clone() as Arc<dyn AuditLogger>);
-        with_reply_signer(handler, &self.config)
+        self.query_tasks.clone()
     }
 
     /// The live admin dispatcher handle.
@@ -235,6 +229,7 @@ impl TrustRegistry {
         &self.repository
     }
 
+    /// The configuration the registry was built with.
     pub fn config(&self) -> &Arc<TrustRegistryConfig> {
         &self.config
     }
@@ -253,11 +248,8 @@ impl TrustRegistry {
     fn shared_data(&self) -> SharedData<dyn TrustRecordRepository> {
         SharedData {
             config: self.config.clone(),
-            service_start_timestamp: self.service_start_timestamp,
             repository: self.repository.clone() as Arc<dyn TrustRecordRepository>,
-            query_dispatcher: self.capabilities.query_dispatcher(),
-            verifier: self.verifier.clone(),
-            audit: self.audit.clone(),
+            query_tasks: self.query_tasks.clone(),
         }
     }
 
@@ -272,38 +264,6 @@ impl TrustRegistry {
     pub async fn serve(self) -> Result<ServerHandle, BoxError> {
         crate::server::serve_registry(self).await
     }
-
-    // --- accessors used by `crate::server` when it drives the service form ---
-
-    pub(crate) fn into_parts(self) -> RegistryParts {
-        RegistryParts {
-            config: self.config,
-            repository: self.repository,
-            capabilities: self.capabilities,
-            verifier: self.verifier,
-            dedup: self.dedup,
-            audit: self.audit,
-            health: self.health,
-            didcomm_source: self.didcomm_source,
-            shutdown: self.shutdown,
-            service_start_timestamp: self.service_start_timestamp,
-        }
-    }
-}
-
-/// Destructured [`TrustRegistry`], so `crate::server` can consume the pieces
-/// without making every field public.
-pub(crate) struct RegistryParts {
-    pub(crate) config: Arc<TrustRegistryConfig>,
-    pub(crate) repository: Arc<dyn TrustRecordAdminRepository>,
-    pub(crate) capabilities: Arc<CapabilitySet>,
-    pub(crate) verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
-    pub(crate) dedup: Arc<dyn MessageIdStore>,
-    pub(crate) audit: Arc<BoundedAuditLogger>,
-    pub(crate) health: Arc<RegistryHealth>,
-    pub(crate) didcomm_source: DidCommSource,
-    pub(crate) shutdown: CancellationToken,
-    pub(crate) service_start_timestamp: DateTime<Utc>,
 }
 
 /// The Trust Task handler every write-carrying binding shares: the admin
@@ -333,38 +293,30 @@ fn write_task_handler(
     with_reply_signer(handler, config)
 }
 
+/// The read-only Trust Task handler: the query dispatcher, no admins and no
+/// dedup store.
+fn query_task_handler(
+    config: &TrustRegistryConfig,
+    capabilities: &Arc<CapabilitySet>,
+    verifier: &Arc<dyn trust_tasks_rs::DynProofVerifier>,
+    audit: &Arc<BoundedAuditLogger>,
+) -> TaskHandler {
+    let handler = TaskHandler::new(
+        capabilities.query_dispatcher(),
+        config.didcomm_config.profile_config.did.clone(),
+        Vec::new(),
+        verifier.clone(),
+    )
+    .with_audit(audit.clone() as Arc<dyn AuditLogger>);
+    with_reply_signer(handler, config)
+}
+
 /// `handler`, signing its replies with the registry's operational key when the
 /// config carries one.
-pub(crate) fn with_reply_signer(handler: TaskHandler, config: &TrustRegistryConfig) -> TaskHandler {
+fn with_reply_signer(handler: TaskHandler, config: &TrustRegistryConfig) -> TaskHandler {
     match ReplySigner::for_config(config) {
         Some(signer) => handler.with_reply_signer(signer),
         None => handler,
-    }
-}
-
-impl RegistryParts {
-    /// The shared write-carrying Trust Task handler, as
-    /// [`TrustRegistry::task_handler`] builds it.
-    pub(crate) fn task_handler(&self) -> TaskHandler {
-        write_task_handler(
-            &self.config,
-            &self.capabilities,
-            &self.verifier,
-            &self.dedup,
-            &self.audit,
-        )
-    }
-
-    /// Rebuild the axum state after `crate::server` has taken the pieces apart.
-    pub(crate) fn shared_data(&self) -> SharedData<dyn TrustRecordRepository> {
-        SharedData {
-            config: self.config.clone(),
-            service_start_timestamp: self.service_start_timestamp,
-            repository: self.repository.clone() as Arc<dyn TrustRecordRepository>,
-            query_dispatcher: self.capabilities.query_dispatcher(),
-            verifier: self.verifier.clone(),
-            audit: self.audit.clone(),
-        }
     }
 }
 
@@ -436,8 +388,10 @@ impl TrustRegistryBuilder {
     /// The Data-Integrity proof verifier for write proofs.
     ///
     /// Defaults to [`crate::trust_tasks::build_verifier`], which is backed by
-    /// the Affinidi DID-resolver cache. Pass a host's own to share a resolver
-    /// cache it already maintains.
+    /// the Affinidi DID-resolver cache, and which, if that cache cannot be
+    /// built, verifies `did:key` issuers only while it retries in the
+    /// background (reported on [`TrustRegistry::health`]). Pass a host's own
+    /// to share a resolver cache it already maintains.
     pub fn verifier(mut self, verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>) -> Self {
         self.verifier = Some(verifier);
         self
@@ -496,8 +450,12 @@ impl TrustRegistryBuilder {
     /// Assemble the registry.
     ///
     /// Loads persisted capability state and composes the dispatchers, so an
-    /// already-enabled capability is live before the first request. Binds no
-    /// socket and starts no listener.
+    /// already-enabled capability is live before the first request, and builds
+    /// the Trust Task handlers every binding shares. Binds no socket and starts
+    /// no listener. Starts background tasks that end with the shutdown token:
+    /// the audit flusher, the advertised-vs-served transport check (when the
+    /// registry has a DID), and, if the DID resolver could not be built, its
+    /// retry.
     pub async fn build(self) -> Result<TrustRegistry, BoxError> {
         if ReplySigner::for_config(&self.config).is_none() {
             warn!(
@@ -536,9 +494,21 @@ impl TrustRegistryBuilder {
         )
         .map_err(BoxError::from)?;
 
+        let shutdown = self.shutdown.unwrap_or_default();
+        let didcomm_source = self.didcomm_source.unwrap_or_default();
+        let health = Arc::new(RegistryHealth::with_write_status(
+            match (self.config.didcomm_config.is_enabled, &didcomm_source) {
+                (false, _) => WriteStatus::Disabled,
+                // The host owns the socket; only it can say whether it works.
+                (true, DidCommSource::HostDriven) => WriteStatus::Unknown,
+                (true, _) => WriteStatus::Starting,
+            },
+        ));
+        health.attach_storage(repository.clone() as Arc<dyn TrustRecordRepository>);
+
         let verifier = match self.verifier {
             Some(v) => v,
-            None => crate::trust_tasks::build_verifier().await,
+            None => crate::trust_tasks::build_verifier(&health, &shutdown).await,
         };
 
         let dedup = self.dedup.unwrap_or_else(|| {
@@ -581,20 +551,30 @@ impl TrustRegistryBuilder {
         // entries another's refusals need. Its count of suppressed entries is
         // flushed every window and at shutdown.
         let audit = Arc::new(BoundedAuditLogger::new(audit_sink));
-        let shutdown = self.shutdown.unwrap_or_default();
         audit.spawn_flusher(shutdown.clone());
+
+        // Does the document peers resolve match what this registry serves?
+        // Checked for every transport configuration, in the background, so a
+        // slow resolver delays nothing.
+        crate::didcomm::transport_capability::spawn_startup_check(
+            &self.config.didcomm_config,
+            health.clone(),
+            shutdown.clone(),
+        );
+
+        let tasks = write_task_handler(&self.config, &capabilities, &verifier, &dedup, &audit);
+        let query_tasks = query_task_handler(&self.config, &capabilities, &verifier, &audit);
 
         Ok(TrustRegistry {
             audit,
             shutdown,
-            health: Arc::new(RegistryHealth::new(self.config.didcomm_config.is_enabled)),
+            health,
             config: self.config,
             repository,
             capabilities,
-            verifier,
-            dedup,
-            didcomm_source: self.didcomm_source.unwrap_or_default(),
-            service_start_timestamp: Utc::now(),
+            didcomm_source,
+            tasks,
+            query_tasks,
         })
     }
 }
@@ -657,10 +637,7 @@ mod tests {
     #[tokio::test]
     async fn didcomm_source_defaults_to_managed() {
         let registry = registry().await;
-        assert!(matches!(
-            registry.into_parts().didcomm_source,
-            DidCommSource::Managed
-        ));
+        assert!(matches!(registry.didcomm_source, DidCommSource::Managed));
     }
 
     /// `HostDriven` is the escape hatch for a host that already holds the one
@@ -677,10 +654,7 @@ mod tests {
             .await
             .expect("builds");
 
-        assert!(matches!(
-            registry.into_parts().didcomm_source,
-            DidCommSource::HostDriven
-        ));
+        assert!(matches!(registry.didcomm_source, DidCommSource::HostDriven));
     }
 
     /// A host driving its own socket gets the same envelope contract the
@@ -886,5 +860,192 @@ mod tests {
             .build()
             .await
             .expect("a host-provided logger is the host's responsibility");
+    }
+
+    /// An Ed25519 `did:key` whose secret id is its own verification method.
+    fn did_key(seed: u8) -> (affinidi_tdk::secrets_resolver::secrets::Secret, String) {
+        use affinidi_tdk::secrets_resolver::secrets::Secret;
+        let throwaway = Secret::generate_ed25519(None, Some(&[seed; 32]));
+        let public = throwaway.get_public_keymultibase().expect("multikey");
+        let vm = format!("did:key:{public}#{public}");
+        let mut secret = Secret::generate_ed25519(Some(&vm), Some(&[seed; 32]));
+        secret.id = vm;
+        (secret, format!("did:key:{public}"))
+    }
+
+    /// Every `task_handler()` is the same handler, so a signed
+    /// `registry/record/query` delivered twice is answered from the replay
+    /// record the second time, not executed again. Before, each call built a
+    /// handler with an empty record of its own, so the redelivery re-ran.
+    #[tokio::test]
+    async fn task_handlers_share_one_query_replay_record() {
+        use crate::domain::*;
+        use crate::storage::repository::TrustRecordQuery;
+        use trust_tasks_proof::affinidi::{SignOptions, sign_trust_task};
+
+        const ME: &str = "did:example:registry";
+        let (key, admin) = did_key(7);
+        let mut config = TrustRegistryConfig::embedded("/tmp/tr-embed-test");
+        config.didcomm_config.profile_config.did = ME.to_string();
+        config.didcomm_config.admin_config.admin_dids = vec![admin.clone()];
+
+        let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::new());
+        let record = TrustRecordBuilder::new()
+            .entity_id(EntityId::new("did:example:member"))
+            .authority_id(AuthorityId::new(&admin))
+            .action(Action::new("issue"))
+            .resource(Resource::new("vc"))
+            .recognized(true)
+            .authorized(true)
+            .record_type(RecordType::Authorization)
+            .build()
+            .expect("valid record");
+        repository.create(record).await.expect("seeded");
+
+        let registry = TrustRegistry::builder(config)
+            .repository(repository.clone())
+            .capability_store(Box::new(MemoryCapabilityStore::default()))
+            .verifier(trust_tasks_rs::erase_verifier(
+                trust_tasks_proof::affinidi::Verifier::for_did_key(),
+            ))
+            .build()
+            .await
+            .expect("builds");
+
+        let unsigned = serde_json::json!({
+            "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+            "type": "https://trusttasks.org/spec/registry/record/query/0.1",
+            "issuer": admin,
+            "recipient": ME,
+            "issuedAt": chrono::Utc::now(),
+            "payload": { "authority_id": admin },
+        });
+        let signed = sign_trust_task(
+            &unsigned,
+            &key,
+            SignOptions::new().with_proof_purpose(crate::trust_tasks::proof::WRITE_PROOF_PURPOSE),
+        )
+        .await
+        .expect("signs");
+        let doc: trust_tasks_rs::TrustTask<serde_json::Value> =
+            serde_json::from_value(signed).expect("parses");
+        let records = |response: trust_tasks_rs::TrustTask<serde_json::Value>| {
+            response.payload["records"].as_array().map(Vec::len)
+        };
+
+        let first = registry
+            .task_handler()
+            .handle(doc.clone(), Some(&admin))
+            .await
+            .expect("answered");
+        assert_eq!(records(first), Some(1));
+
+        // Change what a re-execution would find, then redeliver.
+        repository
+            .delete(TrustRecordQuery::new(
+                EntityId::new("did:example:member"),
+                AuthorityId::new(&admin),
+                Action::new("issue"),
+                Resource::new("vc"),
+            ))
+            .await
+            .expect("deleted");
+
+        let second = registry
+            .task_handler()
+            .handle(doc, Some(&admin))
+            .await
+            .expect("answered");
+        assert_eq!(
+            records(second),
+            Some(1),
+            "the redelivered query must be replayed from the shared record"
+        );
+    }
+
+    /// A store that fails every lookup.
+    struct DownStore;
+
+    #[async_trait::async_trait]
+    impl crate::storage::repository::TrustRecordRepository for DownStore {
+        async fn find_by_query(
+            &self,
+            _query: crate::storage::repository::TrustRecordQuery,
+        ) -> Result<Option<crate::domain::TrustRecord>, crate::storage::repository::RepositoryError>
+        {
+            Err(crate::storage::repository::RepositoryError::ConnectionFailed("down".into()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TrustRecordAdminRepository for DownStore {
+        async fn create(
+            &self,
+            _record: crate::domain::TrustRecord,
+        ) -> Result<(), crate::storage::repository::RepositoryError> {
+            Err(crate::storage::repository::RepositoryError::ConnectionFailed("down".into()))
+        }
+        async fn update(
+            &self,
+            _record: crate::domain::TrustRecord,
+        ) -> Result<(), crate::storage::repository::RepositoryError> {
+            Err(crate::storage::repository::RepositoryError::ConnectionFailed("down".into()))
+        }
+        async fn delete(
+            &self,
+            _query: crate::storage::repository::TrustRecordQuery,
+        ) -> Result<(), crate::storage::repository::RepositoryError> {
+            Err(crate::storage::repository::RepositoryError::ConnectionFailed("down".into()))
+        }
+        async fn list(
+            &self,
+        ) -> Result<
+            crate::storage::repository::TrustRecordList,
+            crate::storage::repository::RepositoryError,
+        > {
+            Err(crate::storage::repository::RepositoryError::ConnectionFailed("down".into()))
+        }
+        async fn read(
+            &self,
+            _query: crate::storage::repository::TrustRecordQuery,
+        ) -> Result<crate::domain::TrustRecord, crate::storage::repository::RepositoryError>
+        {
+            Err(crate::storage::repository::RepositoryError::ConnectionFailed("down".into()))
+        }
+    }
+
+    /// `/health` asks the record store, so a dead backend degrades it.
+    #[tokio::test]
+    async fn health_router_reports_a_dead_record_store() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let registry = TrustRegistry::builder(TrustRegistryConfig::embedded("/tmp/tr-embed-test"))
+            .repository(Arc::new(DownStore))
+            .capabilities(Vec::new())
+            .capability_store(Box::new(MemoryCapabilityStore::default()))
+            .build()
+            .await
+            .expect("builds");
+
+        let response = registry
+            .health_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("health router responds");
+        // Still 200: the process is alive; the body says what is wrong.
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+        assert_eq!(body["status"], "degraded");
+        assert_eq!(body["storage"], "unavailable");
     }
 }

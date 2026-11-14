@@ -1,4 +1,4 @@
 pub mod error;
-pub mod handlers;
+pub(crate) mod handlers;
 pub mod limits;
-pub use handlers::application_routes;
+pub(crate) use handlers::application_routes;

@@ -1,7 +1,9 @@
+use std::process::ExitCode;
+
 use trust_registry::server::start;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     // `trust-registry setup …` provisions the registry at a VTA and exits;
     // anything else runs the service.
     #[cfg(feature = "vta")]

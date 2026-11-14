@@ -41,7 +41,12 @@ async fn health_endpoint_is_ok() {
     let body: Value = resp.json().await.expect("json");
     // `spawn()` runs without DIDComm, so the write path is deliberately off
     // rather than broken — that must read as healthy, not degraded.
-    assert_eq!(body, json!({ "status": "OK", "writes": "disabled" }));
+    // The record store is probed on each (cached) health request, and the
+    // proof verifier has its DID resolver.
+    assert_eq!(
+        body,
+        json!({ "status": "OK", "writes": "disabled", "storage": "ok", "verifier": "ok" })
+    );
     tr.shutdown().await;
 }
 

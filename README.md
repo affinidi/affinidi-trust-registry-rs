@@ -31,6 +31,7 @@ TRQP (REST or DIDComm) is unsigned and read-only, matching the ToIP spec verbati
   - [Run with DIDComm Enabled In Private Mode](#run-with-didcomm-enabled-in-private-mode)
   - [Run with DIDComm Disabled](#run-with-didcomm-disabled)
 - [Run Trust Registry on Docker](#run-trust-registry-on-docker)
+  - [Health](#health)
 - [Using Redis as Storage Backend](#using-redis-as-storage-backend)
   - [Prerequisites](#prerequisites)
   - [Setup Redis Storage](#setup-redis-storage)
@@ -281,6 +282,21 @@ The image is built for the platform Docker builds for, the host's by default. Fo
 The registry's port is published on `127.0.0.1` only; change the `ports` entry in `docker-compose.yaml` to expose it on other interfaces. The LocalStack service used for the DynamoDB backend is not started by default: run `docker compose --profile dynamodb up` (or `docker compose up localstack`) when you need it.
 
 The image runs the registry as the unprivileged user `trustregistry` (UID/GID 10001), with `/app` as its working and data directory. A bind-mounted directory the registry writes to (the CSV file, a fjall store, `.trust-registry`) must be writable by that UID, for example `sudo chown -R 10001:10001 ./sample-data` on Linux, or run the container with `user: "<uid>:<gid>"` of the directory's owner. The image has a `HEALTHCHECK` that expects `GET /health` to answer `200` on `LISTEN_ADDRESS`; for a registry run with `ENABLE_REST=false`, disable it (`docker run --no-healthcheck`, or `healthcheck: {disable: true}` in compose).
+
+**Stopping.** The registry stops on `SIGTERM` (what `docker stop` and Kubernetes send) or `Ctrl-C`: it stops accepting HTTP connections and lets in-flight requests finish within the request time limit, stops the DIDComm listener, lets its in-flight handlers finish and ack, sends those deletions to the mediator directly and closes its connection (up to 80 seconds), flushes the audit log, and exits `0`. It exits non-zero only when startup fails or a server task ends without being asked to. A second signal exits at once (status 130); messages whose handlers are cut short stay queued at the mediator and are redelivered. Give the container a stop grace period of at least 90 seconds (`docker stop -t 90`, `stop_grace_period: 90s` as in `docker-compose.yaml`, `terminationGracePeriodSeconds: 90`) so handlers are not cut short.
+
+### Health
+
+`GET /health` answers `200` while the process is serving reads, even when a dependency is failing: restarting rarely fixes an unreachable mediator, and reads still work. What is wrong is in the body. `status` is `"OK"`, or `"degraded"` when one of the fields below reports a failure, and `detail` then says which, without the underlying error (that is in the log). Every field other than `status` and `writes` may be absent, and a monitor should ignore fields it does not know.
+
+| Field | Values | Meaning |
+|---|---|---|
+| `writes` | `ok`, `starting`, `unavailable`, `disabled`, `unknown` | The DIDComm write path. `starting` until the listener has completed a round trip with the mediator (`unavailable` if it has not within five minutes of start); `ok` while those round trips (one every 30 seconds) succeed; `unavailable` after two failures in a row, when none has succeeded for five minutes, or when the listener stopped (degraded); `disabled` with `ENABLE_DIDCOMM=false`; with TSP enabled, the delivery-layer connection's state instead (`ok` while connected, `unavailable` while it reconnects); `unknown` when this process cannot observe it (a host-driven embedding). A host that reports its own state with `RegistryHealth::mark_writes_ok` must also report failures: that value has no heartbeat behind it. |
+| `storage` | `ok`, `unavailable` | A lookup against the record store, made at most every five seconds when `/health` is asked. `unavailable` is degraded. |
+| `verifier` | `ok`, `didKeyOnly` | `didKeyOnly` (degraded) while the DID resolver cannot be built: only `did:key` write proofs can be checked, other writes are answered `unavailable` (retryable), and the resolver is rebuilt in the background. |
+| `transports` | `ok`, `mismatch`, `unknown` | Whether the DID document peers resolve advertises a transport this registry does not serve (`mismatch`, degraded). Checked at startup and every 15 minutes. `unknown` when it could not be resolved; absent when the registry has no DID. |
+| `tspRelationships` | `ok`, `full` | See `TR_TSP_MAX_RELATIONSHIPS`. |
+| `givenUpMessages` | number | Messages the DIDComm listener deleted from the mediator after they failed to be handled five times over at least ten minutes, since start. Present while the pickup listener runs. |
 
 ## Using Redis as Storage Backend
 

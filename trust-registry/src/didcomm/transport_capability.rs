@@ -47,8 +47,16 @@
 use serde_json::Value;
 
 use super::did_document::{
-    DIDCOMM_SERVICE_TYPE, REST_SERVICE_TYPE, TSP_SERVICE_TYPE, TransportFlags,
+    DIDCOMM_SERVICE_TYPE, REST_SERVICE_TYPE, TRUST_REGISTRY_SERVICE_TYPE, TSP_SERVICE_TYPE,
+    TransportFlags,
 };
+use crate::configs::DidcommConfig;
+use crate::health::TransportState;
+
+/// How long the startup check may spend resolving the registry's own DID.
+/// It runs in the background, so this bounds only how long `/health` waits for
+/// a `transports` value.
+pub const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Which transports a DID document names, or which a build can serve.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -89,7 +97,8 @@ fn service_is(entry: &Value, wanted: &str) -> bool {
     }
 }
 
-/// Read the transports a resolved DID document advertises.
+/// Read the transports a resolved DID document advertises. A TRQP surface is
+/// advertised by either `TRQPRest` or the ToIP `TrustRegistry` type.
 pub fn advertised_in(document: &Value) -> Transports {
     let services = document
         .get("service")
@@ -99,7 +108,9 @@ pub fn advertised_in(document: &Value) -> Transports {
     Transports {
         tsp: services.iter().any(|s| service_is(s, TSP_SERVICE_TYPE)),
         didcomm: services.iter().any(|s| service_is(s, DIDCOMM_SERVICE_TYPE)),
-        rest: services.iter().any(|s| service_is(s, REST_SERVICE_TYPE)),
+        rest: services.iter().any(|s| {
+            service_is(s, REST_SERVICE_TYPE) || service_is(s, TRUST_REGISTRY_SERVICE_TYPE)
+        }),
     }
 }
 
@@ -116,7 +127,23 @@ pub fn served(flags: &TransportFlags) -> Transports {
 }
 
 /// Compare a published document against what this build serves.
+///
+/// Equivalent to [`findings_for`] with a public REST URL configured.
 pub fn findings(advertised: &Transports, served: &Transports) -> Vec<Finding> {
+    findings_for(advertised, served, true)
+}
+
+/// Compare a published document against what this build serves.
+///
+/// `rest_public_url` says whether the registry has a public URL to advertise
+/// its REST surface at (`TR_PUBLIC_URL`). Without one, REST served but not
+/// advertised is the expected state, not a rollout step, so it is not
+/// reported.
+pub fn findings_for(
+    advertised: &Transports,
+    served: &Transports,
+    rest_public_url: bool,
+) -> Vec<Finding> {
     let mut out = Vec::new();
 
     if advertised.tsp && !served.tsp {
@@ -159,7 +186,11 @@ pub fn findings(advertised: &Transports, served: &Transports) -> Vec<Finding> {
     for (servable, advertised_it, name) in [
         (served.tsp, advertised.tsp, TSP_SERVICE_TYPE),
         (served.didcomm, advertised.didcomm, DIDCOMM_SERVICE_TYPE),
-        (served.rest, advertised.rest, REST_SERVICE_TYPE),
+        (
+            served.rest && rest_public_url,
+            advertised.rest,
+            REST_SERVICE_TYPE,
+        ),
     ] {
         if servable && !advertised_it {
             out.push(Finding {
@@ -176,11 +207,43 @@ pub fn findings(advertised: &Transports, served: &Transports) -> Vec<Finding> {
     out
 }
 
+/// What `config` serves. DIDComm (and TSP, which rides on its socket) counts
+/// only when the listener — or the host's receive loop — is enabled, whatever
+/// its transport flag says.
+pub fn served_by(config: &DidcommConfig) -> Transports {
+    let mut flags = config.transport_flags;
+    flags.didcomm &= config.is_enabled;
+    flags.tsp &= config.is_enabled;
+    served(&flags)
+}
+
+/// Whether the registry's own local DID document advertises a REST endpoint,
+/// which it does only when a public URL is configured.
+fn local_document_advertises_rest(config: &DidcommConfig) -> bool {
+    serde_json::from_str::<Value>(&config.did_document)
+        .map(|doc| advertised_in(&doc).rest)
+        .unwrap_or(false)
+}
+
 /// Resolve this registry's own DID and log every disagreement with what this
 /// build serves. Best-effort: never fails startup.
-pub async fn report_at_startup(own_did: &str, flags: &TransportFlags) {
+///
+/// Returns [`TransportState::Mismatch`] when an error-severity finding was
+/// logged, [`TransportState::Ok`] when there was none, and
+/// [`TransportState::Unknown`] when the document could not be resolved.
+pub async fn report_at_startup(config: &DidcommConfig) -> TransportState {
+    match resolve_findings(config).await {
+        Some(findings) => log_findings(&findings),
+        None => TransportState::Unknown,
+    }
+}
+
+/// Resolve this registry's own DID and compare it with what this build
+/// serves. `None` when the document could not be resolved.
+async fn resolve_findings(config: &DidcommConfig) -> Option<Vec<Finding>> {
     use affinidi_tdk::did_resolver::{DIDCacheClient, config::DIDCacheConfigBuilder};
 
+    let own_did = config.profile_config.did.as_str();
     let resolved = match DIDCacheClient::new(DIDCacheConfigBuilder::default().build()).await {
         Ok(client) => client.resolve(own_did).await,
         Err(e) => {
@@ -188,7 +251,7 @@ pub async fn report_at_startup(own_did: &str, flags: &TransportFlags) {
                 error = %e,
                 "no DID resolver available; skipping the advertised-vs-served transport check",
             );
-            return;
+            return None;
         }
     };
 
@@ -197,7 +260,7 @@ pub async fn report_at_startup(own_did: &str, flags: &TransportFlags) {
             Ok(v) => v,
             Err(e) => {
                 tracing::debug!(error = %e, "could not read this registry's own DID document");
-                return;
+                return None;
             }
         },
         Err(e) => {
@@ -209,16 +272,122 @@ pub async fn report_at_startup(own_did: &str, flags: &TransportFlags) {
                 "could not resolve this registry's own DID; skipping the advertised-vs-served \
                  transport check",
             );
-            return;
+            return None;
         }
     };
 
-    let advertised = advertised_in(&document);
-    let served = served(flags);
-    for finding in findings(&advertised, &served) {
+    Some(findings_for(
+        &advertised_in(&document),
+        &served_by(config),
+        local_document_advertises_rest(config),
+    ))
+}
+
+/// The `/health` summary of `findings`.
+fn summarise(findings: &[Finding]) -> TransportState {
+    if findings.iter().any(|f| f.severity == Severity::Error) {
+        TransportState::Mismatch
+    } else {
+        TransportState::Ok
+    }
+}
+
+/// Log `findings` and summarise them for `/health`.
+fn log_findings(findings: &[Finding]) -> TransportState {
+    for finding in findings {
         match finding.severity {
             Severity::Error => tracing::error!("{}", finding.message),
             Severity::Info => tracing::info!("{}", finding.message),
+        }
+    }
+    summarise(findings)
+}
+
+#[cfg(test)]
+fn report_findings(
+    advertised: &Transports,
+    served: &Transports,
+    rest_public_url: bool,
+) -> TransportState {
+    log_findings(&findings_for(advertised, served, rest_public_url))
+}
+
+/// How often the published document is checked again after startup, so a
+/// document that is fixed — or breaks — after boot is reflected on `/health`,
+/// and a resolver that was unreachable at boot does not leave it `unknown`
+/// (R6.2).
+pub const RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Compare the published document with what this registry serves in the
+/// background — at startup, then every [`RECHECK_INTERVAL`] — each attempt
+/// bounded by [`CHECK_TIMEOUT`], until `shutdown`. Each outcome is recorded on
+/// `health`. Findings are logged the first time and whenever the outcome
+/// changes, not on every check.
+///
+/// Runs for every transport configuration that has a DID of its own: REST-only
+/// (when the host configured a DID), host-driven and the registry's own
+/// listener alike. A standalone REST-only registry loads no DID, so there is
+/// no published document to compare and nothing is recorded.
+pub(crate) fn spawn_startup_check(
+    config: &DidcommConfig,
+    health: std::sync::Arc<crate::health::RegistryHealth>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if config.profile_config.did.trim().is_empty() {
+        tracing::debug!(
+            "no registry DID configured; skipping the advertised-vs-served transport check"
+        );
+        return None;
+    }
+    let config = config.clone();
+    Some(tokio::spawn(async move {
+        run_checks(
+            || resolve_findings(&config),
+            &health,
+            &shutdown,
+            RECHECK_INTERVAL,
+        )
+        .await;
+    }))
+}
+
+/// The loop behind [`spawn_startup_check`], over any way of producing the
+/// findings.
+async fn run_checks<F, Fut>(
+    mut check: F,
+    health: &crate::health::RegistryHealth,
+    shutdown: &tokio_util::sync::CancellationToken,
+    interval: std::time::Duration,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<Vec<Finding>>>,
+{
+    let mut last: Option<TransportState> = None;
+    loop {
+        let findings = tokio::select! {
+            _ = shutdown.cancelled() => return,
+            result = tokio::time::timeout(CHECK_TIMEOUT, check()) => {
+                result.unwrap_or_else(|_| {
+                    tracing::debug!(
+                        "resolving this registry's own DID took longer than {CHECK_TIMEOUT:?}; \
+                         the advertised-vs-served transport check is inconclusive"
+                    );
+                    None
+                })
+            }
+        };
+        let state = match &findings {
+            Some(findings) if last.is_none_or(|l| l != summarise(findings)) => {
+                log_findings(findings)
+            }
+            Some(findings) => summarise(findings),
+            None => TransportState::Unknown,
+        };
+        health.set_transports(state);
+        last = Some(state);
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(interval) => {}
         }
     }
 }
@@ -341,5 +510,139 @@ mod tests {
             tsp: false,
         };
         assert!(!served(&off).tsp, "flag off is never served");
+    }
+
+    /// The ToIP `TrustRegistry` type names a TRQP surface as much as
+    /// `TRQPRest` does.
+    #[test]
+    fn the_toip_trust_registry_type_counts_as_rest() {
+        let doc = doc_with(json!([{ "id": "#trust-registry", "type": "TrustRegistry" }]));
+        assert!(advertised_in(&doc).rest);
+
+        let out = findings_for(
+            &advertised_in(&doc),
+            &Transports {
+                tsp: false,
+                didcomm: true,
+                rest: false,
+            },
+            false,
+        );
+        assert!(
+            out.iter()
+                .any(|f| f.severity == Severity::Error && f.message.contains("ENABLE_REST")),
+            "{out:?}"
+        );
+    }
+
+    /// Without a public URL there is nothing to advertise, so REST served but
+    /// not advertised is not a rollout step to report.
+    #[test]
+    fn rest_without_a_public_url_is_not_reported_as_unadvertised() {
+        let advertised = Transports::default();
+        let served = Transports {
+            tsp: false,
+            didcomm: false,
+            rest: true,
+        };
+        assert!(findings_for(&advertised, &served, false).is_empty());
+        assert_eq!(findings_for(&advertised, &served, true).len(), 1);
+    }
+
+    /// The case the check used to skip: a REST-only registry whose published
+    /// document still advertises DIDComm is an error finding and a `/health`
+    /// mismatch.
+    #[test]
+    fn a_rest_only_registry_advertising_didcomm_is_a_mismatch() {
+        let config = DidcommConfig::disabled();
+        let served = served_by(&config);
+        assert_eq!(
+            served,
+            Transports {
+                tsp: false,
+                didcomm: false,
+                rest: true,
+            }
+        );
+        let advertised = advertised_in(&doc_with(json!([
+            { "id": "#didcomm", "type": "DIDCommMessaging" },
+        ])));
+        let out = findings_for(&advertised, &served, false);
+        assert!(
+            out.iter()
+                .any(|f| f.severity == Severity::Error && f.message.contains("ENABLE_DIDCOMM")),
+            "{out:?}"
+        );
+        assert_eq!(
+            report_findings(&advertised, &served, false),
+            TransportState::Mismatch
+        );
+    }
+
+    /// The flag alone does not make DIDComm served: an embedded config can
+    /// leave `transport_flags.didcomm` at `true` with the listener disabled.
+    #[test]
+    fn didcomm_is_served_only_when_enabled() {
+        let mut config = DidcommConfig::default();
+        config.transport_flags.didcomm = true;
+        config.is_enabled = false;
+        assert!(!served_by(&config).didcomm);
+        config.is_enabled = true;
+        assert!(served_by(&config).didcomm);
+    }
+
+    /// With no DID of its own (a standalone REST-only registry), there is no
+    /// published document to check and nothing is spawned.
+    #[tokio::test]
+    async fn no_did_means_no_check() {
+        let health = std::sync::Arc::new(crate::health::RegistryHealth::new(false));
+        let handle = spawn_startup_check(
+            &DidcommConfig::disabled(),
+            health.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        assert!(handle.is_none());
+        assert!(health.to_json().get("transports").is_none());
+    }
+
+    /// The check is repeated, so a document that breaks after boot — or a
+    /// resolver that was unreachable at boot — is reflected, rather than the
+    /// first outcome latching (R6.2).
+    #[tokio::test(start_paused = true)]
+    async fn the_check_is_repeated_and_never_latches() {
+        let health = crate::health::RegistryHealth::new(false);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let mismatch = vec![Finding {
+            severity: Severity::Error,
+            message: "advertised but not served".to_string(),
+        }];
+        let interval = std::time::Duration::from_secs(60);
+
+        let run = run_checks(
+            || {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let outcome = match n {
+                    0 => None,
+                    1 => Some(Vec::new()),
+                    _ => Some(mismatch.clone()),
+                };
+                async move { outcome }
+            },
+            &health,
+            &shutdown,
+            interval,
+        );
+        let observe = async {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            assert_eq!(health.to_json()["transports"], "unknown");
+            tokio::time::sleep(interval).await;
+            assert_eq!(health.to_json()["transports"], "ok");
+            tokio::time::sleep(interval).await;
+            assert_eq!(health.to_json()["transports"], "mismatch");
+            shutdown.cancel();
+        };
+        tokio::join!(run, observe);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 }

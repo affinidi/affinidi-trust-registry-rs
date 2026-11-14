@@ -190,7 +190,7 @@ impl FileStorageConfig {
 
 impl DynamoDbStorageConfig {
     fn from_env() -> Result<Self, String> {
-        Ok(DynamoDbStorageConfig {
+        let config = DynamoDbStorageConfig {
             table_name: required_env("DDB_TABLE_NAME")?,
             // Unset: the AWS SDK resolves the region itself (AWS_DEFAULT_REGION,
             // the selected profile, instance metadata).
@@ -198,7 +198,16 @@ impl DynamoDbStorageConfig {
             profile: non_empty_env("AWS_PROFILE"),
             endpoint_url: ddb_endpoint_from_env()?,
             use_test_credentials: env_flag("DDB_USE_TEST_CREDENTIALS", false)?,
-        })
+        };
+        info!(
+            "DynamoDB table {}, region {}",
+            config.table_name,
+            config
+                .region
+                .as_deref()
+                .unwrap_or("from the AWS SDK default chain (AWS_REGION unset)")
+        );
+        Ok(config)
     }
 }
 
