@@ -73,10 +73,10 @@ Get the Trust Registry up and running quickly with default settings (DIDComm dis
 cargo run --bin setup-trust-registry --features="dev-tools"
 ```
 
-2. Start the Trust Registry server.
+2. Start the Trust Registry server. The setup wrote `ENABLE_DIDCOMM=false` to `.env`, so the same `.env` also works for [Docker](#run-trust-registry-on-docker).
 
 ```bash
-ENABLE_DIDCOMM=false RUST_LOG=info cargo run --bin trust-registry
+RUST_LOG=info cargo run --bin trust-registry
 ```
 
 The Trust Registry will start on `http://localhost:3232` using CSV file storage with sample data from `./sample-data/data.csv`.
@@ -170,13 +170,15 @@ To deploy and run a DIDComm mediator, see the [deployment options](https://docs.
 
 **Mediator compatibility.** The Trust Registry sets its own access-list mode (`ACL_MODE`) at the mediator with the `messaging/account/get` and `messaging/account/update` Trust Tasks, so the mediator must answer them. affinidi-messaging-mediator 0.31.0 and later accepts only Trust Tasks for administration (the legacy `mediator/1.0` account and ACL protocols are removed). This release is checked against 0.33.1. Trust Registry releases before 0.19.0 use the legacy protocols and cannot set their mode on a 0.31.0 or later mediator. If the mediator refuses the update, a public registry (`ACL_MODE=ExplicitDeny`) logs `Failed to set ACL mode` and keeps running, since at worst it stays private: unreachable rather than exposed. A private registry (`ACL_MODE=ExplicitAllow`) fails closed. Its DIDComm listener does not start, so it never serves from an account that may still accept anyone. `/health` reports `"status": "degraded"` with the failure class in `detail` (the error itself is in the log), and REST reads keep answering.
 
-`setup-trust-registry` and `generate-secrets` give the registry an Ed25519 signing key and an X25519 key-agreement key, the pair a mediator holds by default. A mediator with `security.trust_task_verification = "enforce"` (the default `mediator-setup` writes) accepts these Trust Tasks only when they carry a proof, and the messaging SDK signs them only with an **Ed25519** key. A registry DID whose keys are all P-256 (what those tools generated before this release) is affected twice. It cannot authenticate to a mediator that holds no P-256 key (`mediator-setup` adds one only with `--key-suite p256`). Even on one that does, it sends these Trust Tasks unsigned, so an enforcing mediator refuses them (`proof_required`) and the mode is not applied. A private registry then does not serve DIDComm at all (see above). Re-key such a registry, or run its mediator with a P-256 key and `trust_task_verification = "warn"`.
+`setup-trust-registry` gives the registry an Ed25519 signing key and an X25519 key-agreement key, the pair a mediator holds by default. A mediator with `security.trust_task_verification = "enforce"` (the default `mediator-setup` writes) accepts these Trust Tasks only when they carry a proof, and the messaging SDK signs them only with an **Ed25519** key. A registry DID whose keys are all P-256 (what it and the former `generate-secrets` generated before this release) is affected twice. It cannot authenticate to a mediator that holds no P-256 key (`mediator-setup` adds one only with `--key-suite p256`). Even on one that does, it sends these Trust Tasks unsigned, so an enforcing mediator refuses them (`proof_required`) and the mode is not applied. A private registry then does not serve DIDComm at all (see above). Re-key such a registry, or run its mediator with a P-256 key and `trust_task_verification = "warn"`.
 
 `trust-registry/tests/mediator_e2e.rs` runs the registry against the mediator image in Docker (v0.33.1, enforcing): TRQP over REST and DIDComm, signed `registry/record/*` writes and queries, and an unsigned write refused. It also checks that a private P-256 registry, whose mode the mediator refuses, does not serve DIDComm. It needs Docker and is ignored by default: `cargo test -p trust-registry --test mediator_e2e -- --ignored --nocapture`. `E2E_IDENTITY_KEYS=p256` runs the main test with P-256 identities, which reproduces the refusal above.
 
 ## Set up Trust Registry
 
-Configure the environment to run Trust Registry. The setup command creates the `.env` file with default configurations. For testing environments, it generates a `.env.test` file with the appropriate test configurations (from the tracked `.env.pipeline` template with `--test-in-pipeline=true`). The files it writes are readable by their owner only, and it does not print private keys.
+Configure the environment to run Trust Registry. The setup command creates the `.env` file with default configurations, editing only the lines it sets (comments and the rest of the file are kept). With `--with-test-identities` it also creates test identities in `.env.test` (from the tracked `.env.pipeline` template with `--test-in-pipeline`). The files it writes are readable by their owner only, and it does not print private keys.
+
+Re-running it is safe: it refuses to replace the registry's identity (`PROFILE_CONFIG`, `MEDIATOR_DID`, `ADMIN_DIDS`, `ACL_MODE`, `ADMIN_AUTHORITIES` in `.env`, a bundle in the configured secret store, or `did.json` / `did.jsonl` / `did-update-keys.json`) unless given `--force`, which backs each one up first.
 
 ### Run with DIDComm Enabled
 
@@ -188,15 +190,16 @@ To enable DIDComm for managing and querying trust records, run the following com
 
 ```bash
 cargo run --bin setup-trust-registry --features="dev-tools" -- \
- --mediator-did=<MEDIATOR_DID>
+ --mediator-did=<MEDIATOR_DID> \
+ --did-method=peer
 ```
 
 The command generates the following:
 
-- Creates a Decentralised Identifier (DID) for the Trust Registry using the **did:peer** method.
-- Creates Decentralised Identifiers (DIDs) for test users (Trust Registry and Admin) using the did:peer method.
-- Configures the appropriate DIDComm mediator ACLs for the Trust Registry and test user DIDs.
+- Creates a Decentralised Identifier (DID) for the Trust Registry using the **did:peer** method (`--did-method` also takes `web`, `webvh` and `scid`; or use an existing identity with `--tr-did`/`--tr-did-secret-file` or `--profile`).
+- Writes `ENABLE_DIDCOMM=true`, `MEDIATOR_DID` and `PROFILE_CONFIG` to `.env`.
 - Populates the environment variables with default values, such as Storage Backend (`csv`) and audit log format (`json`).
+- Only with `--with-test-identities` (development and CI): creates test Trust Registry and client DIDs, opens their mediator accounts, and writes them to `.env.test`.
 
 ### Run with DIDComm Enabled In Private Mode
 
@@ -205,6 +208,7 @@ By default, the Trust Registry runs in **public mode** (`ACL_MODE=ExplicitDeny`)
 ```bash
 cargo run --bin setup-trust-registry --features="dev-tools" -- \
  --mediator-did=<MEDIATOR_DID> \
+ --did-method=peer \
  --acl-mode=ExplicitAllow
 ```
 
@@ -237,12 +241,12 @@ cargo run --bin setup-trust-registry --features="dev-tools"
 The command generates the following:
 
 - Populates the environment variables with default values, such as Storage Backend (`csv`) and audit log format (`json`).
-- Sets DIDComm-related environment variables to empty values.
+- Writes `ENABLE_DIDCOMM=false`, and leaves the DIDComm variables out.
 
 After successful setup, it displays the command to run the Trust Registry.
 
 ```bash
-ENABLE_DIDCOMM=false RUST_LOG=info cargo run --bin trust-registry
+RUST_LOG=info cargo run --bin trust-registry
 ```
 
 For more details on setting up the Trust Registry, refer to the [setup guide](https://github.com/affinidi/affinidi-trust-registry-rs/blob/main/SETUP_COMMAND_REFERENCES.md) document.
@@ -390,7 +394,9 @@ services:
     restart: unless-stopped
 
   trust-registry:
-    build: .
+    build:
+      context: .
+      dockerfile: trust-registry/Dockerfile
     environment:
       - TR_STORAGE_BACKEND=redis
       - REDIS_URL=redis://:your_password@redis:6379
@@ -1169,6 +1175,16 @@ its URL directly.
 > **Note:** with `ENABLE_DIDCOMM=false` no DID document is built at all, since
 > the registry's DID profile is loaded on the DIDComm path. A REST-only registry
 > is reached by URL rather than by resolving its DID.
+
+The document served at `/.well-known/did.json` is the one set in `DID_DOCUMENT`
+(a loader URI, like `PROFILE_CONFIG`), or else built from the profile by the
+same builder `setup-trust-registry` uses for a did:web / did:webvh: one
+`Multikey` verification method per secret, under the secret's own id, with
+signing keys (Ed25519, P-256, secp256k1) under `authentication` and
+`assertionMethod` and X25519 keys under `keyAgreement`. A profile with no
+X25519 key (one generated before the move to Curve25519) lists its P-256 /
+secp256k1 keys under `keyAgreement` too. A secret that cannot be published this
+way stops startup.
 
 ### Profile Config Options
 

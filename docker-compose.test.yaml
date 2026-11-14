@@ -13,5 +13,3 @@ services:
       FILE_STORAGE_PATH: /app/sample-data/data.csv
     ports:
       - "127.0.0.1:3232:3232"
-    volumes:
-      - ./didcomm-server/tests/tmp:/tmp

@@ -107,11 +107,6 @@ path = "src/main.rs"
 required-features = ["standalone"]
 
 [[bin]]
-name = "generate-secrets"
-path = "bin/generate_secrets.rs"
-required-features = ["dev-tools"]
-
-[[bin]]
 name = "setup-trust-registry"
 path = "bin/setup_trust_registry.rs"
 required-features = ["dev-tools"]
@@ -128,7 +123,7 @@ default = [
     "loaders-aws",
     "standalone",
 ]
-# The `setup-trust-registry` / `generate-secrets` binaries. `secrets-config`
+# The `setup-trust-registry` binary. `secrets-config`
 # because the setup wizard writes the profile bundle through the secret store.
 dev-tools = ["didwebvh-rs", "dep:clap", "dep:crossterm", "secrets-config"]
 # Trust Spanning Protocol transport binding. Off by default (affinidi-tsp is a

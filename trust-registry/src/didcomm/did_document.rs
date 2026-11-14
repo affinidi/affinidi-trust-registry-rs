@@ -1,59 +1,144 @@
 use crate::configs::ProfileConfig;
+use affinidi_tdk::secrets_resolver::secrets::{KeyType, Secret};
 use serde_json::Value;
 
-pub fn build_public_jwk(jwk: &affinidi_tdk::affinidi_crypto::JWK) -> serde_json::Value {
-    match &jwk.params {
-        affinidi_tdk::affinidi_crypto::Params::EC(params) => {
-            let mut jwk_obj = serde_json::json!({
-                "kty": "EC",
-                "crv": params.curve,
-                "x": params.x,
-                "y": params.y,
-            });
-            if let Some(kid) = &jwk.key_id {
-                jwk_obj["kid"] = serde_json::json!(kid);
-            }
-            jwk_obj
-        }
-        affinidi_tdk::affinidi_crypto::Params::OKP(params) => {
-            let mut jwk_obj = serde_json::json!({
-                "kty": "OKP",
-                "crv": params.curve,
-                "x": params.x,
-            });
-            if let Some(kid) = &jwk.key_id {
-                jwk_obj["kid"] = serde_json::json!(kid);
-            }
-            jwk_obj
-        }
-        // The `Params` enum is non-exhaustive upstream (e.g. RSA, symmetric).
-        // The Trust Registry only publishes EC/OKP verification methods, so any
-        // other key type is not representable here.
-        _ => serde_json::json!({}),
+/// The JSON-LD contexts of a Trust Registry DID document: DID core and the
+/// Multikey verification-method type every key is published as.
+pub const DID_DOCUMENT_CONTEXT: [&str; 2] = [
+    "https://www.w3.org/ns/did/v1",
+    "https://w3id.org/security/multikey/v1",
+];
+
+/// The verification-method `type` both DID document builders publish.
+pub const VERIFICATION_METHOD_TYPE: &str = "Multikey";
+
+/// What a key may be used for, which decides the verification relationships
+/// it is listed under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPurpose {
+    /// A signing key: `authentication` and `assertionMethod`.
+    Signing,
+    /// A key-agreement key: `keyAgreement`.
+    KeyAgreement,
+    /// An EC key (P-256, secp256k1), which can do both: `authentication` and
+    /// `assertionMethod`, and also `keyAgreement` when the profile has no
+    /// X25519 key. Profiles from before the move to Curve25519 hold only EC
+    /// keys and authcrypt with them; listing none under `keyAgreement` would
+    /// leave peers no key to encrypt to.
+    SigningOrAgreement,
+}
+
+/// The purpose a key of `key_type` serves, or `None` when the registry does
+/// not publish keys of that type.
+///
+/// Ed25519 signs; X25519 agrees keys; P-256 and secp256k1 can do both. An
+/// X25519 key under `authentication`, or an Ed25519 key under `keyAgreement`,
+/// would let a peer pick a key that cannot perform the operation.
+pub fn key_purpose(key_type: KeyType) -> Option<KeyPurpose> {
+    match key_type {
+        KeyType::Ed25519 => Some(KeyPurpose::Signing),
+        KeyType::P256 | KeyType::Secp256k1 => Some(KeyPurpose::SigningOrAgreement),
+        KeyType::X25519 => Some(KeyPurpose::KeyAgreement),
+        _ => None,
     }
 }
 
-pub fn build_verification_methods(profile_config: &ProfileConfig) -> Vec<serde_json::Value> {
-    profile_config
-        .secrets
-        .iter()
-        .enumerate()
-        .map(|(index, secret)| {
-            let public_jwk = match &secret.secret_material {
-                affinidi_tdk::secrets_resolver::secrets::SecretMaterial::JWK(jwk) => {
-                    build_public_jwk(jwk)
-                }
-                _ => serde_json::json!({}),
-            };
+/// The verification-method id of `secret` in `did`'s document: the secret's
+/// own id, made absolute when it is a bare `#fragment`.
+///
+/// The registry signs and authcrypts under the secret's id, so the published
+/// document must carry exactly that id. An id invented here (e.g. by
+/// position) names a key a peer cannot find, or the wrong one.
+fn verification_method_id(did: &str, secret: &Secret) -> Result<String, String> {
+    let id = secret.id.trim();
+    if id.starts_with('#') && id.len() > 1 {
+        Ok(format!("{did}{id}"))
+    } else if let Some((id_did, _)) = id.split_once('#')
+        && id_did.starts_with("did:")
+    {
+        // A did:scid profile DID carries `?src=`; its keys are under the bare
+        // DID (VTI-KEY-161), which is the same identity.
+        let bare = did.split_once('?').map_or(did, |(d, _)| d);
+        if id_did != did && id_did != bare {
+            tracing::warn!(
+                "secret id {id} names {id_did}, not the profile's DID {did}: peers resolving \
+                 {did} will not find this key under that id"
+            );
+        }
+        Ok(id.to_string())
+    } else {
+        Err(format!(
+            "secret id {id:?} is not a DID URL with a fragment (expected {did}#<key>)"
+        ))
+    }
+}
 
-            serde_json::json!({
-                "id": format!("{}#key-{}", profile_config.did, index),
-                "type": "JsonWebKey2020",
-                "controller": profile_config.did,
-                "publicKeyJwk": public_jwk,
-            })
+/// The public key of `secret` as a multikey (`z…`).
+///
+/// An EC secret read from a JWK holds its public key as `x || y`, without
+/// the `0x04` prefix the SDK's point compression expects, so its multibase
+/// form fails there. Such a key is re-derived from its private half, and the
+/// derived public key must equal the JWK's, else the secret is inconsistent.
+fn public_multibase(secret: &Secret) -> Result<String, String> {
+    match secret.get_public_keymultibase() {
+        Ok(multibase) => Ok(multibase),
+        Err(first) if matches!(secret.get_key_type(), KeyType::P256 | KeyType::Secp256k1) => {
+            let derived = secret
+                .get_private_keymultibase()
+                .and_then(|private| Secret::from_multibase(&private, None))
+                .map_err(|e| format!("{first}; re-deriving from the private key: {e}"))?;
+            let ours = secret.get_public_bytes();
+            let theirs = derived.get_public_bytes();
+            if theirs.len() == ours.len() + 1 && theirs.ends_with(ours) {
+                derived.get_public_keymultibase().map_err(|e| e.to_string())
+            } else {
+                Err("the private key does not match the public key".to_string())
+            }
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// One verification method per secret, with the purpose its key type serves.
+///
+/// A secret whose key cannot be published (an unsupported type, or material
+/// with no public multibase form) is an error: emitting an empty key would
+/// publish a document that names a key nobody can use.
+pub fn build_verification_methods_for(
+    did: &str,
+    secrets: &[Secret],
+) -> Result<Vec<(Value, KeyPurpose)>, String> {
+    secrets
+        .iter()
+        .map(|secret| {
+            let id = verification_method_id(did, secret)?;
+            let key_type = secret.get_key_type();
+            let purpose = key_purpose(key_type).ok_or_else(|| {
+                format!("{id}: key type {key_type:?} cannot be published in the DID document")
+            })?;
+            let multibase = public_multibase(secret)
+                .map_err(|e| format!("{id}: no public multibase form for this key: {e}"))?;
+            Ok((
+                serde_json::json!({
+                    "id": id,
+                    "type": VERIFICATION_METHOD_TYPE,
+                    "controller": did,
+                    "publicKeyMultibase": multibase,
+                }),
+                purpose,
+            ))
         })
         .collect()
+}
+
+/// The verification methods of `profile_config`'s document.
+pub fn build_verification_methods(profile_config: &ProfileConfig) -> Result<Vec<Value>, String> {
+    Ok(
+        build_verification_methods_for(&profile_config.did, &profile_config.secrets)?
+            .into_iter()
+            .map(|(method, _)| method)
+            .collect(),
+    )
 }
 
 /// DID-document service `type` for the Trust Registry's REST/TRQP surface.
@@ -300,202 +385,270 @@ pub fn build_services(
     services
 }
 
+/// The DID document for `did` with `secrets`, as a JSON value.
+///
+/// The one builder for both the registry's runtime document (served when
+/// `DID_DOCUMENT` is unset) and the document `setup-trust-registry` publishes
+/// for a did:web / did:webvh, so the two never describe one registry
+/// differently: each verification method carries its secret's own id,
+/// relationships follow key type, and the service entries come from
+/// [`build_services`].
+pub fn build_did_document_value(
+    did: &str,
+    secrets: &[Secret],
+    mediator_did: &str,
+    public_url: Option<&str>,
+    flags: TransportFlags,
+) -> Result<Value, String> {
+    let methods = build_verification_methods_for(did, secrets)?;
+    let refs = |wanted: &[KeyPurpose]| -> Vec<Value> {
+        methods
+            .iter()
+            .filter(|(_, purpose)| wanted.contains(purpose))
+            .map(|(method, _)| method["id"].clone())
+            .collect()
+    };
+    let signing = refs(&[KeyPurpose::Signing, KeyPurpose::SigningOrAgreement]);
+    let mut key_agreement = refs(&[KeyPurpose::KeyAgreement]);
+    if key_agreement.is_empty() {
+        // A profile with no X25519 key agrees keys with its EC keys.
+        key_agreement = refs(&[KeyPurpose::SigningOrAgreement]);
+    }
+    if flags.didcomm && !methods.is_empty() && key_agreement.is_empty() {
+        tracing::warn!(
+            "{did}: the profile has no key-agreement key (X25519, P-256 or secp256k1), so the \
+             DID document lists none under keyAgreement and peers cannot encrypt to it"
+        );
+    }
+    let verification_methods: Vec<Value> = methods.iter().map(|(m, _)| m.clone()).collect();
+
+    Ok(serde_json::json!({
+        "@context": DID_DOCUMENT_CONTEXT,
+        "id": did,
+        "verificationMethod": verification_methods,
+        "authentication": signing,
+        "assertionMethod": signing,
+        "keyAgreement": key_agreement,
+        "service": build_services(did, mediator_did, public_url, flags),
+    }))
+}
+
+/// [`build_did_document_value`] for `profile_config`, serialised.
 pub fn build_did_document(
     profile_config: &ProfileConfig,
     mediator_did: &str,
     public_url: Option<&str>,
     flags: TransportFlags,
-) -> String {
-    let verification_methods = build_verification_methods(profile_config);
-
-    let key_refs: Vec<String> = (0..profile_config.secrets.len())
-        .map(|index| format!("{}#key-{}", profile_config.did, index))
-        .collect();
-
-    serde_json::json!({
-        "@context": [
-            "https://www.w3.org/ns/did/v1",
-            "https://w3id.org/security/suites/jws-2020/v1"
-        ],
-        "id": profile_config.did,
-        "verificationMethod": verification_methods,
-        "authentication": key_refs,
-        "assertionMethod": key_refs,
-        "keyAgreement": key_refs,
-        "service": build_services(&profile_config.did, mediator_did, public_url, flags)
-    })
-    .to_string()
+) -> Result<String, String> {
+    Ok(build_did_document_value(
+        &profile_config.did,
+        &profile_config.secrets,
+        mediator_did,
+        public_url,
+        flags,
+    )?
+    .to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use affinidi_tdk::{affinidi_crypto::JWK, secrets_resolver::secrets::Secret};
     use serde_json::json;
 
-    #[test]
-    fn test_build_public_jwk_ec() {
-        // Create a test EC JWK and verify d field is removed
-        let jwk: JWK = serde_json::from_value(json!({
-          "crv": "P-256",
-          "kty": "EC",
-          "x": "DEtsdJXfi7IuqaZFkRW_aBwHHpID1jQjPqN_Y46zlZM",
-          "y": "LQs6Q-gGqgtrUW2iEfb9YRyvPAuNALceHqGYs4sNwh4",
-          "d": "private part"
-        }))
-        .unwrap();
-        let result = build_public_jwk(&jwk);
-
-        assert_eq!(result["kty"], "EC");
-        assert!(result.get("x").is_some());
-        assert!(result.get("y").is_some());
-        assert!(result.get("d").is_none()); // Private key removed
-    }
-
-    #[test]
-    fn test_build_public_jwk_okp() {
-        // Create a test OKP JWK
-
-        let jwk: JWK = serde_json::from_value(json!({
-            "crv": "Ed25519",
-            "kty": "OKP",
-            "x": "DfRiO5mCASvWyPxr20GQEfzOmFFh50spyP7KHMjvGQo",
-            "d": "private part"
-        }))
-        .unwrap();
-        let result = build_public_jwk(&jwk);
-
-        assert_eq!(result["kty"], "OKP");
-        assert!(result.get("x").is_some());
-        assert!(result.get("d").is_none()); // Private key removed
-    }
-
-    #[test]
-    fn test_build_verification_methods_single_key() {
-        let secret: Secret = serde_json::from_value(json!({
-            "id": "did:web:example.com#key-0",
+    /// A secret from its JWK, as a profile bundle carries it.
+    fn secret(id: &str, jwk: Value) -> Secret {
+        serde_json::from_value(json!({
+            "id": id,
             "type": "JsonWebKey2020",
-            "privateKeyJwk": {
-                "crv": "P-256",
-                // not real, just copy of x
-                "d": "ctKLNB9cXUO3yD-jMCaRi680RmHOFuS30nVogmEhkx4",
-                "kty": "EC",
-                "x": "ctKLNB9cXUO3yD-jMCaRi680RmHOFuS30nVogmEhkx4",
-                "y": "1GDFw4zkTPdVWwqxRhSnEVCdkZyfmViJR8Nq5ad2V9w"
-            }
+            "privateKeyJwk": jwk,
         }))
-        .unwrap();
+        .unwrap()
+    }
 
+    fn ed25519(id: &str) -> Secret {
+        let mut s = Secret::generate_ed25519(None, None);
+        s.id = id.to_string();
+        s
+    }
+
+    fn x25519(id: &str) -> Secret {
+        let mut s = Secret::generate_x25519(None, None).unwrap();
+        s.id = id.to_string();
+        s
+    }
+
+    /// What `setup-trust-registry` generates: Ed25519 `#key-1`, X25519
+    /// `#key-2`. The served document must carry those ids and nothing else,
+    /// since the registry signs and authcrypts under them.
+    #[test]
+    fn methods_carry_each_secrets_own_id_and_relationships_follow_key_type() {
+        let did = "did:web:registry.example";
         let profile = ProfileConfig {
-            did: "did:web:example.com".to_string(),
+            did: did.to_string(),
             alias: "test".to_string(),
-            secrets: vec![secret],
+            secrets: vec![
+                ed25519("did:web:registry.example#key-1"),
+                x25519("did:web:registry.example#key-2"),
+            ],
         };
+        let doc: Value = serde_json::from_str(
+            &build_did_document(
+                &profile,
+                "did:web:mediator.example",
+                None,
+                TransportFlags::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
 
-        let methods = build_verification_methods(&profile);
-        assert_eq!(methods.len(), 1);
-        assert_eq!(methods[0]["id"], "did:web:example.com#key-0");
-        assert_eq!(methods[0]["type"], "JsonWebKey2020");
-        assert_eq!(methods[0]["controller"], "did:web:example.com");
-        assert_eq!(methods[0]["publicKeyJwk"]["kty"], "EC");
-        assert_eq!(methods[0]["publicKeyJwk"]["crv"], "P-256");
-        assert!(methods[0]["publicKeyJwk"].get("d").is_none());
+        let ids: Vec<&str> = doc["verificationMethod"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, [format!("{did}#key-1"), format!("{did}#key-2")]);
+        for method in doc["verificationMethod"].as_array().unwrap() {
+            assert_eq!(method["type"], "Multikey");
+            assert_eq!(method["controller"], did);
+            assert!(
+                method["publicKeyMultibase"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with('z')
+            );
+            assert!(method.get("publicKeyJwk").is_none());
+        }
+        assert_eq!(doc["authentication"], json!([format!("{did}#key-1")]));
+        assert_eq!(doc["assertionMethod"], json!([format!("{did}#key-1")]));
+        assert_eq!(doc["keyAgreement"], json!([format!("{did}#key-2")]));
+        assert_eq!(doc["@context"], json!(DID_DOCUMENT_CONTEXT));
+    }
+
+    /// Ids are the secrets' own, whatever order or numbering they come in.
+    #[test]
+    fn ids_are_not_invented_by_position() {
+        let did = "did:web:registry.example";
+        let secrets = vec![x25519("#enc"), ed25519(&format!("{did}#sig"))];
+        let methods = build_verification_methods_for(did, &secrets).unwrap();
+        assert_eq!(methods[0].0["id"], format!("{did}#enc"));
+        assert_eq!(methods[0].1, KeyPurpose::KeyAgreement);
+        assert_eq!(methods[1].0["id"], format!("{did}#sig"));
+        assert_eq!(methods[1].1, KeyPurpose::Signing);
     }
 
     #[test]
-    fn test_build_verification_methods_multiple_keys() {
-        let secret1: Secret = serde_json::from_value(json!({
-            "id": "did:web:example.com#key-0",
-            "type": "JsonWebKey2020",
-            "privateKeyJwk": {
-                "crv": "P-256",
-                // not real, just copy of x
-                "d": "ctKLNB9cXUO3yD-jMCaRi680RmHOFuS30nVogmEhkx4",
-                "kty": "EC",
-                "x": "ctKLNB9cXUO3yD-jMCaRi680RmHOFuS30nVogmEhkx4",
-                "y": "1GDFw4zkTPdVWwqxRhSnEVCdkZyfmViJR8Nq5ad2V9w"
-            }
-        }))
-        .unwrap();
-
-        let secret2: Secret = serde_json::from_value(json!({
-            "id": "did:web:example.com#key-1",
-            "type": "JsonWebKey2020",
-            "privateKeyJwk": {
-                "crv": "secp256k1",
-                // not real, just copy of x
-                "d": "rJcdID8WLUt3Fby5ZsVgyVtrkaEXv050hISLxwY5RrI",
-                "kty": "EC",
-                "x": "rJcdID8WLUt3Fby5ZsVgyVtrkaEXv050hISLxwY5RrI",
-                "y": "eKiDGeJExattkEmEBbOBOBuzvCB9YnfFaZ6xMzYpIMM"
-            }
-        }))
-        .unwrap();
-
-        let secret3: Secret = serde_json::from_value(json!({
-            "id": "did:web:example.com#key-2",
-            "type": "JsonWebKey2020",
-            "privateKeyJwk": {
-                "crv": "Ed25519",
-                // not real, just copy of x
-                "d": "DfRiO5mCASvWyPxr20GQEfzOmFFh50spyP7KHMjvGQo",
-                "kty": "OKP",
-                "x": "DfRiO5mCASvWyPxr20GQEfzOmFFh50spyP7KHMjvGQo"
-            }
-        }))
-        .unwrap();
-
-        let profile = ProfileConfig {
-            did: "did:web:example.com".to_string(),
-            alias: "test".to_string(),
-            secrets: vec![secret1, secret2, secret3],
-        };
-
-        let methods = build_verification_methods(&profile);
-        assert_eq!(methods.len(), 3);
-        assert_eq!(methods[0]["id"], "did:web:example.com#key-0");
-        assert_eq!(methods[1]["id"], "did:web:example.com#key-1");
-        assert_eq!(methods[2]["id"], "did:web:example.com#key-2");
-
-        // Verify all are JsonWebKey2020
-        assert_eq!(methods[0]["type"], "JsonWebKey2020");
-        assert_eq!(methods[1]["type"], "JsonWebKey2020");
-        assert_eq!(methods[2]["type"], "JsonWebKey2020");
-
-        // Verify all have controller set
-        assert_eq!(methods[0]["controller"], "did:web:example.com");
-        assert_eq!(methods[1]["controller"], "did:web:example.com");
-        assert_eq!(methods[2]["controller"], "did:web:example.com");
-
-        // Verify no private keys
-        assert!(methods[0]["publicKeyJwk"].get("d").is_none());
-        assert!(methods[1]["publicKeyJwk"].get("d").is_none());
-        assert!(methods[2]["publicKeyJwk"].get("d").is_none());
-    }
-
-    #[test]
-    fn test_build_did_document_structure() {
-        let profile = ProfileConfig {
-            did: "did:web:localhost%3A3232".to_string(),
-            alias: "local-test".to_string(),
-            secrets: vec![/* test secret */],
-        };
-
-        let doc = build_did_document(
-            &profile,
-            "did:web:mediator.example.com",
-            None,
-            TransportFlags::default(),
+    fn the_published_key_is_the_secrets_public_key() {
+        let s = ed25519("did:web:registry.example#key-1");
+        let methods =
+            build_verification_methods_for("did:web:registry.example", &[s.clone()]).unwrap();
+        assert_eq!(
+            methods[0].0["publicKeyMultibase"],
+            s.get_public_keymultibase().unwrap()
         );
-        let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
+    }
 
-        assert_eq!(parsed["id"], "did:web:localhost%3A3232");
-        assert!(parsed["@context"].is_array());
-        assert!(parsed["verificationMethod"].is_array());
-        assert!(parsed["authentication"].is_array());
-        assert!(parsed["assertionMethod"].is_array());
-        assert!(parsed["keyAgreement"].is_array());
-        assert!(parsed["service"].is_array());
+    #[test]
+    fn ec_signing_keys_are_published_under_authentication() {
+        for generated in [
+            Secret::generate_p256(Some("did:web:example.com#key-1"), None).unwrap(),
+            Secret::generate_secp256k1(Some("did:web:example.com#key-1"), None).unwrap(),
+        ] {
+            // Through JSON, as a profile bundle delivers it.
+            let parsed: Secret =
+                serde_json::from_value(serde_json::to_value(&generated).unwrap()).unwrap();
+            let methods = build_verification_methods_for("did:web:example.com", &[parsed]).unwrap();
+            assert_eq!(methods[0].1, KeyPurpose::SigningOrAgreement);
+            assert_eq!(
+                methods[0].0["publicKeyMultibase"],
+                generated.get_public_keymultibase().unwrap()
+            );
+        }
+    }
+
+    /// A profile from before the move to Curve25519 (P-256 `#key-1`,
+    /// secp256k1 `#key-2`) keeps a key to encrypt to: with no X25519 key, its
+    /// EC keys are listed under `keyAgreement` too.
+    #[test]
+    fn a_legacy_ec_profile_keeps_key_agreement() {
+        let did = "did:web:example.com";
+        let secrets = vec![
+            Secret::generate_p256(Some(&format!("{did}#key-1")), None).unwrap(),
+            Secret::generate_secp256k1(Some(&format!("{did}#key-2")), None).unwrap(),
+        ];
+        let doc =
+            build_did_document_value(did, &secrets, "did:web:m", None, TransportFlags::default())
+                .unwrap();
+        let both = json!([format!("{did}#key-1"), format!("{did}#key-2")]);
+        assert_eq!(doc["authentication"], both);
+        assert_eq!(doc["keyAgreement"], both);
+
+        // With an X25519 key present, EC keys stay out of keyAgreement.
+        let mut with_x = secrets.clone();
+        with_x.push(x25519(&format!("{did}#key-3")));
+        let doc =
+            build_did_document_value(did, &with_x, "did:web:m", None, TransportFlags::default())
+                .unwrap();
+        assert_eq!(doc["keyAgreement"], json!([format!("{did}#key-3")]));
+    }
+
+    /// A did:scid profile DID carries `?src=`; its keys are under the bare
+    /// DID, and both forms are accepted.
+    #[test]
+    fn scid_keys_under_the_bare_did_are_accepted() {
+        let did = "did:scid:vh:1:QmAbc?src=example.com";
+        let methods =
+            build_verification_methods_for(did, &[ed25519("did:scid:vh:1:QmAbc#key-1")]).unwrap();
+        assert_eq!(methods[0].0["id"], "did:scid:vh:1:QmAbc#key-1");
+    }
+
+    /// A JWK whose private half is not its public key's is refused rather
+    /// than published under a key the registry cannot sign for.
+    #[test]
+    fn an_ec_secret_whose_halves_disagree_is_an_error() {
+        let p256 = secret(
+            "did:web:example.com#key-1",
+            json!({
+                "crv": "P-256",
+                "d": "ctKLNB9cXUO3yD-jMCaRi680RmHOFuS30nVogmEhkx4",
+                "kty": "EC",
+                "x": "DEtsdJXfi7IuqaZFkRW_aBwHHpID1jQjPqN_Y46zlZM",
+                "y": "LQs6Q-gGqgtrUW2iEfb9YRyvPAuNALceHqGYs4sNwh4"
+            }),
+        );
+        let err = build_verification_methods_for("did:web:example.com", &[p256]).unwrap_err();
+        assert!(err.contains("does not match"), "{err}");
+    }
+
+    /// A key that cannot be represented is a configuration error, never an
+    /// empty `{}` key in the served document.
+    #[test]
+    fn an_unpublishable_secret_is_an_error() {
+        let bad_id = ed25519("key-1");
+        assert!(build_verification_methods_for("did:web:example.com", &[bad_id]).is_err());
+
+        let p384 = secret(
+            "did:web:example.com#key-1",
+            json!({
+                "kty": "EC",
+                "crv": "P-384",
+                "x": "iA7lWQLzVrKGEFjfGMfMHfTEZ2KnLiKU7JuNT3E7ygsfE7ygAqtV1UYAsHSdGI_6",
+                "y": "vbYb9_K4xs7YpWSiNm8TbqQcGGbtBY-v6ySSOihkzCjQwX4yU8QEf0Kl9F2-RoWh",
+                "d": "u2jqGxbGJMKbDCgtyDiOjJWaQ2ZtFYsLNuUDxx3t-kG5k-gl_6Wd2b5JX5brQWwA"
+            }),
+        );
+        let err = build_verification_methods_for("did:web:example.com", &[p384]).unwrap_err();
+        assert!(err.contains("cannot be published"), "{err}");
+
+        let profile = ProfileConfig {
+            did: "did:web:example.com".to_string(),
+            alias: "t".to_string(),
+            secrets: vec![ed25519("no-fragment")],
+        };
+        assert!(
+            build_did_document(&profile, "did:web:m", None, TransportFlags::default()).is_err()
+        );
     }
 
     #[test]
@@ -511,7 +664,8 @@ mod tests {
             "did:web:mediator.com",
             None,
             TransportFlags::default(),
-        );
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&doc).unwrap();
 
         let service = &parsed["service"][0];

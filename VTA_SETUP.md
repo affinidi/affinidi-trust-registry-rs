@@ -146,6 +146,15 @@ env_path=vta.env
 `transports`, `MEDIATOR_DID` and `TR_PUBLIC_URL`. Neither phase prints a
 private key.
 
+Before contacting the VTA, phase 2 creates `credential_out` (owner-only) and
+checks that `env_out` can be written, so a wrong path fails while nothing has
+been provisioned. An existing `env_out` stops it unless `--force` is given,
+which backs the file up as `<env_out>.backup-<UTC timestamp>` first. If
+anything fails after the VTA has provisioned the registry, what the VTA
+returned is saved to an owner-only recovery file (beside `credential_out`, or
+in the temp directory) and the error names it. After a successful run the
+phase-1 setup key is spent: delete it.
+
 ### H4 — Start the registry
 
 Load `vta.env` (or set the same variables) and start `trust-registry`. Part B

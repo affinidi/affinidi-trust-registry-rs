@@ -98,9 +98,9 @@ jobs:
     permissions:
       contents: read
     env:
+      # Read by trust-registry/tests/didcomm_integration_test.rs (longer waits).
       IN_PIPELINE: 'true'
       MEDIATOR_DID: ${{ vars.MEDIATOR_DID }}
-      MEDIATOR_URL: ${{ vars.MEDIATOR_URL }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         # No `ref:`: a pull_request run tests the PR merged into its base
@@ -120,9 +120,14 @@ jobs:
           shared-key: 'rust-cache'
       - name: generate configs
         run: |
+          # The tests run as the test identities in .env.test; the registry
+          # identity this also writes to .env is replaced by `cp .env.test .env`.
           cargo run --bin setup-trust-registry --features dev-tools -p trust-registry -- \
             --mediator-did="$MEDIATOR_DID" \
-            --test-in-pipeline=true \
+            --did-method=peer \
+            --with-test-identities \
+            --test-in-pipeline \
+            --non-interactive \
             --file-storage-path=trust-registry/tests/tmp/data.csv
       - name: Prepare test data
         run: |

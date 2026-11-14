@@ -60,6 +60,13 @@ struct SetupArgs {
     /// file (see `examples/vta-setup.example.toml`).
     #[arg(long, value_name = "FILE")]
     from: Option<PathBuf>,
+
+    /// Phase 2: replace the setup file's `env_out` if it already exists,
+    /// after backing it up (owner-only) as `<env_out>.backup-<UTC timestamp>`.
+    /// Without it an existing `env_out` stops the run before the VTA is
+    /// contacted.
+    #[arg(long, conflicts_with = "setup_key_out")]
+    force: bool,
 }
 
 /// Run `trust-registry setup` with `args` (the arguments after the binary
@@ -78,7 +85,7 @@ pub async fn run_cli(args: impl IntoIterator<Item = OsString>) -> i32 {
             let context = args.context.as_deref().unwrap_or(DEFAULT_CONTEXT);
             run_setup_phase1(&out, context).await
         }
-        (None, Some(file)) => run_setup_from_file(&file).await,
+        (None, Some(file)) => from_toml::run_setup(&file, args.force).await,
         // The `phase` group makes exactly one of the two present.
         _ => unreachable!("clap enforces exactly one of --setup-key-out / --from"),
     };
@@ -137,6 +144,18 @@ mod tests {
     #[test]
     fn context_belongs_to_phase_one() {
         assert!(parse(&["setup", "--from", "s.toml", "--context", "x"]).is_err());
+    }
+
+    /// `--force` replaces phase 2's `env_out`; phase 1 writes no env file.
+    #[test]
+    fn force_belongs_to_phase_two() {
+        assert!(
+            parse(&["setup", "--from", "s.toml", "--force"])
+                .unwrap()
+                .force
+        );
+        assert!(!parse(&["setup", "--from", "s.toml"]).unwrap().force);
+        assert!(parse(&["setup", "--setup-key-out", "k.json", "--force"]).is_err());
     }
 
     /// The grant must carry `--admin-handoff`: without it the VTA refuses to

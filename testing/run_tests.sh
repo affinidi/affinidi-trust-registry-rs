@@ -26,7 +26,7 @@ echo "Using TR_STORAGE_BACKEND=$TR_STORAGE_BACKEND"
 
 if [ ! -f .env.test ]; then
     echo ".env.test not found. Please run the following command to set up the Trust Registry:"
-    echo "  cargo run --bin setup-trust-registry --features dev-tools"
+    echo "  cargo run --bin setup-trust-registry --features dev-tools -- --mediator-did <MEDIATOR_DID> --did-method peer --with-test-identities"
     exit 1
 fi
 source .env.test
