@@ -1,6 +1,8 @@
 //! End-to-end smoke test for the embedded fixture: spawn, drive the REST/TRQP
 //! surface over an in-memory store, and shut down — all in-process, no env vars.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use serde_json::{Value, json};
 use test_trust_registry::TestTrustRegistry;
 use trust_registry::domain::{

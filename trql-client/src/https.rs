@@ -2,6 +2,14 @@
 //! wire contract (JSON body = the request document; a 2xx body is the reply
 //! document, a non-2xx body is a `trust-task-error` document).
 //!
+//! Both directions of that contract are enforced. A non-2xx reply whose body
+//! is a Trust Task document other than `trust-task-error` is a
+//! [`TrqlError::Contract`] error, so an error status can never deliver an
+//! answer; one whose body is no Trust Task document at all is a
+//! [`TrqlError::Transport`] error. A 2xx reply must be a Trust Task document
+//! ([`TrqlError::Contract`] otherwise); if it is a `trust-task-error`, the
+//! query fails as [`TrqlError::Rejected`].
+//!
 //! Implemented directly on `reqwest` rather than `trust_tasks_https::HttpsClient`:
 //! that client's typed `send` bounds (`Payload` on both sides) don't admit the
 //! untyped `TrustTask<Value>` seam this crate routes every binding through.
@@ -49,7 +57,9 @@ pub const MAX_ERROR_DETAIL_CHARS: usize = 256;
 
 /// Configuration for [`HttpsTransport`].
 ///
-/// Build it with [`HttpsTransportConfig::new`] and adjust the fields.
+/// Build it with [`HttpsTransportConfig::new`] and the `with_*` setters (or
+/// assign the fields); the struct is `#[non_exhaustive]`, so options can be
+/// added without breaking callers.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct HttpsTransportConfig {
@@ -94,6 +104,49 @@ impl HttpsTransportConfig {
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             allow_non_public_addresses: false,
         }
+    }
+
+    /// Set the end-to-end request timeout.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Set the connection-establishment timeout.
+    #[must_use]
+    pub fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self
+    }
+
+    /// Send `Authorization: Bearer <token>` with every request.
+    #[must_use]
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.bearer_token = Some(token.into());
+        self
+    }
+
+    /// See [`allow_insecure_http`](Self::allow_insecure_http).
+    #[must_use]
+    pub fn with_allow_insecure_http(mut self, allow: bool) -> Self {
+        self.allow_insecure_http = allow;
+        self
+    }
+
+    /// See [`max_response_bytes`](Self::max_response_bytes).
+    #[must_use]
+    pub fn with_max_response_bytes(mut self, max: usize) -> Self {
+        self.max_response_bytes = max;
+        self
+    }
+
+    /// See [`allow_non_public_addresses`](Self::allow_non_public_addresses):
+    /// only for a base URL you configured yourself.
+    #[must_use]
+    pub fn with_allow_non_public_addresses(mut self, allow: bool) -> Self {
+        self.allow_non_public_addresses = allow;
+        self
     }
 }
 
@@ -242,7 +295,7 @@ impl HttpsTransport {
             if e.is_timeout() {
                 TrqlError::Timeout {
                     kind: TransportKind::Https,
-                    waited_secs: self.timeout.as_secs(),
+                    waited_secs: crate::error::whole_secs_rounded_up(self.timeout),
                 }
             } else {
                 Self::transport_error(format!("failed reading response body: {e}"))
@@ -275,7 +328,7 @@ impl TrqlTransport for HttpsTransport {
             if e.is_timeout() {
                 TrqlError::Timeout {
                     kind: TransportKind::Https,
-                    waited_secs: self.timeout.as_secs(),
+                    waited_secs: crate::error::whole_secs_rounded_up(self.timeout),
                 }
             } else if e.is_connect() {
                 Self::transport_error(format!("could not connect to {}: {e}", self.endpoint))
@@ -292,10 +345,8 @@ impl TrqlTransport for HttpsTransport {
         }
         let body = self.read_capped(response).await?;
 
-        // Success and error statuses both carry a Trust Task document (the
-        // error status carries `trust-task-error`); the client layer maps it.
         match serde_json::from_slice::<TrustTask<Value>>(&body) {
-            Ok(document) => Ok(document),
+            Ok(document) => status_agrees_with(status, document),
             Err(e) if status.is_success() => Err(TrqlError::Contract(format!(
                 "HTTP {status} body is not a Trust Task document: {e}"
             ))),
@@ -306,6 +357,37 @@ impl TrqlTransport for HttpsTransport {
         }
     }
 }
+
+/// Hold a parsed reply document to the binding's contract: a non-2xx status
+/// carries a `trust-task-error` document.
+///
+/// A non-2xx status with any other document — a `#response` saying
+/// `authorized: true` under a `403` or `502`, say — is a broken exchange (a
+/// gateway rewriting the status, or a server that set an error status after
+/// serialising a success body), and of the two disagreeing signals the
+/// restrictive one wins: it is a [`TrqlError::Contract`] error, never an
+/// answer.
+///
+/// A 2xx status with a `trust-task-error` document is passed on, and
+/// [`crate::TrqlClient`] reports it as [`TrqlError::Rejected`]: the document
+/// refuses, so the exchange fails closed either way, and the registry's
+/// machine-readable code is kept.
+fn status_agrees_with(
+    status: reqwest::StatusCode,
+    document: TrustTask<Value>,
+) -> Result<TrustTask<Value>, TrqlError> {
+    if status.is_success() || document.type_uri.slug() == ERROR_SLUG {
+        return Ok(document);
+    }
+    Err(TrqlError::Contract(format!(
+        "HTTP {status} carried a non-error `{}` document; a non-2xx reply must be a \
+         {ERROR_SLUG} document",
+        document.type_uri
+    )))
+}
+
+/// Slug of the framework's reserved error document type.
+const ERROR_SLUG: &str = "trust-task-error";
 
 /// At most [`MAX_ERROR_DETAIL_CHARS`] characters of `text`, marked when cut.
 fn truncate_detail(text: &str) -> String {

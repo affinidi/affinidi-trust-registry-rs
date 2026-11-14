@@ -19,16 +19,52 @@
 //! ### Profile requirements
 //!
 //! The [`ATMProfile`] must have a mediator configured and websocket live
-//! delivery enabled before the first exchange. Give this transport a profile
-//! of its own: replies are picked from the profile's inbound stream, and a
-//! second consumer on the same stream would steal them.
+//! delivery enabled before the first exchange. **This transport owns the
+//! profile's inbound DIDComm stream exclusively**: replies are picked from
+//! it, a second consumer on the same stream would steal them, and every
+//! message this transport cannot use is deleted (below). Give it a profile
+//! of its own.
 //!
 //! ### Delivery semantics
 //!
-//! Inbound envelope frames are acked (deleted from the mediator) only after
-//! the reply has been handed to its waiter; frames that are not Trust Task
-//! envelopes, that correlate to no in-flight request, or that come from a
-//! party other than the one addressed, are left untouched.
+//! Every inbound message is deleted from the mediator once the demux task
+//! has decided what to do with it:
+//!
+//! * a reply routed to its waiter is deleted only after the waiter holds it
+//!   (ack after handoff);
+//! * a reply that correlates to no in-flight query (a late answer to a query
+//!   that timed out or was cancelled, or an unsolicited one) is deleted: it
+//!   answers an idempotent read nobody is waiting for any more;
+//! * a correlated reply from a party other than the one addressed is deleted:
+//!   it can never complete the exchange, which goes on waiting for the
+//!   registry's own reply;
+//! * an envelope whose body is not a Trust Task document is poison (it will
+//!   never parse) and is deleted;
+//! * a message of any other DIDComm type is deleted: the profile belongs to
+//!   this transport, so nothing else will ever consume it, and leaving it
+//!   would grow the mediator queue without bound.
+//!
+//! None of these decisions depends on anything transient: every message this
+//! loop sees has already been unpacked and authenticated by the SDK, and the
+//! remaining checks are pure functions of its content. A frame that fails to
+//! unpack never reaches this loop: the SDK's receive leg classifies it,
+//! deleting a poison frame and keeping one that failed for a transient reason
+//! (a resolver hiccup) for redelivery.
+//!
+//! ### Failure reporting
+//!
+//! Poll failures are retried with capped exponential backoff and logged with
+//! escalation (the first at `warn`, then periodically). The transport also
+//! follows the profile's websocket connection state: the SDK keeps
+//! reconnecting a websocket whose mediator is unreachable or rejects the
+//! profile's credentials, and polls during that time return "no message"
+//! rather than an error. Once polls have failed, or the websocket has been
+//! disconnected, for 10 seconds without a break, the stream is declared
+//! unavailable (logged at `error`): in-flight and new exchanges fail at once
+//! with [`TrqlError::Transport`] naming the reason instead of waiting out the
+//! reply window; see [`DidcommTransport::inbound_error`]. It clears as soon
+//! as polls succeed with the websocket connected. If the demux task ever
+//! ends, every exchange fails with "reply demux task stopped".
 //!
 //! Once the TDK delivery layer (architecture decision D1, phase 2) is
 //! consumable, this arm's internals move onto it; the [`TrqlTransport`] seam
@@ -47,19 +83,38 @@ use trust_tasks_didcomm::ENVELOPE_TYPE;
 use trust_tasks_rs::TrustTask;
 
 use crate::error::TrqlError;
-use crate::pending::{PendingReplies, RouteOutcome};
+use crate::pending::{
+    DEMUX_STOPPED, InboundMonitor, PendingReplies, RouteOutcome, watch_connection,
+};
 use crate::transport::{TransportKind, TrqlTransport};
 
 /// How long each inbound pickup poll waits before looping.
 const INBOUND_POLL_WAIT: Duration = Duration::from_secs(10);
-/// Backoff after a transient inbound error so the demux loop doesn't spin.
-const INBOUND_ERROR_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Configuration for [`DidcommTransport`].
+///
+/// Build it with [`DidcommTransportConfig::new`] (or `default()`) and the
+/// `with_*` setters, so options can be added without breaking callers.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DidcommTransportConfig {
     /// How long to wait for the registry's reply before failing the exchange.
     pub reply_timeout: Duration,
+}
+
+impl DidcommTransportConfig {
+    /// The defaults: a 60s reply window.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Wait up to `reply_timeout` for the registry's reply.
+    #[must_use]
+    pub fn with_reply_timeout(mut self, reply_timeout: Duration) -> Self {
+        self.reply_timeout = reply_timeout;
+        self
+    }
 }
 
 impl Default for DidcommTransportConfig {
@@ -78,6 +133,8 @@ pub struct DidcommTransport {
     pending: PendingReplies,
     reply_timeout: Duration,
     demux: tokio::task::JoinHandle<()>,
+    /// Follows the profile's websocket connection state for the health check.
+    watcher: tokio::task::JoinHandle<()>,
 }
 
 impl DidcommTransport {
@@ -96,20 +153,44 @@ impl DidcommTransport {
             ));
         }
         let pending = PendingReplies::new();
-        let demux = tokio::spawn(demux_loop(atm.clone(), profile.clone(), pending.clone()));
+        let monitor = InboundMonitor::new(pending.clone(), TransportKind::Didcomm);
+        let demux = tokio::spawn(demux_loop(
+            atm.clone(),
+            profile.clone(),
+            pending.clone(),
+            monitor,
+        ));
+        let watcher = tokio::spawn(watch_connection(
+            profile.clone(),
+            pending.clone(),
+            TransportKind::Didcomm,
+        ));
         Ok(Self {
             atm,
             profile,
             pending,
             reply_timeout: config.reply_timeout,
             demux,
+            watcher,
         })
+    }
+
+    /// Why this transport cannot receive replies right now (its polls have
+    /// failed, or its mediator websocket has been disconnected, for longer
+    /// than the health threshold; or its demux task has stopped), or `None`
+    /// while it can. Exchanges fail fast with this reason meanwhile.
+    pub fn inbound_error(&self) -> Option<String> {
+        if self.demux.is_finished() {
+            return Some(DEMUX_STOPPED.to_string());
+        }
+        self.pending.inbound_error()
     }
 }
 
 impl Drop for DidcommTransport {
     fn drop(&mut self) {
         self.demux.abort();
+        self.watcher.abort();
     }
 }
 
@@ -123,36 +204,27 @@ impl TrqlTransport for DidcommTransport {
         let dest = request.recipient.clone().ok_or_else(|| {
             TrqlError::Config("request document has no recipient to route to".to_string())
         })?;
+        if self.demux.is_finished() {
+            return Err(TrqlError::Transport {
+                kind: TransportKind::Didcomm,
+                detail: DEMUX_STOPPED.to_string(),
+            });
+        }
         let request_id = request.id.clone();
         let body = serde_json::to_value(&request)
             .map_err(|e| TrqlError::Contract(format!("request did not serialize: {e}")))?;
 
-        // Register the waiter before sending so a fast reply cannot be lost.
-        let receiver = self.pending.register(&request_id, &dest);
-
-        let send_result = self.send_envelope(&dest, &request_id, body).await;
-        if let Err(error) = send_result {
-            self.pending.abandon(&request_id);
-            return Err(error);
-        }
-
-        match tokio::time::timeout(self.reply_timeout, receiver).await {
-            Ok(Ok(document)) => Ok(document),
-            Ok(Err(_closed)) => {
-                self.pending.abandon(&request_id);
-                Err(TrqlError::Transport {
-                    kind: TransportKind::Didcomm,
-                    detail: "reply demux task stopped".to_string(),
-                })
-            }
-            Err(_elapsed) => {
-                self.pending.abandon(&request_id);
-                Err(TrqlError::Timeout {
-                    kind: TransportKind::Didcomm,
-                    waited_secs: self.reply_timeout.as_secs(),
-                })
-            }
-        }
+        // The waiter is registered before the send and removed however the
+        // exchange ends, including by this future being dropped.
+        self.pending
+            .exchange(
+                TransportKind::Didcomm,
+                &request_id,
+                &dest,
+                self.reply_timeout,
+                self.send_envelope(&dest, &request_id, body),
+            )
+            .await
     }
 }
 
@@ -213,35 +285,93 @@ impl DidcommTransport {
     }
 }
 
+/// What the demux task did with one inbound DIDComm message.
+///
+/// Every disposition ends with the message deleted from the mediator: the
+/// transport owns the profile's stream exclusively (module docs), and each
+/// case is decided from the message's own content, so none of them could
+/// change on redelivery. [`Disposition::Delivered`] is deleted only after the
+/// waiter holds the reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Disposition {
+    /// Handed to the waiting exchange.
+    Delivered,
+    /// A Trust Task reply no exchange is waiting for: late (its query timed
+    /// out or was cancelled) or unsolicited.
+    Unrouted,
+    /// A correlated reply not authcrypted by the party addressed.
+    WrongSender,
+    /// A Trust Task envelope whose body is not a Trust Task document.
+    Malformed,
+    /// A DIDComm message of another type.
+    OtherType,
+}
+
+impl Disposition {
+    /// Whether the demux task deletes the message from the mediator. True
+    /// for every case; spelled out so the policy is stated and tested in one
+    /// place, and a new case has to decide.
+    fn deletes(self) -> bool {
+        match self {
+            Self::Delivered
+            | Self::Unrouted
+            | Self::WrongSender
+            | Self::Malformed
+            | Self::OtherType => true,
+        }
+    }
+}
+
 /// Route one unpacked DIDComm message to its waiter, bound to the sender
-/// the envelope authenticated. Messages that are not Trust Task envelopes are
-/// [`RouteOutcome::Unsolicited`] and left alone.
+/// the envelope authenticated, and say what became of it.
 fn route_envelope(
     pending: &PendingReplies,
     message: Message,
     meta: &UnpackMetadata,
-) -> RouteOutcome {
+) -> Disposition {
     if message.typ != ENVELOPE_TYPE {
-        // Not a Trust Task envelope — not ours to consume or ack.
-        return RouteOutcome::Unsolicited;
+        // A problem report (from the mediator or the registry) usually
+        // explains why a query will go unanswered: say so where it shows.
+        if message.typ.contains("report-problem") {
+            warn!(
+                message_type = message.typ,
+                body = %message.body,
+                "discarding a DIDComm problem report on the trql-client profile"
+            );
+            return Disposition::OtherType;
+        }
+        debug!(
+            message_type = message.typ,
+            "discarding a non-Trust-Task DIDComm message on the trql-client profile"
+        );
+        return Disposition::OtherType;
     }
     let sender = authenticated_sender(&message, meta);
     let document: TrustTask<Value> = match serde_json::from_value(message.body) {
         Ok(document) => document,
         Err(e) => {
-            warn!("dropping malformed Trust Task envelope: {e}");
-            return RouteOutcome::Unsolicited;
+            warn!(
+                in_flight = pending.waiting(),
+                "discarding a malformed Trust Task envelope (poison): {e}"
+            );
+            return Disposition::Malformed;
         }
     };
-    let outcome = pending.route(document, sender.as_deref());
-    if let RouteOutcome::WrongSender { expected } = &outcome {
-        warn!(
-            expected,
-            sender = sender.as_deref().unwrap_or("<not authenticated>"),
-            "ignoring a Trust Task reply that was not authcrypted by the party the request was addressed to"
-        );
+    match pending.route(document, sender.as_deref()) {
+        RouteOutcome::Delivered => Disposition::Delivered,
+        RouteOutcome::Unsolicited => {
+            debug!("discarding a Trust Task reply no query is waiting for (late or unsolicited)");
+            Disposition::Unrouted
+        }
+        RouteOutcome::WrongSender { expected } => {
+            warn!(
+                expected,
+                sender = sender.as_deref().unwrap_or("<not authenticated>"),
+                "discarding a Trust Task reply that was not authcrypted by the party the request was addressed to"
+            );
+            Disposition::WrongSender
+        }
     }
-    outcome
 }
 
 /// The DID that authcrypted `message`, or `None` when the envelope was not
@@ -261,29 +391,43 @@ fn authenticated_sender(message: &Message, meta: &UnpackMetadata) -> Option<Stri
 }
 
 /// The single owner of the profile's inbound pickup stream. Routes Trust Task
-/// envelope replies to waiters; survives transient stream errors.
-async fn demux_loop(atm: ATM, profile: Arc<ATMProfile>, pending: PendingReplies) {
+/// envelope replies to waiters and deletes every message once it has been
+/// dealt with; survives transient stream errors, reporting persistent ones
+/// through `monitor` (whose `Drop` reports the task ending).
+async fn demux_loop(
+    atm: ATM,
+    profile: Arc<ATMProfile>,
+    pending: PendingReplies,
+    mut monitor: InboundMonitor,
+) {
     loop {
         match atm
             .message_pickup()
+            // `auto_delete = false`: the delete below runs after routing, so
+            // a routed reply is acked only once its waiter holds it.
             .live_stream_next(&profile, Some(INBOUND_POLL_WAIT), false)
             .await
         {
             Ok(Some((message, meta))) => {
-                // Ack (mediator delete) only after the waiter holds the reply;
-                // an unrouted reply stays queued rather than being destroyed.
-                if route_envelope(&pending, message, &meta) == RouteOutcome::Delivered
+                monitor.succeeded();
+                // Deliberately deletes what cannot be used (late, foreign,
+                // malformed or other-typed messages) as well as what was
+                // delivered; see `Disposition`. None of those decisions is
+                // transient, so nothing that could later succeed is
+                // discarded (R1.6).
+                let disposition = route_envelope(&pending, message, &meta);
+                if disposition.deletes()
                     && let Err(e) = atm
                         .delete_message_background(&profile, &meta.sha256_hash)
                         .await
                 {
-                    debug!("ack of handled reply failed (will redeliver): {e}");
+                    debug!(?disposition, "mediator delete failed (will redeliver): {e}");
                 }
             }
-            Ok(None) => {}
+            Ok(None) => monitor.succeeded(),
             Err(e) => {
-                debug!("inbound stream error (backing off): {e}");
-                tokio::time::sleep(INBOUND_ERROR_BACKOFF).await;
+                let wait = monitor.failed(&e.to_string());
+                tokio::time::sleep(wait).await;
             }
         }
     }
@@ -328,16 +472,27 @@ mod tests {
     }
 
     #[test]
+    fn config_is_built_without_a_struct_literal() {
+        let config = DidcommTransportConfig::new().with_reply_timeout(Duration::from_secs(5));
+        assert_eq!(config.reply_timeout, Duration::from_secs(5));
+        assert_eq!(
+            DidcommTransportConfig::default().reply_timeout,
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
     fn a_reply_authcrypted_by_the_registry_completes_the_exchange() {
         let pending = PendingReplies::new();
-        let mut rx = pending.register("req-1", REGISTRY);
+        let mut reg = pending.register("req-1", REGISTRY).unwrap();
         let outcome = route_envelope(
             &pending,
             envelope(&reply_to("req-1"), Some(REGISTRY)),
             &authcrypt_by(REGISTRY),
         );
-        assert_eq!(outcome, RouteOutcome::Delivered);
-        assert!(rx.try_recv().is_ok());
+        assert_eq!(outcome, Disposition::Delivered);
+        assert!(outcome.deletes(), "a delivered reply is acked");
+        assert!(reg.receiver().try_recv().unwrap().is_ok());
     }
 
     /// Another party that knows the request id and echoes the asked tuple,
@@ -346,7 +501,7 @@ mod tests {
     #[test]
     fn a_correlated_reply_authcrypted_by_another_party_is_not_delivered() {
         let pending = PendingReplies::new();
-        let mut rx = pending.register("req-1", REGISTRY);
+        let mut reg = pending.register("req-1", REGISTRY).unwrap();
 
         for from in [Some(OTHER), Some(REGISTRY), None] {
             let outcome = route_envelope(
@@ -354,11 +509,11 @@ mod tests {
                 envelope(&reply_to("req-1"), from),
                 &authcrypt_by(OTHER),
             );
-            assert!(
-                matches!(outcome, RouteOutcome::WrongSender { .. }),
-                "from {from:?}: {outcome:?}"
-            );
-            assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+            assert_eq!(outcome, Disposition::WrongSender, "from {from:?}");
+            assert!(matches!(
+                reg.receiver().try_recv(),
+                Err(TryRecvError::Empty)
+            ));
         }
 
         // The registry's reply still completes it.
@@ -368,24 +523,27 @@ mod tests {
                 envelope(&reply_to("req-1"), Some(REGISTRY)),
                 &authcrypt_by(REGISTRY),
             ),
-            RouteOutcome::Delivered
+            Disposition::Delivered
         );
-        assert!(rx.try_recv().is_ok());
+        assert!(reg.receiver().try_recv().is_ok());
     }
 
     #[test]
     fn an_unauthenticated_reply_naming_the_registry_is_not_delivered() {
         let pending = PendingReplies::new();
-        let mut rx = pending.register("req-1", REGISTRY);
+        let mut reg = pending.register("req-1", REGISTRY).unwrap();
         for meta in [anoncrypt(), UnpackMetadata::default()] {
             let outcome = route_envelope(
                 &pending,
                 envelope(&reply_to("req-1"), Some(REGISTRY)),
                 &meta,
             );
-            assert!(matches!(outcome, RouteOutcome::WrongSender { .. }));
+            assert_eq!(outcome, Disposition::WrongSender);
         }
-        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(
+            reg.receiver().try_recv(),
+            Err(TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -403,16 +561,71 @@ mod tests {
         assert_eq!(authenticated_sender(&msg, &meta), None);
     }
 
+    // --- what the demux task deletes ---------------------------------------
+
+    /// A reply that arrives after its query timed out or was cancelled finds
+    /// no waiter, and is deleted rather than left queued for ever.
     #[test]
-    fn other_message_types_are_left_alone() {
+    fn a_late_reply_is_deleted() {
         let pending = PendingReplies::new();
-        let mut rx = pending.register("req-1", REGISTRY);
-        let mut msg = envelope(&reply_to("req-1"), Some(REGISTRY));
-        msg.typ = "https://didcomm.org/trust-ping/2.0/ping".to_string();
-        assert_eq!(
-            route_envelope(&pending, msg, &authcrypt_by(REGISTRY)),
-            RouteOutcome::Unsolicited
+        let reg = pending.register("req-1", REGISTRY).unwrap();
+        drop(reg); // the query timed out or was cancelled
+        let outcome = route_envelope(
+            &pending,
+            envelope(&reply_to("req-1"), Some(REGISTRY)),
+            &authcrypt_by(REGISTRY),
         );
-        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(outcome, Disposition::Unrouted);
+        assert!(outcome.deletes());
+    }
+
+    #[test]
+    fn a_malformed_envelope_is_deleted_as_poison() {
+        let pending = PendingReplies::new();
+        let msg = Message::build(
+            "urn:uuid:envelope".to_string(),
+            ENVELOPE_TYPE.to_string(),
+            serde_json::json!({ "not": "a trust task" }),
+        )
+        .finalize();
+        let outcome = route_envelope(&pending, msg, &authcrypt_by(REGISTRY));
+        assert_eq!(outcome, Disposition::Malformed);
+        assert!(outcome.deletes());
+    }
+
+    #[test]
+    fn a_reply_from_the_wrong_sender_is_deleted() {
+        let pending = PendingReplies::new();
+        let _reg = pending.register("req-1", REGISTRY).unwrap();
+        let outcome = route_envelope(
+            &pending,
+            envelope(&reply_to("req-1"), Some(OTHER)),
+            &authcrypt_by(OTHER),
+        );
+        assert_eq!(outcome, Disposition::WrongSender);
+        assert!(outcome.deletes());
+        assert_eq!(pending.waiting(), 1, "the waiter keeps waiting");
+    }
+
+    /// The profile belongs to this transport, so a message of another type
+    /// is never routed and is deleted, not left to accumulate.
+    #[test]
+    fn other_message_types_are_not_routed_and_are_deleted() {
+        let pending = PendingReplies::new();
+        let mut reg = pending.register("req-1", REGISTRY).unwrap();
+        for typ in [
+            "https://didcomm.org/trust-ping/2.0/ping",
+            "https://didcomm.org/report-problem/2.0/problem-report",
+        ] {
+            let mut msg = envelope(&reply_to("req-1"), Some(REGISTRY));
+            msg.typ = typ.to_string();
+            let outcome = route_envelope(&pending, msg, &authcrypt_by(REGISTRY));
+            assert_eq!(outcome, Disposition::OtherType, "{typ}");
+            assert!(outcome.deletes());
+        }
+        assert!(matches!(
+            reg.receiver().try_recv(),
+            Err(TryRecvError::Empty)
+        ));
     }
 }

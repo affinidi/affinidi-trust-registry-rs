@@ -199,9 +199,73 @@ release goes GA (`## 0.27.0 (date)`).
 - **`.env.example` starts with `ENABLE_DIDCOMM=false`** and no sample
   `PROFILE_CONFIG` (the old one was not valid JSON), so a copy of it starts;
   `setup-trust-registry` now writes `ENABLE_DIDCOMM` to `.env` (#259).
+- **`trql-client`: `TrqlError`, `TransportKind`, `TrqpQuery`,
+  `ServiceCapabilities`, `TransportChoice`, `DidcommTransportConfig` and
+  `TspTransportConfig` are `#[non_exhaustive]`**, so new variants, fields and
+  options are no longer breaking. Outside the crate, a `match` on `TrqlError`
+  or `TransportKind` needs a wildcard arm, and these structs can no longer be
+  built with struct literals: use `TrqpQuery::new` with `at`/`locator`,
+  `TransportChoice::new(kind, endpoint)`, `ServiceCapabilities::default()`
+  with `with_tsp`/`with_didcomm`/`with_https` (or `from_document`), and
+  `DidcommTransportConfig::new()` / `TspTransportConfig::new()` with
+  `with_reply_timeout`. `TrqlError` variants can still be constructed.
+- **`trql-client`: the build-script-generated `specs` module is private.**
+  The request/response types stay public as `trql_client::payloads::{v0_1,
+  v0_2}`.
+- **`trql-client`: an answer to `TrqpQuery::at(time)` must be for that
+  time.** A reply whose `asOf` (0.1: `time_requested`) is absent or names
+  another instant is refused as `TrqlError::AnswerMismatch` instead of being
+  returned, so a registry that ignores `context.time` can no longer pass off
+  a "now" answer as an "as of then" one.
+- **`trql-client`: over HTTPS, an error status never yields an answer.** A
+  non-2xx reply whose body is a Trust Task document other than
+  `trust-task-error` (for example a `#response` granting the query under a
+  `403` or `502`) is now `TrqlError::Contract` instead of being accepted. A
+  2xx reply carrying a `trust-task-error` is, as before,
+  `TrqlError::Rejected`.
+- **`trql-client`: a DIDComm or TSP query fails fast when the reply stream is
+  down.** Once the transport's polls have failed, or its mediator websocket
+  has been disconnected (mediator unreachable, credentials rejected), for 10
+  seconds without a break, in-flight and new queries fail with
+  `TrqlError::Transport` ("inbound stream unavailable: …") instead of
+  `TrqlError::Timeout` after the reply window; it clears once polls succeed
+  with the websocket connected. A stopped reply-routing task is reported as
+  `TrqlError::Transport` ("reply demux task stopped") instead of a timeout.
+  `TrqlError::Timeout::waited_secs` rounds up, so a sub-second window no
+  longer reports 0.
+- **`trql-client`: an `asOf` echo written more coarsely than the asked time**
+  (whole seconds, milliseconds) matches the asked time truncated to that
+  precision; any other difference is an `AnswerMismatch`.
+- **`trql-client`: the DIDComm transport deletes every inbound message it
+  cannot use** from the mediator (late or unsolicited replies, replies from a
+  party other than the one addressed, malformed envelopes, and other DIDComm
+  message types), as the TSP transport already did. A routed reply is still
+  deleted only after its query holds it. The transport's profile must not be
+  shared with another consumer, as its documentation already required.
+- **The `trqp` crate is no longer published** (`publish = false`). It was a
+  placeholder whose binary printed a greeting. The versions already on
+  crates.io are left as they are.
 
 ### Added
 
+- **`trql-client`: `trql_client::trust_tasks`** re-exports `TrustTask`,
+  `TrustTaskCode` and `StandardCode`, so matching a rejection code or
+  implementing `TrqlTransport` needs no direct `trust-tasks-rs` dependency.
+- **`trql-client`: `with_*` setters on `HttpsTransportConfig`**
+  (`with_timeout`, `with_connect_timeout`, `with_bearer_token`,
+  `with_allow_insecure_http`, `with_max_response_bytes`,
+  `with_allow_non_public_addresses`).
+- **`trql-client`: `DidcommTransport::inbound_error` and
+  `TspTransport::inbound_error`** report why the transport cannot receive
+  replies (its inbound stream keeps failing, or its routing task stopped).
+- **`trql-client` has its own README** on crates.io, and docs.rs renders all
+  its features.
+- **`test-trust-registry`: `TestTrustRegistryBuilder::did`** gives a
+  REST-only registry a DID, so `trql-client` can query its
+  `POST /trust-tasks`; **`TestTrustRegistryBuilder::tsp`** turns on its TSP
+  binding under `spawn_with_mediator` (a `tsp` build alone never did, so the
+  routed TSP test could not pass). New tests query the real registry through
+  `trql-client` over HTTPS, DIDComm and TSP.
 - **Audit entries for writes carry `document_digest`**, the SHA-256 (hex) of
   the canonical JSON of the whole signed document, proof included, so an
   archived copy of a request can be matched to its entry and its proof checked
@@ -585,6 +649,30 @@ release goes GA (`## 0.27.0 (date)`).
   matches `--help` (`scid`, `--no-scid-alias`, `--non-interactive`, the
   `--didweb-url` form) and links the README for the environment reference
   (#272).
+- **`trql-client`: a cancelled DIDComm or TSP query no longer leaks its
+  waiter.** Dropping the future of a query in flight (a caller's own timeout,
+  a `select!`, a disconnected HTTP client) left its entry in the transport's
+  pending-reply map for the life of the transport; each exchange now holds a
+  guard that removes the entry however it ends.
+- **`trql-client`: document ids are random UUIDs in every build.** The
+  default (HTTPS-only) build sent `urn:uuid:` followed by a clock-and-counter
+  string that was neither a UUID nor random; `uuid` is now a regular
+  dependency and every build sends `urn:uuid:<v4 UUID>`.
+- **`trql-client`: inbound-stream failures are logged at `warn`/`error`**
+  with capped exponential backoff, instead of at `debug` every 500 ms, and a
+  TSP reply lost to a failed unpack says so.
+- **`trql-client` documentation**: the examples compile as doctests (one
+  passed a `Vec` where `select` takes a slice), the payload-types paragraph is
+  on `payloads`, `SpecVersion` no longer implies 0.1 answers ignore a record's
+  validity window, and the crate docs list every check made on a reply.
+  "TRQL" is defined as only the crate's name (the protocol is TRQP), and the
+  workspace drops `trql` as a crates.io keyword. The `trust-registry` crate
+  has crate-level docs, and the README lists the workspace's crates.
+- **`test-trust-registry` documentation** no longer calls `spawn_with_mediator`
+  and the routed TSP round trip future work, explains running the routed
+  tests (`--ignored`, a local Redis, direct delivery and a TSP relationship
+  for TSP), and states that an admin DID may write only under its own
+  authority.
 - **Records whose identifiers contain `#` no longer share a storage key.** The
   Redis, DynamoDB and fjall backends keyed a record by
   `TR#{authority}#{action}#{resource}#{entity}` with the identifiers joined as

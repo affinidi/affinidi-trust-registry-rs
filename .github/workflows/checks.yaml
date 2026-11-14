@@ -158,7 +158,12 @@ jobs:
           trap 'kill $TAIL_PID 2>/dev/null || true' EXIT
           cargo llvm-cov --all-features -p trust-registry --summary-only --fail-under-lines=45
       - name: Test library crates
-        run: cargo test --all-features -p trql-client -p trqp
+        # test-trust-registry with its default features only: its `mediator`
+        # / `tsp` suites need a Redis for the test mediator and run on the
+        # scheduled mediator workflow instead.
+        run: |
+          cargo test --all-features -p trql-client -p trqp
+          cargo test -p test-trust-registry
       - name: Stop server
         if: always()
         run: |

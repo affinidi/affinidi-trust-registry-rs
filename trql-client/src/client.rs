@@ -30,16 +30,31 @@ fn payload_build_error(err: impl std::fmt::Display) -> TrqlError {
     TrqlError::Config(format!("could not build query payload: {err}"))
 }
 
-/// The four tuple members, as one version spells them on both its request and
-/// its response.
+/// How one spec version spells the members of the question on its response.
 ///
 /// Every `registry/authorization` and `registry/recognition` version requires
-/// all four on the response, verbatim from the request, which is what makes an
-/// echo check possible without knowing which query is in flight. The authority
-/// is always the second.
-type Tuple = [&'static str; 4];
-const TUPLE_V0_1: Tuple = ["entity_id", "authority_id", "action", "resource"];
-const TUPLE_V0_2: Tuple = ["entityId", "authorityId", "action", "resource"];
+/// the four tuple members on the response, verbatim from the request, which is
+/// what makes an echo check possible without knowing which query is in
+/// flight. The authority is always the second. The evaluation time the query
+/// asked for (`context.time`) is echoed in `as_of`.
+struct Spelling {
+    tuple: [&'static str; 4],
+    as_of: &'static str,
+}
+const SPELLING_V0_1: Spelling = Spelling {
+    tuple: ["entity_id", "authority_id", "action", "resource"],
+    as_of: "time_requested",
+};
+const SPELLING_V0_2: Spelling = Spelling {
+    tuple: ["entityId", "authorityId", "action", "resource"],
+    as_of: "asOf",
+};
+
+/// What a query asked, captured from the request as it went on the wire.
+struct Asked {
+    tuple: [Value; 4],
+    time: Option<DateTime<Utc>>,
+}
 
 /// Whether `err` is a registry saying it does not speak this version of a task
 /// it does know: the SPEC §8.3 signal to downgrade.
@@ -49,7 +64,12 @@ fn is_unsupported_version(err: &TrqlError) -> bool {
 
 /// The TRQP 4-tuple every registry query is keyed on, plus the optional
 /// evaluation context.
+///
+/// Build it with [`TrqpQuery::new`] and the [`at`](Self::at) /
+/// [`locator`](Self::locator) setters. The struct is `#[non_exhaustive]`, so
+/// context members can be added without breaking callers.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TrqpQuery {
     /// DID of the entity whose trust is being checked.
     pub entity_id: String,
@@ -84,6 +104,16 @@ impl TrqpQuery {
     }
 
     /// Request evaluation as of `time` instead of the registry's current time.
+    ///
+    /// The answer must then say it holds for exactly `time` (its `as_of`):
+    /// one that omits it, or names another instant, is refused as
+    /// [`TrqlError::AnswerMismatch`] rather than returned as if it answered
+    /// this question.
+    ///
+    /// The comparison is exact, except that an echo written with fewer
+    /// fractional-second digits (whole seconds, milliseconds) matches the
+    /// asked time truncated to that precision. A time in whole seconds
+    /// compares the same under every registry.
     pub fn at(mut self, time: DateTime<Utc>) -> Self {
         self.time = Some(time);
         self
@@ -153,15 +183,25 @@ impl TrqlClient {
     /// and nothing about the answer. Authority flows registry → subject, and
     /// only the registry answering for `origin_did` completes that direction.
     ///
-    /// ```rust,ignore
-    /// let mut doc = resolve(vtc_did).await?;
+    /// ```no_run
+    /// use std::sync::Arc;
+    /// use trql_client::{TrqlClient, TrqlError, TrqlTransport, registry_referral};
+    /// # /// Stands in for your DID resolver.
+    /// # async fn resolve(_did: &str) -> Result<serde_json::Value, TrqlError> { unimplemented!() }
+    /// # async fn demo(
+    /// #     vtc_did: &str,
+    /// #     transport: Arc<dyn TrqlTransport>,
+    /// # ) -> Result<TrqlClient, TrqlError> {
+    ///
+    /// let doc = resolve(vtc_did).await?;
     /// let client = match registry_referral(&doc) {
-    ///     Some(registry) => {
-    ///         doc = resolve(&registry).await?;              // one hop
-    ///         TrqlClient::new(transport, registry).referred_by(vtc_did)
-    ///     }
-    ///     None => TrqlClient::new(transport, registry_did),
+    ///     // One hop: build the transport from the registry's own document.
+    ///     Some(registry) => TrqlClient::new(transport, registry).referred_by(vtc_did),
+    ///     // The document is the registry's own.
+    ///     None => TrqlClient::new(transport, vtc_did),
     /// };
+    /// # Ok(client)
+    /// # }
     /// ```
     pub fn referred_by(mut self, origin_did: impl Into<String>) -> Self {
         self.referred_by = Some(origin_did.into());
@@ -224,7 +264,7 @@ impl TrqlClient {
             .context(context)
             .try_into()
             .map_err(payload_build_error)?;
-        let r: v0_2::AuthorizationResponse = self.send_query(payload, &TUPLE_V0_2).await?;
+        let r: v0_2::AuthorizationResponse = self.send_query(payload, &SPELLING_V0_2).await?;
         Ok(AuthorizationAnswer {
             entity_id: r.entity_id,
             authority_id: r.authority_id,
@@ -261,7 +301,7 @@ impl TrqlClient {
             .context(context)
             .try_into()
             .map_err(payload_build_error)?;
-        let r: v0_1::AuthorizationResponse = self.send_query(payload, &TUPLE_V0_1).await?;
+        let r: v0_1::AuthorizationResponse = self.send_query(payload, &SPELLING_V0_1).await?;
         Ok(AuthorizationAnswer {
             entity_id: r.entity_id,
             authority_id: r.authority_id,
@@ -295,7 +335,7 @@ impl TrqlClient {
             .context(context)
             .try_into()
             .map_err(payload_build_error)?;
-        let r: v0_2::RecognitionResponse = self.send_query(payload, &TUPLE_V0_2).await?;
+        let r: v0_2::RecognitionResponse = self.send_query(payload, &SPELLING_V0_2).await?;
         Ok(RecognitionAnswer {
             entity_id: r.entity_id,
             authority_id: r.authority_id,
@@ -329,7 +369,7 @@ impl TrqlClient {
             .context(context)
             .try_into()
             .map_err(payload_build_error)?;
-        let r: v0_1::RecognitionResponse = self.send_query(payload, &TUPLE_V0_1).await?;
+        let r: v0_1::RecognitionResponse = self.send_query(payload, &SPELLING_V0_1).await?;
         Ok(RecognitionAnswer {
             entity_id: r.entity_id,
             authority_id: r.authority_id,
@@ -347,18 +387,31 @@ impl TrqlClient {
     /// validate the reply: correlated (`threadId` == request `id`), then
     /// either the matching `#response` document or a `trust-task-error`
     /// mapped to [`TrqlError::Rejected`]. A `#response` must additionally
-    /// answer the tuple that was asked, and close any referral this client was
-    /// built with.
-    async fn send_query<Req, Resp>(&self, payload: Req, tuple: &Tuple) -> Result<Resp, TrqlError>
+    /// answer the question that was asked (tuple and, when one was asked for,
+    /// evaluation time), and close any referral this client was built with.
+    async fn send_query<Req, Resp>(
+        &self,
+        payload: Req,
+        spelling: &Spelling,
+    ) -> Result<Resp, TrqlError>
     where
         Req: Payload + Serialize,
         Resp: DeserializeOwned,
     {
         let body = serde_json::to_value(&payload)
             .map_err(|e| TrqlError::Contract(format!("request payload did not serialize: {e}")))?;
-        // Capture the tuple before `body` is moved into the request document;
-        // the reply is checked against what we actually put on the wire.
-        let asked = tuple.map(|field| body.get(field).cloned().unwrap_or(Value::Null));
+        // Capture the question before `body` is moved into the request
+        // document; the reply is checked against what we actually put on the
+        // wire.
+        let asked = Asked {
+            tuple: spelling
+                .tuple
+                .map(|field| body.get(field).cloned().unwrap_or(Value::Null)),
+            time: body
+                .get("context")
+                .and_then(|context| context.get("time"))
+                .and_then(parse_instant),
+        };
         let id = new_task_id();
         let mut request = TrustTask::new(id.clone(), Req::type_uri(), body);
         request.recipient = Some(self.registry_did.clone());
@@ -396,7 +449,7 @@ impl TrqlClient {
             )));
         }
 
-        self.check_answers_our_question(tuple, &asked, &reply.payload)?;
+        self.check_answers_our_question(spelling, &asked, &reply.payload)?;
 
         serde_json::from_value(reply.payload)
             .map_err(|e| TrqlError::Contract(format!("response payload did not parse: {e}")))
@@ -411,18 +464,25 @@ impl TrqlClient {
     /// registry — or anything able to shape its reply — could substitute the
     /// subject of an authorization decision and be believed.
     ///
-    /// A field the reply omits is *not* treated as a mismatch here: all four
-    /// members are required by the response schema, so absence fails in the
+    /// A tuple member the reply omits is *not* treated as a mismatch here: all
+    /// four are required by the response schema, so absence fails in the
     /// deserialization immediately below. That keeps a malformed payload
     /// reported as a contract violation rather than as a substituted answer,
     /// and either way the query fails closed.
+    ///
+    /// The evaluation time is different: the schemas make `as_of` optional, so
+    /// a registry that ignored `context.time` and answered for its own clock
+    /// would pass every other check. When the query asked for a time, the
+    /// reply must echo that same instant; absent or different, it is an
+    /// [`TrqlError::AnswerMismatch`]. (An `as_of` that is present but not a
+    /// timestamp at all is left to the deserialization, a contract error.)
     fn check_answers_our_question(
         &self,
-        tuple: &Tuple,
-        asked: &[Value; 4],
+        spelling: &Spelling,
+        asked: &Asked,
         answered: &Value,
     ) -> Result<(), TrqlError> {
-        for (&field, asked) in tuple.iter().zip(asked) {
+        for (&field, asked) in spelling.tuple.iter().zip(&asked.tuple) {
             let Some(answered) = answered.get(field) else {
                 continue;
             };
@@ -435,13 +495,32 @@ impl TrqlClient {
             }
         }
 
+        if let Some(asked_time) = asked.time {
+            let echoed = answered.get(spelling.as_of).filter(|v| !v.is_null());
+            let mismatch = |answered: String| TrqlError::AnswerMismatch {
+                field: spelling.as_of,
+                asked: asked_time.to_rfc3339(),
+                answered,
+            };
+            match echoed {
+                None => return Err(mismatch("<absent>".to_string())),
+                Some(value) => {
+                    if let Some(echoed_time) = parse_instant(value)
+                        && !echoes_instant(asked_time, echoed_time, value)
+                    {
+                        return Err(mismatch(echoed_time.to_rfc3339()));
+                    }
+                }
+            }
+        }
+
         // Closing the loop (DID_SERVICE_DISCOVERY.md §4 step 5). The echo check
         // above proves the registry answered the authority we named; this
         // proves the authority we named is the one that referred us here. A
         // caller that follows a referral and then asks about some other
         // authority has learned nothing about the referral.
         if let Some(origin) = self.referred_by.as_deref() {
-            let answered = answered.get(tuple[1]).and_then(Value::as_str);
+            let answered = answered.get(spelling.tuple[1]).and_then(Value::as_str);
             if answered != Some(origin) {
                 return Err(TrqlError::ReferralNotClosed {
                     origin: origin.to_string(),
@@ -451,6 +530,49 @@ impl TrqlClient {
         }
 
         Ok(())
+    }
+}
+
+/// A timestamp member, parsed the way the response payload's deserialization
+/// parses it, so the comparison is between instants rather than spellings
+/// (`Z` and `+00:00` name the same one). `None` when it is not a timestamp.
+fn parse_instant(value: &Value) -> Option<DateTime<Utc>> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+/// Whether `echoed` (spelled `raw` on the wire) is the instant `asked`, at the
+/// precision the echo is written in.
+///
+/// A registry may write timestamps with fewer fractional-second digits than
+/// the client sent (whole seconds, or milliseconds). An echo equal to the
+/// asked time truncated to the echo's own precision is the same answer
+/// written more coarsely; any other difference, including one in a digit the
+/// echo does write, is a different instant.
+fn echoes_instant(asked: DateTime<Utc>, echoed: DateTime<Utc>, raw: &Value) -> bool {
+    if asked == echoed {
+        return true;
+    }
+    let digits = raw.as_str().map_or(9, fractional_digits);
+    if digits >= 9 {
+        return false;
+    }
+    let unit = 10u32.pow(9 - digits);
+    let nanos = asked.timestamp_subsec_nanos();
+    let truncated = asked - chrono::Duration::nanoseconds(i64::from(nanos % unit));
+    truncated == echoed
+}
+
+/// How many fractional-second digits an RFC 3339 timestamp is written with.
+fn fractional_digits(timestamp: &str) -> u32 {
+    let Some((_, time)) = timestamp.split_once(['T', 't', ' ']) else {
+        return 0;
+    };
+    match time.split_once('.') {
+        Some((_, rest)) => {
+            let n = rest.bytes().take_while(u8::is_ascii_digit).count();
+            u32::try_from(n).unwrap_or(9)
+        }
+        None => 0,
     }
 }
 
@@ -467,30 +589,12 @@ fn render(value: &Value) -> String {
     }
 }
 
-/// A fresh `urn:uuid:` document id.
+/// A fresh document id: `urn:uuid:` and a random (version 4) UUID, in every
+/// build (RFC 4122 syntax, so anything that validates `urn:uuid:` accepts it,
+/// and unpredictable, so ids neither collide across processes nor can be
+/// guessed).
 fn new_task_id() -> String {
-    format!("urn:uuid:{}", uuid_v4())
-}
-
-#[cfg(any(feature = "didcomm", feature = "tsp"))]
-fn uuid_v4() -> String {
-    uuid::Uuid::new_v4().to_string()
-}
-
-// Without the mediator transports the crate has no uuid dependency; derive the
-// id from entropy the std library already gives us. Uniqueness only needs to
-// hold within this process's in-flight queries.
-#[cfg(not(any(feature = "didcomm", feature = "tsp")))]
-fn uuid_v4() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{nanos:032x}-{n:016x}")
+    format!("urn:uuid:{}", uuid::Uuid::new_v4())
 }
 
 #[cfg(test)]
@@ -637,7 +741,7 @@ mod tests {
                 req.payload["context"]["time"], "2026-01-01T00:00:00Z",
                 "context.time must be carried on the wire"
             );
-            Ok(authorized_response(&req, true))
+            Ok(answer_as_of(&req, Some("2026-01-01T00:00:00Z")))
         });
         client.authorization(query().at(at)).await.unwrap();
     }
@@ -956,5 +1060,184 @@ mod tests {
             .collect();
         pinned.sort();
         assert_eq!(sent, pinned, "the client sends exactly the locked versions");
+    }
+
+    // --- answering for the time that was asked -----------------------------
+
+    fn asked_time() -> DateTime<Utc> {
+        "2026-01-01T00:00:00Z".parse().unwrap()
+    }
+
+    /// A 0.2 answer echoing `as_of` (or none, for `Value::Null` removed).
+    fn answer_as_of(request: &TrustTask<Value>, as_of: Option<&str>) -> TrustTask<Value> {
+        let mut reply = authorized_response(request, true);
+        if let Some(as_of) = as_of {
+            reply.payload["asOf"] = Value::String(as_of.to_string());
+        }
+        reply
+    }
+
+    #[tokio::test]
+    async fn an_answer_for_the_time_asked_is_accepted() {
+        // The same instant in another spelling is the same answer.
+        for echoed in ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00+00:00"] {
+            let client = client_over(move |req| Ok(answer_as_of(&req, Some(echoed))));
+            let answer = client
+                .authorization(query().at(asked_time()))
+                .await
+                .unwrap();
+            assert_eq!(answer.as_of, Some(asked_time()));
+        }
+    }
+
+    /// A registry that ignores `context.time` and answers for its own clock
+    /// omits `as_of`; that is not an answer to "as of then".
+    #[tokio::test]
+    async fn time_asked_but_not_echoed_is_rejected() {
+        let client = client_over(|req| Ok(answer_as_of(&req, None)));
+        match client.authorization(query().at(asked_time())).await {
+            Err(TrqlError::AnswerMismatch {
+                field, answered, ..
+            }) => {
+                assert_eq!(field, "asOf");
+                assert_eq!(answered, "<absent>");
+            }
+            other => panic!("expected AnswerMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn time_asked_but_another_time_echoed_is_rejected() {
+        let client = client_over(|req| Ok(answer_as_of(&req, Some("2026-07-16T00:00:00Z"))));
+        let err = client
+            .authorization(query().at(asked_time()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, TrqlError::AnswerMismatch { field: "asOf", .. }),
+            "got: {err}"
+        );
+        assert!(!err.is_retryable());
+
+        let client = client_over(|req| {
+            let mut reply = answer_as_of(&req, Some("2025-12-31T23:59:59Z"));
+            reply.payload["recognized"] = Value::Bool(true);
+            reply.payload.as_object_mut().unwrap().remove("authorized");
+            Ok(reply)
+        });
+        assert!(matches!(
+            client.recognition(query().at(asked_time())).await,
+            Err(TrqlError::AnswerMismatch { field: "asOf", .. })
+        ));
+    }
+
+    /// A sub-second time asked, echoed at the registry's coarser precision,
+    /// is the same answer; a difference in a digit the echo writes is not.
+    #[tokio::test]
+    async fn a_coarser_echo_of_a_sub_second_time_is_accepted() {
+        let asked: DateTime<Utc> = "2026-01-01T00:00:00.123456789Z".parse().unwrap();
+        for (echoed, ok) in [
+            ("2026-01-01T00:00:00.123456789Z", true),
+            ("2026-01-01T00:00:00.123Z", true),
+            ("2026-01-01T00:00:00Z", true),
+            ("2026-01-01T00:00:00.124Z", false),
+            ("2026-01-01T00:00:01Z", false),
+            ("2026-01-01T00:00:00.123456788Z", false),
+        ] {
+            let client = client_over(move |req| Ok(answer_as_of(&req, Some(echoed))));
+            let result = client.authorization(query().at(asked)).await;
+            assert_eq!(result.is_ok(), ok, "{echoed}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn fractional_digits_are_counted() {
+        assert_eq!(fractional_digits("2026-01-01T00:00:00Z"), 0);
+        assert_eq!(fractional_digits("2026-01-01T00:00:00.5+01:00"), 1);
+        assert_eq!(fractional_digits("2026-01-01T00:00:00.123456789Z"), 9);
+    }
+
+    /// No time asked, nothing to check: an `as_of` the registry volunteers is
+    /// passed through.
+    #[tokio::test]
+    async fn without_a_time_asked_as_of_is_not_required() {
+        let client = client_over(|req| Ok(answer_as_of(&req, None)));
+        assert_eq!(client.authorization(query()).await.unwrap().as_of, None);
+    }
+
+    /// The 0.1 fallback spells it `time_requested`, and is held to the same.
+    #[tokio::test]
+    async fn the_0_1_path_checks_time_requested() {
+        for (echoed, ok) in [
+            (Some("2026-01-01T00:00:00Z"), true),
+            (Some("2026-07-16T00:00:00Z"), false),
+            (None, false),
+        ] {
+            let client = client_over(move |req| {
+                if req.type_uri.minor() == 2 {
+                    return Err(TrqlError::Rejected {
+                        code: StandardCode::UnsupportedVersion.into(),
+                        retryable: false,
+                        retry_after: None,
+                        message: None,
+                    });
+                }
+                assert_eq!(req.payload["context"]["time"], "2026-01-01T00:00:00Z");
+                let mut payload = serde_json::json!({
+                    "entity_id": req.payload["entity_id"],
+                    "authority_id": req.payload["authority_id"],
+                    "action": req.payload["action"],
+                    "resource": req.payload["resource"],
+                    "authorized": true,
+                    "time_evaluated": "2026-07-16T00:00:00Z",
+                });
+                if let Some(echoed) = echoed {
+                    payload["time_requested"] = Value::String(echoed.to_string());
+                }
+                Ok(req.respond_with("urn:uuid:reply".to_string(), payload))
+            });
+            let result = client.authorization(query().at(asked_time())).await;
+            if ok {
+                assert_eq!(result.unwrap().version, SpecVersion::V0_1);
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(TrqlError::AnswerMismatch {
+                            field: "time_requested",
+                            ..
+                        })
+                    ),
+                    "{echoed:?}: {result:?}"
+                );
+            }
+        }
+    }
+
+    // --- document ids --------------------------------------------------------
+
+    /// Every build (the default HTTPS-only one included) sends a real random
+    /// UUID under `urn:uuid:`.
+    #[tokio::test]
+    async fn request_ids_are_random_v4_uuids() {
+        let ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = ids.clone();
+        let client = client_over(move |req| {
+            seen.lock().unwrap().push(req.id.clone());
+            Ok(authorized_response(&req, true))
+        });
+        client.authorization(query()).await.unwrap();
+        client.authorization(query()).await.unwrap();
+        let ids = ids.lock().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        for id in ids.iter() {
+            let uuid = id
+                .strip_prefix("urn:uuid:")
+                .unwrap_or_else(|| panic!("{id} is not a urn:uuid"));
+            let uuid = uuid::Uuid::parse_str(uuid).unwrap_or_else(|e| panic!("{id}: {e}"));
+            assert_eq!(uuid.get_version(), Some(uuid::Version::Random), "{id}");
+            assert_eq!(uuid.get_variant(), uuid::Variant::RFC4122, "{id}");
+        }
     }
 }

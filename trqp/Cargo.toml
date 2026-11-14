@@ -3,14 +3,16 @@ name = "trqp"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description.workspace = true
-readme.workspace = true
+description = "Placeholder for a TRQP command-line client; not published"
 license.workspace = true
 homepage.workspace = true
-keywords.workspace = true
 repository.workspace = true
 
-publish = true
+# A placeholder (`fn main` prints a greeting), so it is not published: a
+# crates.io `trqp` binary that does nothing would mislead anyone installing
+# it. Versions already on crates.io are left as they are. A TRQP CLI built on
+# `trql-client` would replace it.
+publish = false
 
 [dependencies]
 

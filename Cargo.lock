@@ -6537,8 +6537,10 @@ dependencies = [
  "chrono",
  "reqwest",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
+ "trql-client",
  "trust-registry",
  "trust-tasks-didcomm",
  "trust-tasks-proof",
@@ -6970,6 +6972,7 @@ dependencies = [
 name = "trql-client"
 version = "0.32.0"
 dependencies = [
+ "affinidi-messaging-core",
  "affinidi-messaging-sdk",
  "affinidi-tdk",
  "async-trait",

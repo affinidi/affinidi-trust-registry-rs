@@ -3,8 +3,11 @@
 What operators deploy is a **release**, named by its `major.minor` version
 (`0.27`, `0.28`, …). It is cut from `nightly`, stabilised and patched on its own
 branch for as long as it is supported, and published from there as crates on
-crates.io (`trust-registry`, `trqp`, `trql-client`) and a tag. Patches
-(`0.27.1`, `0.27.2`, …) only ever happen on the release branch.
+crates.io (`trust-registry`, `trql-client`) and a tag. Patches
+(`0.27.1`, `0.27.2`, …) only ever happen on the release branch. The other
+workspace members (`trqp`, a placeholder; `test-client`;
+`test-trust-registry`) are `publish = false`; the `trqp` versions already on
+crates.io are left as they are.
 
 This follows the branching model of `affinidi-messaging-mediator` (and, before
 it, `affinidi-webvh-service` and verifiable-trust-infrastructure). Every crate

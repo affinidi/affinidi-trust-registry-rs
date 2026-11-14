@@ -30,16 +30,23 @@
 //! already-resolved document, so it needs no resolver dependency and works
 //! under any feature combination.
 //!
-//! ```rust,ignore
-//! let doc: serde_json::Value = resolve(registry_did).await?;
+//! ```no_run
+//! use trql_client::{ServiceCapabilities, TransportKind, TrqlError};
+//! # /// Stands in for your DID resolver.
+//! # async fn resolve(_did: &str) -> Result<serde_json::Value, TrqlError> { unimplemented!() }
+//! # async fn demo() -> Result<(), TrqlError> {
+//!
+//! let doc: serde_json::Value = resolve("did:webvh:...registry").await?;
 //! let caps = ServiceCapabilities::from_document(&doc);
-//! let choice = caps.select(TransportKind::compiled())?;
+//! let choice = caps.select(&TransportKind::compiled())?;
 //! match choice.kind {
-//!     TransportKind::Https => /* build HttpsTransport with choice.endpoint */,
+//!     TransportKind::Https => { /* build an HttpsTransport for choice.endpoint */ }
 //!     // TSP/DIDComm endpoints are the registry's *mediator* DID — resolve
 //!     // onward for the transport URL, or hand it to an ATM profile.
 //!     _ => { /* ... */ }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use serde_json::Value;
@@ -157,7 +164,13 @@ impl TransportKind {
 ///   Both use mediator indirection; the URL lives in the mediator's own DID
 ///   document, so a second resolution hop is required.
 /// * `https` — the registry's REST **base URL**, used directly.
+///
+/// Usually parsed with [`from_document`](Self::from_document). To build one
+/// by hand, start from `ServiceCapabilities::default()` and the `with_*`
+/// setters: the struct is `#[non_exhaustive]`, so a transport added later is
+/// not a breaking change.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ServiceCapabilities {
     /// Mediator DID advertised for TSP, if any.
     pub tsp: Option<String>,
@@ -168,7 +181,11 @@ pub struct ServiceCapabilities {
 }
 
 /// The transport chosen for a registry, and where to send.
+///
+/// Returned by [`ServiceCapabilities::select`]; build one directly with
+/// [`TransportChoice::new`] (the struct is `#[non_exhaustive]`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TransportChoice {
     /// The selected binding.
     pub kind: TransportKind,
@@ -177,7 +194,40 @@ pub struct TransportChoice {
     pub endpoint: String,
 }
 
+impl TransportChoice {
+    /// Route over `kind` to `endpoint` (a mediator DID for TSP/DIDComm, a
+    /// base URL for HTTPS).
+    #[must_use]
+    pub fn new(kind: TransportKind, endpoint: impl Into<String>) -> Self {
+        Self {
+            kind,
+            endpoint: endpoint.into(),
+        }
+    }
+}
+
 impl ServiceCapabilities {
+    /// Advertise TSP through the mediator `mediator_did`.
+    #[must_use]
+    pub fn with_tsp(mut self, mediator_did: impl Into<String>) -> Self {
+        self.tsp = Some(mediator_did.into());
+        self
+    }
+
+    /// Advertise DIDComm through the mediator `mediator_did`.
+    #[must_use]
+    pub fn with_didcomm(mut self, mediator_did: impl Into<String>) -> Self {
+        self.didcomm = Some(mediator_did.into());
+        self
+    }
+
+    /// Advertise the REST surface at `base_url`.
+    #[must_use]
+    pub fn with_https(mut self, base_url: impl Into<String>) -> Self {
+        self.https = Some(base_url.into());
+        self
+    }
+
     /// Parse the `service` array of a resolved DID document.
     ///
     /// Unknown service types are ignored, entries missing a usable endpoint are
@@ -267,12 +317,29 @@ impl ServiceCapabilities {
 /// Resolve the returned DID, then parse [`ServiceCapabilities`] from *that*
 /// document:
 ///
-/// ```ignore
+/// ```no_run
+/// use std::sync::Arc;
+/// use trql_client::{
+///     ServiceCapabilities, TransportChoice, TransportKind, TrqlClient, TrqlError, TrqlTransport,
+///     registry_referral,
+/// };
+/// # /// Stands in for your DID resolver.
+/// # async fn resolve(_did: &str) -> Result<serde_json::Value, TrqlError> { unimplemented!() }
+/// # /// Stands in for building the transport `choice` names.
+/// # fn transport_for(_choice: &TransportChoice) -> Result<Arc<dyn TrqlTransport>, TrqlError> {
+/// #     unimplemented!()
+/// # }
+/// # async fn demo(start_did: &str) -> Result<TrqlClient, TrqlError> {
+///
 /// let mut doc = resolve(start_did).await?;
 /// let referral = registry_referral(&doc);
-/// if let Some(target) = &referral {
-///     doc = resolve(target).await?;   // one hop, no loop
-/// }
+/// let registry_did = match &referral {
+///     Some(target) => {
+///         doc = resolve(target).await?; // one hop, no loop
+///         target.clone()
+///     }
+///     None => start_did.to_string(),
+/// };
 /// let choice = ServiceCapabilities::from_document(&doc).select(&TransportKind::compiled())?;
 ///
 /// // Carry the starting DID through, so the answer has to confirm the hop.
@@ -280,6 +347,8 @@ impl ServiceCapabilities {
 /// if referral.is_some() {
 ///     client = client.referred_by(start_did);
 /// }
+/// # Ok(client)
+/// # }
 /// ```
 ///
 /// **Cap at one hop.** TRQP's wording assumes the registry's own document
@@ -339,6 +408,8 @@ fn endpoint_uri(endpoint: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
     use serde_json::json;
 
@@ -645,5 +716,21 @@ mod tests {
         // The default feature set always includes HTTPS.
         #[cfg(feature = "https")]
         assert!(compiled.contains(&TransportKind::Https));
+    }
+
+    /// The `#[non_exhaustive]` types stay constructible without literals.
+    #[test]
+    fn capabilities_and_choices_are_built_without_struct_literals() {
+        let caps = ServiceCapabilities::default()
+            .with_didcomm("did:web:mediator.example")
+            .with_https("https://r.example");
+        assert_eq!(caps.tsp, None);
+        assert_eq!(
+            caps.select(&[TransportKind::Didcomm, TransportKind::Https])
+                .unwrap(),
+            TransportChoice::new(TransportKind::Didcomm, "did:web:mediator.example")
+        );
+        let caps = caps.with_tsp("did:web:mediator.example");
+        assert_eq!(caps.advertised(), PREFERENCE_ORDER.to_vec());
     }
 }

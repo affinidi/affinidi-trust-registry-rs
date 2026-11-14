@@ -13,10 +13,13 @@ use chrono::{DateTime, Utc};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SpecVersion {
-    /// `registry/{authorization,recognition}/0.1`: snake_case.
+    /// `registry/{authorization,recognition}/0.1`: snake_case members.
     V0_1,
-    /// `registry/{authorization,recognition}/0.2`: lowerCamelCase, judged
-    /// against the record's validity window.
+    /// `registry/{authorization,recognition}/0.2`: lowerCamelCase members.
+    ///
+    /// The versions differ only in spelling: a registry decides the same
+    /// way under both (this repository's registry applies a record's
+    /// validity window to 0.1 queries too).
     V0_2,
 }
 
@@ -39,7 +42,9 @@ pub struct AuthorizationAnswer {
     pub authorized: bool,
     /// The registry's clock when it produced the answer.
     pub evaluated_at: DateTime<Utc>,
-    /// The instant the answer holds for, when the query named one.
+    /// The instant the answer holds for. When the query named one
+    /// ([`TrqpQuery::at`](crate::TrqpQuery::at)) this is that instant: the
+    /// client refuses an answer that echoes another, or none.
     pub as_of: Option<DateTime<Utc>>,
     /// The registry's human-readable detail, e.g. why a statement does not
     /// hold. Advisory: decide on [`authorized`](Self::authorized).
@@ -65,7 +70,9 @@ pub struct RecognitionAnswer {
     pub recognized: bool,
     /// The registry's clock when it produced the answer.
     pub evaluated_at: DateTime<Utc>,
-    /// The instant the answer holds for, when the query named one.
+    /// The instant the answer holds for. When the query named one
+    /// ([`TrqpQuery::at`](crate::TrqpQuery::at)) this is that instant: the
+    /// client refuses an answer that echoes another, or none.
     pub as_of: Option<DateTime<Utc>>,
     /// The registry's human-readable detail. Advisory.
     pub message: Option<String>,

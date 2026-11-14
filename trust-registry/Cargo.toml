@@ -215,3 +215,8 @@ secrets-all = [
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+# Render the optional APIs too (tsp, vta, storage-fjall, ...), not only the
+# default feature set.
+all-features = true

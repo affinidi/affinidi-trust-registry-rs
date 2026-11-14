@@ -36,9 +36,7 @@ async fn serve(router: Router) -> String {
 /// A config for a test server on this machine: loopback is not a public
 /// address, so these tests opt out of the address filter.
 fn local_config(base_url: impl Into<String>) -> HttpsTransportConfig {
-    let mut config = HttpsTransportConfig::new(base_url);
-    config.allow_non_public_addresses = true;
-    config
+    HttpsTransportConfig::new(base_url).with_allow_non_public_addresses(true)
 }
 
 fn client_for(base_url: &str) -> TrqlClient {
@@ -277,6 +275,56 @@ fn authorized_reply(doc: TrustTask<Value>) -> TrustTask<Value> {
 
 fn query() -> TrqpQuery {
     TrqpQuery::new("e", "a", "act", "res")
+}
+
+/// An error status whose body is a well-formed success document granting
+/// the query is a broken exchange, not an answer: whichever of the two
+/// disagreeing signals is more permissive must not win.
+#[tokio::test]
+async fn error_status_with_a_success_document_is_not_an_answer() {
+    for status in [
+        StatusCode::FORBIDDEN,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::BAD_GATEWAY,
+    ] {
+        let router = Router::new().route(
+            "/trust-tasks",
+            post(move |Json(doc): Json<TrustTask<Value>>| async move {
+                (status, Json(authorized_reply(doc)))
+            }),
+        );
+        let base = serve(router).await;
+        let err = client_for(&base)
+            .authorization(query())
+            .await
+            .expect_err("an error status must never yield an answer");
+        assert!(matches!(err, TrqlError::Contract(_)), "{status}: {err}");
+        assert!(err.to_string().contains("non-error"), "{err}");
+    }
+}
+
+/// A success status carrying a `trust-task-error` document is still a
+/// refusal: the query fails, with the registry's code.
+#[tokio::test]
+async fn success_status_with_an_error_document_is_not_an_answer() {
+    let router = Router::new().route(
+        "/trust-tasks",
+        post(|Json(doc): Json<TrustTask<Value>>| async move {
+            let error = doc.reject_with(
+                "urn:uuid:err".to_string(),
+                RejectReason::PermissionDenied {
+                    reason: "nope".to_string(),
+                },
+            );
+            (StatusCode::OK, Json(error))
+        }),
+    );
+    let base = serve(router).await;
+    let err = client_for(&base)
+        .authorization(query())
+        .await
+        .expect_err("an error document must never yield an answer");
+    assert!(matches!(err, TrqlError::Rejected { .. }), "{err}");
 }
 
 /// A redirect is answered as a transport error; the target is never asked.

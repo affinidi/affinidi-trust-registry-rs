@@ -9,7 +9,11 @@ use crate::error::TrqlError;
 ///
 /// Kept as an explicit tag (never inferred from endpoint shape — a TSP VID is
 /// a DID too) so callers and logs can always name the protocol in use.
+///
+/// `#[non_exhaustive]`: a new binding may be added in a minor release, so a
+/// `match` outside this crate needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TransportKind {
     /// `POST /trust-tasks` per the `trust-tasks-https` binding.
     Https,
@@ -48,6 +52,12 @@ impl std::fmt::Display for TransportKind {
 /// * A reply body that is not a Trust Task document is a
 ///   [`TrqlError::Contract`] (2xx / delivered) or [`TrqlError::Transport`]
 ///   (error status with a non-Trust-Task body) — never silently dropped.
+/// * A transport whose wire carries its own success/failure signal (an HTTP
+///   status) returns a document only when that signal agrees with it; see
+///   `HttpsTransport`.
+///
+/// [`TrustTask`] is re-exported as [`crate::trust_tasks::TrustTask`], so an
+/// implementation needs no direct `trust-tasks-rs` dependency.
 #[async_trait::async_trait]
 pub trait TrqlTransport: Send + Sync {
     /// The protocol this transport speaks.

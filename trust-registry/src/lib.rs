@@ -1,3 +1,44 @@
+//! The Affinidi Trust Registry: a store of trust records that answers TRQP
+//! queries.
+//!
+//! **TRQP** (the ToIP Trust Registry Query Protocol) asks whether an
+//! *entity* is authorized, or recognized, by an *authority* for an *action*
+//! on a *resource*. Each record here is one such 4-tuple with its
+//! `authorized` / `recognized` flags and a validity window. Queries and record
+//! management travel as **Trust Task** documents (`registry/authorization`,
+//! `registry/recognition`, `registry/record/*`, …) over HTTPS
+//! (`POST /trust-tasks`, read-only), DIDComm through a mediator, and, with the
+//! `tsp` feature, TSP. The legacy REST TRQP endpoints (`/authorization`,
+//! `/recognition`) are served as well.
+//!
+//! The client side is the separate `trql-client` crate (`trql` is only its
+//! name; the protocol is TRQP).
+//!
+//! # Two ways to run it
+//!
+//! * **Standalone**: the `trust-registry` binary (`server::start`, under the
+//!   `standalone` feature) reads its configuration from the environment and
+//!   owns the process. See the repository README.
+//! * **Embedded**: a host application builds a [`TrustRegistry`] with
+//!   [`TrustRegistry::builder`], mounts [`TrustRegistry::router`] on its own
+//!   axum server, and can feed Trust Tasks from its own transport through
+//!   [`TrustRegistry::task_handler`] or a [`didcomm::listener::DidCommSource`].
+//!   See [`embed`] for a worked example. A host should build this crate with
+//!   `default-features = false` and enable only the storage backends it uses.
+//!
+//! # Map of the crate
+//!
+//! * [`trust_tasks`]: the Trust Task router and handlers, shared by every
+//!   transport.
+//! * [`http`], [`didcomm`] (and `tsp`, `messaging` with the `tsp` feature):
+//!   the transport bindings.
+//! * [`domain`]: the trust record model; [`storage`]: the repository trait and
+//!   its backends.
+//! * [`configs`]: configuration, from the environment or built in code.
+//! * [`audit`], [`dedup`], [`health`], [`capabilities`], [`mediator_acl`]:
+//!   the audit log, message-id deduplication, health reporting, runtime
+//!   capability switches and the mediator access list.
+
 use crate::storage::repository::TrustRecordRepository;
 use chrono::{DateTime, Utc};
 use std::{fmt, sync::Arc};
