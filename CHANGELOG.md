@@ -60,6 +60,70 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 - **`DIDCommError::UnreachableDidDocument` carries the URL that was tried**
   (`https://{domain}/.well-known/did.json`, or `https://{domain}/{path}/did.json`
   for a `did:web` with a path).
+- **Trust Task refusals carry the codes the task specifications declare**
+  (#195), instead of `taskFailed` with the code spelled in the message:
+  `registry/record/put:alreadyExists` / `:notFound` (a strict put),
+  `registry/record/delete:notFound`, `registry/record/query:notFound` (a fully
+  keyed query), `governance/capability/enable:unknownCapability`,
+  `:alreadyEnabled`, `:configInvalid` (was `malformedRequest`),
+  `governance/capability/disable:notEnabled`, `git-trust/grant:alreadyGranted`
+  and `git-trust/revoke:notGranted`, each with the specification's
+  `retryable: false`. A client matching `taskFailed` or the old
+  `already_granted:` / `not_enabled:` message prefixes must match the code.
+  The codes hang off the descriptor table:
+  `trust_tasks::descriptor::{TaskError, TaskDescriptor::errors,
+  TaskDescriptor::error_code, spec_error}`.
+- **Capability enablement is per authority** (#197). The state is keyed by
+  `capabilities::EnablementKey` (capability, authority): several communities
+  may each enable `git-trust` under their own authority, and a grant, revoke or
+  disable acts on the enablement of the authority the issuer may act for. An
+  issuer that may act for several enabled authorities names one in the
+  request's `ext."com.affinidi.trust-registry".authority`; without it the
+  request is refused as `malformedRequest`. `governance/capability/list`
+  returns one entry per enablement, with
+  `ext."com.affinidi.trust-registry".entries[i]` naming the capability and
+  authority of `capabilities[i]`. Rust API: `CapabilitySet::disable` and
+  `snapshot` take the authority; `configured_authority` is replaced by
+  `authorities`; `list` returns `ListedCapability`; `CapabilitySnapshot` gains
+  `tasks`; `CapabilityStateStore` loads and saves `CapabilityStates`;
+  `CapabilityState` has no `delegate`; `CapabilityError::UnknownCapability`
+  carries a message and there is a new `AuthorityRequired`. The live admin
+  dispatcher serves a capability's tasks only while one authority has it
+  enabled; the `TaskHandler` dispatches through the chosen enablement's own.
+  The `TR_CAPABILITY_STATE` file of earlier releases (one slot per capability)
+  is read and migrated, and is written in the new format
+  (`{"format": 2, "enablements": [...]}`) on the next enable or disable.
+  **Downgrade:** an earlier release refuses to start on a format-2 file. The
+  file is rewritten only by the first enable or disable after the upgrade, so
+  back it up before that (or before upgrading) and restore the backup to go
+  back; otherwise convert it by hand to `{"<capability>": {<state>}}`, keeping
+  one enablement per capability. A format-2 entry whose `authority` is not
+  its config's (normalised) `authority` is refused at load.
+- **`governance/capability/enable` checks what it is given** (#235): a version
+  other than the built-in manifest's is `unknownCapability`; `delegate` is
+  refused as `configInvalid`, since the registry has no delegation mechanism
+  (`CapabilitySet::enable` refuses it for every caller); a `manifest` that is
+  not the built-in one is `configInvalid`.
+- **did:scid references are normalised** (#236): `EntityId::new` and
+  `AuthorityId::new` drop a did:scid `?src=` locator, so records, record keys,
+  queries, the capability authority and the replay-record key all use the bare
+  DID, and a write addressed to the registry's did:scid with a locator is
+  accepted. A record an earlier release stored with a locator is still reached
+  by the spelling it was stored under: TRQP queries on every transport (the
+  `registry/*` tasks, `POST /recognition` / `/authorization` and DIDComm
+  `trqp/1.0`, through the new `storage::repository::find_either_spelling`),
+  keyed fetches, deletes, and `git-trust/grant` / `revoke` (whose legacy
+  state may name the authority with its locator) fall back to it. A query or
+  delete by the bare DID does not find such a record: a bare-DID delete
+  answers `registry/record/delete:notFound`, which vtc-service treats as
+  done. Re-put it to move it to the bare DID. The CSV backend normalises as it
+  loads, so its located rows are re-keyed in memory, and a file holding both
+  spellings of one key keeps one of them. New `domain::normalise_reference`,
+  `TrustRecordQuery::normalised` and `EntityId::as_written` /
+  `AuthorityId::as_written`.
+- **`configs::vta::rotate_did` returns `RotateError`** (`reason`,
+  `transient`) instead of a `String`.
+
 - **The registry refuses to start when `ADMIN_DIDS` lists the test client's
   former sample DID** (`did:peer:2.Vz6Mkpun7x…`), whose private keys were
   committed to this repository; anyone could make its proofs. `.env.example`
@@ -699,6 +763,27 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   order, and evicting the stale copy removed the live entry.
 - **Inbound-path comments and `CLAUDE.md` describe the current delivery
   semantics** (#246, #269).
+- **A git-trust subject can be granted again after a revoke** (#193): a grant
+  over a revoked (retained) tuple authorizes it again; only an active grant is
+  `alreadyGranted`. Revoking a grant that is already revoked answers
+  `notGranted` instead of succeeding again.
+- **A failed save of the capability state changes nothing** (#196): enable and
+  disable save a changed copy first and only then replace the in-memory state
+  and swap the dispatchers, so memory, disk and the dispatchers never
+  disagree and the retry that `internalError` invites starts from the same
+  state. The save runs off the async runtime, syncs the temporary file before
+  renaming it and syncs the directory after.
+- **Retry flags**: a repository validation error from `git-trust/grant` or
+  `revoke` is `malformedRequest` (was the retryable `internalError`), and a
+  `registry/did/rotate` that failed reaching the VTA or resolving the DID is a
+  retryable `taskFailed`, so the replay record no longer keeps a transient
+  failure as the document's answer (#195).
+- **The `reason` of `governance/capability/disable` and `git-trust/revoke` is
+  kept in the audit entry** of a success, as the specifications say (#235);
+  new `AuditLogBuilder::build_success_with`.
+- **`governance/capability/list` reads its `status` from the enum's variants**,
+  not its `Debug` text (#235).
+
 - **The DIDComm pickup listener deletes a message at the mediator only after
   handling it** (R1.6). The live stream pulled with `auto_delete = true` and
   the 30-second offline sync acked its whole batch as soon as the handlers

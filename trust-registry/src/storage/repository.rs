@@ -130,6 +130,41 @@ impl TrustRecordQuery {
             resource,
         }
     }
+
+    /// This query with its entity and authority in the normalised form records
+    /// are stored in ([`normalise_reference`]). A query deserialised off the
+    /// wire keeps the spelling the caller sent, since derived `Deserialize`
+    /// does not normalise (stored records are read with it too).
+    pub fn normalised(&self) -> Self {
+        Self {
+            entity_id: EntityId::new(self.entity_id.as_str()),
+            authority_id: AuthorityId::new(self.authority_id.as_str()),
+            action: self.action.clone(),
+            resource: self.resource.clone(),
+        }
+    }
+}
+
+/// Look `query` up by its normalised key, and — when that misses and the
+/// caller wrote a did:scid with its `?src=` locator — by the key as written,
+/// where an earlier release stored such a record. Every TRQP lookup, on every
+/// transport, goes through this, so one spelling is answered the same way
+/// everywhere.
+pub async fn find_either_spelling<R>(
+    repository: &R,
+    query: TrustRecordQuery,
+) -> Result<Option<TrustRecord>, RepositoryError>
+where
+    R: TrustRecordRepository + ?Sized,
+{
+    let normalised = query.normalised();
+    let differs =
+        normalised.entity_id != query.entity_id || normalised.authority_id != query.authority_id;
+    match repository.find_by_query(normalised).await? {
+        Some(record) => Ok(Some(record)),
+        None if differs => repository.find_by_query(query).await,
+        None => Ok(None),
+    }
 }
 
 /// Errors a repository reports.

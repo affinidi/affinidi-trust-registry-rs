@@ -50,8 +50,10 @@ their `context` — is accepted only when all of the following hold:
 
 For a record put, delete or query the authority is the `authority_id` it names
 (a query must name one). For
-`git-trust/grant` and `git-trust/revoke` it is the authority git-trust was
-enabled with, and for `governance/capability/enable` and `disable` it is the
+`git-trust/grant` and `git-trust/revoke` it is the authority of the git-trust
+enablement the issuer may act for (enablement is per authority; an issuer that
+may act for several enabled authorities names one in the payload's
+`ext."com.affinidi.trust-registry".authority`), and for `governance/capability/enable` and `disable` it is the
 authority the capability's config names. `registry/did/rotate`, and enabling or
 disabling a capability whose config names no authority, act on the registry
 itself, so their authority is the registry's own DID: only an admin listed for

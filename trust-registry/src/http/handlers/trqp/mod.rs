@@ -1,6 +1,6 @@
 use crate::{
     domain::{Context, Evaluation, TrustRecord, TrustRecordIds},
-    storage::repository::{TrustRecordQuery, TrustRecordRepository},
+    storage::repository::{TrustRecordQuery, TrustRecordRepository, find_either_spelling},
 };
 use anyhow::anyhow;
 use axum::{
@@ -117,10 +117,11 @@ where
         }
     })?;
     let query = validate(body.0)?;
-    let query_result = state
-        .repository
-        .find_by_query(TrustRecordQuery::from_ids(query.ids))
-        .await;
+    let query_result = find_either_spelling(
+        state.repository.as_ref(),
+        TrustRecordQuery::from_ids(query.ids),
+    )
+    .await;
     let mut trust_record = query_result
         .map_err(|e| AppError::Internal {
             internal_error: e.into(),
@@ -304,6 +305,23 @@ mod tests {
             .build()
             .expect("valid record");
         repository.create(year_2026).await.expect("seeded");
+        // Stored under the bare did:scid (a put normalises), and one an
+        // earlier release stored with its locator.
+        repository
+            .create(record(SCID_ENTITY_LOCATED))
+            .await
+            .expect("seeded");
+        let legacy = TrustRecordBuilder::new()
+            .entity_id(EntityId::as_written(LEGACY_ENTITY_LOCATED))
+            .authority_id(AuthorityId::new(AUTHORITY))
+            .action(Action::new("issue"))
+            .resource(Resource::new("vc"))
+            .recognized(true)
+            .authorized(true)
+            .record_type(RecordType::Authorization)
+            .build()
+            .expect("valid record");
+        repository.create(legacy).await.expect("seeded");
         TrustRegistry::builder(TrustRegistryConfig::embedded("/tmp/tr-trqp-test"))
             .repository(repository)
             .capability_store(Box::new(MemoryCapabilityStore::default()))
@@ -367,6 +385,25 @@ mod tests {
         assert_eq!(body["status"], status.as_u16());
         assert_eq!(body["code"], status.as_u16(), "kept for older clients");
         assert!(body["detail"].is_string());
+    }
+
+    const SCID_ENTITY_LOCATED: &str = "did:scid:vh:1:entity?src=example.com";
+    const LEGACY_ENTITY_LOCATED: &str = "did:scid:vh:1:legacy?src=example.com";
+
+    #[tokio::test]
+    async fn a_did_scid_locator_is_answered_either_way() {
+        for entity in [SCID_ENTITY_LOCATED, LEGACY_ENTITY_LOCATED] {
+            let (status, _, body) =
+                post("/authorization", with(query(), "entity_id", json!(entity))).await;
+            assert_eq!(status, StatusCode::OK, "{entity}: {body}");
+            assert_eq!(body["authorized"], true);
+        }
+        let (status, _, body) = post(
+            "/authorization",
+            with(query(), "entity_id", json!("did:scid:vh:1:entity")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "the bare DID: {body}");
     }
 
     #[tokio::test]

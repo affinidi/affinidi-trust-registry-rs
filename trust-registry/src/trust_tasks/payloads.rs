@@ -277,6 +277,28 @@ pub(crate) fn query_of(
     )
 }
 
+/// The key as written, when it differs from [`query_of`]'s normalised one:
+/// a record an earlier release stored under a did:scid with its `?src=`
+/// locator is still found (and deleted) by the spelling it was stored under.
+/// `None` when normalising changed nothing.
+pub(crate) fn query_as_written(
+    entity_id: &str,
+    authority_id: &str,
+    action: &str,
+    resource: &str,
+) -> Option<TrustRecordQuery> {
+    let normalised = query_of(entity_id, authority_id, action, resource);
+    (normalised.entity_id.as_str() != entity_id || normalised.authority_id.as_str() != authority_id)
+        .then(|| {
+            TrustRecordQuery::new(
+                EntityId::as_written(entity_id),
+                AuthorityId::as_written(authority_id),
+                Action::new(action),
+                Resource::new(resource),
+            )
+        })
+}
+
 /// Convert between two types with the same JSON shape by re-serialising
 /// through JSON.
 ///

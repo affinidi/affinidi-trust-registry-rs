@@ -134,8 +134,13 @@ pub enum DedupError {
 /// or deliberately (claiming an id to suppress somebody else's write). The
 /// `MID#` prefix keeps these clear of the `TR#` namespace every backend's
 /// `list()` scans.
+///
+/// The issuer is taken in its normalised form (a did:scid without its `?src=`
+/// locator), so one document id under the two spellings of one issuer is one
+/// key.
 pub fn message_key(doc: &TrustTask<Value>) -> String {
     let issuer = doc.issuer.as_deref().unwrap_or("anonymous");
+    let issuer = affinidi_did_common::scid::strip_scid_src(issuer);
     format!("MID#{issuer}#{}", doc.id)
 }
 
@@ -607,6 +612,13 @@ mod tests {
             a.starts_with("MID#"),
             "must not collide with the TR# namespace"
         );
+    }
+
+    #[test]
+    fn a_did_scid_issuer_has_one_key_with_or_without_its_locator() {
+        let bare = message_key(&write_doc("id", Some("did:scid:vh:1:abc")));
+        let located = message_key(&write_doc("id", Some("did:scid:vh:1:abc?src=example.com")));
+        assert_eq!(bare, located);
     }
 
     #[tokio::test]
