@@ -6537,6 +6537,7 @@ dependencies = [
  "chrono",
  "reqwest",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "trql-client",

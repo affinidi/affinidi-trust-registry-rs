@@ -138,8 +138,8 @@ impl TestTrustRegistryBuilder {
     ///
     /// With it on, the registry drives its mediator socket through the
     /// delivery layer (which records TSP relationships) instead of the
-    /// DIDComm pickup loop, and keeps its TSP relationships in a store under
-    /// `./.trust-registry/messaging/` (or `TR_MESSAGING_STORE_PATH`). A client
+    /// DIDComm pickup loop, and keeps its TSP relationships in a store in a
+    /// temporary directory of this spawn's own. A client
     /// must form a TSP relationship with the registry before its first Trust
     /// Task (Spec Rev 3 §7.2.2), and client and registry share the test
     /// mediator, so it must allow direct delivery
@@ -188,6 +188,8 @@ impl TestTrustRegistryBuilder {
             http_addr,
             repository,
             did: self.did,
+            #[cfg(feature = "mediator")]
+            _messaging_store: None,
         })
     }
 
@@ -215,16 +217,11 @@ impl TestTrustRegistryBuilder {
 
         let repository = Arc::new(LocalStorage::with_records(self.records)?);
 
-        // Unique per spawn: with TSP on, the registry keeps its TSP
-        // relationships in a store named after the profile alias, under
-        // `./.trust-registry/messaging/` (or `TR_MESSAGING_STORE_PATH`), and
-        // two registries in one test run must not share one.
-        static SPAWNED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let alias = format!(
-            "Trust Registry {}-{}",
-            std::process::id(),
-            SPAWNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
+        // With TSP on, the registry keeps its TSP relationships in a
+        // messaging store. Each spawn gets its own, in a temporary directory
+        // removed after `shutdown`, so registries in one test run never share
+        // one and nothing is left in the working directory.
+        let messaging_store = tempfile::TempDir::new()?;
 
         #[cfg_attr(not(feature = "tsp"), allow(unused_mut))]
         let mut didcomm_config = DidcommConfig {
@@ -235,10 +232,11 @@ impl TestTrustRegistryBuilder {
             acl_mode: AccessListModeType::ExplicitDeny,
             profile_config: ProfileConfig {
                 did: did.clone(),
-                alias,
+                alias: "Trust Registry".to_string(),
                 secrets: identity.secrets,
             },
             mediator_did: mediator.did().to_string(),
+            messaging_store_path: Some(messaging_store.path().to_path_buf()),
             admin_config: AdminConfig {
                 admin_dids: self.admin_dids,
                 ..Default::default()
@@ -273,6 +271,7 @@ impl TestTrustRegistryBuilder {
             http_addr,
             repository,
             did: Some(did),
+            _messaging_store: Some(messaging_store),
         })
     }
 }
@@ -284,6 +283,11 @@ pub struct TestTrustRegistryHandle {
     http_addr: SocketAddr,
     repository: Arc<LocalStorage>,
     did: Option<String>,
+    /// The registry's messaging store directory (mediator-wired spawns),
+    /// removed when the handle goes away, after `shutdown` has stopped the
+    /// server.
+    #[cfg(feature = "mediator")]
+    _messaging_store: Option<tempfile::TempDir>,
 }
 
 impl TestTrustRegistryHandle {

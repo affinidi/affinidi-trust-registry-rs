@@ -117,9 +117,8 @@ A TSP test of your own needs three things the TSP tests show:
 3. a TSP relationship with the registry before the first Trust Task (Spec
    Rev 3 §7.2.2): see `relate_with_registry` in `tests/mediator.rs`.
 
-With TSP on, the registry keeps its TSP relationships in
-`./.trust-registry/messaging/` under the test's working directory (ignored by
-git), or under `TR_MESSAGING_STORE_PATH`.
+With TSP on, each spawned registry keeps its TSP relationships in a temporary
+directory of its own, removed after `shutdown()`.
 
 ## Scope
 
