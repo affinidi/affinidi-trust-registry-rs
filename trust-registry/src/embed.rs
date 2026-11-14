@@ -55,7 +55,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::audit::audit_logger::{AUDIT_TARGET, BaseAuditLogger};
 use crate::audit::bounded::BoundedAuditLogger;
@@ -423,11 +423,18 @@ impl TrustRegistryBuilder {
 
     /// The write-path message-id dedup store (R1.4).
     ///
-    /// Defaults to [`MemoryMessageIdStore`], which suppresses duplicates only
-    /// while the process lives — a restart forgets them, so a redelivered
-    /// mutation can be applied twice. A host with durable storage should pass
-    /// its own implementation; that is the one injection point here that
-    /// changes a correctness property rather than a convenience.
+    /// Defaults to the repository's own durable store
+    /// ([`TrustRecordAdminRepository::message_id_store`]): the Redis, DynamoDB
+    /// and fjall backends keep the record of accepted documents beside the
+    /// records, so it survives a restart and is shared by replicas. With a
+    /// repository that has none (CSV, in-memory, a host's own) the default is
+    /// [`MemoryMessageIdStore`], which suppresses duplicates only while the
+    /// process lives — a restart forgets them, so a redelivered mutation can
+    /// be applied twice. Both are configured by
+    /// `config.storage_config.message_id_config`. A host with durable storage
+    /// of its own should pass its own implementation; that is the one
+    /// injection point here that changes a correctness property rather than a
+    /// convenience.
     pub fn dedup_store(mut self, dedup: Arc<dyn MessageIdStore>) -> Self {
         self.dedup = Some(dedup);
         self
@@ -541,16 +548,36 @@ impl TrustRegistryBuilder {
             None => crate::trust_tasks::build_verifier().await,
         };
 
-        let dedup = self.dedup.unwrap_or_else(|| {
-            if self.config.didcomm_config.is_enabled {
-                warn!(
-                    "Message-id dedup is in-memory: duplicate writes are suppressed while this \
-                     process lives, but a restart forgets them and a redelivery could re-apply. \
-                     Pass a durable store with `TrustRegistryBuilder::dedup_store`."
-                );
-            }
-            Arc::new(MemoryMessageIdStore::default())
-        });
+        let message_id_config = self.config.storage_config.message_id_config;
+        message_id_config.validate().map_err(BoxError::from)?;
+        let dedup = match self.dedup {
+            Some(dedup) => dedup,
+            None => match repository
+                .message_id_store(&message_id_config)
+                .await
+                .map_err(|e| {
+                    BoxError::from(format!(
+                        "the record of accepted document identifiers could not be opened: {e}"
+                    ))
+                })? {
+                Some(durable) => {
+                    info!("Message-id dedup uses the record backend's durable store");
+                    durable
+                }
+                None => {
+                    if self.config.didcomm_config.is_enabled {
+                        warn!(
+                            "Message-id dedup is in-memory (the record backend has no durable \
+                             store): duplicate writes are suppressed while this process lives, \
+                             but a restart forgets them and a redelivery could re-apply. Use \
+                             the Redis, DynamoDB or fjall backend, or pass a durable store with \
+                             `TrustRegistryBuilder::dedup_store`."
+                        );
+                    }
+                    Arc::new(MemoryMessageIdStore::from_config(message_id_config))
+                }
+            },
+        };
 
         let audit_sink = match self.audit_logger {
             Some(audit_logger) => audit_logger,

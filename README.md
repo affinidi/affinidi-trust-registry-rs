@@ -684,11 +684,15 @@ ever does), install a tracing subscriber, load a `.env` file, or call
 `std::process::exit`. Those all live behind the `standalone` feature. Only
 `TrustRegistry::serve()` binds a socket, and only when you ask for it.
 
-One default is worth changing deliberately: `dedup_store` falls back to an
-in-memory store, which forgets across a restart, so a redelivered mutation could
-be applied twice (R1.4). It is the one injection point that changes a
-correctness property rather than a convenience — a host with durable storage
-should supply its own.
+One default is worth checking deliberately: `dedup_store` defaults to the
+repository's own durable store (`TrustRecordAdminRepository::message_id_store`:
+Redis, DynamoDB and fjall have one, see [Record of accepted
+documents](#record-of-accepted-documents)). With a repository that has none —
+`LocalStorage`, CSV, or a host's own — it falls back to an in-memory store, which
+forgets across a restart, so a redelivered mutation could be applied twice
+(R1.4). It is the one injection point that changes a correctness property rather
+than a convenience — a host with durable storage of its own should supply a
+store, or implement `message_id_store` on its repository.
 
 ## Trust Tasks, Transports & Identity
 
@@ -1182,6 +1186,44 @@ Because the file is replaced by renaming a new file over it:
   on the first write; the link's target is left unchanged.
 - The file gets a new inode on every write. Its permissions are carried over.
 
+### Record of accepted documents
+
+Trust Task writes are delivered at least once, so the registry keeps a record
+of the documents it has accepted (by issuer and document id) and answers a
+redelivered copy with the stored response instead of executing it again
+(R1.4). Where that record lives follows the storage backend:
+
+| Backend | Record | Survives a restart | Shared by replicas |
+| ------- | ------ | ------------------ | ------------------ |
+| `redis` | One hash per document under `MID#<issuer>#<id>`, claimed and resolved by Lua scripts | yes | yes |
+| `dynamodb` | One item per document in the records' table, `PK = MID#<issuer>#<id>`, `SK = MID`, written conditionally | yes | yes |
+| `fjall` | Outcomes in the `message_ids` keyspace of the record database, `fsync`ed before the reply | yes | single process |
+| `csv`, in-memory | Process memory | no (a warning is logged at startup) | no |
+
+An entry is kept for `TR_DEDUP_RETENTION_SEC`. DynamoDB decides expiry in its
+write conditions; to have expired items deleted, enable TTL on the table with
+the attribute `ttl`. Redis keys expire on their own. On DynamoDB the record
+uses `PutItem`, `UpdateItem`, `DeleteItem` and `GetItem` on the table, beside
+the `Query`, `GetItem`, `TransactGetItems` and `TransactWriteItems` the records
+use; an IAM policy narrower than the table must allow them.
+
+A copy is executed again only when the registry stops (or loses its store)
+between applying a write and recording its outcome: once the in-flight lease
+(`TR_DEDUP_IN_FLIGHT_LEASE_SEC`) lapses, the next copy runs. The re-run sees the
+first run's effect — a plain `registry/record/put` converges, while a strict
+create answers "already exists" and a delete "not found" — and its answer is
+recorded, so every later copy gets that same answer.
+
+### Redis connections
+
+Reads, listings and the record of accepted documents share one
+auto-reconnecting connection (`redis::aio::ConnectionManager`), used
+concurrently. Each write opens a connection of its own for its `WATCH`ed
+`MULTI`/`EXEC`, and closes it afterwards. Connecting and each command's answer
+time out after 5 seconds. A listing walks the keys with `SCAN … MATCH` and
+fetches each step's values with one `MGET`; a `registry/record/query` naming an
+authority scans only that authority's keys.
+
 ### Storage key layout
 
 The Redis, DynamoDB and fjall backends store each record under the key
@@ -1242,6 +1284,10 @@ none of these variables reach it.
 | `DDB_USE_TEST_CREDENTIALS` | `true` to use the SDK's static test credentials, for DynamoDB Local / LocalStack only. Never inferred from the endpoint. | default: `false` |
 | `REDIS_URL` | Redis connection URL. Format: `redis://host:port` or `redis://username:password@host:port/db`. | **Required** when `TR_STORAGE_BACKEND=redis` |
 | `TR_FJALL_PATH` | Directory for the embedded fjall keyspace. | default: `./trust_records.fjall` |
+| `TR_DEDUP_RETENTION_SEC` | How long, in seconds, the [record of accepted documents](#record-of-accepted-documents) keeps a write's outcome for replay. At least `360` (the write acceptance window plus clock skew). | default: `420` |
+| `TR_DEDUP_IN_FLIGHT_LEASE_SEC` | How long, in seconds, a claim on a document being executed is honoured before another copy may take it. At least `1` and less than `300` (the acceptance window). | default: `120` |
+| `TR_DEDUP_MAX_ENTRIES` | Most documents the record holds at once, when it is kept in process memory (CSV and in-memory backends, and fjall's index). A positive whole number. | default: `100000` |
+| `TR_DEDUP_MAX_ENTRIES_PER_ISSUER` | Most documents one issuer may hold in a record kept in process memory. At least `1`, at most `TR_DEDUP_MAX_ENTRIES`. | default: `10000` |
 
 #### DIDComm, TSP and the registry's DID
 

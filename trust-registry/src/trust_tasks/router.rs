@@ -622,7 +622,18 @@ where
         })
         .clamp(1, QUERY_MAX_LIMIT);
 
-    let list = repository.list().await.map_err(QueryFailure::Repository)?;
+    // The repository reads only what the filter can match where its backend
+    // allows (a key-prefix scan from the authority); the filter below is
+    // applied again regardless.
+    let list = repository
+        .list_matching(&crate::storage::repository::TrustRecordFilter {
+            entity_id: f.entity_id.map(crate::domain::EntityId::new),
+            authority_id: f.authority_id.map(crate::domain::AuthorityId::new),
+            action: f.action.map(crate::domain::Action::new),
+            resource: f.resource.map(crate::domain::Resource::new),
+        })
+        .await
+        .map_err(QueryFailure::Repository)?;
     // Compared in the normalised form records are stored in, so a filter
     // naming a did:scid with its `?src=` locator matches, and so does a
     // record stored with one before references were normalised.
@@ -919,6 +930,88 @@ mod tests {
             query_records(&repo, filter(Some("did:example:authority"), None))
                 .await
                 .is_err()
+        );
+    }
+
+    /// Answers only filtered listings, recording each filter; a full listing
+    /// fails the test.
+    #[derive(Default)]
+    struct FilterOnlyRepo {
+        records: Vec<TrustRecord>,
+        asked: Mutex<Vec<crate::storage::repository::TrustRecordFilter>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TrustRecordRepository for FilterOnlyRepo {
+        async fn find_by_query(
+            &self,
+            _query: TrustRecordQuery,
+        ) -> Result<Option<TrustRecord>, RepositoryError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TrustRecordAdminRepository for FilterOnlyRepo {
+        async fn create(&self, _record: TrustRecord) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+        async fn update(&self, _record: TrustRecord) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+        async fn delete(&self, _query: TrustRecordQuery) -> Result<(), RepositoryError> {
+            Ok(())
+        }
+        async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
+            panic!("a filtered query must not enumerate every record");
+        }
+        async fn list_matching(
+            &self,
+            filter: &crate::storage::repository::TrustRecordFilter,
+        ) -> Result<TrustRecordList, RepositoryError> {
+            self.asked.lock().unwrap().push(filter.clone());
+            Ok(TrustRecordList::new(
+                self.records
+                    .iter()
+                    .filter(|record| filter.matches(record))
+                    .cloned()
+                    .collect(),
+            ))
+        }
+    }
+
+    /// #216: the query passes its filter down rather than loading the whole
+    /// store and filtering after the fact.
+    #[tokio::test]
+    async fn a_partially_keyed_query_passes_its_filter_to_the_repository() {
+        let other_authority = TrustRecordBuilder::new()
+            .entity_id(EntityId::new("did:example:entity"))
+            .authority_id(AuthorityId::new("did:example:other"))
+            .action(Action::new("issue"))
+            .resource(Resource::new("vc"))
+            .recognized(true)
+            .authorized(true)
+            .record_type(RecordType::Authorization)
+            .build()
+            .expect("valid record");
+        let repo = FilterOnlyRepo {
+            records: vec![sample_record(), other_authority],
+            ..Default::default()
+        };
+
+        let (page, next) =
+            query_records(&repo, filter(Some("did:example:authority"), Some("issue")))
+                .await
+                .expect("answered");
+        assert_eq!(page, vec![sample_record()]);
+        assert_eq!(next, None);
+        assert_eq!(
+            *repo.asked.lock().unwrap(),
+            vec![crate::storage::repository::TrustRecordFilter {
+                authority_id: Some(AuthorityId::new("did:example:authority")),
+                action: Some(Action::new("issue")),
+                ..Default::default()
+            }]
         );
     }
 

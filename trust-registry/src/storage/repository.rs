@@ -219,6 +219,101 @@ impl RepositoryError {
     }
 }
 
+/// Which records a filtered listing ([`TrustRecordAdminRepository::list_matching`])
+/// returns: those equal to every identifier given. `None` matches anything.
+///
+/// Storage keys put the authority first (`TR#<authority>#<action>#<resource>#<entity>`),
+/// so a backend that can enumerate by key prefix narrows its scan with
+/// [`Self::storage_key_prefixes`]: a filter naming the authority reads only that
+/// authority's records. A filter naming only the entity cannot be narrowed by
+/// prefix and reads every record.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrustRecordFilter {
+    pub entity_id: Option<EntityId>,
+    pub authority_id: Option<AuthorityId>,
+    pub action: Option<Action>,
+    pub resource: Option<Resource>,
+}
+
+impl TrustRecordFilter {
+    /// A filter matching every record.
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    fn field_matches(wanted: Option<&str>, value: &str) -> bool {
+        wanted.is_none_or(|wanted| wanted == value)
+    }
+
+    fn matches_parts(&self, entity: &str, authority: &str, action: &str, resource: &str) -> bool {
+        Self::field_matches(self.entity_id.as_ref().map(EntityId::as_str), entity)
+            && Self::field_matches(
+                self.authority_id.as_ref().map(AuthorityId::as_str),
+                authority,
+            )
+            && Self::field_matches(self.action.as_ref().map(Action::as_str), action)
+            && Self::field_matches(self.resource.as_ref().map(Resource::as_str), resource)
+    }
+
+    /// Whether `record` satisfies the filter.
+    pub fn matches(&self, record: &TrustRecord) -> bool {
+        self.matches_parts(
+            record.entity_id().as_str(),
+            record.authority_id().as_str(),
+            record.action().as_str(),
+            record.resource().as_str(),
+        )
+    }
+
+    /// Whether the record `key` names satisfies the filter.
+    pub fn matches_key(&self, key: &TrustRecordKey) -> bool {
+        self.matches_parts(
+            key.entity_id().as_str(),
+            key.authority_id().as_str(),
+            key.action().as_str(),
+            key.resource().as_str(),
+        )
+    }
+
+    /// Storage-key prefixes that together hold every record this filter can
+    /// match, for backends that enumerate by prefix.
+    ///
+    /// Built from the leading identifiers the filter names, in key order
+    /// (authority, action, resource, entity). The first is the escaped form
+    /// ([`TrustRecordKey::sk`]); when an identifier contains `#` or `%` the
+    /// unescaped form an older release wrote ([`TrustRecordKey::legacy_sk`])
+    /// follows. A prefix can also hold records the filter does not match (the
+    /// unescaped form is ambiguous, and later identifiers are not part of it),
+    /// so a caller still applies [`Self::matches`].
+    pub fn storage_key_prefixes(&self) -> Vec<String> {
+        crate::domain::key::storage_key_prefixes(
+            self.authority_id.as_ref(),
+            self.action.as_ref(),
+            self.resource.as_ref(),
+            self.entity_id.as_ref(),
+        )
+    }
+}
+
+impl TrustRecordList {
+    /// Keep only what `filter` can match: the records it matches, and the
+    /// unreadable values that could hold one ([`UnreadableRecord::could_match`]).
+    pub fn filtered(self, filter: &TrustRecordFilter) -> Self {
+        Self {
+            records: self
+                .records
+                .into_iter()
+                .filter(|record| filter.matches(record))
+                .collect(),
+            unreadable: self
+                .unreadable
+                .into_iter()
+                .filter(|unreadable| unreadable.could_match(|key| filter.matches_key(key)))
+                .collect(),
+        }
+    }
+}
+
 /// Read-only repository trait for querying trust records
 #[async_trait::async_trait]
 pub trait TrustRecordRepository: Send + Sync {
@@ -235,6 +330,39 @@ pub trait TrustRecordAdminRepository: TrustRecordRepository {
     async fn update(&self, record: TrustRecord) -> Result<(), RepositoryError>;
     async fn delete(&self, query: TrustRecordQuery) -> Result<(), RepositoryError>;
     async fn list(&self) -> Result<TrustRecordList, RepositoryError>;
+
+    /// The records `filter` matches, and the unreadable values that could hold
+    /// one ([`TrustRecordList::unreadable`]).
+    ///
+    /// The default lists everything and filters it. Adapters that can do
+    /// better override it: the keyed backends read only the storage-key
+    /// prefixes the filter names ([`TrustRecordFilter::storage_key_prefixes`]),
+    /// and the in-memory ones copy only the matching records. An override
+    /// returns exactly what the default would.
+    async fn list_matching(
+        &self,
+        filter: &TrustRecordFilter,
+    ) -> Result<TrustRecordList, RepositoryError> {
+        Ok(self.list().await?.filtered(filter))
+    }
+
+    /// The durable record of accepted Trust Task document identifiers
+    /// ([`crate::dedup`], R1.4) that belongs with this repository's storage,
+    /// configured by `config`, or `None` when the backend has none.
+    ///
+    /// [`TrustRegistryBuilder`](crate::TrustRegistryBuilder) uses it when no
+    /// store is passed, so a registry on Redis, DynamoDB or fjall remembers
+    /// accepted documents across restarts and replicas without further
+    /// configuration. The default, and the CSV and in-memory adapters, return
+    /// `None`; the builder then falls back to the per-process
+    /// [`MemoryMessageIdStore`](crate::dedup::MemoryMessageIdStore).
+    async fn message_id_store(
+        &self,
+        config: &crate::configs::MessageIdStoreConfig,
+    ) -> Result<Option<std::sync::Arc<dyn crate::dedup::MessageIdStore>>, RepositoryError> {
+        let _ = config;
+        Ok(None)
+    }
 
     /// The record `query` names, or [`RepositoryError::RecordNotFound`].
     ///

@@ -29,7 +29,10 @@ use tracing::info;
 
 use std::sync::{Arc, Mutex};
 
-use crate::domain::key::{TR_SK_PREFIX, TrustRecordKey, dedupe_listing};
+use crate::configs::MessageIdStoreConfig;
+use crate::dedup::MessageIdStore;
+use crate::dedup::fjall::FjallMessageIdStore;
+use crate::domain::key::{TrustRecordKey, dedupe_listing};
 use crate::domain::*;
 use crate::storage::keyed::{
     Action as KeyedAction, KeyedReader, Op, lookup, plan_create, plan_delete, plan_update,
@@ -46,6 +49,9 @@ pub struct FjallStorage {
     /// Held across each write's reads and its batch, so the keys a write
     /// planned against cannot change before it lands.
     write_lock: Arc<Mutex<()>>,
+    /// The record of accepted document identifiers in this database, opened
+    /// on first request. One per database: its claims live in its memory.
+    message_ids: Arc<tokio::sync::OnceCell<Arc<FjallMessageIdStore>>>,
 }
 
 impl FjallStorage {
@@ -58,6 +64,7 @@ impl FjallStorage {
             keyspace,
             db,
             write_lock: Arc::new(Mutex::new(())),
+            message_ids: Arc::new(tokio::sync::OnceCell::new()),
         })
     }
 
@@ -200,26 +207,56 @@ impl TrustRecordAdminRepository for FjallStorage {
     }
 
     async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
+        self.list_matching(&TrustRecordFilter::all()).await
+    }
+
+    /// A prefix scan of the keys the filter's leading identifiers name.
+    async fn list_matching(
+        &self,
+        filter: &TrustRecordFilter,
+    ) -> Result<TrustRecordList, RepositoryError> {
         let ks = self.keyspace.clone();
+        let prefixes = filter.storage_key_prefixes();
         let (entries, unreadable) = tokio::task::spawn_blocking(move || {
             let mut entries = Vec::new();
             let mut unreadable = Vec::new();
-            for guard in ks.prefix(TR_SK_PREFIX.as_bytes()) {
-                let (key, value) = guard.into_inner().map_err(query_error)?;
-                let key = String::from_utf8_lossy(&key).into_owned();
-                match FjallStorage::deserialize(&value) {
-                    Ok(record) => entries.push((key, record)),
-                    Err(e) => skip_unreadable(key, &e, &mut unreadable),
+            for prefix in prefixes {
+                for guard in ks.prefix(prefix.as_bytes()) {
+                    let (key, value) = guard.into_inner().map_err(query_error)?;
+                    let key = String::from_utf8_lossy(&key).into_owned();
+                    match FjallStorage::deserialize(&value) {
+                        Ok(record) => entries.push((key, record)),
+                        Err(e) => skip_unreadable(key, &e, &mut unreadable),
+                    }
                 }
             }
             Ok::<_, RepositoryError>((entries, unreadable))
         })
         .await
         .map_err(join_error)??;
-        Ok(TrustRecordList::with_unreadable(
-            dedupe_listing(entries),
-            unreadable,
-        ))
+        Ok(TrustRecordList::with_unreadable(dedupe_listing(entries), unreadable).filtered(filter))
+    }
+
+    /// The fjall record of accepted document identifiers, in this database
+    /// ([`FjallMessageIdStore`]). Opened once; later calls return the same
+    /// store, with the settings of the first.
+    async fn message_id_store(
+        &self,
+        config: &MessageIdStoreConfig,
+    ) -> Result<Option<Arc<dyn MessageIdStore>>, RepositoryError> {
+        let db = self.db.clone();
+        let config = *config;
+        let store = self
+            .message_ids
+            .get_or_try_init(|| async move {
+                tokio::task::spawn_blocking(move || FjallMessageIdStore::open(db, config))
+                    .await
+                    .map_err(join_error)?
+                    .map(Arc::new)
+                    .map_err(|e| RepositoryError::ConnectionFailed(e.to_string()))
+            })
+            .await?;
+        Ok(Some(Arc::clone(store) as Arc<dyn MessageIdStore>))
     }
 }
 
@@ -609,4 +646,59 @@ mod tests {
     }
 
     crate::storage::conformance::repository_conformance_tests!(fjall, conformance_fixture().await);
+
+    /// #194: the store the builder takes from the repository is one per
+    /// database, and what it records survives the registry restarting.
+    #[tokio::test]
+    async fn the_repository_store_is_shared_and_survives_a_restart() {
+        use crate::dedup::{Claim, StoredOutcome};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("path").to_string();
+        let config = MessageIdStoreConfig::default();
+        let key = "MID#did:example:a#1";
+        let outcome = StoredOutcome::Rejected(
+            trust_tasks_rs::TrustTask::new(
+                "1".to_string(),
+                "https://trusttasks.org/spec/registry/record/put/0.1"
+                    .parse()
+                    .expect("type uri"),
+                serde_json::json!({}),
+            )
+            .reject_with("e".to_string(), trust_tasks_rs::RejectReason::IdConflict),
+        );
+        {
+            let fjall = FjallStorage::new(&path).expect("open");
+            let store = fjall
+                .message_id_store(&config)
+                .await
+                .expect("opens")
+                .expect("fjall has a durable store");
+            let again = fjall
+                .message_id_store(&config)
+                .await
+                .expect("opens")
+                .expect("store");
+            let Claim::Acquired(token) = store.claim(key, "digest").await.expect("claim") else {
+                panic!("first claim is acquired");
+            };
+            assert!(
+                matches!(again.claim(key, "digest").await, Ok(Claim::InFlight)),
+                "a second request returns the same store"
+            );
+            store
+                .complete(key, &token, &outcome)
+                .await
+                .expect("complete");
+        }
+        let fjall = FjallStorage::new(&path).expect("reopen");
+        let store = fjall
+            .message_id_store(&config)
+            .await
+            .expect("opens")
+            .expect("store");
+        assert!(matches!(
+            store.claim(key, "digest").await,
+            Ok(Claim::Replay(_))
+        ));
+    }
 }

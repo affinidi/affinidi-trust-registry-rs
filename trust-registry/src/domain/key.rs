@@ -173,6 +173,52 @@ impl TrustRecordKey {
     }
 }
 
+/// The storage-key prefixes holding every record whose leading identifiers,
+/// in key order, are the ones given (see
+/// [`TrustRecordFilter::storage_key_prefixes`](crate::storage::repository::TrustRecordFilter::storage_key_prefixes)).
+///
+/// Only the leading run of `Some`s is used: `TR#` alone when the authority is
+/// `None`. The escaped prefix comes first; the unescaped one an older release
+/// would have written follows when it differs.
+pub(crate) fn storage_key_prefixes(
+    authority: Option<&AuthorityId>,
+    action: Option<&Action>,
+    resource: Option<&Resource>,
+    entity: Option<&EntityId>,
+) -> Vec<String> {
+    let leading: Vec<&str> = [
+        authority.map(AuthorityId::as_str),
+        action.map(Action::as_str),
+        resource.map(Resource::as_str),
+        entity.map(EntityId::as_str),
+    ]
+    .into_iter()
+    .map_while(|part| part)
+    .collect();
+    let join = |escape: bool| {
+        let mut prefix = TR_SK_PREFIX.to_string();
+        for (index, part) in leading.iter().enumerate() {
+            if escape {
+                prefix.push_str(&escape_component(part));
+            } else {
+                prefix.push_str(part);
+            }
+            // A complete key has no trailing separator.
+            if index < 3 {
+                prefix.push(SEPARATOR);
+            }
+        }
+        prefix
+    };
+    let escaped = join(true);
+    let literal = join(false);
+    if literal == escaped {
+        vec![escaped]
+    } else {
+        vec![escaped, literal]
+    }
+}
+
 impl fmt::Display for TrustRecordKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.sk())
@@ -398,5 +444,51 @@ mod tests {
         }
 
         assert_eq!(dedupe_listing(vec![(legacy, old.clone())]), vec![old]);
+    }
+
+    #[test]
+    fn prefixes_cover_every_key_a_filter_can_match() {
+        let authority = AuthorityId::new("did:a");
+        let action = Action::new("sign");
+        assert_eq!(
+            storage_key_prefixes(None, Some(&action), None, None),
+            vec!["TR#".to_string()],
+            "without the authority nothing narrows the scan"
+        );
+        assert_eq!(
+            storage_key_prefixes(Some(&authority), None, Some(&Resource::new("x")), None),
+            vec!["TR#did:a#".to_string()],
+            "only the leading identifiers are used"
+        );
+        assert_eq!(
+            storage_key_prefixes(Some(&authority), Some(&action), None, None),
+            vec!["TR#did:a#sign#".to_string()]
+        );
+
+        // Every record's current and earlier key starts with one of the
+        // prefixes of a filter naming its leading identifiers.
+        for stored in [
+            record("did:a", "sign#x", "repo#main", "did:e"),
+            record("did:a%23", "sign", "r", "did:e"),
+            record("did#a", "sign", "r", "did:e#1"),
+        ] {
+            let key = TrustRecordKey::from_record(&stored);
+            let mut stored_under = vec![key.sk()];
+            stored_under.extend(key.legacy_sk());
+            for depth in 1..=4 {
+                let prefixes = storage_key_prefixes(
+                    Some(key.authority_id()),
+                    (depth > 1).then_some(key.action()),
+                    (depth > 2).then_some(key.resource()),
+                    (depth > 3).then_some(key.entity_id()),
+                );
+                for storage_key in &stored_under {
+                    assert!(
+                        prefixes.iter().any(|p| storage_key.starts_with(p.as_str())),
+                        "{storage_key} under {prefixes:?}"
+                    );
+                }
+            }
+        }
     }
 }

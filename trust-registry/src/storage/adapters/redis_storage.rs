@@ -1,32 +1,59 @@
-use redis::{AsyncCommands, Client, aio::MultiplexedConnection};
+use redis::aio::{
+    ConnectionLike, ConnectionManager, ConnectionManagerConfig, MultiplexedConnection,
+};
+use redis::{AsyncCommands, AsyncConnectionConfig, Client};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::time::Duration;
 use tracing::{debug, info};
 
-use crate::domain::key::{TR_SK_PREFIX, TrustRecordKey, dedupe_listing};
+use crate::configs::MessageIdStoreConfig;
+use crate::dedup::MessageIdStore;
+use crate::dedup::redis::RedisMessageIdStore;
+use crate::domain::key::{TrustRecordKey, dedupe_listing};
 use crate::domain::*;
 use crate::storage::keyed::{
     Action as KeyedAction, KeyedReader, Op, lookup, plan_create, plan_delete, plan_update,
 };
 use crate::storage::repository::*;
 
+/// How long connecting to Redis may take, for the shared connection and for
+/// each write's own.
+pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long one command may wait for its answer. Above the `redis` crate's
+/// 500 ms default, so one `MGET` of a large page on a slow link does not fail
+/// a listing part-way.
+pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Keys asked for per `SCAN` step of a listing, and so the most values one
+/// `MGET` fetches.
+const SCAN_PAGE: usize = 500;
+
 /// Redis storage adapter for Trust Registry
 /// Keys are formatted as: TR#{authority}#{action}#{resource}#{entity}, each
 /// identifier escaped (see `TrustRecordKey::sk`)
 /// Values are JSON-serialized TrustRecord objects
 ///
+/// Reads share one auto-reconnecting [`ConnectionManager`], cloned per
+/// operation, so they run concurrently over its multiplexed connection, and a
+/// dropped connection (a Redis restart, a failover, an idle reset) is
+/// re-established instead of failing every later command.
+///
 /// Every write is atomic across registry replicas sharing one Redis: it reads
 /// the keys it depends on under `WATCH` and applies its changes in one
 /// `MULTI`/`EXEC`, which Redis aborts if any watched key changed; the write
 /// then re-plans. So two strict creates of one key never both succeed, and an
-/// update racing a delete cannot bring the record back.
+/// update racing a delete cannot bring the record back. `WATCH` belongs to a
+/// connection, so each write opens a connection of its own for its duration:
+/// a command from another task on a shared connection would change what is
+/// watched or land inside the transaction. Writes are rare (administration);
+/// the connection set-up is their price.
 #[derive(Clone)]
 pub struct RedisStorage {
-    /// One multiplexed connection. Every use must hold the write lock for the
-    /// whole operation: writes `WATCH` keys on this connection and then
-    /// `MULTI`/`EXEC`, and a command from another task in between would
-    /// change what is watched or land inside the transaction.
-    connection: Arc<RwLock<MultiplexedConnection>>,
+    client: Client,
+    /// Shared by reads and by the record of accepted documents; cloned per
+    /// operation.
+    connection: ConnectionManager,
 }
 
 impl RedisStorage {
@@ -36,11 +63,27 @@ impl RedisStorage {
             crate::configs::storage::redact_url_credentials(redis_url)
         );
         let client = Client::open(redis_url)?;
-        let connection = client.get_multiplexed_async_connection().await?;
+        let connection = client
+            .get_connection_manager_with_config(
+                ConnectionManagerConfig::new()
+                    .set_connection_timeout(Some(CONNECTION_TIMEOUT))
+                    .set_response_timeout(Some(RESPONSE_TIMEOUT)),
+            )
+            .await?;
 
-        Ok(Self {
-            connection: Arc::new(RwLock::new(connection)),
-        })
+        Ok(Self { client, connection })
+    }
+
+    /// A connection of its own for one write.
+    async fn write_connection(&self) -> Result<MultiplexedConnection, RepositoryError> {
+        self.client
+            .get_multiplexed_async_connection_with_config(
+                &AsyncConnectionConfig::new()
+                    .set_connection_timeout(Some(CONNECTION_TIMEOUT))
+                    .set_response_timeout(Some(RESPONSE_TIMEOUT)),
+            )
+            .await
+            .map_err(|e| RepositoryError::ConnectionFailed(format!("Redis connect failed: {e}")))
     }
 
     fn serialize_record(record: &TrustRecord) -> Result<String, RepositoryError> {
@@ -63,8 +106,7 @@ const MAX_WRITE_ATTEMPTS: usize = 5;
 /// Reads for the planners: each key is `WATCH`ed before it is read, so the
 /// `MULTI`/`EXEC` that applies the plan fails if any of them changed.
 ///
-/// Safe on the shared multiplexed connection because every operation holds
-/// the connection's write lock for its whole duration.
+/// On the write's own connection, which nothing else uses.
 struct WatchingReader<'a> {
     conn: &'a mut MultiplexedConnection,
 }
@@ -96,14 +138,14 @@ impl KeyedReader for WatchingReader<'_> {
 }
 
 /// Plain reads, for lookups.
-struct PlainReader<'a> {
-    conn: &'a mut MultiplexedConnection,
+struct PlainReader {
+    conn: ConnectionManager,
 }
 
 #[async_trait::async_trait]
-impl KeyedReader for PlainReader<'_> {
+impl KeyedReader for PlainReader {
     async fn read_at(&mut self, storage_key: &str) -> Result<Option<TrustRecord>, RepositoryError> {
-        RedisStorage::get_record(self.conn, storage_key).await
+        RedisStorage::get_record(&mut self.conn, storage_key).await
     }
 
     async fn read_pair(
@@ -111,13 +153,26 @@ impl KeyedReader for PlainReader<'_> {
         first: &str,
         second: &str,
     ) -> Result<(Option<TrustRecord>, Option<TrustRecord>), RepositoryError> {
-        RedisStorage::get_pair(self.conn, first, second).await
+        RedisStorage::get_pair(&mut self.conn, first, second).await
     }
 }
 
+/// Escape the glob characters `SCAN MATCH` interprets, so a key prefix
+/// matches only itself.
+fn glob_escape(prefix: &str) -> String {
+    let mut escaped = String::with_capacity(prefix.len() + 4);
+    for character in prefix.chars() {
+        if matches!(character, '*' | '?' | '[' | ']' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 impl RedisStorage {
-    async fn get_record(
-        conn: &mut MultiplexedConnection,
+    async fn get_record<C: ConnectionLike + Send + Sync>(
+        conn: &mut C,
         storage_key: &str,
     ) -> Result<Option<TrustRecord>, RepositoryError> {
         let data: Option<String> = conn
@@ -128,8 +183,8 @@ impl RedisStorage {
     }
 
     /// Both keys in one `MGET`, so they are read at one point in time.
-    async fn get_pair(
-        conn: &mut MultiplexedConnection,
+    async fn get_pair<C: ConnectionLike + Send + Sync>(
+        conn: &mut C,
         first: &str,
         second: &str,
     ) -> Result<(Option<TrustRecord>, Option<TrustRecord>), RepositoryError> {
@@ -151,13 +206,16 @@ impl RedisStorage {
     }
 
     async fn find(&self, key: &TrustRecordKey) -> Result<Option<TrustRecord>, RepositoryError> {
-        let mut conn = self.connection.write().await;
-        let mut reader = PlainReader { conn: &mut conn };
+        let mut reader = PlainReader {
+            conn: self.connection.clone(),
+        };
         Ok(lookup(&mut reader, key).await?.map(|(_, record)| record))
     }
 
     /// Plan a write against `WATCH`ed keys and apply it in one
-    /// `MULTI`/`EXEC`, re-planning if a watched key changed in between.
+    /// `MULTI`/`EXEC`, re-planning if a watched key changed in between. Runs
+    /// on a connection of its own, dropped afterwards (with any `WATCH` a
+    /// failed or cancelled write left).
     async fn write<F>(&self, plan: F) -> Result<(), RepositoryError>
     where
         F: for<'a, 'c> Fn(
@@ -165,24 +223,11 @@ impl RedisStorage {
         )
             -> futures::future::BoxFuture<'a, Result<Vec<Op>, RepositoryError>>,
     {
-        let mut conn = self.connection.write().await;
-        // A write that was cancelled, or stopped on an error, after its
-        // WATCHes may have left keys watched; they would abort this EXEC.
-        redis::cmd("UNWATCH")
-            .exec_async(&mut *conn)
-            .await
-            .map_err(|e| RepositoryError::QueryFailed(format!("Redis UNWATCH failed: {e}")))?;
+        let mut conn = self.write_connection().await?;
         for _ in 0..MAX_WRITE_ATTEMPTS {
-            let planned = {
+            let ops = {
                 let mut reader = WatchingReader { conn: &mut conn };
-                plan(&mut reader).await
-            };
-            let ops = match planned {
-                Ok(ops) => ops,
-                Err(e) => {
-                    let _ = redis::cmd("UNWATCH").exec_async(&mut *conn).await;
-                    return Err(e);
-                }
+                plan(&mut reader).await?
             };
             let mut pipe = redis::pipe();
             pipe.atomic();
@@ -198,7 +243,7 @@ impl RedisStorage {
                 }
             }
             let applied: Option<redis::Value> = pipe
-                .query_async(&mut *conn)
+                .query_async(&mut conn)
                 .await
                 .map_err(|e| RepositoryError::QueryFailed(format!("Redis EXEC failed: {e}")))?;
             if applied.is_some() {
@@ -210,6 +255,62 @@ impl RedisStorage {
             "the keys this write depends on kept changing; gave up after {MAX_WRITE_ATTEMPTS} \
              attempts"
         )))
+    }
+
+    /// Every record under `prefixes`: one `SCAN MATCH <prefix>*` per prefix,
+    /// each step's keys fetched with one `MGET`.
+    async fn scan(&self, prefixes: &[String]) -> Result<TrustRecordList, RepositoryError> {
+        let mut conn = self.connection.clone();
+        let mut entries = Vec::new();
+        let mut unreadable = Vec::new();
+
+        for prefix in prefixes {
+            let pattern = format!("{}*", glob_escape(prefix));
+            // SCAN is O(1) per call and iterates incrementally, unlike KEYS.
+            let mut cursor: u64 = 0;
+            loop {
+                let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(SCAN_PAGE)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(|e| RepositoryError::QueryFailed(format!("Redis SCAN failed: {e}")))?;
+
+                if !keys.is_empty() {
+                    let values: Vec<Option<String>> = redis::cmd("MGET")
+                        .arg(&keys)
+                        .query_async(&mut conn)
+                        .await
+                        .map_err(|e| {
+                            RepositoryError::QueryFailed(format!("Redis MGET failed: {e}"))
+                        })?;
+                    for (key, data) in keys.into_iter().zip(values) {
+                        // Deleted between the SCAN and the MGET.
+                        let Some(data) = data else { continue };
+                        match Self::deserialize_record(&data) {
+                            Ok(record) => entries.push((key, record)),
+                            Err(e) => skip_unreadable(key, &e, &mut unreadable),
+                        }
+                    }
+                }
+
+                if next_cursor == 0 {
+                    break;
+                }
+                cursor = next_cursor;
+            }
+        }
+
+        // SCAN may return a key more than once; the listing keeps one copy.
+        unreadable.sort_by(|a: &UnreadableRecord, b| a.storage_key().cmp(b.storage_key()));
+        unreadable.dedup();
+        Ok(TrustRecordList::with_unreadable(
+            dedupe_listing(entries),
+            unreadable,
+        ))
     }
 }
 
@@ -265,49 +366,33 @@ impl TrustRecordAdminRepository for RedisStorage {
 
     async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
         debug!("Listing all records");
+        let list = self.list_matching(&TrustRecordFilter::all()).await?;
+        info!("Listed {} records", list.records().len());
+        Ok(list)
+    }
 
-        let mut conn = self.connection.write().await;
-        let mut entries = Vec::new();
-        let mut unreadable = Vec::new();
+    /// Scans only the keys under the filter's leading identifiers
+    /// ([`TrustRecordFilter::storage_key_prefixes`]).
+    async fn list_matching(
+        &self,
+        filter: &TrustRecordFilter,
+    ) -> Result<TrustRecordList, RepositoryError> {
+        Ok(self
+            .scan(&filter.storage_key_prefixes())
+            .await?
+            .filtered(filter))
+    }
 
-        // Use SCAN instead of KEYS to avoid blocking Redis
-        // SCAN is O(1) per call and iterates incrementally
-        let mut cursor: u64 = 0;
-        loop {
-            let pattern = format!("{}*", TR_SK_PREFIX);
-            let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(100)
-                .query_async(&mut *conn)
-                .await
-                .map_err(|e| RepositoryError::QueryFailed(format!("Redis SCAN failed: {e}")))?;
-
-            for key in keys {
-                let data: Option<String> = conn
-                    .get(&key)
-                    .await
-                    .map_err(|e| RepositoryError::QueryFailed(format!("Redis GET failed: {e}")))?;
-
-                if let Some(data) = data {
-                    match Self::deserialize_record(&data) {
-                        Ok(record) => entries.push((key, record)),
-                        Err(e) => skip_unreadable(key, &e, &mut unreadable),
-                    }
-                }
-            }
-
-            if new_cursor == 0 {
-                break;
-            }
-            cursor = new_cursor;
-        }
-
-        let records = dedupe_listing(entries);
-        info!("Listed {} records", records.len());
-        Ok(TrustRecordList::with_unreadable(records, unreadable))
+    /// The Redis record of accepted document identifiers
+    /// ([`RedisMessageIdStore`]), over this storage's connection.
+    async fn message_id_store(
+        &self,
+        config: &MessageIdStoreConfig,
+    ) -> Result<Option<Arc<dyn MessageIdStore>>, RepositoryError> {
+        Ok(Some(Arc::new(RedisMessageIdStore::new(
+            self.connection.clone(),
+            *config,
+        ))))
     }
 }
 
@@ -363,7 +448,7 @@ mod tests {
                     move |storage_key: String| {
                         let storage = writer.clone();
                         Box::pin(async move {
-                            let mut conn = storage.connection.write().await;
+                            let mut conn = storage.connection.clone();
                             let result: redis::RedisResult<()> =
                                 conn.set(&storage_key, "{not json").await;
                             result.expect("Redis SET");
@@ -372,7 +457,7 @@ mod tests {
                     move |storage_key: String| {
                         let storage = remover.clone();
                         Box::pin(async move {
-                            let mut conn = storage.connection.write().await;
+                            let mut conn = storage.connection.clone();
                             let _: Result<(), _> = conn.del(&storage_key).await;
                         })
                     },
@@ -386,7 +471,7 @@ mod tests {
     crate::storage::conformance::repository_conformance_tests!(redis, conformance_fixture().await);
 
     async fn cleanup_test_data(storage: &RedisStorage, records: &[TrustRecord]) {
-        let mut conn = storage.connection.write().await;
+        let mut conn = storage.connection.clone();
         for record in records {
             let key = TrustRecordKey::from_record(record);
             let _: Result<(), _> = conn.del(key.sk()).await;
@@ -627,7 +712,7 @@ mod tests {
         let legacy = TrustRecordKey::from_record(record)
             .legacy_sk()
             .expect("identifiers contain '#' or '%'");
-        let mut conn = storage.connection.write().await;
+        let mut conn = storage.connection.clone();
         let _: () = conn
             .set(&legacy, RedisStorage::serialize_record(record).unwrap())
             .await
@@ -725,7 +810,7 @@ mod tests {
         let updated = stored.clone().with_authorized(false);
         storage.update(updated.clone()).await.unwrap();
         {
-            let mut conn = storage.connection.write().await;
+            let mut conn = storage.connection.clone();
             let legacy_left: bool = conn.exists(&legacy).await.unwrap();
             assert!(
                 !legacy_left,
@@ -821,7 +906,7 @@ mod tests {
         assert_eq!(storage.read(query_for(&a)).await.unwrap(), a);
         assert_eq!(storage.read(query_for(&b)).await.unwrap(), b);
         {
-            let mut conn = storage.connection.write().await;
+            let mut conn = storage.connection.clone();
             let moved: bool = conn
                 .exists(TrustRecordKey::from_record(&b).sk())
                 .await
@@ -832,5 +917,112 @@ mod tests {
         assert_eq!(storage.read(query_for(&b)).await.unwrap(), b);
 
         cleanup_test_data(&storage, &[a, b]).await;
+    }
+
+    #[test]
+    fn glob_characters_in_a_prefix_match_only_themselves() {
+        assert_eq!(glob_escape("TR#a*b?[c]\\d#"), "TR#a\\*b\\?\\[c\\]\\\\d#");
+        assert_eq!(glob_escape("TR#did:example:a#"), "TR#did:example:a#");
+    }
+
+    /// #212: a dropped connection is re-established. With the single
+    /// `MultiplexedConnection` the registry used before, every command after
+    /// the drop failed until the process was restarted.
+    #[tokio::test]
+    #[serial(redis)]
+    async fn reads_recover_after_the_connection_is_dropped() {
+        let Some(storage) = get_test_storage().await else {
+            return;
+        };
+        let record = create_test_record(
+            "did:example:reconnect",
+            "did:example:authority-reconnect",
+            "issue",
+            "vc",
+            true,
+            true,
+            "authorization",
+        );
+        cleanup_test_data(&storage, std::slice::from_ref(&record)).await;
+        storage.create(record.clone()).await.unwrap();
+
+        let mut conn = storage.connection.clone();
+        let id: i64 = redis::cmd("CLIENT")
+            .arg("ID")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let mut killer = storage.write_connection().await.unwrap();
+        let killed: i64 = redis::cmd("CLIENT")
+            .arg("KILL")
+            .arg("ID")
+            .arg(id)
+            .query_async(&mut killer)
+            .await
+            .unwrap();
+        assert_eq!(killed, 1);
+
+        // The command that finds the connection gone may fail; the ones after
+        // it run on a new connection.
+        let mut recovered = false;
+        for _ in 0..50 {
+            if let Ok(Some(found)) = storage.find_by_query(query_for(&record)).await {
+                assert_eq!(found, record);
+                recovered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(recovered, "reads work again after the connection dropped");
+
+        cleanup_test_data(&storage, &[record]).await;
+    }
+
+    /// Reads share the connection concurrently, while a listing runs and
+    /// while a write holds a connection of its own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial(redis)]
+    async fn reads_run_concurrently_with_a_listing_and_writes() {
+        let Some(storage) = get_test_storage().await else {
+            return;
+        };
+        let record = create_test_record(
+            "did:example:concurrent",
+            "did:example:authority-concurrent",
+            "issue",
+            "vc",
+            true,
+            true,
+            "authorization",
+        );
+        cleanup_test_data(&storage, std::slice::from_ref(&record)).await;
+        storage.create(record.clone()).await.unwrap();
+
+        let mut tasks = Vec::new();
+        for index in 0..32 {
+            let storage = storage.clone();
+            let record = record.clone();
+            tasks.push(tokio::spawn(async move {
+                match index % 8 {
+                    0 => {
+                        storage.list().await.unwrap();
+                    }
+                    1 => {
+                        storage.update(record.clone()).await.unwrap();
+                    }
+                    _ => {
+                        assert_eq!(
+                            storage.find_by_query(query_for(&record)).await.unwrap(),
+                            Some(record)
+                        );
+                    }
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        cleanup_test_data(&storage, &[record]).await;
     }
 }

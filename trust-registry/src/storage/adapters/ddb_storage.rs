@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Result as AnyResult;
 use aws_config::BehaviorVersion;
@@ -12,7 +13,8 @@ use aws_types::region::Region;
 use tracing::debug;
 
 use crate::{
-    configs::DynamoDbStorageConfig,
+    configs::{DynamoDbStorageConfig, MessageIdStoreConfig},
+    dedup::{MessageIdStore, dynamodb::DynamoDbMessageIdStore},
     domain::{
         TrustRecord,
         key::{TrustRecordKey, dedupe_listing},
@@ -22,8 +24,8 @@ use crate::{
         plan_update,
     },
     storage::repository::{
-        RepositoryError, TrustRecordAdminRepository, TrustRecordList, TrustRecordQuery,
-        TrustRecordRepository, skip_unreadable,
+        RepositoryError, TrustRecordAdminRepository, TrustRecordFilter, TrustRecordList,
+        TrustRecordQuery, TrustRecordRepository, skip_unreadable,
     },
 };
 
@@ -451,42 +453,63 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
 
     async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
         debug!("Listing all trust records from DynamoDB");
+        self.list_matching(&TrustRecordFilter::all()).await
+    }
 
-        let items: Vec<_> = self
-            .client
-            .query()
-            .table_name(&self.table_name)
-            .key_condition_expression("PK = :pk AND begins_with(SK, :sk_prefix)")
-            .expression_attribute_values(":pk", AttributeValue::S(TrustRecordKey::pk().to_string()))
-            .expression_attribute_values(
-                ":sk_prefix",
-                AttributeValue::S(crate::domain::key::TR_SK_PREFIX.to_string()),
-            )
-            .into_paginator()
-            .items()
-            .send()
-            .try_collect()
-            .await
-            .map_err(|err| sdk_error("Failed to query table", err))?;
-
-        let mut entries = Vec::with_capacity(items.len());
+    /// One `Query` of the `TR` partition per storage-key prefix the filter's
+    /// leading identifiers name (`begins_with(SK, prefix)`), so a filter
+    /// naming the authority reads only that authority's items.
+    async fn list_matching(
+        &self,
+        filter: &TrustRecordFilter,
+    ) -> Result<TrustRecordList, RepositoryError> {
+        let mut entries = Vec::new();
         let mut unreadable = Vec::new();
 
-        for item in items {
-            let storage_key = match item.get(SK_ATTR) {
-                Some(AttributeValue::S(storage_key)) => storage_key.clone(),
-                _ => String::new(),
-            };
-            match decode_item(&storage_key, item) {
-                Ok(record) => entries.push((storage_key, record)),
-                Err(e) => skip_unreadable(storage_key, &e, &mut unreadable),
+        for prefix in filter.storage_key_prefixes() {
+            let items: Vec<_> = self
+                .client
+                .query()
+                .table_name(&self.table_name)
+                .key_condition_expression("PK = :pk AND begins_with(SK, :sk_prefix)")
+                .expression_attribute_values(
+                    ":pk",
+                    AttributeValue::S(TrustRecordKey::pk().to_string()),
+                )
+                .expression_attribute_values(":sk_prefix", AttributeValue::S(prefix))
+                .into_paginator()
+                .items()
+                .send()
+                .try_collect()
+                .await
+                .map_err(|err| sdk_error("Failed to query table", err))?;
+
+            for item in items {
+                let storage_key = match item.get(SK_ATTR) {
+                    Some(AttributeValue::S(storage_key)) => storage_key.clone(),
+                    _ => String::new(),
+                };
+                match decode_item(&storage_key, item) {
+                    Ok(record) => entries.push((storage_key, record)),
+                    Err(e) => skip_unreadable(storage_key, &e, &mut unreadable),
+                }
             }
         }
 
-        Ok(TrustRecordList::with_unreadable(
-            dedupe_listing(entries),
-            unreadable,
-        ))
+        Ok(TrustRecordList::with_unreadable(dedupe_listing(entries), unreadable).filtered(filter))
+    }
+
+    /// The DynamoDB record of accepted document identifiers
+    /// ([`DynamoDbMessageIdStore`]), in this table, over this client.
+    async fn message_id_store(
+        &self,
+        config: &MessageIdStoreConfig,
+    ) -> Result<Option<Arc<dyn MessageIdStore>>, RepositoryError> {
+        Ok(Some(Arc::new(DynamoDbMessageIdStore::new(
+            self.client.clone(),
+            self.table_name.clone(),
+            *config,
+        ))))
     }
 }
 
@@ -670,6 +693,36 @@ mod tests {
     crate::storage::conformance::repository_conformance_tests!(
         dynamodb,
         conformance_fixture().await
+    );
+
+    /// The record of accepted documents in the test table; each handle is a
+    /// client of its own, as a replica would hold.
+    async fn message_id_fixture() -> Option<crate::dedup::conformance::StoreFixture> {
+        // Creates the table if it is missing, before any store uses it.
+        test_storage().await?;
+        Some(
+            crate::dedup::conformance::StoreFixture::new(|config| {
+                Box::pin(async move {
+                    test_storage()
+                        .await
+                        .expect("TR_TEST_DYNAMODB_ENDPOINT is set")
+                        .message_id_store(&config)
+                        .await
+                        .expect("store")
+                        .expect("DynamoDB has a durable store")
+                })
+            })
+            .shared()
+            .unbounded()
+            // Nothing to restart: a new handle is a new client, and the
+            // entries live in the table.
+            .with_restart(|| Box::pin(async {})),
+        )
+    }
+
+    crate::dedup::conformance::message_id_store_conformance_tests!(
+        dynamodb_dedup,
+        message_id_fixture().await
     );
 
     #[test]

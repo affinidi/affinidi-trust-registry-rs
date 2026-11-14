@@ -367,6 +367,21 @@ impl TrustRecordAdminRepository for FileStorage {
         let records = self.inner.records.read().await;
         Ok(TrustRecordList::new(records.values().cloned().collect()))
     }
+
+    /// Copies only the matching records.
+    async fn list_matching(
+        &self,
+        filter: &TrustRecordFilter,
+    ) -> Result<TrustRecordList, RepositoryError> {
+        let records = self.inner.records.read().await;
+        Ok(TrustRecordList::new(
+            records
+                .values()
+                .filter(|record| filter.matches(record))
+                .cloned()
+                .collect(),
+        ))
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

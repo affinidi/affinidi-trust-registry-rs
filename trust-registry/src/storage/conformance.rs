@@ -27,7 +27,9 @@ use serde_json::json;
 
 use crate::domain::key::TrustRecordKey;
 use crate::domain::*;
-use crate::storage::repository::{RepositoryError, TrustRecordAdminRepository, TrustRecordQuery};
+use crate::storage::repository::{
+    RepositoryError, TrustRecordAdminRepository, TrustRecordFilter, TrustRecordQuery,
+};
 
 /// Writes or removes raw bytes under a storage key, bypassing the adapter.
 pub(crate) type RawKeyOp = Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>;
@@ -492,6 +494,170 @@ pub(crate) async fn corrupt_value_is_an_error(fixture: &Fixture) {
     );
 }
 
+/// The records of `list` that `filter` matches, sorted by key.
+async fn matching(
+    repo: &dyn TrustRecordAdminRepository,
+    filter: &TrustRecordFilter,
+) -> Vec<TrustRecord> {
+    let mut records = repo
+        .list_matching(filter)
+        .await
+        .expect("list_matching")
+        .into_records();
+    assert!(
+        records.iter().all(|record| filter.matches(record)),
+        "list_matching returns only matching records"
+    );
+    records.sort_by_key(|record| key_of(record).sk());
+    records
+}
+
+/// `list_matching` returns exactly the records its filter matches, however
+/// many identifiers it names, including identifiers holding the key
+/// separator; an unreadable value is reported only to a filter it could
+/// match.
+pub(crate) async fn list_matching_returns_what_the_filter_matches(fixture: &Fixture) {
+    let repo = fixture.repo();
+    let ns = Namespace::new();
+    // A second authority that shares the first's text up to a separator, so
+    // a prefix scan that forgot the trailing separator would mix them.
+    let sibling = Namespace {
+        authority: format!("{}#sub", ns.authority),
+    };
+    let issue_vc = ns.record("issue", "vc", "did:example:a");
+    let issue_vc_b = ns.record("issue", "vc", "did:example:b");
+    let issue_doc = ns.record("issue", "doc", "did:example:a");
+    let verify = ns.record("verify#x", "vc", "did:example:a");
+    let sibling_record = sibling.record("issue", "vc", "did:example:a");
+    for record in [&issue_vc, &issue_vc_b, &issue_doc, &verify, &sibling_record] {
+        repo.create(record.clone()).await.expect("create");
+    }
+    let sorted = |mut records: Vec<TrustRecord>| {
+        records.sort_by_key(|record| key_of(record).sk());
+        records
+    };
+    let by_authority = TrustRecordFilter {
+        authority_id: Some(AuthorityId::new(ns.authority.as_str())),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        matching(repo, &by_authority).await,
+        sorted(vec![
+            issue_vc.clone(),
+            issue_vc_b.clone(),
+            issue_doc.clone(),
+            verify.clone()
+        ])
+    );
+    assert_eq!(
+        matching(
+            repo,
+            &TrustRecordFilter {
+                authority_id: Some(AuthorityId::new(sibling.authority.as_str())),
+                ..Default::default()
+            }
+        )
+        .await,
+        vec![sibling_record.clone()],
+        "an authority containing the separator is its own"
+    );
+    assert_eq!(
+        matching(
+            repo,
+            &TrustRecordFilter {
+                action: Some(Action::new("issue")),
+                resource: Some(Resource::new("vc")),
+                ..by_authority.clone()
+            }
+        )
+        .await,
+        sorted(vec![issue_vc.clone(), issue_vc_b.clone()])
+    );
+    assert_eq!(
+        matching(
+            repo,
+            &TrustRecordFilter {
+                action: Some(Action::new("verify#x")),
+                ..by_authority.clone()
+            }
+        )
+        .await,
+        vec![verify.clone()]
+    );
+    assert_eq!(
+        matching(
+            repo,
+            &TrustRecordFilter {
+                resource: Some(Resource::new("vc")),
+                entity_id: Some(EntityId::new("did:example:b")),
+                ..by_authority.clone()
+            }
+        )
+        .await,
+        vec![issue_vc_b.clone()],
+        "identifiers after a gap still filter"
+    );
+    // No authority: every record is a candidate; this test's are among them.
+    let by_entity: Vec<TrustRecord> = matching(
+        repo,
+        &TrustRecordFilter {
+            entity_id: Some(EntityId::new("did:example:a")),
+            ..Default::default()
+        },
+    )
+    .await
+    .into_iter()
+    .filter(|record| ns.owns(record) || sibling.owns(record))
+    .collect();
+    assert_eq!(
+        by_entity,
+        sorted(vec![
+            issue_vc.clone(),
+            issue_doc.clone(),
+            verify.clone(),
+            sibling_record.clone()
+        ])
+    );
+
+    if let Some((write, remove)) = &fixture.corrupter {
+        let corrupt = ns.record("revoke", "vc", "did:example:a");
+        let storage_key = key_of(&corrupt).sk();
+        write(storage_key.clone()).await;
+        let own = repo.list_matching(&by_authority).await;
+        let narrower = repo
+            .list_matching(&TrustRecordFilter {
+                action: Some(Action::new("issue")),
+                ..by_authority.clone()
+            })
+            .await;
+        let elsewhere = repo
+            .list_matching(&TrustRecordFilter {
+                authority_id: Some(AuthorityId::new(sibling.authority.as_str())),
+                ..Default::default()
+            })
+            .await;
+        remove(storage_key.clone()).await;
+
+        let reported = |list: &crate::storage::repository::TrustRecordList| {
+            list.unreadable()
+                .iter()
+                .any(|unreadable| unreadable.storage_key() == storage_key)
+        };
+        let own = own.expect("an unreadable value does not fail the listing");
+        assert!(reported(&own), "reported to a filter it could match");
+        assert_eq!(own.records().len(), 4, "the readable records are listed");
+        assert!(
+            !reported(&narrower.expect("listing")),
+            "not to one it cannot"
+        );
+        assert!(!reported(&elsewhere.expect("listing")));
+    }
+
+    ns.cleanup(repo).await;
+    sibling.cleanup(repo).await;
+}
+
 /// Expand the conformance suite as `#[tokio::test]`s in a `conformance`
 /// child module.
 ///
@@ -516,7 +682,8 @@ macro_rules! repository_conformance_tests {
                 separator_in_identifiers,
                 concurrent_creates_of_one_key,
                 concurrent_creates_of_distinct_keys,
-                corrupt_value_is_an_error
+                corrupt_value_is_an_error,
+                list_matching_returns_what_the_filter_matches
             );
         }
     };
