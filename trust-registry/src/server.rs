@@ -1,22 +1,33 @@
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::storage::repository::TrustRecordAdminRepository;
-use axum::{Json, Router, routing::get};
+use axum::Router;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    BoxError,
     configs::{DidcommConfig, TrustRegistryConfig},
     didcomm::listener::start_didcomm_listener,
     health::RegistryHealth,
-    http::application_routes,
     http::limits::{BoundedListener, bound_requests},
 };
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
+/// How long [`ServerHandle::join`] waits, once shutdown is under way, for the
+/// DIDComm/TSP listener to stop. Covers the listener draining its in-flight
+/// handlers (each bounded by its own handler and ack time limits) with margin.
+pub const LISTENER_SHUTDOWN_GRACE: Duration = Duration::from_secs(50);
+
+/// Margin [`ServerHandle::join`] adds to the HTTP request time limit while
+/// waiting for in-flight HTTP requests to drain.
+const HTTP_SHUTDOWN_MARGIN: Duration = Duration::from_secs(5);
+
+type TaskResult = Result<Result<(), BoxError>, tokio::task::JoinError>;
 
 /// Diagnostics follow `RUST_LOG`; audit entries have a layer of their own,
 /// always on at `INFO`, so lowering the log level never drops them.
@@ -51,8 +62,8 @@ fn setup_logging() {
 /// Returned by [`serve`]. Holds the bound HTTP address, the shutdown token, and
 /// the background task handles so a caller (production `main` or an integration
 /// test) can learn where the server is listening, wait for it, or stop it
-/// cleanly — without the process-global side effects (`dotenv`,
-/// `std::process::exit`) that [`start`] performs.
+/// cleanly — without the process-global side effects (`dotenv`, signal
+/// handlers) that [`start`] performs.
 ///
 /// With `ENABLE_REST=false` no HTTP listener is bound at all (no TRQP routes,
 /// no `/health`), so the HTTP fields are `None`.
@@ -61,6 +72,9 @@ pub struct ServerHandle {
     shutdown: CancellationToken,
     http_task: Option<JoinHandle<Result<(), BoxError>>>,
     didcomm_task: Option<JoinHandle<Result<(), BoxError>>>,
+    /// How long, once shutdown is under way, the HTTP server may take to
+    /// drain its in-flight requests.
+    http_grace: Duration,
     health: Arc<RegistryHealth>,
     audit: Arc<crate::audit::bounded::BoundedAuditLogger>,
 }
@@ -85,11 +99,16 @@ impl ServerHandle {
         self.shutdown.clone()
     }
 
-    /// Signal shutdown and await the background tasks. The HTTP server stops
-    /// via graceful shutdown; the DIDComm/TSP listeners observe the same token.
+    /// Signal shutdown and wait for every task to stop: the HTTP server drains
+    /// its in-flight requests, and the DIDComm/TSP listener stops receiving and
+    /// drains its in-flight handlers, each within a bounded time (see
+    /// [`join`](Self::join)). A failure is logged; use `shutdown_token` and
+    /// [`join`](Self::join) to receive it instead.
     pub async fn shutdown(self) {
         self.shutdown.cancel();
-        self.join().await;
+        if let Err(e) = self.join().await {
+            error!("the Trust Registry did not stop cleanly: {e}");
+        }
     }
 
     /// The shared health state, so callers (and tests) can observe whether the
@@ -98,87 +117,164 @@ impl ServerHandle {
         &self.health
     }
 
-    /// Await the background tasks without signalling shutdown.
+    /// Wait until the service stops, then wait for every task to finish and
+    /// flush the audit log.
     ///
-    /// With REST enabled, returns when the **HTTP** task ends: a DIDComm
-    /// listener failure does not end this, it degrades health and leaves the
-    /// read path serving. With REST disabled the DIDComm listener is the whole
-    /// service, so this returns when it ends (or, when DIDComm is host-driven
-    /// and nothing runs here, when the shutdown token is cancelled).
-    pub async fn join(self) {
+    /// The service stops when the shutdown token is cancelled, when the HTTP
+    /// server ends, or — with REST disabled — when the DIDComm listener ends.
+    /// With REST enabled a DIDComm listener failure does not stop it: health
+    /// is degraded and reads keep being served. Once stopping, the shutdown
+    /// token is cancelled (if it was not already) and each remaining task is
+    /// awaited for a bounded time — the HTTP request time limit plus a margin,
+    /// and [`LISTENER_SHUTDOWN_GRACE`] for the listener — then aborted.
+    ///
+    /// Returns `Ok` when the stop was requested through the shutdown token and
+    /// every task stopped cleanly in time; `Err` when a task ended on its own,
+    /// failed, panicked, or had to be aborted.
+    pub async fn join(self) -> Result<(), BoxError> {
         let audit = self.audit.clone();
-        self.join_tasks().await;
+        let result = self.join_tasks().await;
         // Whatever ended the tasks, record the refusals still only counted.
         audit.flush().await;
+        result
     }
 
-    async fn join_tasks(self) {
+    async fn join_tasks(self) -> Result<(), BoxError> {
         let Self {
-            http_task,
-            didcomm_task,
-            health,
+            mut http_task,
+            mut didcomm_task,
             shutdown,
+            http_grace,
             ..
         } = self;
 
-        let (mut http_task, didcomm_task) = match (http_task, didcomm_task) {
-            (Some(http_task), Some(didcomm_task)) => (http_task, didcomm_task),
-            (Some(http_task), None) => {
-                if let Err(e) = http_task.await {
-                    error!("http task panicked: {e:?}");
-                }
-                return;
-            }
-            // No read path to fall back to: the listener ending is the service
-            // ending, so return and let the caller (or supervisor) react.
-            (None, Some(didcomm_task)) => {
-                let result = didcomm_task.await;
-                log_task_exit("didcomm", &result);
-                health.mark_writes_unavailable(describe_task_exit(&result));
-                return;
-            }
-            (None, None) => {
-                shutdown.cancelled().await;
-                return;
-            }
-        };
+        let rest = http_task.is_some();
+        let mut http_result: Option<TaskResult> = None;
+        let mut didcomm_result: Option<TaskResult> = None;
 
-        tokio::select! {
-            result = didcomm_task => {
-                // The DIDComm listener stopping must NOT bring the process
-                // down: the read path (REST/TRQP) is independent and still
-                // useful. Previously this arm ended `join`, so an unreachable
-                // mediator killed the HTTP server too. Degrade, keep serving
-                // reads, and let the operator see it on /health.
-                log_task_exit("didcomm", &result);
-                health.mark_writes_unavailable(describe_task_exit(&result));
-                error!(
-                    "DIDComm listener stopped; continuing to serve reads. \
-                     Record mutations cannot be received until it recovers \
-                     (/health reports status=degraded)."
-                );
-                if let Err(e) = http_task.await {
-                    error!("http task panicked: {e:?}");
+        // Run until a stop is requested or the task the service depends on
+        // ends by itself.
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                result = poll_task(&mut http_task), if http_result.is_none() => {
+                    log_task_exit("http", &result);
+                    http_result = Some(result);
+                    break;
+                }
+                result = poll_task(&mut didcomm_task), if didcomm_result.is_none() => {
+                    log_task_exit("didcomm", &result);
+                    didcomm_result = Some(result);
+                    if http_task.is_none() {
+                        // No read path to fall back to: the listener ending is
+                        // the service ending.
+                        break;
+                    }
+                    // The DIDComm listener stopping must NOT bring the process
+                    // down: the read path (REST/TRQP) is independent and still
+                    // useful. Its task has already degraded /health.
+                    error!(
+                        "DIDComm listener stopped; continuing to serve reads. \
+                         Record mutations cannot be received until it recovers \
+                         (/health reports status=degraded)."
+                    );
                 }
             }
-            result = &mut http_task => log_task_exit("http", &result),
+        }
+
+        // Read before cancelling below: was the stop asked for, or did a task
+        // end by itself?
+        let requested = shutdown.is_cancelled();
+        let listener_failed_while_serving = task_failed(&didcomm_result);
+        let mut failures = Vec::new();
+        if !requested {
+            failures.push("a server task ended without a shutdown request".to_string());
+        }
+        // Whatever ended the service, stop what is still running.
+        shutdown.cancel();
+
+        if http_result.is_none()
+            && let Some(task) = http_task.take()
+        {
+            http_result = finish("http", task, http_grace).await;
+            if http_result.is_none() {
+                failures.push(format!(
+                    "the HTTP server did not stop within {http_grace:?}"
+                ));
+            }
+        }
+        if didcomm_result.is_none()
+            && let Some(task) = didcomm_task.take()
+        {
+            didcomm_result = finish("didcomm", task, LISTENER_SHUTDOWN_GRACE).await;
+            match &didcomm_result {
+                None => failures.push(format!(
+                    "the DIDComm listener did not stop within {LISTENER_SHUTDOWN_GRACE:?}"
+                )),
+                Some(result) => log_task_exit("didcomm", result),
+            }
+        }
+
+        if let Some(Ok(Err(e))) = &http_result {
+            failures.push(format!("the HTTP server failed: {e}"));
+        }
+        if let Some(Err(_)) = &http_result {
+            failures.push("the HTTP server panicked".to_string());
+        }
+        // A listener that failed while reads went on was reported on /health
+        // and does not fail the stop; one that was the whole service, or that
+        // failed while stopping, does.
+        if task_failed(&didcomm_result) && (!rest || !listener_failed_while_serving) {
+            failures.push("the DIDComm listener failed".to_string());
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; ").into())
         }
     }
 }
 
-/// How a task ended, for the `/health` `detail` field. `/health` is public,
-/// so it carries the class of the failure only; the error itself is logged
-/// ([`log_task_exit`]).
-fn describe_task_exit(result: &Result<Result<(), BoxError>, tokio::task::JoinError>) -> String {
-    match result {
-        Ok(Ok(())) => "didcomm listener exited cleanly",
-        Ok(Err(_)) => "didcomm listener failed; see the registry's log",
-        Err(_) => "didcomm listener panicked; see the registry's log",
-    }
-    .to_string()
+fn task_failed(result: &Option<TaskResult>) -> bool {
+    matches!(result, Some(Ok(Err(_))) | Some(Err(_)))
 }
 
-fn log_task_exit(name: &str, result: &Result<Result<(), BoxError>, tokio::task::JoinError>) {
+/// Await `task` if there is one; never resolves when there is none.
+async fn poll_task(task: &mut Option<JoinHandle<Result<(), BoxError>>>) -> TaskResult {
+    match task {
+        Some(task) => task.await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Await `task` for at most `grace`, aborting it if it has not finished.
+async fn finish(
+    name: &str,
+    mut task: JoinHandle<Result<(), BoxError>>,
+    grace: Duration,
+) -> Option<TaskResult> {
+    match tokio::time::timeout(grace, &mut task).await {
+        Ok(result) => Some(result),
+        Err(_) => {
+            error!("{name} task did not stop within {grace:?} of shutdown; aborting it");
+            task.abort();
+            None
+        }
+    }
+}
+
+/// How the listener ended, for the `/health` `detail` field. `/health` is
+/// public, so it carries the class of the failure only; the error itself is
+/// logged ([`log_task_exit`]).
+fn describe_task_exit(result: &Result<(), BoxError>) -> &'static str {
+    match result {
+        Ok(()) => "didcomm listener exited; see the registry's log",
+        Err(_) => "didcomm listener failed; see the registry's log",
+    }
+}
+
+fn log_task_exit(name: &str, result: &TaskResult) {
     match result {
         Ok(Ok(())) => info!("{name} task exited"),
         Ok(Err(e)) => error!("{name} task failed: {e}"),
@@ -233,31 +329,25 @@ fn build_cors_layer(allowed_origins: &[String]) -> Result<Option<CorsLayer>, Box
 /// Build the top-level HTTP router (health check + TRQP application routes +
 /// request limits + CORS).
 ///
-/// The service form of the router. The application routes themselves are the
-/// same ones [`crate::TrustRegistry::router`] hands an embedding host; what the
-/// service adds on top is `/health`, the request time and concurrency limits
+/// The service form of the router: the registry's own
+/// [`router`](crate::TrustRegistry::router) and
+/// [`health_router`](crate::TrustRegistry::health_router), which a host can
+/// mount itself, plus the request time and concurrency limits
 /// ([`crate::http::limits`]) and the CORS layer, all of which a host owns for
 /// itself.
-fn build_router(parts: &crate::embed::RegistryParts) -> Result<Router, BoxError> {
-    let cors = build_cors_layer(&parts.config.server_config.cors_allowed_origins)?;
-
-    let health = parts.health.clone();
-    let health_route = Router::new().route(
-        "/health",
-        get(move || {
-            let health = health.clone();
-            async move { Json(health.to_json()) }
-        }),
-    );
-
-    let routes = health_route.merge(application_routes("", parts.shared_data()));
-    let router = bound_requests(routes, &parts.config.server_config.http_limits);
+fn build_router(registry: &crate::TrustRegistry) -> Result<Router, BoxError> {
+    let cors = build_cors_layer(&registry.config.server_config.cors_allowed_origins)?;
+    let routes = registry.health_router().merge(registry.router());
+    let router = bound_requests(routes, &registry.config.server_config.http_limits);
     Ok(match cors {
         Some(cors) => router.layer(cors),
         None => router,
     })
 }
 
+/// Run the DIDComm listener, reporting on `health` when it stops: a listener
+/// that ends while the service is running means writes are unavailable,
+/// whether or not anyone is awaiting the [`ServerHandle`].
 async fn start_didcomm_server(
     config: DidcommConfig,
     repository: Arc<dyn TrustRecordAdminRepository>,
@@ -266,24 +356,57 @@ async fn start_didcomm_server(
     health: Arc<RegistryHealth>,
     shutdown: CancellationToken,
 ) -> Result<(), BoxError> {
-    // `start_didcomm_listener` returns the listener task's own result nested
-    // inside the join result. Both layers are propagated, so `/health` says
-    // why the listener stopped instead of reporting a failure as a clean exit.
-    start_didcomm_listener(config, repository, tasks, source, Some(health), shutdown).await??;
-    Ok(())
+    supervise_listener(
+        start_didcomm_listener(
+            config,
+            repository,
+            tasks,
+            source,
+            Some(health.clone()),
+            shutdown.clone(),
+        ),
+        &health,
+        &shutdown,
+    )
+    .await
+}
+
+/// Await the listener and, unless it stopped because shutdown was requested,
+/// mark writes unavailable. Both the listener's own result and its task's join
+/// result are propagated, so `/health` says why it stopped instead of
+/// reporting a failure as a clean exit.
+async fn supervise_listener<E1, E2>(
+    listener: impl Future<Output = Result<Result<(), E1>, E2>>,
+    health: &RegistryHealth,
+    shutdown: &CancellationToken,
+) -> Result<(), BoxError>
+where
+    E1: Into<BoxError>,
+    E2: Into<BoxError>,
+{
+    let result = match listener.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.into()),
+        Err(e) => Err(e.into()),
+    };
+    if result.is_err() || !shutdown.is_cancelled() {
+        health.mark_writes_unavailable(describe_task_exit(&result));
+    }
+    result
 }
 
 /// Start the Trust Registry servers over `repository` and return a
 /// [`ServerHandle`] once the HTTP listener (if any) is bound.
 ///
 /// This is the reusable core of [`start`]: it performs **no** process-global
-/// setup (no `dotenv`, no logging init, no `std::process::exit`). When REST is
+/// setup (no `dotenv`, no logging init, no signal handlers). When REST is
 /// enabled (`config.didcomm_config.transport_flags.rest`) it binds whatever
 /// `config.server_config.listen_address` requests — including an ephemeral
 /// `…:0` port, which the returned handle reports via
-/// [`ServerHandle::http_addr`]; when REST is disabled nothing is bound. The HTTP server is wired for graceful shutdown
-/// on `shutdown`; the DIDComm listener (and, with the `tsp` feature, the TSP
-/// receive loop) is started only when `config.didcomm_config.is_enabled`.
+/// [`ServerHandle::http_addr`]; when REST is disabled nothing is bound. The
+/// HTTP server is wired for graceful shutdown on `shutdown`; the DIDComm
+/// listener (and, with the `tsp` feature, the TSP receive loop) is started
+/// only when `config.didcomm_config.is_enabled`.
 pub async fn serve(
     config: Arc<TrustRegistryConfig>,
     repository: Arc<dyn TrustRecordAdminRepository>,
@@ -305,9 +428,7 @@ pub async fn serve(
 pub(crate) async fn serve_registry(
     registry: crate::TrustRegistry,
 ) -> Result<ServerHandle, BoxError> {
-    let parts = registry.into_parts();
-
-    let config = &parts.config;
+    let config = &registry.config;
     debug!(
         listen_address = %config.server_config.listen_address,
         storage_backend = ?config.storage_config.storage_backend,
@@ -319,25 +440,26 @@ pub(crate) async fn serve_registry(
         "configuration loaded"
     );
 
-    let (http_addr, http_task) = if parts.config.didcomm_config.transport_flags.rest {
+    let http_grace = config.server_config.http_limits.request_timeout + HTTP_SHUTDOWN_MARGIN;
+    let (http_addr, http_task) = if config.didcomm_config.transport_flags.rest {
         // Bind first so the caller (and the returned handle) learns the
         // concrete address before any request can race against it.
-        let listener = tokio::net::TcpListener::bind(&parts.config.server_config.listen_address)
+        let listener = tokio::net::TcpListener::bind(&config.server_config.listen_address)
             .await
             .map_err(|e| {
                 format!(
                     "failed to bind REST listener on {} (LISTEN_ADDRESS): {e}",
-                    parts.config.server_config.listen_address
+                    config.server_config.listen_address
                 )
             })?;
         let http_addr = listener.local_addr()?;
 
-        let router = build_router(&parts)?;
+        let router = build_router(&registry)?;
 
         info!("HTTP server is starting on {http_addr}...");
 
-        let http_shutdown = parts.shutdown.clone();
-        let limits = parts.config.server_config.http_limits;
+        let http_shutdown = registry.shutdown.clone();
+        let limits = config.server_config.http_limits;
         let http_task = tokio::spawn(async move {
             axum::serve(BoundedListener::new(listener, &limits), router)
                 .with_graceful_shutdown(async move { http_shutdown.cancelled().await })
@@ -354,17 +476,14 @@ pub(crate) async fn serve_registry(
 
     use crate::didcomm::listener::DidCommSource;
 
-    let didcomm_task = match (
-        parts.config.didcomm_config.is_enabled,
-        &parts.didcomm_source,
-    ) {
+    let didcomm_task = match (config.didcomm_config.is_enabled, &registry.didcomm_source) {
         (false, _) => {
             warn!("DIDComm server is disabled.");
             None
         }
         // The host drives the receive loop and calls into the registry itself,
-        // so there is no listener to start — but the write path is up, which is
-        // why health is not degraded here.
+        // so there is no listener to start. Health reports the write path as
+        // `unknown` until the host says otherwise.
         (true, DidCommSource::HostDriven) => {
             info!(
                 "DIDComm is host-driven: the host owns the mediator socket and routes \
@@ -373,78 +492,148 @@ pub(crate) async fn serve_registry(
             None
         }
         (true, source) => Some(tokio::spawn(start_didcomm_server(
-            parts.config.didcomm_config.clone(),
-            parts.repository.clone(),
-            parts.task_handler(),
+            config.didcomm_config.clone(),
+            registry.repository.clone(),
+            registry.task_handler(),
             source.clone(),
-            parts.health.clone(),
-            parts.shutdown.clone(),
+            registry.health.clone(),
+            registry.shutdown.clone(),
         ))),
     };
 
     Ok(ServerHandle {
         http_addr,
-        shutdown: parts.shutdown,
+        shutdown: registry.shutdown.clone(),
         http_task,
         didcomm_task,
-        audit: parts.audit.clone(),
-        health: parts.health,
+        http_grace,
+        audit: registry.audit.clone(),
+        health: registry.health.clone(),
     })
+}
+
+/// Wait for SIGTERM or Ctrl-C (SIGINT), whichever comes first, and name it.
+///
+/// The handlers are installed when this is called, not when it is first
+/// polled, so a signal that arrives during startup is not missed. As PID 1 in
+/// a container the process has no default signal dispositions, so without
+/// them SIGTERM would be ignored.
+#[cfg(feature = "standalone")]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = &'static str> + Send> {
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    #[cfg(unix)]
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    Ok(async move {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = terminate.recv() => "SIGTERM",
+                _ = interrupt.recv() => "SIGINT",
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => "Ctrl-C",
+                Err(e) => {
+                    error!("could not listen for Ctrl-C: {e}");
+                    std::future::pending().await
+                }
+            }
+        }
+    })
+}
+
+/// Cancel `shutdown` when `signal` resolves.
+#[cfg(feature = "standalone")]
+fn cancel_on_signal(
+    signal: impl Future<Output = &'static str> + Send + 'static,
+    shutdown: CancellationToken,
+) {
+    tokio::spawn(async move {
+        tokio::select! {
+            name = signal => {
+                info!("{name} received; shutting down");
+                shutdown.cancel();
+            }
+            _ = shutdown.cancelled() => {}
+        }
+    });
 }
 
 /// Standalone entrypoint: own the process.
 ///
-/// Loads `.env`, installs a global tracing subscriber, reads the whole config
-/// from the environment, and exits the process when a server task dies so a
-/// supervisor restarts it. Every one of those is a process-global side effect a
-/// host must not inherit, which is why this sits behind the `standalone`
-/// feature — an embedded registry uses [`serve`] (or the builder) instead.
+/// Loads `.env`, installs a global tracing subscriber and SIGTERM/Ctrl-C
+/// handlers, reads the whole config from the environment, and runs until a
+/// signal or a server task ends. Every one of those is a process-global side
+/// effect a host must not inherit, which is why this sits behind the
+/// `standalone` feature — an embedded registry uses [`serve`] (or the builder)
+/// instead.
+///
+/// Returns success when a signal stopped the registry and every task stopped
+/// cleanly, and failure when startup failed or a task ended on its own, so a
+/// supervisor can tell a requested stop from a crash. It returns rather than
+/// calling `std::process::exit`, so destructors run after the audit log has
+/// been flushed.
 #[cfg(feature = "standalone")]
-pub async fn start() {
+pub async fn start() -> std::process::ExitCode {
     use crate::configs::Configs;
     use crate::storage::factory::TrustStorageRepoFactory;
+    use std::process::ExitCode;
 
     // resources section
     dotenvy::dotenv().ok();
 
     setup_logging();
 
+    // Installed first, so a stop requested during startup is honoured.
+    let shutdown = CancellationToken::new();
+    match shutdown_signal() {
+        Ok(signal) => cancel_on_signal(signal, shutdown.clone()),
+        Err(e) => {
+            error!("could not install the SIGTERM/SIGINT handlers: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     let config = match TrustRegistryConfig::load().await {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            error!(
-                "Failed to load configs. End of work. Original error is: {}",
-                e
-            );
-            panic!("Failed to load configs");
+            error!("Failed to load configs. End of work. Original error is: {e}");
+            return ExitCode::FAILURE;
         }
     };
 
-    let repository_factory = TrustStorageRepoFactory::new(Arc::clone(&config));
-
-    let repository = match repository_factory.create().await {
+    let repository = match TrustStorageRepoFactory::new(Arc::clone(&config))
+        .create()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             error!("Failed to initialize trust record repository: {e}");
-            panic!("Failed to initialize trust record repository: {e}");
+            return ExitCode::FAILURE;
         }
     };
-
-    // Shutdown token for graceful termination of background tasks.
-    let shutdown = CancellationToken::new();
 
     let handle = match serve(config, repository, shutdown).await {
         Ok(handle) => handle,
         Err(e) => {
             error!("Failed to start Trust Registry server: {e}");
-            panic!("Failed to start Trust Registry server: {e}");
+            return ExitCode::FAILURE;
         }
     };
 
-    // Block until a server task exits (which, in production, only happens on
-    // failure), then terminate the process so a supervisor restarts us.
-    handle.join().await;
-    std::process::exit(1);
+    match handle.join().await {
+        Ok(()) => {
+            info!("Trust Registry stopped");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            error!("Trust Registry stopped: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(test)]
@@ -495,7 +684,8 @@ mod tests {
         shutdown.cancel();
         tokio::time::timeout(std::time::Duration::from_secs(5), handle.join())
             .await
-            .expect("join returns once shutdown is signalled");
+            .expect("join returns once shutdown is signalled")
+            .expect("a requested stop is clean");
     }
 
     /// With REST on, a taken port is still a startup error, and it names the
@@ -588,5 +778,237 @@ mod tests {
             .to_string();
         assert!(err.contains("CORS_ALLOWED_ORIGINS"), "{err}");
         assert!(err.contains("'app.example.com'"), "{err}");
+    }
+
+    // --- lifecycle --------------------------------------------------------
+
+    fn audit() -> Arc<crate::audit::bounded::BoundedAuditLogger> {
+        Arc::new(crate::audit::bounded::BoundedAuditLogger::new(Arc::new(
+            crate::audit::audit_logger::BaseAuditLogger::new(Default::default()),
+        )))
+    }
+
+    /// A handle over hand-made tasks, so the supervision logic can be tested
+    /// without a mediator.
+    fn handle(
+        shutdown: &CancellationToken,
+        http_task: Option<JoinHandle<Result<(), BoxError>>>,
+        didcomm_task: Option<JoinHandle<Result<(), BoxError>>>,
+    ) -> ServerHandle {
+        ServerHandle {
+            http_addr: None,
+            shutdown: shutdown.clone(),
+            http_task,
+            didcomm_task,
+            http_grace: Duration::from_secs(5),
+            health: Arc::new(RegistryHealth::new(true)),
+            audit: audit(),
+        }
+    }
+
+    /// Stops when shutdown is signalled, as axum's graceful shutdown does.
+    fn http_like(shutdown: &CancellationToken) -> JoinHandle<Result<(), BoxError>> {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown.cancelled().await;
+            Ok(())
+        })
+    }
+
+    /// Stops a while after shutdown is signalled, as the listener does while
+    /// draining its handlers, and records that it finished.
+    fn listener_like(
+        shutdown: &CancellationToken,
+        finished: Arc<std::sync::atomic::AtomicBool>,
+    ) -> JoinHandle<Result<(), BoxError>> {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown.cancelled().await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
+    /// `shutdown()` returns only once the listener has finished, with REST on
+    /// — where the HTTP task used to end the wait and the listener's handle
+    /// was dropped — and with REST off.
+    #[tokio::test]
+    async fn shutdown_awaits_the_listener() {
+        for rest in [true, false] {
+            let shutdown = CancellationToken::new();
+            let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let handle = handle(
+                &shutdown,
+                rest.then(|| http_like(&shutdown)),
+                Some(listener_like(&shutdown, finished.clone())),
+            );
+            tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
+                .await
+                .expect("shutdown returns");
+            assert!(
+                finished.load(std::sync::atomic::Ordering::SeqCst),
+                "rest={rest}: shutdown returned before the listener finished"
+            );
+        }
+    }
+
+    /// A requested stop with every task stopping cleanly is a success, so the
+    /// standalone binary exits 0.
+    #[tokio::test]
+    async fn a_requested_stop_joins_ok() {
+        let shutdown = CancellationToken::new();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = handle(
+            &shutdown,
+            Some(http_like(&shutdown)),
+            Some(listener_like(&shutdown, finished)),
+        );
+        shutdown.cancel();
+        handle.join().await.expect("a requested stop is clean");
+    }
+
+    /// The HTTP server ending by itself is a failure, and it stops the
+    /// listener rather than leaving it running.
+    #[tokio::test]
+    async fn the_http_server_ending_by_itself_fails_and_stops_the_rest() {
+        let shutdown = CancellationToken::new();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let http = tokio::spawn(async { Err::<(), BoxError>("accept failed".into()) });
+        let handle = handle(
+            &shutdown,
+            Some(http),
+            Some(listener_like(&shutdown, finished.clone())),
+        );
+        let err = handle.join().await.expect_err("an unrequested stop fails");
+        assert!(err.to_string().contains("accept failed"), "{err}");
+        assert!(shutdown.is_cancelled());
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// With REST on, a listener failure degrades health but the service goes
+    /// on, and a later requested stop is still clean.
+    #[tokio::test]
+    async fn a_listener_failure_with_rest_on_does_not_fail_the_stop() {
+        let shutdown = CancellationToken::new();
+        let listener = tokio::spawn(async { Err::<(), BoxError>("mediator gone".into()) });
+        let handle = handle(&shutdown, Some(http_like(&shutdown)), Some(listener));
+        let stopper = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stopper.cancel();
+        });
+        handle
+            .join()
+            .await
+            .expect("reads kept going; the stop was asked for");
+    }
+
+    /// With REST off, the listener is the service: its failure is the
+    /// service's failure.
+    #[tokio::test]
+    async fn a_listener_failure_with_rest_off_fails() {
+        let shutdown = CancellationToken::new();
+        let listener = tokio::spawn(async { Err::<(), BoxError>("mediator gone".into()) });
+        let handle = handle(&shutdown, None, Some(listener));
+        handle.join().await.expect_err("the only task failed");
+    }
+
+    /// The wait is bounded: a listener that ignores shutdown is aborted after
+    /// the grace period, and the stop is reported as unclean.
+    #[tokio::test(start_paused = true)]
+    async fn a_listener_that_will_not_stop_is_aborted() {
+        let shutdown = CancellationToken::new();
+        let stuck = tokio::spawn(std::future::pending::<Result<(), BoxError>>());
+        let handle = handle(&shutdown, Some(http_like(&shutdown)), Some(stuck));
+        shutdown.cancel();
+        let err = handle
+            .join()
+            .await
+            .expect_err("an aborted task is not clean");
+        assert!(err.to_string().contains("did not stop"), "{err}");
+    }
+
+    /// The listener's own task reports to health when it stops, so health
+    /// degrades even when nobody awaits the `ServerHandle`.
+    #[tokio::test]
+    async fn a_stopped_listener_degrades_health_without_join() {
+        let health = RegistryHealth::new(true);
+        let shutdown = CancellationToken::new();
+
+        let result = supervise_listener(
+            async { Ok::<Result<(), BoxError>, BoxError>(Err("auth failed".into())) },
+            &health,
+            &shutdown,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(health.to_json()["writes"], "unavailable");
+        assert!(
+            !health.to_json()["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("auth failed"),
+            "the error is logged, not published"
+        );
+
+        // Stopping because shutdown was asked for is not a fault.
+        let health = RegistryHealth::new(true);
+        shutdown.cancel();
+        supervise_listener(
+            async { Ok::<Result<(), BoxError>, BoxError>(Ok(())) },
+            &health,
+            &shutdown,
+        )
+        .await
+        .expect("clean");
+        assert_eq!(health.to_json()["writes"], "starting");
+    }
+
+    /// The service's `/health` is the registry's own health router, reporting
+    /// the record store and, for a host-driven registry, `writes: unknown`.
+    #[tokio::test]
+    async fn service_health_route_reports_storage_and_write_path() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let registry = registry("127.0.0.1:0".to_string(), true, CancellationToken::new()).await;
+        let response = build_router(&registry)
+            .expect("router")
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["status"], "OK");
+        assert_eq!(body["writes"], "unknown");
+        assert_eq!(body["storage"], "ok");
+    }
+
+    #[cfg(feature = "standalone")]
+    #[tokio::test]
+    async fn a_signal_cancels_the_shutdown_token() {
+        let shutdown = CancellationToken::new();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        cancel_on_signal(
+            async move {
+                let _ = rx.await;
+                "SIGTERM"
+            },
+            shutdown.clone(),
+        );
+        assert!(!shutdown.is_cancelled());
+        tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), shutdown.cancelled())
+            .await
+            .expect("the signal cancels the token");
     }
 }

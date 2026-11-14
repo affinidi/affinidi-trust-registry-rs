@@ -40,8 +40,10 @@
 //!   capability switches and the mediator access list.
 
 use crate::storage::repository::TrustRecordRepository;
-use chrono::{DateTime, Utc};
 use std::{fmt, sync::Arc};
+
+/// The error type the registry's fallible entry points return.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 pub mod audit;
 pub mod capabilities;
@@ -73,34 +75,24 @@ pub mod messaging;
 #[cfg(feature = "tsp")]
 pub mod tsp;
 
-pub struct SharedData<R>
+/// State for the HTTP handlers, built by [`TrustRegistry`] and nowhere else.
+pub(crate) struct SharedData<R>
 where
     R: TrustRecordRepository + ?Sized,
 {
-    pub config: Arc<configs::TrustRegistryConfig>,
-    pub service_start_timestamp: DateTime<Utc>,
-    pub repository: Arc<R>,
-    /// Live read-only dispatcher (list + TRQP query tasks), owned by the
-    /// CapabilitySet so capability enable/disable takes effect without a
-    /// restart.
-    pub query_dispatcher: capabilities::DispatcherHandle,
-    /// Data-Integrity proof verifier, built once and shared with the DIDComm
-    /// and TSP write paths. The HTTP surface is read-only and denies writes on
-    /// the ACL before verification is reached, so it never exercises this —
-    /// but it holds it so the surface stays correct if authenticated HTTP
-    /// writes are ever wired up.
-    pub verifier: Arc<dyn trust_tasks_rs::DynProofVerifier>,
-    /// The registry's audit logger, shared with the DIDComm and TSP bindings,
-    /// which records the write refusals this surface issues.
-    pub audit: Arc<dyn audit::model::AuditLogger>,
+    pub(crate) config: Arc<configs::TrustRegistryConfig>,
+    pub(crate) repository: Arc<R>,
+    /// The registry's one read-only Trust Task handler, shared with
+    /// [`TrustRegistry::query_task_handler`], so its replay record and reply
+    /// signer are built once rather than per request.
+    pub(crate) query_tasks: trust_tasks::TaskHandler,
 }
 
-impl<R: TrustRecordRepository> fmt::Debug for SharedData<R> {
+impl<R: TrustRecordRepository + ?Sized> fmt::Debug for SharedData<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SharedData")
             .field("config", &self.config)
-            .field("service_start_timestamp", &self.service_start_timestamp)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -111,11 +103,8 @@ where
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
-            service_start_timestamp: self.service_start_timestamp,
             repository: Arc::clone(&self.repository),
-            query_dispatcher: self.query_dispatcher.clone(),
-            verifier: self.verifier.clone(),
-            audit: self.audit.clone(),
+            query_tasks: self.query_tasks.clone(),
         }
     }
 }

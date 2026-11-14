@@ -4,7 +4,7 @@
 //! request, and each connection, is bounded:
 //!
 //! - **body size** ([`HttpLimits::max_body_bytes`]): applied by
-//!   [`application_routes`](crate::http::application_routes) itself, so a host
+//!   the registry's own routes, so a host
 //!   mounting [`TrustRegistry::router`](crate::TrustRegistry::router) gets it
 //!   too. A larger body is answered `413`, in the shape of the route's other
 //!   errors;
