@@ -21,6 +21,33 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Breaking
 
+- **TRQP identifiers are validated wherever a client supplies one** (#210).
+  `EntityId`, `AuthorityId`, `Action` and `Resource` gain `parse` and
+  `TryFrom<String>`/`TryFrom<&str>` (non-empty, at most
+  `MAX_IDENTIFIER_BYTES` = 2048 bytes, RFC 3986) and lose `Default`. A
+  `registry/record/put` with an invalid identifier, and a
+  `registry/recognition`/`registry/authorization` query with one, are refused
+  as `malformedRequest`, as the HTTP endpoints already refused it with `400`;
+  so is a `git-trust/grant` whose subject or resource is invalid, and a DIDComm
+  `trqp/1.0` query answers it with its bad-request problem report. `parse`
+  normalises a did:scid entity or authority exactly as `new` does. `new` and
+  `Deserialize` skip the rules, for values already stored: records written
+  before them are still read, listed and deleted (and git-trust revoked) by
+  their exact key.
+- **HTTP TRQP answer shapes** (#209, #247, #252): `http::handlers::trqp::OutputDto`
+  is replaced by `AuthorizationAnswer` / `RecognitionAnswer` (the queried flag
+  is a `bool`), `InputDto` holds plain strings, and the answers' `context` is
+  the stored one (the request context is no longer merged in). `AppError`'s
+  `BadRequest` carries `detail`, `NotFound` carries `detail`, `Internal` drops
+  `details`, and `UnsupportedMediaType` is new.
+- **`DidcommConfig::did_document` is `Option<serde_json::Value>`** (#251),
+  parsed once at load; `None` means no document is published. A
+  `DID_DOCUMENT` that is valid JSON but not an object now stops startup.
+- **`POST /trust-tasks` answers `404` on a registry with no DID** (#211):
+  REST-only (`ENABLE_DIDCOMM=false`) and `TrustRegistryConfig::embedded`
+  without a profile. It used to answer with `"issuer": ""` and no proof, and
+  reject any document that named a recipient. The TRQP endpoints are
+  unaffected.
 - **`setup-trust-registry` has no default `--did-method`.** With
   `--mediator-did` it needs one of three identity modes: `--did-method`
   (new DID), `--tr-did` with `--tr-did-secret-file` (existing DID; each now
@@ -845,7 +872,28 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   new `AuditLogBuilder::build_success_with`.
 - **`governance/capability/list` reads its `status` from the enum's variants**,
   not its `Debug` text (#235).
-
+- **A TRQP answer's `message` follows the answer** (#208). A record inside its
+  window that stores `authorized: false` (as after a git-trust revoke) or no
+  value was answered `false` with the message "X authorized to …". The HTTP
+  endpoints, the `registry/*` Trust Tasks and DIDComm `trqp/1.0` now share one
+  decision, `Evaluation::answer`, for the boolean and the message.
+- **The HTTP TRQP answers always carry the flag asked about** (#209, R3.4):
+  `authorized` from `/authorization`, `recognized` from `/recognition`, as a
+  boolean, `false` when the record stores `false` or nothing, as the Trust Task
+  answers already did. A recognition-only record queried at `/authorization`
+  answered `200` with no `authorized` member at all.
+- **The HTTP TRQP answers return the record's stored `context`, as stored**
+  (#247). The request's `context` was deep-merged over it, so a caller could
+  make the registry's answer show context it never held. The request context
+  is no longer merged or echoed, as on the Trust Task answers.
+- **TRQP HTTP errors say what was wrong** (#252). A body the JSON extractor
+  refuses gets its reason (such as the missing field) as `detail`, not a fixed
+  sentence; a body not sent as `application/json` is `415`, an oversize body
+  `413`.
+- **`/.well-known/did.json` is parsed once, at startup** (#251). With no
+  document configured (REST-only, embedded) it answers `404` instead of
+  `200 {}`, and nothing is logged per request (the whole configured document
+  was logged at warn on each failing request).
 - **The DIDComm pickup listener deletes a message at the mediator only after
   handling it** (R1.6). The live stream pulled with `auto_delete = true` and
   the 30-second offline sync acked its whole batch as soon as the handlers

@@ -175,11 +175,14 @@ fn build_record(
     valid_from: Option<DateTime<Utc>>,
     valid_until: Option<DateTime<Utc>>,
 ) -> Result<TrustRecord, String> {
+    // A written identifier must be one every TRQP surface can query, so it is
+    // validated as a client-supplied value (refused as `malformedRequest`).
+    let invalid = |e: crate::domain::IdentifierError| e.to_string();
     let mut builder = TrustRecordBuilder::new()
-        .entity_id(EntityId::new(entity_id))
-        .authority_id(AuthorityId::new(authority_id))
-        .action(Action::new(action))
-        .resource(Resource::new(resource))
+        .entity_id(EntityId::parse(entity_id).map_err(invalid)?)
+        .authority_id(AuthorityId::parse(authority_id).map_err(invalid)?)
+        .action(Action::parse(action).map_err(invalid)?)
+        .resource(Resource::parse(resource).map_err(invalid)?)
         .context(Context::new(Value::Object(context)))
         .record_type(record_type)
         .valid_from(valid_from)

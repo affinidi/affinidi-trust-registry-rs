@@ -253,7 +253,7 @@ async fn test_recognition_endpoint_bad_request() {
 }
 
 #[tokio::test]
-async fn test_context_merging_authorization() {
+async fn test_request_context_is_not_merged_authorization() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
 
@@ -280,13 +280,15 @@ async fn test_context_merging_authorization() {
 
     let json: Value = response.json().await.unwrap();
 
+    // The answer carries the record's stored context as stored; the request's
+    // context is neither merged in nor allowed to override it.
     let context = &json["context"];
-    assert_eq!(context["additional"], "info");
-    assert_eq!(context["test"], "overridden");
+    assert!(context.get("additional").is_none(), "{context}");
+    assert_ne!(context["test"], "overridden", "{context}");
 }
 
 #[tokio::test]
-async fn test_context_merging_recognition() {
+async fn test_request_context_is_not_merged_recognition() {
     let server_url = get_test_server_url().await;
     let client = reqwest::Client::new();
 
@@ -313,7 +315,7 @@ async fn test_context_merging_recognition() {
     let json: Value = response.json().await.unwrap();
 
     let context = &json["context"];
-    assert_eq!(context["recognition_context"], "specific_info");
+    assert!(context.get("recognition_context").is_none(), "{context}");
 }
 
 #[tokio::test]
