@@ -406,7 +406,7 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   host driving its own socket can report its write path.
 - `trust_tasks::proof::RegistryVerifier` and `RESOLVER_UNAVAILABLE`;
   `transport_capability::findings_for`, `served_by` and `CHECK_TIMEOUT`;
-  `server::LISTENER_SHUTDOWN_GRACE`.
+  `server::LISTENER_SHUTDOWN_GRACE`; `transport_capability::RECHECK_INTERVAL`.
 - **Audit entries for writes carry `document_digest`**, the SHA-256 (hex) of
   the canonical JSON of the whole signed document, proof included, so an
   archived copy of a request can be matched to its entry and its proof checked
@@ -839,15 +839,26 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   killed, and the graceful HTTP shutdown and the audit log's final flush
   never ran. It now drains, flushes and exits `0`, and exits non-zero (with
   one log line, not a panic) only when startup fails or a task ends on its
-  own. It no longer calls `std::process::exit`.
+  own. It no longer calls `std::process::exit` on the normal path; a second
+  signal during the drain exits at once with status 130.
 - **`ServerHandle::shutdown` and `join` wait for every task** (#206): with
   REST on, the DIDComm listener's handle was dropped when the HTTP task ended,
-  leaving it running. Each task now gets a bounded time to stop and is then
+  leaving it running. The tasks drain concurrently, each within its own bound
+  (HTTP: the request time limit plus 5s; listener: 75s), and are then
   aborted. A listener still checking its DID document stops on shutdown.
+- **A clean stop no longer loses the acks of messages handled just before
+  it** (R1.6). Acks go through the SDK's background deletion handler, which
+  closing the connection cancels without draining, so those messages were
+  redelivered — and re-applied, the ledger and default dedup store being in
+  memory — after a restart. On shutdown the pickup listener now sends the
+  deletion of every message acked in the last minute directly, after its
+  handlers drain, and then closes the mediator connection it opened (never a
+  host's lent `SharedAtm` connection).
 - **`/health` no longer reports writes `ok` from boot** (#207, R6.1/R6.2/R6.5):
   `starting` until the listener's first round trip with the mediator, then
   driven by the periodic offline sync — `unavailable` after two failures in a
-  row or five minutes without a success, `ok` again on recovery. The listener
+  row or five minutes without a success, `ok` again on recovery; a listener
+  still `starting` five minutes after boot is `unavailable` too. The listener
   marks writes unavailable when it stops, whether or not the `ServerHandle`
   is awaited. A host-driven registry reports `unknown`, and the record store
   is probed.
@@ -859,7 +870,8 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   (retryable).
 - **The advertised-vs-served transport check runs for every configuration**
   (#244): REST-only (when a DID is configured) and host-driven registries too,
-  in the background with a 30-second limit, with the result on `/health`. A
+  in the background, at startup and every 15 minutes (each attempt limited to
+  30 seconds), with the result on `/health`, so it never latches. A
   document advertising only the ToIP `TrustRegistry` type counts as
   advertising REST, and REST served without `TR_PUBLIC_URL` is no longer
   reported as unadvertised.

@@ -232,6 +232,15 @@ fn local_document_advertises_rest(config: &DidcommConfig) -> bool {
 /// logged, [`TransportState::Ok`] when there was none, and
 /// [`TransportState::Unknown`] when the document could not be resolved.
 pub async fn report_at_startup(config: &DidcommConfig) -> TransportState {
+    match resolve_findings(config).await {
+        Some(findings) => log_findings(&findings),
+        None => TransportState::Unknown,
+    }
+}
+
+/// Resolve this registry's own DID and compare it with what this build
+/// serves. `None` when the document could not be resolved.
+async fn resolve_findings(config: &DidcommConfig) -> Option<Vec<Finding>> {
     use affinidi_tdk::did_resolver::{DIDCacheClient, config::DIDCacheConfigBuilder};
 
     let own_did = config.profile_config.did.as_str();
@@ -242,7 +251,7 @@ pub async fn report_at_startup(config: &DidcommConfig) -> TransportState {
                 error = %e,
                 "no DID resolver available; skipping the advertised-vs-served transport check",
             );
-            return TransportState::Unknown;
+            return None;
         }
     };
 
@@ -251,7 +260,7 @@ pub async fn report_at_startup(config: &DidcommConfig) -> TransportState {
             Ok(v) => v,
             Err(e) => {
                 tracing::debug!(error = %e, "could not read this registry's own DID document");
-                return TransportState::Unknown;
+                return None;
             }
         },
         Err(e) => {
@@ -263,38 +272,57 @@ pub async fn report_at_startup(config: &DidcommConfig) -> TransportState {
                 "could not resolve this registry's own DID; skipping the advertised-vs-served \
                  transport check",
             );
-            return TransportState::Unknown;
+            return None;
         }
     };
 
-    report_findings(
+    Some(findings_for(
         &advertised_in(&document),
         &served_by(config),
         local_document_advertises_rest(config),
-    )
+    ))
 }
 
-/// Log [`findings_for`] and summarise them for `/health`.
+/// The `/health` summary of `findings`.
+fn summarise(findings: &[Finding]) -> TransportState {
+    if findings.iter().any(|f| f.severity == Severity::Error) {
+        TransportState::Mismatch
+    } else {
+        TransportState::Ok
+    }
+}
+
+/// Log `findings` and summarise them for `/health`.
+fn log_findings(findings: &[Finding]) -> TransportState {
+    for finding in findings {
+        match finding.severity {
+            Severity::Error => tracing::error!("{}", finding.message),
+            Severity::Info => tracing::info!("{}", finding.message),
+        }
+    }
+    summarise(findings)
+}
+
+#[cfg(test)]
 fn report_findings(
     advertised: &Transports,
     served: &Transports,
     rest_public_url: bool,
 ) -> TransportState {
-    let mut state = TransportState::Ok;
-    for finding in findings_for(advertised, served, rest_public_url) {
-        match finding.severity {
-            Severity::Error => {
-                tracing::error!("{}", finding.message);
-                state = TransportState::Mismatch;
-            }
-            Severity::Info => tracing::info!("{}", finding.message),
-        }
-    }
-    state
+    log_findings(&findings_for(advertised, served, rest_public_url))
 }
 
-/// Run [`report_at_startup`] in the background, bounded by [`CHECK_TIMEOUT`]
-/// and by `shutdown`, and record its outcome on `health`.
+/// How often the published document is checked again after startup, so a
+/// document that is fixed — or breaks — after boot is reflected on `/health`,
+/// and a resolver that was unreachable at boot does not leave it `unknown`
+/// (R6.2).
+pub const RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Compare the published document with what this registry serves in the
+/// background — at startup, then every [`RECHECK_INTERVAL`] — each attempt
+/// bounded by [`CHECK_TIMEOUT`], until `shutdown`. Each outcome is recorded on
+/// `health`. Findings are logged the first time and whenever the outcome
+/// changes, not on every check.
 ///
 /// Runs for every transport configuration that has a DID of its own: REST-only
 /// (when the host configured a DID), host-driven and the registry's own
@@ -313,20 +341,55 @@ pub(crate) fn spawn_startup_check(
     }
     let config = config.clone();
     Some(tokio::spawn(async move {
-        let state = tokio::select! {
+        run_checks(
+            || resolve_findings(&config),
+            &health,
+            &shutdown,
+            RECHECK_INTERVAL,
+        )
+        .await;
+    }))
+}
+
+/// The loop behind [`spawn_startup_check`], over any way of producing the
+/// findings.
+async fn run_checks<F, Fut>(
+    mut check: F,
+    health: &crate::health::RegistryHealth,
+    shutdown: &tokio_util::sync::CancellationToken,
+    interval: std::time::Duration,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<Vec<Finding>>>,
+{
+    let mut last: Option<TransportState> = None;
+    loop {
+        let findings = tokio::select! {
             _ = shutdown.cancelled() => return,
-            result = tokio::time::timeout(CHECK_TIMEOUT, report_at_startup(&config)) => {
+            result = tokio::time::timeout(CHECK_TIMEOUT, check()) => {
                 result.unwrap_or_else(|_| {
                     tracing::debug!(
                         "resolving this registry's own DID took longer than {CHECK_TIMEOUT:?}; \
-                         skipping the advertised-vs-served transport check"
+                         the advertised-vs-served transport check is inconclusive"
                     );
-                    TransportState::Unknown
+                    None
                 })
             }
         };
+        let state = match &findings {
+            Some(findings) if last.is_none_or(|l| l != summarise(findings)) => {
+                log_findings(findings)
+            }
+            Some(findings) => summarise(findings),
+            None => TransportState::Unknown,
+        };
         health.set_transports(state);
-    }))
+        last = Some(state);
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(interval) => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -540,5 +603,46 @@ mod tests {
         );
         assert!(handle.is_none());
         assert!(health.to_json().get("transports").is_none());
+    }
+
+    /// The check is repeated, so a document that breaks after boot — or a
+    /// resolver that was unreachable at boot — is reflected, rather than the
+    /// first outcome latching (R6.2).
+    #[tokio::test(start_paused = true)]
+    async fn the_check_is_repeated_and_never_latches() {
+        let health = crate::health::RegistryHealth::new(false);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let mismatch = vec![Finding {
+            severity: Severity::Error,
+            message: "advertised but not served".to_string(),
+        }];
+        let interval = std::time::Duration::from_secs(60);
+
+        let run = run_checks(
+            || {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let outcome = match n {
+                    0 => None,
+                    1 => Some(Vec::new()),
+                    _ => Some(mismatch.clone()),
+                };
+                async move { outcome }
+            },
+            &health,
+            &shutdown,
+            interval,
+        );
+        let observe = async {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            assert_eq!(health.to_json()["transports"], "unknown");
+            tokio::time::sleep(interval).await;
+            assert_eq!(health.to_json()["transports"], "ok");
+            tokio::time::sleep(interval).await;
+            assert_eq!(health.to_json()["transports"], "mismatch");
+            shutdown.cancel();
+        };
+        tokio::join!(run, observe);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 }

@@ -110,6 +110,9 @@ pub struct Listener<H: MessageHandler> {
     pub(crate) max_inflight: usize,
     /// Where mediator round trips and given-up messages are reported.
     pub(crate) health: Option<Arc<crate::health::RegistryHealth>>,
+    /// Ids recently queued for background deletion, sent again directly on
+    /// shutdown ([`mediator_functions::RecentAcks`]).
+    pub(crate) acks: Arc<mediator_functions::RecentAcks>,
 }
 
 impl<H: MessageHandler> Listener<H> {
@@ -128,6 +131,7 @@ impl<H: MessageHandler> Listener<H> {
             permits: Arc::new(tokio::sync::Semaphore::new(delivery::MAX_INFLIGHT_HANDLERS)),
             max_inflight: delivery::MAX_INFLIGHT_HANDLERS,
             health: None,
+            acks: Arc::default(),
         }
     }
 
@@ -247,6 +251,9 @@ pub(crate) async fn start_one_did_listener(
     // for every transport configuration, not here.
     let handler = BaseHandler::build_from_arc(repository, tasks.clone());
 
+    // Only a connection the registry opened is the registry's to close; a
+    // host's lent ATM is left alone.
+    let owns_connection = matches!(source, DidCommSource::Managed);
     let listener = match source {
         DidCommSource::Managed => {
             // We are about to publish this DID as reachable, so refuse to start
@@ -350,10 +357,29 @@ pub(crate) async fn start_one_did_listener(
         &listener.profile.inner.alias
     );
 
-    Arc::new(listener.with_health(health))
+    let atm = listener.atm.clone();
+    let result = Arc::new(listener.with_health(health))
         .start_listening(config)
-        .await?;
-    Ok(())
+        .await;
+    if owns_connection {
+        close_owned_connection(&atm).await;
+    }
+    result
+}
+
+/// How long closing the registry's own mediator connection may take.
+pub(crate) const CONNECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Close a mediator connection the registry opened itself, once the listener
+/// has drained its handlers and sent their deletions directly
+/// ([`Listener::flush_acks`]). Bounded by [`CONNECTION_CLOSE_TIMEOUT`].
+async fn close_owned_connection(atm: &ATM) {
+    if tokio::time::timeout(CONNECTION_CLOSE_TIMEOUT, atm.graceful_shutdown())
+        .await
+        .is_err()
+    {
+        warn!("closing the mediator connection took longer than {CONNECTION_CLOSE_TIMEOUT:?}");
+    }
 }
 
 /// starts DIDComm listener for the configured DID profile

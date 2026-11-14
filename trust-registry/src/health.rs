@@ -144,6 +144,9 @@ struct WriteState {
     /// Set once a listener reports round trips: past this age without one, the
     /// link is reported unavailable rather than its last good value.
     link_window: Option<Duration>,
+    /// When this state was created: a listener still `starting`
+    /// [`MEDIATOR_STALE_AFTER`] later is reported unavailable.
+    created: Instant,
 }
 
 /// Outcome of the advertised-vs-served transport check.
@@ -202,6 +205,7 @@ impl RegistryHealth {
                 last_link_ok: None,
                 link_failures: 0,
                 link_window: None,
+                created: Instant::now(),
             }),
             tsp_relationships_full: RwLock::new(None),
             given_up: AtomicU64::new(0),
@@ -227,6 +231,11 @@ impl RegistryHealth {
 
     /// Record that the write path works: the listener (or, for a host-driven
     /// registry, the host) has a working connection.
+    ///
+    /// Called by a host, this holds until the host reports otherwise: there is
+    /// no heartbeat behind it, so a host that calls it must also call
+    /// [`mark_writes_unavailable`](Self::mark_writes_unavailable) when its
+    /// connection fails (R6.2).
     pub fn mark_writes_ok(&self) {
         let mut guard = write(&self.writes);
         guard.status = WriteStatus::Ok;
@@ -311,9 +320,20 @@ impl RegistryHealth {
     }
 
     /// The write status and detail, with a link that has gone quiet for too
-    /// long reported unavailable rather than at its last good value.
+    /// long — or a listener that never connected — reported unavailable
+    /// rather than at its last good value.
     fn effective_writes(&self) -> (WriteStatus, Option<String>) {
         let state = read(&self.writes).clone();
+        if state.status == WriteStatus::Starting && state.created.elapsed() > MEDIATOR_STALE_AFTER {
+            return (
+                WriteStatus::Unavailable,
+                Some(format!(
+                    "the listener has not completed a round trip with the mediator in the {}s \
+                     since start; see the registry's log",
+                    MEDIATOR_STALE_AFTER.as_secs()
+                )),
+            );
+        }
         if state.status == WriteStatus::Ok
             && let (Some(window), Some(last)) = (state.link_window, state.last_link_ok)
             && last.elapsed() > window
@@ -697,5 +717,16 @@ mod tests {
         tokio::time::advance(STORAGE_PROBE_TTL + Duration::from_millis(1)).await;
         health.report().await;
         assert_eq!(store.0.load(Ordering::Relaxed), 2);
+    }
+
+    /// A listener that never connects does not stay `starting` forever.
+    #[tokio::test(start_paused = true)]
+    async fn starting_for_too_long_is_unavailable() {
+        let health = RegistryHealth::new(true);
+        tokio::time::advance(MEDIATOR_STALE_AFTER - Duration::from_secs(1)).await;
+        assert_eq!(health.write_status(), WriteStatus::Starting);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(health.write_status(), WriteStatus::Unavailable);
+        assert_eq!(health.to_json()["status"], "degraded");
     }
 }

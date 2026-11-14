@@ -38,6 +38,9 @@ impl<H: MessageHandler> Listener<H> {
         // would only poll a dead profile.
         sync.abort();
         self.drain_handlers().await;
+        // Deletions the handlers queued may still sit in the SDK's background
+        // handler, which a closing connection does not drain: send them now.
+        self.flush_acks().await;
         result
     }
 

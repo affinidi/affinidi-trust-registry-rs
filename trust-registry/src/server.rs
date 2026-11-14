@@ -19,9 +19,11 @@ use crate::{
 };
 
 /// How long [`ServerHandle::join`] waits, once shutdown is under way, for the
-/// DIDComm/TSP listener to stop. Covers the listener draining its in-flight
-/// handlers (each bounded by its own handler and ack time limits) with margin.
-pub const LISTENER_SHUTDOWN_GRACE: Duration = Duration::from_secs(50);
+/// DIDComm/TSP listener to stop: draining its in-flight handlers (each bounded
+/// by its own handler and ack time limits, 40 seconds in all), sending their
+/// deletions to the mediator directly, and closing its own mediator
+/// connection, with margin.
+pub const LISTENER_SHUTDOWN_GRACE: Duration = Duration::from_secs(75);
 
 /// Margin [`ServerHandle::join`] adds to the HTTP request time limit while
 /// waiting for in-flight HTTP requests to drain.
@@ -193,26 +195,39 @@ impl ServerHandle {
         // Whatever ended the service, stop what is still running.
         shutdown.cancel();
 
-        if http_result.is_none()
-            && let Some(task) = http_task.take()
-        {
-            http_result = finish("http", task, http_grace).await;
-            if http_result.is_none() {
+        // Both drain at once, each within its own bound.
+        let http_pending = http_task.take().filter(|_| http_result.is_none());
+        let didcomm_pending = didcomm_task.take().filter(|_| didcomm_result.is_none());
+        let (http_finished, didcomm_finished) = tokio::join!(
+            async {
+                match http_pending {
+                    Some(task) => Some(finish("http", task, http_grace).await),
+                    None => None,
+                }
+            },
+            async {
+                match didcomm_pending {
+                    Some(task) => Some(finish("didcomm", task, LISTENER_SHUTDOWN_GRACE).await),
+                    None => None,
+                }
+            },
+        );
+        if let Some(finished) = http_finished {
+            if finished.is_none() {
                 failures.push(format!(
                     "the HTTP server did not stop within {http_grace:?}"
                 ));
             }
+            http_result = finished;
         }
-        if didcomm_result.is_none()
-            && let Some(task) = didcomm_task.take()
-        {
-            didcomm_result = finish("didcomm", task, LISTENER_SHUTDOWN_GRACE).await;
-            match &didcomm_result {
+        if let Some(finished) = didcomm_finished {
+            match &finished {
                 None => failures.push(format!(
                     "the DIDComm listener did not stop within {LISTENER_SHUTDOWN_GRACE:?}"
                 )),
                 Some(result) => log_task_exit("didcomm", result),
             }
+            didcomm_result = finished;
         }
 
         if let Some(Ok(Err(e))) = &http_result {
@@ -512,54 +527,72 @@ pub(crate) async fn serve_registry(
     })
 }
 
-/// Wait for SIGTERM or Ctrl-C (SIGINT), whichever comes first, and name it.
+/// Forward every SIGTERM and Ctrl-C (SIGINT) to a channel, by name.
 ///
-/// The handlers are installed when this is called, not when it is first
-/// polled, so a signal that arrives during startup is not missed. As PID 1 in
-/// a container the process has no default signal dispositions, so without
-/// them SIGTERM would be ignored.
+/// The handlers are installed when this is called, not when its task first
+/// runs, so a signal that arrives during startup is not missed. As PID 1 in a
+/// container the process has no default signal dispositions, so without them
+/// SIGTERM would be ignored.
 #[cfg(feature = "standalone")]
-fn shutdown_signal() -> std::io::Result<impl Future<Output = &'static str> + Send> {
+fn shutdown_signals() -> std::io::Result<tokio::sync::mpsc::Receiver<&'static str>> {
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
     #[cfg(unix)]
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    #[cfg(unix)]
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    Ok(async move {
-        #[cfg(unix)]
-        {
-            tokio::select! {
-                _ = terminate.recv() => "SIGTERM",
-                _ = interrupt.recv() => "SIGINT",
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            match tokio::signal::ctrl_c().await {
-                Ok(()) => "Ctrl-C",
-                Err(e) => {
-                    error!("could not listen for Ctrl-C: {e}");
-                    std::future::pending().await
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate())?;
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        tokio::spawn(async move {
+            loop {
+                let name = tokio::select! {
+                    Some(()) = terminate.recv() => "SIGTERM",
+                    Some(()) = interrupt.recv() => "SIGINT",
+                    else => return,
+                };
+                if tx.send(name).await.is_err() {
+                    return;
                 }
             }
+        });
+    }
+    #[cfg(not(unix))]
+    tokio::spawn(async move {
+        while tokio::signal::ctrl_c().await.is_ok() {
+            if tx.send("Ctrl-C").await.is_err() {
+                return;
+            }
         }
-    })
+    });
+    Ok(rx)
 }
 
-/// Cancel `shutdown` when `signal` resolves.
+/// Cancel `shutdown` on the first signal; on a second, call `force` — the
+/// operator asked again, so stop waiting for the drain.
 #[cfg(feature = "standalone")]
 fn cancel_on_signal(
-    signal: impl Future<Output = &'static str> + Send + 'static,
+    mut signals: tokio::sync::mpsc::Receiver<&'static str>,
     shutdown: CancellationToken,
+    force: impl FnOnce(&'static str) + Send + 'static,
 ) {
     tokio::spawn(async move {
         tokio::select! {
-            name = signal => {
-                info!("{name} received; shutting down");
+            Some(name) = signals.recv() => {
+                info!("{name} received; shutting down (send it again to stop at once)");
                 shutdown.cancel();
             }
             _ = shutdown.cancelled() => {}
         }
+        if let Some(name) = signals.recv().await {
+            force(name);
+        }
     });
+}
+
+/// A second signal during shutdown: exit at once. In-flight handlers are cut
+/// short, so their messages stay queued at the mediator and are redelivered.
+#[cfg(feature = "standalone")]
+fn force_exit(name: &'static str) {
+    error!("{name} received again; exiting without waiting for the drain to finish");
+    std::process::exit(130);
 }
 
 /// Standalone entrypoint: own the process.
@@ -589,8 +622,8 @@ pub async fn start() -> std::process::ExitCode {
 
     // Installed first, so a stop requested during startup is honoured.
     let shutdown = CancellationToken::new();
-    match shutdown_signal() {
-        Ok(signal) => cancel_on_signal(signal, shutdown.clone()),
+    match shutdown_signals() {
+        Ok(signals) => cancel_on_signal(signals, shutdown.clone(), force_exit),
         Err(e) => {
             error!("could not install the SIGTERM/SIGINT handlers: {e}");
             return ExitCode::FAILURE;
@@ -997,18 +1030,23 @@ mod tests {
     #[tokio::test]
     async fn a_signal_cancels_the_shutdown_token() {
         let shutdown = CancellationToken::new();
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        cancel_on_signal(
-            async move {
-                let _ = rx.await;
-                "SIGTERM"
-            },
-            shutdown.clone(),
-        );
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let (forced_tx, forced_rx) = tokio::sync::oneshot::channel();
+        cancel_on_signal(rx, shutdown.clone(), move |name| {
+            let _ = forced_tx.send(name);
+        });
         assert!(!shutdown.is_cancelled());
-        tx.send(()).unwrap();
+        tx.send("SIGTERM").await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), shutdown.cancelled())
             .await
             .expect("the signal cancels the token");
+
+        // A second signal forces the exit rather than waiting for the drain.
+        tx.send("SIGINT").await.unwrap();
+        let forced = tokio::time::timeout(Duration::from_secs(5), forced_rx)
+            .await
+            .expect("a second signal forces")
+            .unwrap();
+        assert_eq!(forced, "SIGINT");
     }
 }

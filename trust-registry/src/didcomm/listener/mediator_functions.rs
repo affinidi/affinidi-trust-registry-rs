@@ -105,7 +105,7 @@ impl<H: MessageHandler> Listener<H> {
                     "[profile = {}] message {id} was already handled; acking it again",
                     self.profile.inner.alias
                 );
-                ack(&self.atm, &self.profile, &id).await;
+                ack(&self.atm, &self.profile, &self.acks, &id).await;
                 return;
             }
         }
@@ -124,6 +124,7 @@ impl<H: MessageHandler> Listener<H> {
         let profile = self.profile.clone();
         let ledger = self.ledger.clone();
         let health = self.health.clone();
+        let acks = self.acks.clone();
         // Boxed: with every feature on, the handler futures nest deeply enough
         // to overflow the compiler's layout depth limit.
         let attempt = Box::pin(self.attempt(work));
@@ -133,7 +134,7 @@ impl<H: MessageHandler> Listener<H> {
             let outcome = attempt.await;
             let decision = lock_ledger(&ledger).finish(&id, outcome, Instant::now());
             match decision {
-                Ack::Now => ack(&atm, &profile, &id).await,
+                Ack::Now => ack(&atm, &profile, &acks, &id).await,
                 Ack::Retain => warn!(
                     "[profile = {}] message {id} not handled; left queued at the mediator \
                      for redelivery",
@@ -150,7 +151,7 @@ impl<H: MessageHandler> Listener<H> {
                     if let Some(health) = &health {
                         health.record_given_up();
                     }
-                    ack(&atm, &profile, &id).await;
+                    ack(&atm, &profile, &acks, &id).await;
                 }
             }
         });
@@ -351,7 +352,7 @@ impl<H: MessageHandler> Listener<H> {
                  retry on the next sync",
                 self.profile.inner.alias
             ),
-            Ack::Now => ack(&self.atm, &self.profile, id).await,
+            Ack::Now => ack(&self.atm, &self.profile, &self.acks, &id).await,
             Ack::GiveUp => {
                 error!(
                     "[profile = {}] queued message {id} still cannot be unpacked after {} \
@@ -363,7 +364,7 @@ impl<H: MessageHandler> Listener<H> {
                 if let Some(health) = &self.health {
                     health.record_given_up();
                 }
-                ack(&self.atm, &self.profile, id).await;
+                ack(&self.atm, &self.profile, &self.acks, &id).await;
             }
         }
         Some(decision)
@@ -425,10 +426,104 @@ pub(crate) fn lock_ledger(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// How long an id queued for background deletion is remembered, so a
+/// shutdown can send its deletion again directly. Comfortably longer than the
+/// SDK's deletion handler takes to send a batch, retries included.
+pub(crate) const RECENT_ACK_WINDOW: Duration = Duration::from_secs(60);
+/// Most ids remembered for [`RECENT_ACK_WINDOW`].
+const RECENT_ACK_CAPACITY: usize = 4_096;
+/// Most ids one direct `DELETE` may carry (the mediator's limit).
+const DIRECT_DELETE_BATCH: usize = 100;
+
+/// Ids recently queued on the SDK's background deletion handler.
+///
+/// The handler sends deletions asynchronously, and shutting the ATM down
+/// cancels it without draining its queue. A message handled just before a
+/// stop would then stay on the mediator and be redelivered — and, with an
+/// in-memory ledger and dedup store, applied again — after a restart (R1.6).
+/// So on shutdown the listener deletes every recently acked id again,
+/// directly, before the connection closes ([`Listener::flush_acks`]). Deleting
+/// an id the handler already deleted is answered "not found", which is
+/// harmless.
+#[derive(Default)]
+pub(crate) struct RecentAcks {
+    ids: std::sync::Mutex<std::collections::VecDeque<(Instant, String)>>,
+}
+
+impl RecentAcks {
+    pub(crate) fn record(&self, id: &str, now: Instant) {
+        let mut ids = self
+            .ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while ids
+            .front()
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) > RECENT_ACK_WINDOW)
+            || ids.len() >= RECENT_ACK_CAPACITY
+        {
+            ids.pop_front();
+        }
+        ids.push_back((now, id.to_string()));
+    }
+
+    /// Take every id acked within [`RECENT_ACK_WINDOW`] of `now`.
+    pub(crate) fn take_recent(&self, now: Instant) -> Vec<String> {
+        let mut ids = self
+            .ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ids.drain(..)
+            .filter(|(at, _)| now.saturating_duration_since(*at) <= RECENT_ACK_WINDOW)
+            .map(|(_, id)| id)
+            .collect()
+    }
+}
+
+impl<H: MessageHandler> Listener<H> {
+    /// Send the deletion of every recently acked message directly, so none is
+    /// left in the background handler's queue when the connection closes. Run
+    /// once the handlers have drained; each request is bounded by
+    /// [`ACK_TIMEOUT`].
+    pub(crate) async fn flush_acks(&self) {
+        let ids = self.acks.take_recent(Instant::now());
+        if ids.is_empty() {
+            return;
+        }
+        let alias = &self.profile.inner.alias;
+        for batch in ids.chunks(DIRECT_DELETE_BATCH) {
+            let request = affinidi_tdk::messaging::messages::DeleteMessageRequest {
+                message_ids: batch.to_vec(),
+            };
+            match tokio::time::timeout(
+                ACK_TIMEOUT,
+                self.atm.delete_messages_direct(&self.profile, &request),
+            )
+            .await
+            {
+                Ok(Ok(_)) => debug!(
+                    "[profile = {alias}] sent the deletion of {} recently acked messages",
+                    batch.len()
+                ),
+                Ok(Err(e)) => warn!(
+                    "[profile = {alias}] could not send the deletion of {} recently acked \
+                     messages before stopping (they may be redelivered): {e}",
+                    batch.len()
+                ),
+                Err(_) => warn!(
+                    "[profile = {alias}] sending the deletion of {} recently acked messages \
+                     timed out before stopping (they may be redelivered)",
+                    batch.len()
+                ),
+            }
+        }
+    }
+}
+
 /// Delete `id` at the mediator. A failure is not lost: the message is still
 /// queued, the next sync offers it again, and the ledger acks it again
 /// without handling it again.
-async fn ack(atm: &Arc<ATM>, profile: &Arc<ATMProfile>, id: &str) {
+async fn ack(atm: &Arc<ATM>, profile: &Arc<ATMProfile>, acks: &RecentAcks, id: &str) {
+    acks.record(id, Instant::now());
     match tokio::time::timeout(ACK_TIMEOUT, atm.delete_message_background(profile, id)).await {
         Ok(Ok(())) => debug!("[profile = {}] message {id} acked", profile.inner.alias),
         Ok(Err(e)) => warn!(
