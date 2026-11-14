@@ -1,17 +1,10 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-
 use super::{Configs, loaders::environment::*};
 use crate::http::limits::HttpLimits;
 
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:3232";
 pub const DEFAULT_CAPABILITY_STATE_PATH: &str = "./.trust-registry/capabilities.json";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProfileConfig {
-    pub did: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {

@@ -4,7 +4,8 @@ use anyhow::Result as AnyResult;
 use aws_config::BehaviorVersion;
 use aws_sdk_dynamodb::{
     Client,
-    error::{BuildError, DisplayErrorContext},
+    error::{BuildError, DisplayErrorContext, SdkError},
+    operation::transact_write_items::TransactWriteItemsError,
     types::{AttributeValue, Delete, Get, Put, TransactGetItem, TransactWriteItem},
 };
 use aws_types::region::Region;
@@ -22,7 +23,7 @@ use crate::{
     },
     storage::repository::{
         RepositoryError, TrustRecordAdminRepository, TrustRecordList, TrustRecordQuery,
-        TrustRecordRepository,
+        TrustRecordRepository, skip_unreadable,
     },
 };
 
@@ -102,18 +103,10 @@ impl DynamoDbStorage {
             .consistent_read(true)
             .send()
             .await
-            .map_err(|err| {
-                RepositoryError::ConnectionFailed(format!(
-                    "Failed to fetch item from DynamoDB: {}",
-                    DisplayErrorContext(err)
-                ))
-            })?;
+            .map_err(|err| sdk_error("Failed to fetch item from DynamoDB", err))?;
         response
             .item
-            .map(|item| {
-                serde_dynamo::from_item(item)
-                    .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))
-            })
+            .map(|item| decode_item(storage_key, item))
             .transpose()
     }
 
@@ -235,22 +228,13 @@ impl DynamoDbStorage {
                 .await
             {
                 Ok(_) => return Ok(()),
-                Err(err)
-                    if err
-                        .as_service_error()
-                        .is_some_and(|e| e.is_transaction_canceled_exception()) =>
-                {
+                Err(err) if err.as_service_error().is_some_and(is_stale_read) => {
                     debug!(
-                        "DynamoDB transaction cancelled, re-planning: {}",
+                        "DynamoDB transaction cancelled by a changed item, re-planning: {}",
                         DisplayErrorContext(&err)
                     );
                 }
-                Err(err) => {
-                    return Err(RepositoryError::QueryFailed(format!(
-                        "Failed to write records: {}",
-                        DisplayErrorContext(err)
-                    )));
-                }
+                Err(err) => return Err(sdk_error("Failed to write records", err)),
             }
         }
         Err(RepositoryError::QueryFailed(format!(
@@ -276,8 +260,63 @@ impl std::fmt::Debug for DynamoDbStorage {
     }
 }
 
-fn not_found(key: &TrustRecordKey) -> RepositoryError {
-    RepositoryError::RecordNotFound(format!("Record not found: {}", key.sk()))
+/// Whether a failed `TransactWriteItems` means only that an item it planned
+/// against changed before it ran, so re-planning will settle it.
+///
+/// That is a `TransactionCanceledException` whose every cancellation reason is
+/// `ConditionalCheckFailed` (an item no longer held what was read: a duplicate
+/// create, a concurrent delete), `TransactionConflict` (another transaction
+/// was writing the item) or `None` (the item was fine; another one cancelled
+/// the transaction). Any other reason (throttling, validation, item too
+/// large) or any other error is a real failure and is reported, not retried.
+///
+/// The condition outcome is read from the typed service error. The error's
+/// `Display` is only a fixed phrase per error kind ("service error") and never
+/// names the cancellation reason.
+fn is_stale_read(error: &TransactWriteItemsError) -> bool {
+    let TransactWriteItemsError::TransactionCanceledException(cancelled) = error else {
+        return false;
+    };
+    let reasons = cancelled.cancellation_reasons();
+    !reasons.is_empty()
+        && reasons.iter().all(|reason| {
+            matches!(
+                reason.code(),
+                None | Some("None") | Some("ConditionalCheckFailed") | Some("TransactionConflict")
+            )
+        })
+}
+
+/// Map an SDK error by kind: the request never got an answer (no connection,
+/// timeout) is `ConnectionFailed`; DynamoDB answered with an error is
+/// `QueryFailed`. The message carries the service's error code and message
+/// (`DisplayErrorContext`), not just the SDK's fixed phrase.
+fn sdk_error<E, R>(context: &str, err: SdkError<E, R>) -> RepositoryError
+where
+    E: std::error::Error + 'static,
+    R: std::fmt::Debug,
+{
+    let unreachable = matches!(
+        err,
+        SdkError::DispatchFailure(_) | SdkError::TimeoutError(_)
+    );
+    let message = format!("{context}: {}", DisplayErrorContext(&err));
+    if unreachable {
+        RepositoryError::ConnectionFailed(message)
+    } else {
+        RepositoryError::QueryFailed(message)
+    }
+}
+
+/// Decode a stored item. An item that does not decode is an error naming its
+/// key, for a lookup and a listing alike.
+fn decode_item(
+    storage_key: &str,
+    item: HashMap<String, AttributeValue>,
+) -> Result<TrustRecord, RepositoryError> {
+    serde_dynamo::from_item(item).map_err(|e| {
+        RepositoryError::SerializationFailed(format!("record stored under {storage_key}: {e}"))
+    })
 }
 
 /// How many times a write is re-planned when an item it read changed before
@@ -319,28 +358,20 @@ impl KeyedReader for DdbReader<'_> {
             .transact_items(get(second)?)
             .send()
             .await
-            .map_err(|err| {
-                RepositoryError::ConnectionFailed(format!(
-                    "Failed to fetch items from DynamoDB: {}",
-                    DisplayErrorContext(err)
-                ))
-            })?;
+            .map_err(|err| sdk_error("Failed to fetch items from DynamoDB", err))?;
         let mut items = response
             .responses
             .unwrap_or_default()
             .into_iter()
             .map(|response| response.item);
-        let mut next = || {
+        let mut next = |storage_key: &str| {
             items
                 .next()
                 .flatten()
-                .map(|item| {
-                    serde_dynamo::from_item(item)
-                        .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))
-                })
+                .map(|item| decode_item(storage_key, item))
                 .transpose()
         };
-        Ok((next()?, next()?))
+        Ok((next(first)?, next(second)?))
     }
 }
 
@@ -436,39 +467,210 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             .send()
             .try_collect()
             .await
-            .map_err(|err| RepositoryError::QueryFailed(format!("Failed to query table: {err}")))?;
+            .map_err(|err| sdk_error("Failed to query table", err))?;
 
         let mut entries = Vec::with_capacity(items.len());
+        let mut unreadable = Vec::new();
 
         for item in items {
             let storage_key = match item.get(SK_ATTR) {
                 Some(AttributeValue::S(storage_key)) => storage_key.clone(),
                 _ => String::new(),
             };
-            let record: TrustRecord = serde_dynamo::from_item(item)
-                .map_err(|e| RepositoryError::SerializationFailed(e.to_string()))?;
-            entries.push((storage_key, record));
+            match decode_item(&storage_key, item) {
+                Ok(record) => entries.push((storage_key, record)),
+                Err(e) => skip_unreadable(storage_key, &e, &mut unreadable),
+            }
         }
 
-        Ok(TrustRecordList::new(dedupe_listing(entries)))
-    }
-
-    async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
-        debug!(
-            entity = query.entity_id.as_str(),
-            authority = query.authority_id.as_str(),
-            action = query.action.as_str(),
-            resource = query.resource.as_str(),
-            "Reading trust record from DynamoDB"
-        );
-        let key = TrustRecordKey::from_query(&query);
-        self.find(&key).await?.ok_or_else(|| not_found(&key))
+        Ok(TrustRecordList::with_unreadable(
+            dedupe_listing(entries),
+            unreadable,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aws_sdk_dynamodb::types::{
+        AttributeDefinition, BillingMode, CancellationReason, KeySchemaElement, KeyType,
+        ScalarAttributeType, error::TransactionCanceledException,
+    };
+
+    fn cancelled(codes: &[Option<&str>]) -> TransactWriteItemsError {
+        let mut exception = TransactionCanceledException::builder();
+        for code in codes {
+            let mut reason = CancellationReason::builder();
+            if let Some(code) = code {
+                reason = reason.code(*code);
+            }
+            exception = exception.cancellation_reasons(reason.build());
+        }
+        TransactWriteItemsError::TransactionCanceledException(exception.build())
+    }
+
+    #[test]
+    fn a_failed_condition_or_a_conflict_is_re_planned() {
+        assert!(is_stale_read(&cancelled(&[Some("ConditionalCheckFailed")])));
+        assert!(is_stale_read(&cancelled(&[
+            Some("None"),
+            Some("ConditionalCheckFailed"),
+        ])));
+        assert!(is_stale_read(&cancelled(&[
+            None,
+            Some("TransactionConflict")
+        ])));
+    }
+
+    #[test]
+    fn any_other_cancellation_or_error_is_reported() {
+        assert!(!is_stale_read(&cancelled(&[Some("ThrottlingError")])));
+        assert!(!is_stale_read(&cancelled(&[
+            Some("ConditionalCheckFailed"),
+            Some("ValidationError"),
+        ])));
+        assert!(!is_stale_read(&cancelled(&[])));
+        assert!(!is_stale_read(
+            &TransactWriteItemsError::ResourceNotFoundException(
+                aws_sdk_dynamodb::types::error::ResourceNotFoundException::builder()
+                    .message("no such table")
+                    .build()
+            )
+        ));
+    }
+
+    /// A client for the DynamoDB at `TR_TEST_DYNAMODB_ENDPOINT`, with the
+    /// test table (`TR_TEST_DYNAMODB_TABLE`, default
+    /// `trust-registry-conformance`) created if it is missing. Tests write
+    /// only records under their own authority and delete only those.
+    async fn test_storage() -> Option<DynamoDbStorage> {
+        let endpoint = crate::storage::conformance::dynamodb_test_endpoint()?;
+        let table = std::env::var("TR_TEST_DYNAMODB_TABLE")
+            .unwrap_or_else(|_| "trust-registry-conformance".to_string());
+        // Built the way the registry builds it from `DYNAMODB_ENDPOINT`,
+        // `AWS_REGION` and `DDB_USE_TEST_CREDENTIALS=true`.
+        let storage = DynamoDbStorage::new(DynamoDbStorageConfig {
+            table_name: table.clone(),
+            region: Some("us-east-1".to_string()),
+            endpoint_url: Some(endpoint),
+            use_test_credentials: true,
+            ..Default::default()
+        })
+        .await
+        .expect("client");
+        let client = storage.client.clone();
+        let created = client
+            .create_table()
+            .table_name(&table)
+            .billing_mode(BillingMode::PayPerRequest)
+            .attribute_definitions(
+                AttributeDefinition::builder()
+                    .attribute_name(PK_ATTR)
+                    .attribute_type(ScalarAttributeType::S)
+                    .build()
+                    .expect("attribute"),
+            )
+            .attribute_definitions(
+                AttributeDefinition::builder()
+                    .attribute_name(SK_ATTR)
+                    .attribute_type(ScalarAttributeType::S)
+                    .build()
+                    .expect("attribute"),
+            )
+            .key_schema(
+                KeySchemaElement::builder()
+                    .attribute_name(PK_ATTR)
+                    .key_type(KeyType::Hash)
+                    .build()
+                    .expect("key"),
+            )
+            .key_schema(
+                KeySchemaElement::builder()
+                    .attribute_name(SK_ATTR)
+                    .key_type(KeyType::Range)
+                    .build()
+                    .expect("key"),
+            )
+            .send()
+            .await;
+        if let Err(err) = created {
+            let exists = err
+                .as_service_error()
+                .is_some_and(|e| e.is_resource_in_use_exception());
+            assert!(
+                exists,
+                "TR_TEST_DYNAMODB_ENDPOINT is set but the test table could not be created: {}",
+                DisplayErrorContext(&err)
+            );
+        }
+        // Wait for the table to become usable (immediate on DynamoDB Local
+        // and LocalStack, but not guaranteed).
+        for _ in 0..50 {
+            let status = client
+                .describe_table()
+                .table_name(&table)
+                .send()
+                .await
+                .ok()
+                .and_then(|table| table.table)
+                .and_then(|table| table.table_status);
+            if status == Some(aws_sdk_dynamodb::types::TableStatus::Active) {
+                return Some(storage);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        panic!("the DynamoDB test table {table} did not become active");
+    }
+
+    async fn conformance_fixture() -> Option<crate::storage::conformance::Fixture> {
+        let storage = test_storage().await?;
+        // A second client, as a second registry replica would hold.
+        let peer = test_storage().await?;
+        let writer = storage.clone();
+        let remover = storage.clone();
+        Some(
+            crate::storage::conformance::Fixture::new(storage)
+                .with_peer(peer)
+                .with_corrupter(
+                    move |storage_key: String| {
+                        let storage = writer.clone();
+                        Box::pin(async move {
+                            let mut item = DynamoDbStorage::build_key(&storage_key);
+                            item.insert(
+                                "authority_id".to_string(),
+                                AttributeValue::N("1".to_string()),
+                            );
+                            storage
+                                .client
+                                .put_item()
+                                .table_name(&storage.table_name)
+                                .set_item(Some(item))
+                                .send()
+                                .await
+                                .expect("put corrupt item");
+                        })
+                    },
+                    move |storage_key: String| {
+                        let storage = remover.clone();
+                        Box::pin(async move {
+                            let _ = storage
+                                .client
+                                .delete_item()
+                                .table_name(&storage.table_name)
+                                .set_key(Some(DynamoDbStorage::build_key(&storage_key)))
+                                .send()
+                                .await;
+                        })
+                    },
+                ),
+        )
+    }
+
+    crate::storage::conformance::repository_conformance_tests!(
+        dynamodb,
+        conformance_fixture().await
+    );
 
     #[test]
     fn retry_delays_grow_and_stay_bounded() {

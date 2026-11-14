@@ -1,24 +1,14 @@
 use serde_json::{Value, json};
 use std::env;
 
+/// The address of the registry under test. These tests talk to a server
+/// started separately (CI starts it on `sample-data/data.csv`), so its data
+/// is whatever that server was started with; nothing set here can change it.
 async fn setup_test_environment() -> String {
     dotenvy::from_filename(".env.test").ok();
-    let address = env::var("LISTEN_ADDRESS")
+    env::var("LISTEN_ADDRESS")
         .map(|address| format!("http://{}", address))
-        .unwrap_or("http://0.0.0.0:3232".to_string());
-    let test_data = "entity_id,authority_id,action,resource,recognized,authorized,context
-did:example:entity1,did:example:authority1,action1,resource1,true,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
-did:example:entity2,did:example:authority2,action2,resource2,false,true,eyJ0ZXN0IjogImNvbnRleHQifQ==
-did:example:entity3,did:example:authority3,action3,resource3,true,false,eyJ0ZXN0IjogImNvbnRleHQifQ==";
-    let temp_file = std::env::temp_dir().join("integration_test_data.csv");
-    tokio::fs::write(&temp_file, test_data).await.unwrap();
-    if env::var("TR_STORAGE_BACKEND").unwrap_or("csv".to_owned()) == "csv" {
-        unsafe {
-            env::set_var("FILE_STORAGE_PATH", temp_file.to_str().unwrap());
-        }
-    }
-
-    address
+        .unwrap_or("http://0.0.0.0:3232".to_string())
 }
 
 async fn get_test_server_url() -> String {

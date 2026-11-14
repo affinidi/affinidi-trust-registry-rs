@@ -7,9 +7,25 @@
 //! identifier escaped) and stored
 //! as JSON values. fjall is synchronous, so each operation runs on a blocking
 //! thread via [`tokio::task::spawn_blocking`].
+//!
+//! # Durability
+//!
+//! Every mutation is committed as one batch with [`PersistMode::SyncAll`]: the
+//! journal is `fsync`ed before `create`, `update` or `delete` returns. fjall's
+//! default only flushes the journal to operating-system buffers, which survives
+//! a process crash but not a host crash or power loss; an acknowledged registry
+//! write (and the DIDComm message it came from, deleted from the mediator once
+//! handled) must survive both (rule R1.6). Writes are rare and small, so the
+//! extra `fsync` per write is the right trade.
+//!
+//! # Atomicity
+//!
+//! Each write plans against the keys it reads and commits under one lock, so
+//! check-then-act cannot interleave with another write. fjall locks the
+//! database directory, so only one process writes it.
 
-use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions, Readable};
-use tracing::{error, info};
+use fjall::{Config, Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable};
+use tracing::info;
 
 use std::sync::{Arc, Mutex};
 
@@ -34,7 +50,7 @@ pub struct FjallStorage {
 
 impl FjallStorage {
     /// Open (or create) the fjall database at `path`.
-    pub fn new(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         info!("Opening fjall storage at {path}");
         let db = Database::open(Config::new(std::path::Path::new(path)))?;
         let keyspace = db.keyspace(KEYSPACE_NAME, KeyspaceCreateOptions::default)?;
@@ -80,7 +96,8 @@ impl FjallStorage {
                 db: db.clone(),
             };
             let ops = futures::executor::block_on(plan(&mut reader))?;
-            let mut batch = db.batch();
+            // fsync before acknowledging; see the module docs.
+            let mut batch = db.batch().durability(Some(PersistMode::SyncAll));
             for op in ops {
                 match op.action {
                     KeyedAction::Put(record) => batch.insert(
@@ -182,29 +199,27 @@ impl TrustRecordAdminRepository for FjallStorage {
             .await
     }
 
-    async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
-        self.find_by_query(query.clone())
-            .await?
-            .ok_or_else(|| RepositoryError::RecordNotFound(TrustRecordKey::from_query(&query).sk()))
-    }
-
     async fn list(&self) -> Result<TrustRecordList, RepositoryError> {
         let ks = self.keyspace.clone();
-        let entries = tokio::task::spawn_blocking(move || {
+        let (entries, unreadable) = tokio::task::spawn_blocking(move || {
             let mut entries = Vec::new();
+            let mut unreadable = Vec::new();
             for guard in ks.prefix(TR_SK_PREFIX.as_bytes()) {
                 let (key, value) = guard.into_inner().map_err(query_error)?;
                 let key = String::from_utf8_lossy(&key).into_owned();
                 match FjallStorage::deserialize(&value) {
                     Ok(record) => entries.push((key, record)),
-                    Err(e) => error!("Skipping unreadable fjall record {key}: {e}"),
+                    Err(e) => skip_unreadable(key, &e, &mut unreadable),
                 }
             }
-            Ok::<_, RepositoryError>(entries)
+            Ok::<_, RepositoryError>((entries, unreadable))
         })
         .await
         .map_err(join_error)??;
-        Ok(TrustRecordList::new(dedupe_listing(entries)))
+        Ok(TrustRecordList::with_unreadable(
+            dedupe_listing(entries),
+            unreadable,
+        ))
     }
 }
 
@@ -570,4 +585,28 @@ mod tests {
             occupant
         );
     }
+
+    async fn conformance_fixture() -> Option<crate::storage::conformance::Fixture> {
+        let (dir, fjall) = open();
+        let writer = fjall.keyspace.clone();
+        let remover = fjall.keyspace.clone();
+        Some(
+            crate::storage::conformance::Fixture::new(fjall)
+                .with_guard(dir)
+                .with_corrupter(
+                    move |storage_key: String| {
+                        writer
+                            .insert(storage_key.as_bytes(), b"{not json".to_vec())
+                            .expect("insert");
+                        Box::pin(async {})
+                    },
+                    move |storage_key: String| {
+                        remover.remove(storage_key.as_bytes()).expect("remove");
+                        Box::pin(async {})
+                    },
+                ),
+        )
+    }
+
+    crate::storage::conformance::repository_conformance_tests!(fjall, conformance_fixture().await);
 }

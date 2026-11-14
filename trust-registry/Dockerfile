@@ -50,10 +50,17 @@ RUN apt-get update \
 # the one place it may write: relative data paths (the CSV and fjall stores,
 # ./.trust-registry for capability state and the secret cache) resolve there.
 # The binary stays root-owned and read-only to it.
+#
+# The CSV backend replaces its file by writing a temporary file next to it and
+# renaming it over the original, so the file's directory, not just the file,
+# must be writable by the service: /app/sample-data is created owned by it. For
+# the same reason mount a directory holding the CSV, never the file alone (a
+# rename over a single-file bind mount fails with EBUSY).
 RUN groupadd --system --gid 10001 trustregistry \
     && useradd --system --uid 10001 --gid trustregistry \
     --home-dir /app --no-create-home --shell /usr/sbin/nologin trustregistry \
-    && install -d -o trustregistry -g trustregistry -m 0750 /app
+    && install -d -o trustregistry -g trustregistry -m 0750 /app \
+    && install -d -o trustregistry -g trustregistry -m 0750 /app/sample-data
 
 WORKDIR /app
 COPY --from=builder /app/dist/trust-registry /usr/local/bin/trust-registry

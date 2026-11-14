@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::sync::{Arc, RwLock};
 
 use crate::domain::key::TrustRecordKey;
@@ -15,22 +14,6 @@ impl LocalStorage {
     pub fn new() -> Self {
         Self {
             records: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    pub async fn save(&self, record: TrustRecord) -> Result<(), RepositoryError> {
-        let key = TrustRecordKey::from_record(&record);
-        let mut records = self
-            .records
-            .write()
-            .map_err(|_| RepositoryError::LockPoisoned)?;
-
-        match records.entry(key.clone()) {
-            Entry::Occupied(e) => Err(RepositoryError::RecordAlreadyExists(e.key().to_string())),
-            Entry::Vacant(_) => {
-                records.insert(key, record);
-                Ok(())
-            }
         }
     }
 
@@ -54,13 +37,6 @@ impl LocalStorage {
             .clear();
         Ok(())
     }
-
-    fn matches_query(record: &TrustRecord, query: &TrustRecordQuery) -> bool {
-        record.entity_id() == &query.entity_id
-            && record.authority_id() == &query.authority_id
-            && record.action() == &query.action
-            && record.resource() == &query.resource
-    }
 }
 
 impl Default for LocalStorage {
@@ -79,11 +55,7 @@ impl TrustRecordRepository for LocalStorage {
             .records
             .read()
             .map_err(|_| RepositoryError::LockPoisoned)?;
-        let result = records
-            .values()
-            .find(|&record| Self::matches_query(record, &query))
-            .cloned();
-        Ok(result)
+        Ok(records.get(&TrustRecordKey::from_query(&query)).cloned())
     }
 }
 
@@ -96,13 +68,7 @@ impl TrustRecordAdminRepository for LocalStorage {
             .write()
             .map_err(|_| RepositoryError::LockPoisoned)?;
         if records.contains_key(&key) {
-            return Err(RepositoryError::RecordAlreadyExists(format!(
-                "Record already exists: {}#{}#{}#{}",
-                record.authority_id(),
-                record.action(),
-                record.resource(),
-                record.entity_id()
-            )));
+            return Err(RepositoryError::already_exists(&key));
         }
         records.insert(key, record);
         Ok(())
@@ -115,13 +81,7 @@ impl TrustRecordAdminRepository for LocalStorage {
             .write()
             .map_err(|_| RepositoryError::LockPoisoned)?;
         if !records.contains_key(&key) {
-            return Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}#{}#{}#{}",
-                record.authority_id(),
-                record.action(),
-                record.resource(),
-                record.entity_id()
-            )));
+            return Err(RepositoryError::not_found(&key));
         }
         records.insert(key, record);
         Ok(())
@@ -134,10 +94,7 @@ impl TrustRecordAdminRepository for LocalStorage {
             .write()
             .map_err(|_| RepositoryError::LockPoisoned)?;
         if records.remove(&key).is_none() {
-            return Err(RepositoryError::RecordNotFound(format!(
-                "Record not found: {}#{}#{}#{}",
-                query.authority_id, query.action, query.resource, query.entity_id
-            )));
+            return Err(RepositoryError::not_found(&key));
         }
         Ok(())
     }
@@ -149,24 +106,6 @@ impl TrustRecordAdminRepository for LocalStorage {
             .map_err(|_| RepositoryError::LockPoisoned)?;
         let records_vec: Vec<TrustRecord> = records.values().cloned().collect();
         Ok(TrustRecordList::new(records_vec))
-    }
-
-    async fn read(&self, query: TrustRecordQuery) -> Result<TrustRecord, RepositoryError> {
-        let records = self
-            .records
-            .read()
-            .map_err(|_| RepositoryError::LockPoisoned)?;
-        let result = records
-            .values()
-            .find(|&record| Self::matches_query(record, &query))
-            .cloned();
-
-        result.ok_or_else(|| {
-            RepositoryError::RecordNotFound(format!(
-                "Record not found: {}#{}#{}#{}",
-                query.authority_id, query.action, query.resource, query.entity_id
-            ))
-        })
     }
 }
 
@@ -234,4 +173,11 @@ mod tests {
         assert_eq!(record.action().as_str(), "action-1");
         assert_eq!(record.resource().as_str(), "resource-1");
     }
+
+    crate::storage::conformance::repository_conformance_tests!(
+        local_storage,
+        Some(crate::storage::conformance::Fixture::new(
+            LocalStorage::new()
+        ))
+    );
 }
