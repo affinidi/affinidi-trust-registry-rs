@@ -11,41 +11,97 @@ use crate::didcomm::did_document::{TransportFlags, build_did_document, validate_
 
 use super::{
     Configs,
-    loaders::{environment::*, load},
+    loaders::{environment::*, load_setting},
 };
+
+/// The secret-store settings, read once while the configuration loads.
+#[cfg(feature = "secrets")]
+struct SecretStoreSettings {
+    config: vti_secrets::SecretsConfig,
+    data_dir: std::path::PathBuf,
+}
+
+#[cfg(feature = "secrets")]
+impl SecretStoreSettings {
+    fn from_env() -> Result<Self, String> {
+        use super::secret_store;
+
+        let config = secret_store::secrets_config_from_env()?;
+        if let Some(backend) = secret_store::selected_backend(&config) {
+            tracing::info!(
+                backend = secret_store::backend_name(backend),
+                "secret store selected"
+            );
+        }
+        Ok(Self {
+            config,
+            data_dir: secret_store::data_dir(),
+        })
+    }
+}
 
 /// Load the profile bundle from a configured secret-store backend, if any.
 ///
 /// Returns `Ok(None)` when no backend is configured (deployment uses inline
 /// `PROFILE_CONFIG`) or the backend holds no bundle yet, so the caller falls
-/// back to `PROFILE_CONFIG`. Also `Ok(None)` when no `secrets-*` feature is
-/// compiled in, which is the same "fall back to `PROFILE_CONFIG`" outcome.
-async fn load_profile_from_secret_store() -> Result<Option<String>, String> {
-    #[cfg(feature = "secrets")]
-    {
-        use super::secret_store;
+/// back to `PROFILE_CONFIG`.
+#[cfg(feature = "secrets")]
+async fn load_profile_from_secret_store(
+    settings: &SecretStoreSettings,
+) -> Result<Option<String>, String> {
+    use super::secret_store;
 
-        let cfg = secret_store::secrets_config_from_env();
-        if !secret_store::backend_selected(&cfg) {
-            return Ok(None);
-        }
-        secret_store::read_profile(&cfg, &secret_store::data_dir()).await
+    if !secret_store::backend_selected(&settings.config) {
+        return Ok(None);
     }
-    #[cfg(not(feature = "secrets"))]
-    Ok(None)
+    secret_store::read_profile(&settings.config, &settings.data_dir)
+        .await
+        .map_err(|e| format!("the configured secret store (TR_SECRETS_*): {e}"))
 }
 
-/// Fetch the profile bundle from a configured VTA (feature `vta`); `Ok(None)`
-/// when the VTA path is disabled or unconfigured.
-async fn load_profile_from_vta() -> Result<Option<String>, String> {
+/// Where the profile bundle came from, for error messages.
+#[derive(Debug, Clone, Copy)]
+enum ProfileSource {
     #[cfg(feature = "vta")]
-    {
-        super::vta::startup_profile_json().await
+    Vta,
+    #[cfg(feature = "secrets")]
+    SecretStore,
+    ProfileConfig,
+}
+
+impl fmt::Display for ProfileSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            #[cfg(feature = "vta")]
+            Self::Vta => write!(f, "the profile built from the VTA (TR_VTA_CREDENTIAL)"),
+            #[cfg(feature = "secrets")]
+            Self::SecretStore => write!(f, "the profile bundle in the secret store (TR_SECRETS_*)"),
+            Self::ProfileConfig => write!(f, "PROFILE_CONFIG"),
+        }
     }
-    #[cfg(not(feature = "vta"))]
-    {
-        Ok(None)
+}
+
+/// The registry's identity bundle and where it came from. Precedence: a
+/// configured VTA (remote key custody), then a configured secret-store backend,
+/// then the `PROFILE_CONFIG` loader URI.
+async fn load_profile_bundle(
+    #[cfg(feature = "vta")] vta: Option<&super::vta::VtaConfig>,
+    #[cfg(feature = "secrets")] secrets: &SecretStoreSettings,
+) -> Result<(String, ProfileSource), String> {
+    #[cfg(feature = "vta")]
+    if let Some(vta) = vta {
+        let cache =
+            super::vta::VtaSecretCache::new(secrets.config.clone(), secrets.data_dir.clone());
+        let bundle = super::vta::startup_profile_json(vta, &cache).await?;
+        return Ok((bundle, ProfileSource::Vta));
     }
+    #[cfg(feature = "secrets")]
+    if let Some(bundle) = load_profile_from_secret_store(secrets).await? {
+        return Ok((bundle, ProfileSource::SecretStore));
+    }
+    let profile_configs_uri = required_env("PROFILE_CONFIG")?;
+    let bundle = load_setting("PROFILE_CONFIG", &profile_configs_uri).await?;
+    Ok((bundle, ProfileSource::ProfileConfig))
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,13 +228,53 @@ pub struct DidDocumentRetryConfig {
     pub max_delay_secs: u64,
 }
 
+/// Default for `DID_CHECK_MAX_ATTEMPTS`.
+pub const DEFAULT_DID_CHECK_MAX_ATTEMPTS: u32 = 10;
+/// Default for `DID_CHECK_INITIAL_DELAY_SECS`.
+pub const DEFAULT_DID_CHECK_INITIAL_DELAY_SECS: u64 = 2;
+/// Default for `DID_CHECK_MAX_DELAY_SECS`.
+pub const DEFAULT_DID_CHECK_MAX_DELAY_SECS: u64 = 20;
+
+/// The same defaults the `DID_CHECK_*` variables take when unset.
 impl Default for DidDocumentRetryConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 10,
-            initial_delay_secs: 2,
-            max_delay_secs: 30,
+            max_attempts: DEFAULT_DID_CHECK_MAX_ATTEMPTS,
+            initial_delay_secs: DEFAULT_DID_CHECK_INITIAL_DELAY_SECS,
+            max_delay_secs: DEFAULT_DID_CHECK_MAX_DELAY_SECS,
         }
+    }
+}
+
+impl DidDocumentRetryConfig {
+    /// Read `DID_CHECK_MAX_ATTEMPTS`, `DID_CHECK_INITIAL_DELAY_SECS` and
+    /// `DID_CHECK_MAX_DELAY_SECS`. Each must be a positive whole number, and
+    /// the maximum delay at least the initial one.
+    pub fn from_env() -> Result<Self, String> {
+        let max_attempts = positive_env(
+            "DID_CHECK_MAX_ATTEMPTS",
+            u64::from(DEFAULT_DID_CHECK_MAX_ATTEMPTS),
+        )?;
+        let max_attempts = u32::try_from(max_attempts).map_err(|_| {
+            format!("DID_CHECK_MAX_ATTEMPTS is out of range (got '{max_attempts}')")
+        })?;
+        let initial_delay_secs = positive_env(
+            "DID_CHECK_INITIAL_DELAY_SECS",
+            DEFAULT_DID_CHECK_INITIAL_DELAY_SECS,
+        )?;
+        let max_delay_secs =
+            positive_env("DID_CHECK_MAX_DELAY_SECS", DEFAULT_DID_CHECK_MAX_DELAY_SECS)?;
+        if max_delay_secs < initial_delay_secs {
+            return Err(format!(
+                "DID_CHECK_MAX_DELAY_SECS ({max_delay_secs}) must not be less than \
+                 DID_CHECK_INITIAL_DELAY_SECS ({initial_delay_secs})"
+            ));
+        }
+        Ok(Self {
+            max_attempts,
+            initial_delay_secs,
+            max_delay_secs,
+        })
     }
 }
 
@@ -195,6 +291,40 @@ pub struct DidcommConfig {
     pub did_document: String,
     pub admin_config: AdminConfig,
     pub retry_config: DidDocumentRetryConfig,
+    /// Base directory of the TSP messaging store; the profile alias names a
+    /// subdirectory of it. `None` means `./.trust-registry/messaging`,
+    /// relative to the working directory.
+    pub messaging_store_path: Option<std::path::PathBuf>,
+    /// Bounds on the TSP relationship store.
+    #[cfg(feature = "tsp")]
+    pub relationship_limits: crate::messaging::relationship_store::RelationshipLimits,
+    /// The VTA the identity came from, and which `did/rotate` rotates
+    /// through. `None` when the identity is not VTA-managed.
+    #[cfg(feature = "vta")]
+    pub vta: Option<std::sync::Arc<super::vta::VtaConfig>>,
+}
+
+/// The default base of the TSP messaging store.
+pub const DEFAULT_MESSAGING_STORE_PATH: &str = "./.trust-registry/messaging";
+
+impl DidcommConfig {
+    /// The messaging store base, applying the default when unset.
+    pub fn messaging_store_path(&self) -> std::path::PathBuf {
+        self.messaging_store_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_MESSAGING_STORE_PATH))
+    }
+}
+
+/// `TR_MESSAGING_STORE_PATH`, else `messaging` under `TR_SECRETS_DATA_DIR`,
+/// else `None` (the default).
+fn messaging_store_path_from_env() -> Option<std::path::PathBuf> {
+    non_empty_env("TR_MESSAGING_STORE_PATH")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            non_empty_env("TR_SECRETS_DATA_DIR")
+                .map(|dir| std::path::PathBuf::from(dir).join("messaging"))
+        })
 }
 
 impl DidcommConfig {
@@ -228,21 +358,35 @@ pub fn parse_profile_from_secrets_str(
     Ok(profile_config)
 }
 
-/// Parse a boolean environment flag, defaulting when unset or empty.
-///
-/// Only `true`/`false` are accepted (case-insensitively): a typo like
-/// `ENABLE_TSP=yes` must not silently read as "off" and leave the operator
-/// believing TSP is running.
-fn env_flag(name: &str, default: bool) -> Result<bool, String> {
-    match std::env::var(name) {
-        Err(_) => Ok(default),
-        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "" => Ok(default),
-            "true" => Ok(true),
-            "false" => Ok(false),
-            other => Err(format!("{name} must be 'true' or 'false' (got '{other}')")),
-        },
+/// Parse `ADMIN_DIDS`: comma-separated, surrounding space trimmed, empty
+/// entries (a trailing or doubled comma) dropped. A did:scid admin is listed
+/// by its DID; a `?src=` locator says where to fetch it, not who it is
+/// (VTI-KEY-160).
+pub fn parse_admin_dids(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(|e| strip_scid_src(e).into_owned())
+        .collect()
+}
+
+/// Parse `AUDIT_LOG_FORMAT`: unset or blank is `json`; anything but `json` or
+/// `text` is an error rather than a silent `json`.
+pub fn parse_audit_log_format(raw: Option<&str>) -> Result<AuditLogFormat, String> {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(AuditLogFormat::default()),
+        Some(raw) => raw
+            .parse()
+            .map_err(|_| format!("AUDIT_LOG_FORMAT must be 'json' or 'text' (got '{raw}')")),
     }
+}
+
+/// Parse `DID_DOCUMENT`'s loaded content, which must be a JSON document.
+fn check_did_document(content: &str) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(content)
+        .map(|_| ())
+        .map_err(|e| format!("DID_DOCUMENT is not a JSON document: {e}"))
 }
 
 /// Parse `ACL_MODE`: `ExplicitDeny` (public: anyone may send to the registry
@@ -306,21 +450,13 @@ impl Configs for DidcommConfig {
         }
         let acl_mode = parse_acl_mode(optional_env("ACL_MODE").as_deref())?;
 
-        let admin_dids_str = optional_env("ADMIN_DIDS").unwrap_or_else(|| {
-            warn!("Missing environment variable: ADMIN_DIDS. The admin list is empty");
-            String::new()
-        });
-        // A did:scid admin is listed by its DID; a `?src=` locator says where
-        // to fetch it, not who it is (VTI-KEY-160).
-        let admin_dids: Vec<String> = admin_dids_str
-            .split(',')
-            .map(|e| strip_scid_src(e.trim()).into_owned())
-            .collect();
+        let admin_dids = parse_admin_dids(optional_env("ADMIN_DIDS").as_deref());
+        if admin_dids.is_empty() {
+            warn!("ADMIN_DIDS is unset or empty: no DID may send record-mutating Trust Tasks");
+        }
         check_admin_dids_not_published(&admin_dids)?;
 
-        let log_format = env_or("AUDIT_LOG_FORMAT", "json")
-            .parse::<AuditLogFormat>()
-            .unwrap_or(AuditLogFormat::Json);
+        let log_format = parse_audit_log_format(optional_env("AUDIT_LOG_FORMAT").as_deref())?;
 
         let admin_authorities =
             parse_admin_authorities(optional_env("ADMIN_AUTHORITIES").as_deref(), &admin_dids)?;
@@ -333,20 +469,22 @@ impl Configs for DidcommConfig {
 
         let mediator_did = required_env("MEDIATOR_DID")?;
 
-        // Identity source precedence: a configured VTA (remote key custody) wins,
-        // then a configured secret-store backend (AWS/GCP/Azure/Vault/K8s/keyring),
-        // then the inline PROFILE_CONFIG URI.
-        let profile_configs_str = match load_profile_from_vta().await? {
-            Some(bundle) => bundle,
-            None => match load_profile_from_secret_store().await? {
-                Some(bundle) => bundle,
-                None => {
-                    let profile_configs_uri = required_env("PROFILE_CONFIG")?;
-                    load(&profile_configs_uri).await?
-                }
-            },
-        };
-        let profile_config = parse_profile_from_secrets_str(&profile_configs_str)?;
+        #[cfg(feature = "secrets")]
+        let secret_store = SecretStoreSettings::from_env()?;
+        #[cfg(feature = "vta")]
+        let vta = super::vta::VtaConfig::from_env()
+            .await?
+            .map(std::sync::Arc::new);
+
+        let (profile_configs_str, profile_source) = load_profile_bundle(
+            #[cfg(feature = "vta")]
+            vta.as_deref(),
+            #[cfg(feature = "secrets")]
+            &secret_store,
+        )
+        .await?;
+        let profile_config = parse_profile_from_secrets_str(&profile_configs_str)
+            .map_err(|e| format!("{profile_source} is not a valid profile bundle: {e}"))?;
 
         // Externally reachable base URL for the REST/TRQP surface. Absent =>
         // no `TRQPRest` service entry, so the registry never advertises a
@@ -366,8 +504,10 @@ impl Configs for DidcommConfig {
             );
         }
 
-        let did_document = if let Some(doc) = optional_env("DID_DOCUMENT") {
-            load(&doc).await?
+        let did_document = if let Some(doc) = non_empty_env("DID_DOCUMENT") {
+            let content = load_setting("DID_DOCUMENT", &doc).await?;
+            check_did_document(&content)?;
+            content
         } else {
             build_did_document(
                 &profile_config,
@@ -377,15 +517,7 @@ impl Configs for DidcommConfig {
             )
         };
 
-        let retry_config = DidDocumentRetryConfig {
-            max_attempts: env_or("DID_CHECK_MAX_ATTEMPTS", "10").parse().unwrap_or(10),
-            initial_delay_secs: env_or("DID_CHECK_INITIAL_DELAY_SECS", "2")
-                .parse()
-                .unwrap_or(2),
-            max_delay_secs: env_or("DID_CHECK_MAX_DELAY_SECS", "20")
-                .parse()
-                .unwrap_or(20),
-        };
+        let retry_config = DidDocumentRetryConfig::from_env()?;
 
         Ok(DidcommConfig {
             is_enabled: true,
@@ -396,6 +528,13 @@ impl Configs for DidcommConfig {
             did_document,
             admin_config,
             retry_config,
+            messaging_store_path: messaging_store_path_from_env(),
+            // A malformed bound stops startup rather than running unbounded.
+            #[cfg(feature = "tsp")]
+            relationship_limits:
+                crate::messaging::relationship_store::RelationshipLimits::from_env()?,
+            #[cfg(feature = "vta")]
+            vta,
         })
     }
 }
@@ -530,6 +669,148 @@ mod acl_mode_tests {
             let err = parse_acl_mode(Some(raw)).expect_err(raw);
             assert!(err.contains("ACL_MODE"), "{err}");
             assert!(err.contains(raw), "{err}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod strictness_tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    fn admin_dids_drop_empty_entries() {
+        assert!(parse_admin_dids(None).is_empty());
+        assert!(parse_admin_dids(Some("")).is_empty());
+        assert!(parse_admin_dids(Some(" , ,")).is_empty());
+        assert_eq!(
+            parse_admin_dids(Some("did:example:a,,did:example:b, ")),
+            vec!["did:example:a", "did:example:b"]
+        );
+    }
+
+    /// A typo used to select `json` silently.
+    #[test]
+    fn audit_log_format_rejects_unknown_values() {
+        assert_eq!(parse_audit_log_format(None), Ok(AuditLogFormat::Json));
+        assert_eq!(parse_audit_log_format(Some(" ")), Ok(AuditLogFormat::Json));
+        assert_eq!(
+            parse_audit_log_format(Some("TEXT")),
+            Ok(AuditLogFormat::Text)
+        );
+        let err = parse_audit_log_format(Some("txt")).unwrap_err();
+        assert!(err.contains("AUDIT_LOG_FORMAT"), "{err}");
+        assert!(err.contains("txt"), "{err}");
+    }
+
+    #[test]
+    fn did_document_must_be_json() {
+        assert!(check_did_document(r#"{"id":"did:example:1"}"#).is_ok());
+        let err = check_did_document("aws_secret://tr/doc").unwrap_err();
+        assert!(err.contains("DID_DOCUMENT"), "{err}");
+    }
+
+    const RETRY_VARS: [&str; 3] = [
+        "DID_CHECK_MAX_ATTEMPTS",
+        "DID_CHECK_INITIAL_DELAY_SECS",
+        "DID_CHECK_MAX_DELAY_SECS",
+    ];
+
+    fn clear_retry_env() {
+        for k in RETRY_VARS {
+            unsafe { std::env::remove_var(k) };
+        }
+    }
+
+    /// The environment defaults and `Default` used to disagree (20 and 30).
+    #[test]
+    #[serial]
+    fn retry_defaults_agree() {
+        clear_retry_env();
+        let loaded = DidDocumentRetryConfig::from_env().expect("defaults");
+        let default = DidDocumentRetryConfig::default();
+        assert_eq!(loaded.max_attempts, default.max_attempts);
+        assert_eq!(loaded.initial_delay_secs, default.initial_delay_secs);
+        assert_eq!(loaded.max_delay_secs, default.max_delay_secs);
+    }
+
+    /// Bad values used to fall back to the defaults without a word.
+    #[test]
+    #[serial]
+    fn bad_retry_values_name_the_variable() {
+        for name in RETRY_VARS {
+            for raw in ["0", "ten", "-3"] {
+                clear_retry_env();
+                unsafe { std::env::set_var(name, raw) };
+                let err = DidDocumentRetryConfig::from_env().expect_err(raw);
+                assert!(err.contains(name), "{name}={raw}: {err}");
+            }
+        }
+        clear_retry_env();
+        unsafe {
+            std::env::set_var("DID_CHECK_INITIAL_DELAY_SECS", "40");
+            std::env::set_var("DID_CHECK_MAX_DELAY_SECS", "10");
+        }
+        let err = DidDocumentRetryConfig::from_env().expect_err("inverted");
+        assert!(err.contains("DID_CHECK_MAX_DELAY_SECS"), "{err}");
+        clear_retry_env();
+    }
+
+    #[test]
+    #[serial]
+    fn messaging_store_path_follows_its_variable_then_the_data_dir() {
+        unsafe {
+            std::env::remove_var("TR_MESSAGING_STORE_PATH");
+            std::env::remove_var("TR_SECRETS_DATA_DIR");
+        }
+        assert_eq!(messaging_store_path_from_env(), None);
+        assert_eq!(
+            DidcommConfig::default().messaging_store_path(),
+            std::path::PathBuf::from(DEFAULT_MESSAGING_STORE_PATH)
+        );
+        unsafe { std::env::set_var("TR_SECRETS_DATA_DIR", "/srv/tr") };
+        assert_eq!(
+            messaging_store_path_from_env(),
+            Some(std::path::PathBuf::from("/srv/tr/messaging"))
+        );
+        unsafe { std::env::set_var("TR_MESSAGING_STORE_PATH", "/srv/msg") };
+        assert_eq!(
+            messaging_store_path_from_env(),
+            Some(std::path::PathBuf::from("/srv/msg"))
+        );
+        unsafe {
+            std::env::remove_var("TR_MESSAGING_STORE_PATH");
+            std::env::remove_var("TR_SECRETS_DATA_DIR");
+        }
+    }
+
+    /// A profile that does not parse, or whose loader scheme is mistyped,
+    /// names the setting it came from.
+    #[tokio::test]
+    #[serial]
+    async fn an_unparseable_profile_config_is_named() {
+        for (k, v) in [
+            ("ENABLE_DIDCOMM", "true"),
+            ("MEDIATOR_DID", "did:example:mediator"),
+            ("PROFILE_CONFIG", "string://{not json"),
+        ] {
+            unsafe { std::env::set_var(k, v) };
+        }
+        for k in ["TR_VTA_CREDENTIAL", "ADMIN_DIDS", "ADMIN_AUTHORITIES"] {
+            unsafe { std::env::remove_var(k) };
+        }
+        let err = DidcommConfig::load().await.expect_err("bad profile");
+        assert!(err.to_string().contains("PROFILE_CONFIG"), "{err}");
+
+        unsafe { std::env::set_var("PROFILE_CONFIG", "aws_secret://tr/profile") };
+        let err = DidcommConfig::load().await.expect_err("bad scheme");
+        assert!(
+            err.to_string()
+                .starts_with("PROFILE_CONFIG: unsupported loader scheme"),
+            "{err}"
+        );
+        for k in ["ENABLE_DIDCOMM", "MEDIATOR_DID", "PROFILE_CONFIG"] {
+            unsafe { std::env::remove_var(k) };
         }
     }
 }

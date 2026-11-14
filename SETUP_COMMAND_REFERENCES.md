@@ -23,7 +23,6 @@ This document provides a comprehensive reference for the `setup-trust-registry` 
   - [5. Setup with Redis Storage](#5-setup-with-redis-storage)
   - [6. Setup with Custom Admin DIDs](#6-setup-with-custom-admin-dids)
   - [7. Setup with did:web Method](#7-setup-with-didweb-method)
-  - [8. Setup with Existing Profile](#8-setup-with-existing-profile)
 - [Environment Variables Configured](#environment-variables-configured)
 - [Test Environment Files](#test-environment-files)
 - [Additional Resources](#additional-resources)
@@ -55,25 +54,29 @@ Mediator DID to connect the Trust Registry.
 
 #### `--did-method`, `-m`
 
-DID method to use for Trust Registry. When specified, generates a new DID using the selected method.
+DID method to use for the Trust Registry's new DID. `scid` writes a did:webvh log and presents its `did:scid:vh:1` DID, which the same log verifies but which does not change if the log moves.
 
-**Expected Values:** `peer` | `web` | `webvh`  
+**Expected Values:** `peer` | `web` | `webvh` | `scid`  
 **Default:** `peer`
 
 #### `--didweb-url`, `-w`
 
-URL to host the DID document for `did:web` or `did:webvh` methods.
+URL to host the DID document for the `did:web`, `did:webvh` and `did:scid` methods.
 
 **Expected Value:** `https://example.com`  
-**Required when:** `--did-method` is `web` or `webvh`
+**Required when:** `--did-method` is `web`, `webvh` or `scid`
+
+#### `--no-scid-alias`
+
+Do not list the `did:scid:vh:1` form of a new did:webvh in its `alsoKnownAs`. It is listed by default, so peers can recognise the Trust Registry under either form. Not allowed with `--did-method scid`, whose identity is that form.
+
+**Default:** `false`
 
 ### Profile Configuration
 
 #### `--profile`, `-p`
 
-Profile configuration location using URI schemes. This option serves dual purposes:
-- When `--did-method` is used: Specifies where to save the generated profile
-- When `--did-method` is not used: Specifies where to load an existing profile
+Where the generated profile is to be kept, as a loader URI. (`--did-method` defaults to `peer`, so the command always generates a DID unless `--tr-did` is given; it does not load an existing profile from this location.)
 
 **Expected Values:**
 - Direct value: `'{"alias":"Trust Registry","did":"did:peer:2.VzDna...","secrets":[...]}'`
@@ -94,7 +97,7 @@ When a secret-store backend is configured (`TR_SECRETS_*`), the profile is writt
 
 Storage backend for trust records.
 
-**Expected Values:** `csv` | `ddb` | `redis`  
+**Expected Values:** `csv` | `ddb` | `redis` (the server also accepts `dynamodb` for `ddb`, and `fjall`)  
 **Default:** `csv`
 
 #### `--file-storage-path`, `-f`
@@ -176,6 +179,12 @@ ACL (Access Control List) mode for the Trust Registry when DIDComm is enabled. T
 **Default:** `ExplicitDeny`
 
 **Note:** This setting is only relevant when `--mediator-did` is specified (DIDComm enabled).
+
+#### `--non-interactive`
+
+Run without interactive prompts (CI, container provisioning). Skips the "press any key after hosting the DID document" pause for `did:web`, `did:webvh` and `did:scid`.
+
+**Default:** `false`
 
 ## Common Usage Examples
 
@@ -269,32 +278,25 @@ cargo run --bin setup-trust-registry --features="dev-tools" -- \
   --mediator-did=did:web:mediator.goodcompany.com
 ```
 
-### 8. Setup with Existing Profile
-
-Load an existing profile configuration from a file:
-
-```bash
-cargo run --bin setup-trust-registry --features="dev-tools" -- \
-  --profile='file:///path/to/profile.json' \
-  --mediator-did=did:web:mediator.goodcompany.com
-```
-
 ## Environment Variables Configured
 
-The setup command generates a `.env` file with the following variables:
+The setup command writes the following variables to `.env` (starting from `.env.example` when there is no `.env` yet). Every variable the server reads, with its default, is listed in the README's [Environment Variables](./README.md#environment-variables) section.
 
-| Variable | Description |
-|----------|-------------|
-| `TR_STORAGE_BACKEND` | Storage backend type (csv, ddb, redis). |
-| `FILE_STORAGE_PATH` | Path to CSV file (when using csv backend). |
-| `DDB_TABLE_NAME` | DynamoDB table name (when using ddb backend). |
-| `REDIS_URL`  | Redis connection URL when using Redis as the storage backend. Format: `redis://host:port` or `redis://username:password@host:port/db`. |
-| `AUDIT_LOG_FORMAT` | Audit log output format. |
-| `MEDIATOR_DID` | DIDComm mediator DID when DIDComm enabled. |
-| `ADMIN_DIDS` | Authorized admin DIDs when DIDComm enabled. |
-| `ADMIN_AUTHORITIES` | Optional JSON object: admin DID → extra authority DIDs it may write records under (default: its own DID only). |
-| `PROFILE_CONFIG` | Trust Registry profile configuration when DIDComm enabled. |
-| `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enabled. ExplicitDeny - public mode, ExplicitAllow - private mode (`--acl-mode` accepts only these two values). |
+| Variable | Written | Description |
+|----------|---------|-------------|
+| `ENABLE_DIDCOMM` | always | `true` when `--mediator-did` is given, else `false`. |
+| `TR_STORAGE_BACKEND` | always | `--storage-backend`: `csv`, `ddb` or `redis`. |
+| `FILE_STORAGE_PATH` | `csv` | `--file-storage-path`. |
+| `DDB_TABLE_NAME` | `ddb` | `--ddb-table-name`. |
+| `REDIS_URL` | `redis` | `--redis-url`. Format: `redis://host:port` or `redis://username:password@host:port/db`. |
+| `AUDIT_LOG_FORMAT` | always | `--audit-log-format`: `json` or `text`. |
+| `ACL_MODE` | always | `--acl-mode`: `ExplicitDeny` (public) or `ExplicitAllow` (private). |
+| `MEDIATOR_DID` | always | `--mediator-did` (empty without it). |
+| `ADMIN_DIDS` | always | `--admin-dids`. |
+| `ADMIN_AUTHORITIES` | `--operator-dids` | JSON object: admin DID → extra authority DIDs it may write records under (default: its own DID only). |
+| `PROFILE_CONFIG` | unless a secret store is configured | The registry's DID and keys. With a `TR_SECRETS_*` backend selected the profile is written there instead and `PROFILE_CONFIG` is left out. `TR_SECRETS_SEED` is read-only, so selecting it stops the command. |
+
+The command itself reads `TR_PUBLIC_URL`, `ENABLE_REST`, `ENABLE_DIDCOMM` and `ENABLE_TSP` (to build the DID document it generates, as the server would) and the `TR_SECRETS_*` variables (to choose the secret store it provisions).
 
 ## Test Environment Files
 

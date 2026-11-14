@@ -53,6 +53,7 @@ TRQP (REST or DIDComm) is unsigned and read-only, matching the ToIP spec verbati
   - [Trust Task protocol surface](#trust-task-protocol-surface)
   - [Identity from a VTA (`vta`)](#identity-from-a-vta-vta)
   - [Secret-store backends (`secrets-*`)](#secret-store-backends-secrets-)
+  - [DynamoDB storage (`storage-ddb`)](#dynamodb-storage-storage-ddb)
   - [Embedded fjall storage (`storage-fjall`)](#embedded-fjall-storage-storage-fjall)
 - [Environment Variables](#environment-variables)
   - [Profile Config Options](#profile-config-options)
@@ -661,7 +662,7 @@ above.
 | `secrets-config` |   ✅    | Inline / plaintext-file secret store for the profile bundle. Pulls `vti-secrets`; with no `secrets-*` feature the registry has no secret store at all. |
 | `standalone`     |   ✅    | `server::start()` — the process-owning entrypoint (`.env`, global tracing, `process::exit`). Required by the `trust-registry` binary; an embedded registry does not need it. |
 | `storage-csv`    |   ✅    | CSV file storage backend (`TR_STORAGE_BACKEND=csv`, the standalone default).                                                  |
-| `storage-ddb`    |   ✅    | DynamoDB storage backend (`TR_STORAGE_BACKEND=dynamodb`).                                                                     |
+| `storage-ddb`    |   ✅    | DynamoDB storage backend (`TR_STORAGE_BACKEND=dynamodb`, or `ddb`).                                                           |
 | `storage-redis`  |   ✅    | Redis storage backend (`TR_STORAGE_BACKEND=redis`).                                                                           |
 | `loaders-aws`    |   ✅    | `aws_secrets://` and `aws_parameter_store://` config-loader URI schemes.                                                      |
 | `tsp`            |         | [TSP](https://trustoverip.github.io/tswg-tsp-specification/) transport binding for the `registry/*` Trust Tasks.              |
@@ -844,6 +845,15 @@ custody) instead of loading a local `PROFILE_CONFIG`. The bundle is cached throu
 the configured [secret-store backend](#secret-store-backends-secrets-) so the
 service can still boot while the VTA is briefly unreachable.
 
+The cache has a slot of its own, apart from any profile bundle in the same
+store: the configured secret name (AWS, GCP, Azure, Kubernetes), Vault path or
+keyring service with `-vta-cache` appended, or `<TR_SECRETS_DATA_DIR>/vta-cache/`
+for the plaintext file. A `--features vta` build has no keyring, so **an offline
+cache needs a configured backend** — or, for development only,
+`TR_SECRETS_ALLOW_PLAINTEXT=true`. Without one, startup logs a warning naming
+these variables, and the registry cannot start while the VTA is unreachable.
+`TR_SECRETS_SEED` is read-only and cannot hold the cache.
+
 The registry's DID is a VTA-managed `did:webvh`; its keys can be rotated in place
 via the `registry/did/rotate` admin Trust Task (admin-DID + proof gated, by an
 admin that `ADMIN_AUTHORITIES` lists for the registry's own DID).
@@ -870,23 +880,33 @@ mediator-setup and did-hosting tooling, and every backend is configured through
 the same shared `vti-secrets` crate the VTA uses — so the config field names line
 up one-to-one with the VTA's `[secrets]` table.
 
-**Backend selection** follows the `vti-secrets` priority factory: the first backend
-whose feature is compiled in *and* whose activating variable is set wins, in this
-order — AWS → GCP → Azure → Vault → Kubernetes `Secret` → config-seed → keyring →
-plaintext file. Setting a backend's activating variable (below, in **bold**) is
-what turns it on.
+**Backend selection.** `TR_SECRETS_BACKEND` names the backend outright:
+`aws`, `gcp`, `azure`, `vault`, `kubernetes`, `config_seed`, `keyring` or
+`plaintext` (any other value stops startup). Without it, the backend is the one
+whose activating variable (below, in **bold**) is set; setting the activating
+variables of more than one backend stops startup and asks you to name one with
+`TR_SECRETS_BACKEND`. With none set, no secret store is used and the identity
+comes from `PROFILE_CONFIG` (or a VTA). The selected backend is logged at
+startup, and a backend selected on a binary built without its `secrets-*`
+feature stops startup rather than falling through to another store.
 
-The seed / bundle is stored identically (hex-encoded) across every backend, so you
-can migrate by copying the value between two vendor CLIs and swapping the
-`TR_SECRETS_*` variables.
+A half-configured backend stops startup with the missing variable's name: Azure
+needs both `TR_SECRETS_AZURE_VAULT_URL` and `TR_SECRETS_AZURE_SECRET_NAME`,
+Vault both an address and `TR_SECRETS_VAULT_SECRET_PATH`, GCP both
+`TR_SECRETS_GCP_PROJECT` and `TR_SECRETS_GCP_SECRET_NAME`.
+
+The bundle is stored identically across every backend, so you can migrate by
+copying the value between two vendor CLIs and swapping the `TR_SECRETS_*`
+variables.
 
 #### Config-seed / plaintext file (`secrets-config`, default)
 
 | Variable                     | Description                                                                                   |
 | ---------------------------- | --------------------------------------------------------------------------------------------- |
-| **`TR_SECRETS_SEED`**        | Hex-encoded seed read straight from the environment (config-seed). Its presence activates it. |
-| `TR_SECRETS_ALLOW_PLAINTEXT` | Set `true` to permit the plaintext-file fallback (`<data_dir>/seed.hex`). **Dev/test only.**  |
-| `TR_SECRETS_DATA_DIR`        | On-disk directory for file-backed backends. Default `./.trust-registry`.                      |
+| **`TR_SECRETS_SEED`**        | The profile bundle JSON (`{"alias","did","secrets"}`), **hex-encoded**, read straight from the environment. Read-only: `setup-trust-registry` cannot provision into it, and it cannot hold the VTA offline cache. Activates the config-seed backend. |
+| `TR_SECRETS_BACKEND`         | Names the backend explicitly (see above). `plaintext` is only reachable this way, or as the fallback on a build without `secrets-keyring`. |
+| `TR_SECRETS_ALLOW_PLAINTEXT` | `true` to permit the plaintext-file backend (`<data dir>/seed.plaintext`, the bundle hex-encoded). `true` or `false`. **Dev/test only.** Default `false`. |
+| `TR_SECRETS_DATA_DIR`        | On-disk directory for the file-backed backends, and the default parent of the TSP messaging store. Default `./.trust-registry`. |
 
 #### AWS Secrets Manager (`secrets-aws`)
 
@@ -923,8 +943,8 @@ same Vault env carries across services.
 
 | Variable                            | Description                                                                                          |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| **`TR_SECRETS_VAULT_ADDR`** (or `VAULT_ADDR`) | Vault server URL. Activates the backend.                                                   |
-| `TR_SECRETS_VAULT_SECRET_PATH`      | KV v2 path under the mount, e.g. `tr/master-seed`. **Required** once `..._ADDR` is set.              |
+| `TR_SECRETS_VAULT_ADDR` (or `VAULT_ADDR`) | Vault server URL. **Required** with the secret path.                                         |
+| **`TR_SECRETS_VAULT_SECRET_PATH`** | KV v2 path under the mount, e.g. `tr/master-seed`. Activates the backend; requires the address. |
 | `TR_SECRETS_VAULT_KV_MOUNT`         | KV v2 mount. Default `secret`. (No `/data/` segment — vaultrs injects it.)                           |
 | `TR_SECRETS_VAULT_SECRET_KEY`       | Field within the secret holding the hex seed. Default `seed`.                                        |
 | `TR_SECRETS_VAULT_NAMESPACE` (or `VAULT_NAMESPACE`) | Vault Enterprise namespace, if any.                                                   |
@@ -936,7 +956,7 @@ same Vault env carries across services.
 | `TR_SECRETS_VAULT_APPROLE_ROLE_ID`  | AppRole `role_id` for the `approle` method.                                                          |
 | `TR_SECRETS_VAULT_APPROLE_SECRET_ID`| AppRole `secret_id` for the `approle` method.                                                        |
 | `TR_SECRETS_VAULT_APPROLE_MOUNT`    | AppRole mount. Default `approle`.                                                                    |
-| `TR_SECRETS_VAULT_SKIP_VERIFY` (or `VAULT_SKIP_VERIFY`) | Disable TLS verification. **Dev/test only.**                                     |
+| `TR_SECRETS_VAULT_SKIP_VERIFY` (or `VAULT_SKIP_VERIFY`) | Disable TLS verification (`true`/`false`, `1`/`0`, `yes`/`no`). **Dev/test only.** |
 
 Minimal in-cluster (Kubernetes auth) env — this is the common case, and the two that
 were previously impossible to set from the environment are the auth method and role:
@@ -976,6 +996,29 @@ use Vault / a cloud manager) before treating this as production-grade.
 
 Interactive on macOS (Keychain unlock prompt) — use a different backend for headless / CI.
 
+### DynamoDB storage (`storage-ddb`)
+
+With `TR_STORAGE_BACKEND=dynamodb` (or `ddb`) trust records are kept in the
+DynamoDB table `DDB_TABLE_NAME`. The registry does not create the table. It
+needs a string partition key `PK` and a string sort key `SK`: every record has
+`PK = "TR"` and `SK = "TR#<authority_id>#<action>#<resource>#<entity_id>"` (a `%` or `#`
+inside an identifier is written `%25` or `%23`), so the whole registry lives
+in one partition. Create it with, for example:
+
+```bash
+aws dynamodb create-table \
+  --table-name trust-registry-records \
+  --attribute-definitions AttributeName=PK,AttributeType=S AttributeName=SK,AttributeType=S \
+  --key-schema AttributeName=PK,KeyType=HASH AttributeName=SK,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST
+```
+
+Credentials and region come from the AWS SDK's default chain (environment,
+`AWS_PROFILE`, instance or task role); set `AWS_REGION` to pin the region. For
+DynamoDB Local or LocalStack, set `DYNAMODB_ENDPOINT` and, if you have no real
+credentials, `DDB_USE_TEST_CREDENTIALS=true`. The variables are listed under
+[Trust record storage](#trust-record-storage).
+
 ### Embedded fjall storage (`storage-fjall`)
 
 With `--features storage-fjall` and `TR_STORAGE_BACKEND=fjall`, trust records are
@@ -984,20 +1027,31 @@ single-node, on-disk option that needs no external database.
 
 | Variable         | Description                                                | Required                                       |
 | ---------------- | ---------------------------------------------------------- | ---------------------------------------------- |
-| `TR_FJALL_PATH`  | Directory for the embedded fjall keyspace.                 | Required when `TR_STORAGE_BACKEND` = `fjall`   |
+| `TR_FJALL_PATH`  | Directory for the embedded fjall keyspace.                 | default: `./trust_records.fjall`               |
 
 ## Environment Variables
 
-See the list of environment variables and their usage.
+Every variable the `trust-registry` server reads is listed here, grouped by
+what it configures. A value that does not parse — an unknown backend name, a
+non-numeric or zero interval, a boolean other than `true`/`false`, a loader URI
+with an unknown scheme — stops startup with an error naming the variable; it
+is never replaced by a default. An unset or empty variable takes its default.
 
-| Variable Name           | Description                                                                                                                                                                               | Required                                     |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| `LISTEN_ADDRESS`        | Socket address the REST/TRQP HTTP server (and `/health`) binds to. Ignored when `ENABLE_REST=false`.                                                                                      | default: `0.0.0.0:3232`                      |
-| `TR_STORAGE_BACKEND`    | Storage backend for trust records. Options: `csv`, `ddb`, `redis`, and `fjall` (with the `storage-fjall` feature).                                                                        | Yes                                          |
-| `FILE_STORAGE_PATH`     | Path to the CSV file when using CSV as the storage backend.                                                                                                                               | Required when `TR_STORAGE_BACKEND` = `csv`   |
-| `DDB_TABLE_NAME`        | DynamoDB table name for storing trust records when using DDB as the storage backend.                                                                                                      | Required when `TR_STORAGE_BACKEND` = `ddb`   |
-| `REDIS_URL`             | Redis connection URL when using Redis as the storage backend. Format: `redis://host:port` or `redis://username:password@host:port/db`.                                                    | Required when `TR_STORAGE_BACKEND` = `redis` |
-| `CORS_ALLOWED_ORIGINS`  | Origins allowed to call the HTTP API from a browser: a comma-separated list of origins exactly as browsers send them (`https://app.example.com`, `http://localhost:3000`; no path or trailing `/`), or `*` for any origin. Unset or empty: no cross-origin access (same-origin only). An entry that is not an origin stops startup. With a list, `GET`, `POST` and `OPTIONS` and the `content-type` header are allowed. | Optional (default: none) |
+The standalone binary also loads a `.env` file from the working directory
+(values already in the environment win). A host [embedding the
+registry](#embedding-the-trust-registry) builds `TrustRegistryConfig` itself and
+none of these variables reach it.
+
+`RUST_LOG` sets the diagnostic log filter (`tracing_subscriber`'s
+`EnvFilter`); audit entries are written whatever it says.
+
+#### HTTP server
+
+| Variable | Description | Required / default |
+| -------- | ----------- | ------------------ |
+| `LISTEN_ADDRESS` | Socket address the REST/TRQP HTTP server (and `/health`) binds to. Ignored when `ENABLE_REST=false`. | default: `0.0.0.0:3232` |
+| `CORS_ALLOWED_ORIGINS` | Origins allowed to call the HTTP API from a browser: a comma-separated list of origins exactly as browsers send them (`https://app.example.com`, `http://localhost:3000`; no path or trailing `/`), or `*` for any origin. Unset or empty: no cross-origin access (same-origin only). An entry that is not an origin stops startup. With a list, `GET`, `POST` and `OPTIONS` and the `content-type` header are allowed. | default: none (same-origin only) |
+| `TR_CAPABILITY_STATE` | File capability enablement state is persisted in. Relative paths are relative to the working directory. | default: `./.trust-registry/capabilities.json` |
 | `TR_HTTP_REQUEST_TIMEOUT_SECS` | The longest an HTTP request body may take to arrive (else `408`), and then the longest its answer may take (else `503` with `Retry-After`). | default: `10` |
 | `TR_HTTP_HEADER_TIMEOUT_SECS` | A request's headers must be complete within this long of the connection opening, or of the next request's first byte on a kept-alive connection; the deadline does not move as bytes arrive. | default: `15` |
 | `TR_HTTP_MAX_CONNECTION_AGE_SECS` | Past this age an HTTP connection is closed while it waits for a request; a request already being answered may finish, up to twice the request timeout later. Must be longer than the request timeout. | default: `300` |
@@ -1005,19 +1059,60 @@ See the list of environment variables and their usage.
 | `TR_HTTP_MAX_BODY_BYTES` | The largest HTTP request body accepted; a larger one is answered `413` (a problem document on the TRQP routes, `{"code": "malformedRequest", …}` on `/trust-tasks`). Also applied by `TrustRegistry::router()`. | default: `65536` |
 | `TR_HTTP_MAX_CONCURRENT_REQUESTS` | The most HTTP requests answered at once; beyond it a request is answered `503` with `Retry-After` at once. A request's body is read before it takes a slot, and `/health` does not use one. | default: `256` |
 | `TR_HTTP_MAX_CONNECTIONS` | The most HTTP connections held open; beyond it new connections wait until one closes. | default: `1024` |
-| `AUDIT_LOG_FORMAT`      | Output format for audit logs. Options: `json` (default), `text` (`audit.<key>="<escaped value>"` pairs).                                                                                  | default: `json`                              |
-| `MEDIATOR_DID`          | Decentralised Identifier (DID) of the DIDComm mediator used as a transport layer for managing trust records.                                                                              | Required when DIDComm is enabled             |
-| `ADMIN_DIDS`            | Comma-separated list of DIDs authorised to manage trust records in the Trust Registry.                                                                                                    | Required when DIDComm is enabled             |
-| `ADMIN_AUTHORITIES`     | JSON object mapping an admin DID to the authority DIDs it may write records under **in addition to its own DID**, e.g. `{"did:web:ops.example": ["did:web:a.example", "did:web:b.example"]}`. Every key must be in `ADMIN_DIDS`; a malformed value stops startup. Unset ⇒ each admin writes only under its own DID. List the registry's own DID for an admin to let it rotate the registry's DID and enable or disable capabilities that have no authority. | No                                           |
-| `PROFILE_CONFIG`        | Trust Registry DID and DID secrets for DIDComm communication. See [Profile Config Options](#profile-config-options) for configuration formats. **_Sensitive information, do not share._** | Required when DIDComm is enabled             |
-| `ACL_MODE` | ACL Mode for Trust Registry when DIDComm is enabled. ExplicitDeny - public mode, ExplicitAllow - private mode. Matched case-insensitively; any other value stops startup. | default: `ExplicitDeny` |
-| `TR_PUBLIC_URL`         | Externally reachable base URL of the REST/TRQP surface (e.g. `https://registry.example.org`). When set, the generated DID document advertises a `TRQPRest` service entry so peers can discover the REST endpoint by resolving the registry's DID. Must be `https://` (loopback `http://` allowed for local dev). Unset ⇒ REST is still served, but not advertised. | No                                           |
-| `ENABLE_REST`           | Serve TRQP over REST and advertise `TRQPRest` (needs `TR_PUBLIC_URL` to be advertised).                                                                                                    | default: `true`                              |
-| `ENABLE_DIDCOMM`        | Run the DIDComm listener and advertise `DIDCommMessaging`.                                                                                                                                | default: `true`                              |
-| `ENABLE_TSP`            | Route multiplexed TSP frames and advertise `TSPTransport`. Requires `ENABLE_DIDCOMM=true` and a binary built with `--features tsp`.                                                        | default: `false`                             |
-| `TR_TSP_MAX_RELATIONSHIPS` | The most TSP relationships with non-admin peers the registry keeps. When the store is full, a new peer may only displace a relationship that never completed, or one idle for a quarter of `TR_TSP_RELATIONSHIP_IDLE_SECS` (at least an hour); otherwise it is refused. `/health` reports `"tspRelationships": "full"` (status `degraded`) while the store is at its limit. Relationships with `ADMIN_DIDS` are not counted and never displaced. A value that is not a positive whole number stops the listener. | default: `10000`                             |
-| `TR_TSP_MAX_NEW_RELATIONSHIPS_PER_MINUTE` | The most TSP relationships with new non-admin peers recorded per minute; beyond it an invite is not recorded. | default: `60`                                |
-| `TR_TSP_RELATIONSHIP_IDLE_SECS` | How long a TSP relationship with no activity (no accepted invite, no application message) is kept before it is evicted. At least `60`. | default: `604800` (7 days)                   |
+
+#### Trust record storage
+
+| Variable | Description | Required / default |
+| -------- | ----------- | ------------------ |
+| `TR_STORAGE_BACKEND` | Storage backend for trust records: `csv`, `dynamodb` (or `ddb`), `redis`, or `fjall` (with the `storage-fjall` feature). Matched case-insensitively. Any other value stops startup; it never falls back to CSV. The selected backend and its location are logged at startup. | default: `csv` |
+| `FILE_STORAGE_PATH` | CSV file the `csv` backend reads. | default: `trust_records.csv` (relative to the working directory) |
+| `FILE_STORAGE_UPDATE_INTERVAL_SEC` | How often, in seconds, the `csv` backend checks the file for changes and reloads it. A positive whole number. | default: `60` |
+| `DDB_TABLE_NAME` | DynamoDB table (see [DynamoDB storage](#dynamodb-storage-storage-ddb) for its schema). | **Required** when `TR_STORAGE_BACKEND=dynamodb` |
+| `AWS_REGION` | Region of the DynamoDB table. Unset: the AWS SDK resolves it (`AWS_DEFAULT_REGION`, the selected profile, instance metadata). | default: SDK resolution |
+| `AWS_PROFILE` | Named AWS profile the DynamoDB client loads credentials and region from. | default: SDK default chain |
+| `DYNAMODB_ENDPOINT` | DynamoDB endpoint URL, for DynamoDB Local, LocalStack or a VPC endpoint. `AWS_ENDPOINT` is the deprecated spelling (still read, with a warning); both set to different values stops startup. | default: the AWS endpoint for the region |
+| `DDB_USE_TEST_CREDENTIALS` | `true` to use the SDK's static test credentials, for DynamoDB Local / LocalStack only. Never inferred from the endpoint. | default: `false` |
+| `REDIS_URL` | Redis connection URL. Format: `redis://host:port` or `redis://username:password@host:port/db`. | **Required** when `TR_STORAGE_BACKEND=redis` |
+| `TR_FJALL_PATH` | Directory for the embedded fjall keyspace. | default: `./trust_records.fjall` |
+
+#### DIDComm, TSP and the registry's DID
+
+Read only when `ENABLE_DIDCOMM=true` (the default), except the three
+`ENABLE_*` flags, which are always read.
+
+| Variable | Description | Required / default |
+| -------- | ----------- | ------------------ |
+| `ENABLE_REST` | Serve TRQP over REST and advertise `TRQPRest` (needs `TR_PUBLIC_URL` to be advertised). `true` or `false`. | default: `true` |
+| `ENABLE_DIDCOMM` | Run the DIDComm listener and advertise `DIDCommMessaging`. `true` or `false`. | default: `true` |
+| `ENABLE_TSP` | Route multiplexed TSP frames and advertise `TSPTransport`. Requires `ENABLE_DIDCOMM=true` and a binary built with `--features tsp`. `true` or `false`. | default: `false` |
+| `MEDIATOR_DID` | DID of the DIDComm mediator the registry connects through. | **Required** when DIDComm is enabled |
+| `PROFILE_CONFIG` | The registry's DID and private keys, as a [loader value](#profile-config-options). **_Sensitive information, do not share._** Not read when the identity comes from a VTA (`TR_VTA_CREDENTIAL`) or from a configured secret store that holds a profile bundle. | **Required** when DIDComm is enabled and neither of those supplies the identity |
+| `DID_DOCUMENT` | A [loader value](#profile-config-options) holding a DID document JSON to publish instead of the generated one. Must be JSON. | default: generated from the profile |
+| `TR_PUBLIC_URL` | Externally reachable base URL of the REST/TRQP surface (e.g. `https://registry.example.org`). When set, the generated DID document advertises a `TRQPRest` service entry so peers can discover the REST endpoint by resolving the registry's DID. Must be `https://` (loopback `http://` allowed for local dev). Unset ⇒ REST is still served, but not advertised. | default: unset |
+| `ADMIN_DIDS` | Comma-separated DIDs that may send record-mutating Trust Tasks. Empty entries are ignored. Unset or empty: no admin (a warning is logged). | default: none |
+| `ADMIN_AUTHORITIES` | JSON object mapping an admin DID to the authority DIDs it may write records under **in addition to its own DID**, e.g. `{"did:web:ops.example": ["did:web:a.example", "did:web:b.example"]}`. Every key must be in `ADMIN_DIDS`; a malformed value stops startup. Unset ⇒ each admin writes only under its own DID. List the registry's own DID for an admin to let it rotate the registry's DID and enable or disable capabilities that have no authority. | default: none |
+| `ACL_MODE` | Mediator ACL mode: `ExplicitDeny` (public) or `ExplicitAllow` (private). Matched case-insensitively; any other value stops startup. | default: `ExplicitDeny` |
+| `AUDIT_LOG_FORMAT` | Audit log format: `json` or `text` (`audit.<key>="<escaped value>"` pairs). Any other value stops startup. With DIDComm disabled the format is `json`. | default: `json` |
+| `DID_CHECK_MAX_ATTEMPTS` | For a `did:web` registry, how many times its DID document URL is fetched before the listener starts; if none succeeds the listener does not start. A positive whole number. | default: `10` |
+| `DID_CHECK_INITIAL_DELAY_SECS` | First delay between those checks, doubling each time. A positive whole number. | default: `2` |
+| `DID_CHECK_MAX_DELAY_SECS` | Cap on that delay. A positive whole number, at least `DID_CHECK_INITIAL_DELAY_SECS`. | default: `20` |
+| `TR_MESSAGING_STORE_PATH` | Directory of the TSP messaging store (relationships and outbox, fjall); a subdirectory named after the profile alias is used. | default: `messaging` under `TR_SECRETS_DATA_DIR`, else `./.trust-registry/messaging` |
+| `TR_TSP_MAX_RELATIONSHIPS` | The most TSP relationships with non-admin peers the registry keeps. When the store is full, a new peer may only displace a relationship that never completed, or one idle for a quarter of `TR_TSP_RELATIONSHIP_IDLE_SECS` (at least an hour); otherwise it is refused. `/health` reports `"tspRelationships": "full"` (status `degraded`) while the store is at its limit. Relationships with `ADMIN_DIDS` are not counted and never displaced. A value that is not a positive whole number stops startup. | default: `10000` |
+| `TR_TSP_MAX_NEW_RELATIONSHIPS_PER_MINUTE` | The most TSP relationships with new non-admin peers recorded per minute; beyond it an invite is not recorded. | default: `60` |
+| `TR_TSP_RELATIONSHIP_IDLE_SECS` | How long a TSP relationship with no activity (no accepted invite, no application message) is kept before it is evicted. At least `60`. | default: `604800` (7 days) |
+
+The identity variables of the `vta` feature (`TR_VTA_*`, `TR_ALIAS`) are listed
+under [Identity from a VTA](#identity-from-a-vta-vta), and the secret-store
+variables (`TR_SECRETS_*`, `VAULT_*`) under [Secret-store
+backends](#secret-store-backends-secrets-).
+
+#### Read by the development tools only
+
+| Variable | Read by | Description |
+| -------- | ------- | ----------- |
+| `MEDIATOR_URL`, `MEDIATOR_DID`, `IN_PIPELINE` | `generate-secrets` | Mediator to generate test identities against; `IN_PIPELINE=true` for CI. |
+| `TR_PUBLIC_URL`, `ENABLE_REST`, `ENABLE_DIDCOMM`, `ENABLE_TSP`, `TR_SECRETS_*` | `setup-trust-registry` | As above: the DID document it generates and the secret store it provisions follow the same settings as the server. |
+| `TRUST_REGISTRY_DID`, `CLIENT_DID`, `CLIENT_SECRETS` | integration tests | Written to `.env.test` by `setup-trust-registry`; not read by the server. |
 
 ### Transport selection
 
@@ -1066,7 +1161,7 @@ The `PROFILE_CONFIG` environment variable uses a URI-based loader that supports 
 | ------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | Direct Value        | `PROFILE_CONFIG='<JSON_STRING>'`                          | Store the configuration directly as an inline JSON string in the environment variable. Recommended for local development. |
 | String Protocol     | `PROFILE_CONFIG='string://<JSON_STRING>'`                 | Explicitly specify the value as a string literal. Same functionality as the direct value option.                          |
-| File System         | `PROFILE_CONFIG='file://path/to/config.json'`             | Load configuration from a JSON file on the local filesystem. The path must be accessible by the application.              |
+| File System         | `PROFILE_CONFIG='file:///path/to/config.json'`            | Load configuration from a JSON file on the local filesystem. The path must be accessible by the application.              |
 | AWS Secrets Manager | `PROFILE_CONFIG='aws_secrets://<SECRET_NAME>'`            | Retrieve configuration from AWS Secrets Manager. The secret value must be stored in plaintext format as a JSON string.    |
 | AWS Parameter Store | `PROFILE_CONFIG='aws_parameter_store://<PARAMETER_NAME>'` | Load configuration from AWS Systems Manager Parameter Store. The parameter value must be a JSON string.                   |
 
@@ -1120,7 +1215,11 @@ PROFILE_CONFIG='aws_secrets://prod/trust-registry/profile'
 PROFILE_CONFIG='aws_parameter_store:///trust-registry/profile'
 ```
 
-**Note:** If no URI scheme is specified, the loader parses the value as a direct string literal by default.
+**Note:** A value with no URI scheme (inline JSON) is used as it is. A value
+that starts like a URI (`<scheme>:`) with any scheme other than the four above —
+a typo such as `aws_secret://`, `File:///` or `file:/etc/…` — stops startup with
+an error naming the variable; it is never used as a literal. The same loader,
+and the same rule, apply to `DID_DOCUMENT` and `TR_VTA_CREDENTIAL`.
 
 ## Additional Resources
 

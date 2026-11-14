@@ -212,6 +212,9 @@ pub struct TaskHandler {
     /// Signs every reply, errors included. A handler without one sends its
     /// replies unsigned, which a requester that checks will not accept.
     reply_signer: Option<ReplySigner>,
+    /// The VTA `did/rotate` rotates through, loaded with the configuration.
+    #[cfg(feature = "vta")]
+    vta: Option<Arc<crate::configs::vta::VtaConfig>>,
 }
 
 impl TaskHandler {
@@ -242,7 +245,17 @@ impl TaskHandler {
             capabilities: None,
             audit: None,
             reply_signer: None,
+            #[cfg(feature = "vta")]
+            vta: None,
         }
+    }
+
+    /// Attach the VTA `did/rotate` rotates the registry's keys through.
+    /// Without one, rotation is refused as not configured.
+    #[cfg(feature = "vta")]
+    pub fn with_vta(mut self, vta: Option<Arc<crate::configs::vta::VtaConfig>>) -> Self {
+        self.vta = vta;
+        self
     }
 
     /// Let admins act under authorities other than their own DID.
@@ -854,7 +867,14 @@ impl TaskHandler {
                 .map(u32::try_from)
                 .transpose()
                 .map_err(|_| malformed("the pre-rotation count is out of range".to_string()))?;
-            match crate::configs::vta::rotate_did(&self.my_did, pre_rotation_count, label).await {
+            match crate::configs::vta::rotate_did(
+                self.vta.as_deref(),
+                &self.my_did,
+                pre_rotation_count,
+                label,
+            )
+            .await
+            {
                 Ok((did, new_scid, new_version_id)) => {
                     let value = if camel_case(doc) {
                         let response: v2::DidRotateResponse = v2::DidRotateResponse::builder()
