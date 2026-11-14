@@ -805,8 +805,12 @@ authority and replay-record issuer without it, and accepts a write addressed to
 its own did:scid with one. A record an earlier release stored with a locator
 keeps its old key: queries, fetches and deletes that spell the locator the way
 it was stored still reach it, and filtered `registry/record/query` enumerations
-list it under either spelling, but a query by the bare DID does not find it.
+list it under either spelling, but a query or delete by the bare DID does not
+find it (the delete answers `registry/record/delete:notFound`). The TRQP
+endpoints and DIDComm `trqp/1.0` follow the same rule, and so do
+`git-trust/grant` and `revoke` for tuples written under a located authority.
 Re-put it (stored under the bare DID) and delete the old spelling to migrate.
+The CSV backend normalises rows as it loads them.
 
 Capabilities are enabled **per authority**. Each community enables, for
 example, `git-trust` under its own authority (`config.authority`), and several
@@ -821,8 +825,11 @@ registry's built-in manifest, and refuses `delegate` (the registry has no
 delegation mechanism) and a `manifest` that is not the built-in one. The
 `reason` of a `disable` or `git-trust/revoke` is kept in its audit entry. The
 enablement state file (`TR_CAPABILITY_STATE`) of earlier releases, one slot per
-capability, is read and migrated, and written in the per-authority format on
-the next change.
+capability, is read and migrated, and written in the per-authority format
+(`"format": 2`) on the first enable or disable after the upgrade. An earlier
+release refuses to start on that format: back the file up before upgrading
+and restore it to downgrade, or convert it by hand to one entry per
+capability (`{"<capability>": {<state>}}`).
 
 Refusals carry the codes the task specifications declare: `registry/record/put:alreadyExists`
 and `:notFound` (a strict put), `registry/record/delete:notFound`,

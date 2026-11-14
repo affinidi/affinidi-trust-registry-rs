@@ -25,6 +25,7 @@ use trust_tasks_rs::{RejectReason, TrustTask};
 use crate::domain::{Action, AuthorityId, Context, EntityId, RecordType, Resource, TrustRecord};
 use crate::storage::repository::{RepositoryError, TrustRecordAdminRepository, TrustRecordQuery};
 use crate::trust_tasks::descriptor::{TaskError, spec_error};
+use crate::trust_tasks::payloads::query_as_written;
 use crate::trust_tasks::router::{map_repo_err, new_id, reject_build_err, respond};
 use crate::trust_tasks::{RegistryDispatcher, TaskFuture, TaskOutcome};
 
@@ -94,6 +95,9 @@ pub fn definition(
 /// The community authority DID from the enablement config. Enable-time
 /// validation guarantees presence; an inconsistent state yields `None` and
 /// the handlers reject rather than guess.
+/// Kept as written: a state file of an earlier release may name a did:scid
+/// with its `?src=` locator, and the tuples it wrote are stored under that
+/// spelling ([`read_tuple`] falls back to it).
 fn authority_of(state: &CapabilityState) -> Option<String> {
     state
         .config
@@ -119,6 +123,46 @@ fn require_authority<P>(
     })
 }
 
+/// The git-trust tuple for `subject` and `resource`, if there is one: read by
+/// its normalised key, and — when that misses and the authority or subject is
+/// a did:scid written with its `?src=` locator (as in a state file of an
+/// earlier release) — by the key as written, where that release stored it.
+async fn read_tuple(
+    repository: &dyn TrustRecordAdminRepository,
+    subject: &str,
+    authority: &str,
+    resource: &str,
+) -> Result<Option<TrustRecord>, RepositoryError> {
+    match repository.read(key_of(subject, authority, resource)).await {
+        Ok(record) => return Ok(Some(record)),
+        Err(RepositoryError::RecordNotFound(_)) => {}
+        Err(e) => return Err(e),
+    }
+    let Some(as_written) = query_as_written(subject, authority, ACTION, resource) else {
+        return Ok(None);
+    };
+    match repository.read(as_written).await {
+        Ok(record) => Ok(Some(record)),
+        Err(RepositoryError::RecordNotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// `existing` with `authorized` set, under its own key (which, for a tuple
+/// an earlier release stored with a did:scid locator, is the located one).
+fn with_authorized(existing: &TrustRecord, authorized: bool) -> TrustRecord {
+    TrustRecord::new(
+        existing.entity_id().clone(),
+        existing.authority_id().clone(),
+        Action::new(ACTION),
+        existing.resource().clone(),
+        existing.is_recognized(),
+        authorized,
+        existing.context().clone(),
+        RecordType::Authorization,
+    )
+}
+
 /// `git-trust/grant`: record the tuple as authorized.
 ///
 /// A revoked grant is kept (revoke marks it unauthorized), so granting again
@@ -132,45 +176,32 @@ async fn handle_grant(
     let authority = require_authority(&authority, &doc)?;
     let subject = doc.payload.subject.to_string();
     let resource = doc.payload.resource.to_string();
-
-    let existing = match repository
-        .read(key_of(&subject, &authority, &resource))
-        .await
-    {
-        Ok(record) => Some(record),
-        Err(RepositoryError::RecordNotFound(_)) => None,
-        Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
+    let already_granted = || {
+        spec_error(
+            &doc,
+            TaskError::AlreadyGranted,
+            "an active grant exists for this subject and resource",
+        )
     };
+
+    let existing = read_tuple(repository.as_ref(), &subject, &authority, &resource)
+        .await
+        .map_err(|e| doc.reject_with(new_id(), map_repo_err(e)))?;
     let written = match &existing {
-        Some(record) if record.is_authorized() => {
-            return Err(spec_error(
-                &doc,
-                TaskError::AlreadyGranted,
-                "an active grant exists for this subject and resource",
-            ));
-        }
+        Some(record) if record.is_authorized() => return Err(already_granted()),
         // A revoked grant: authorize it again, keeping what else it carries.
-        Some(record) => {
-            repository
-                .update(tuple(
-                    &subject,
-                    &authority,
-                    &resource,
-                    record.is_recognized(),
-                    true,
-                    record.context().clone(),
-                ))
-                .await
-        }
+        Some(record) => repository.update(with_authorized(record, true)).await,
         None => {
             repository
-                .create(tuple(
-                    &subject,
-                    &authority,
-                    &resource,
+                .create(TrustRecord::new(
+                    EntityId::new(&subject),
+                    AuthorityId::new(&authority),
+                    Action::new(ACTION),
+                    Resource::new(&resource),
                     true,
                     true,
                     Context::empty(),
+                    RecordType::Authorization,
                 ))
                 .await
         }
@@ -185,11 +216,7 @@ async fn handle_grant(
             respond(&doc, response.map_err(|e| reject_build_err(&doc, e))?)
         }
         // Created by a concurrent grant since the read: it is active now.
-        Err(RepositoryError::RecordAlreadyExists(_)) => Err(spec_error(
-            &doc,
-            TaskError::AlreadyGranted,
-            "an active grant exists for this subject and resource",
-        )),
+        Err(RepositoryError::RecordAlreadyExists(_)) => Err(already_granted()),
         Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
     }
 }
@@ -213,24 +240,13 @@ async fn handle_revoke(
             "no active grant exists for this subject and resource",
         )
     };
-    let existing = match repository
-        .read(key_of(&subject, &authority, &resource))
-        .await
-    {
-        Ok(record) if record.is_authorized() => record,
-        Ok(_) | Err(RepositoryError::RecordNotFound(_)) => return Err(not_granted()),
+    let existing = match read_tuple(repository.as_ref(), &subject, &authority, &resource).await {
+        Ok(Some(record)) if record.is_authorized() => record,
+        Ok(_) => return Err(not_granted()),
         Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
     };
 
-    let revoked = tuple(
-        &subject,
-        &authority,
-        &resource,
-        existing.is_recognized(),
-        false,
-        existing.context().clone(),
-    );
-    match repository.update(revoked).await {
+    match repository.update(with_authorized(&existing, false)).await {
         Ok(()) => {
             let response: Result<revoke_spec::Response, _> = revoke_spec::Response::builder()
                 .subject(subject)
@@ -252,27 +268,6 @@ fn key_of(subject: &str, authority: &str, resource: &str) -> TrustRecordQuery {
         AuthorityId::new(authority),
         Action::new(ACTION),
         Resource::new(resource),
-    )
-}
-
-/// The git-trust tuple for `subject` and `resource`.
-fn tuple(
-    subject: &str,
-    authority: &str,
-    resource: &str,
-    recognized: bool,
-    authorized: bool,
-    context: Context,
-) -> TrustRecord {
-    TrustRecord::new(
-        EntityId::new(subject),
-        AuthorityId::new(authority),
-        Action::new(ACTION),
-        Resource::new(resource),
-        recognized,
-        authorized,
-        context,
-        RecordType::Authorization,
     )
 }
 
@@ -487,5 +482,89 @@ mod tests {
             .is_err(),
             "off by default"
         );
+    }
+
+    /// A grant an earlier release wrote under a did:scid authority with its
+    /// `?src=` locator, from a single-slot state file naming it that way, is
+    /// revoked (not answered `notGranted`) and can be granted again.
+    #[tokio::test]
+    async fn a_legacy_located_grant_is_revoked_and_granted_again() {
+        const LOCATED: &str = "did:scid:vh:1:community?src=example.com";
+        let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::default());
+        repository
+            .create(TrustRecord::new(
+                EntityId::new(SIGNER),
+                AuthorityId::as_written(LOCATED),
+                Action::new(ACTION),
+                Resource::new("openvtc/openvtc"),
+                true,
+                true,
+                Context::empty(),
+                RecordType::Authorization,
+            ))
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capabilities.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "git-trust": {
+                    "version": "0.1", "enabled": true,
+                    "config": { "authority": LOCATED },
+                    "enabledAt": "2026-01-01T00:00:00Z",
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let query_repo = repository.clone();
+        let set = CapabilitySet::new(
+            vec![definition(repository.clone()).unwrap()],
+            Box::new(crate::capabilities::FileCapabilityStore::new(&path)),
+            Box::new(Dispatcher::new),
+            Box::new(move || crate::trust_tasks::build_query_dispatcher(query_repo.clone())),
+        )
+        .unwrap();
+        let stored = || async {
+            repository
+                .read(TrustRecordQuery::new(
+                    EntityId::new(SIGNER),
+                    AuthorityId::as_written(LOCATED),
+                    Action::new(ACTION),
+                    Resource::new("openvtc/openvtc"),
+                ))
+                .await
+                .unwrap()
+                .is_authorized()
+        };
+
+        assert_eq!(
+            refusal(&set, grant_spec::Payload::type_uri()).await,
+            ("git-trust/grant:alreadyGranted".to_string(), false)
+        );
+        let out = dispatch(
+            &set,
+            true,
+            task(
+                revoke_spec::Payload::type_uri(),
+                serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
+            ),
+        )
+        .await
+        .expect("the legacy grant is revoked");
+        assert_eq!(out.payload["revoked"], serde_json::json!(true));
+        assert!(!stored().await);
+        dispatch(
+            &set,
+            true,
+            task(
+                grant_spec::Payload::type_uri(),
+                serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
+            ),
+        )
+        .await
+        .expect("granted again");
+        assert!(stored().await);
     }
 }

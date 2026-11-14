@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::{
     didcomm::{problem_report::ProblemReport, transport},
     domain::{Evaluation, TrustRecord},
-    storage::repository::{TrustRecordQuery, TrustRecordRepository},
+    storage::repository::{TrustRecordQuery, TrustRecordRepository, find_either_spelling},
 };
 use affinidi_tdk::didcomm::Message;
 use affinidi_tdk::messaging::messages::compat::UnpackMetadata;
@@ -107,7 +107,7 @@ where
         query.action.as_str().to_string(),
         query.resource.as_str().to_string(),
     );
-    let record = repository.find_by_query(query).await.map_err(|e| {
+    let record = find_either_spelling(repository, query).await.map_err(|e| {
         error!("trqp/1.0 repository lookup failed: {e}");
         ProblemReport::internal_error("The registry could not complete the lookup")
     })?;
@@ -225,6 +225,31 @@ mod tests {
             .build()
             .unwrap();
         LocalStorage::with_records(vec![record]).unwrap()
+    }
+
+    /// A did:scid authority with or without its `?src=` locator is one
+    /// identity: a record stored under the bare DID answers the located
+    /// spelling, and one an earlier release stored located is still found.
+    #[tokio::test]
+    async fn a_did_scid_locator_is_answered_either_way() {
+        const LOCATED: &str = "did:scid:vh:1:abc?src=example.com";
+        for authority in [AuthorityId::new(LOCATED), AuthorityId::as_written(LOCATED)] {
+            let record = TrustRecordBuilder::new()
+                .entity_id(EntityId::new("did:example:known"))
+                .authority_id(authority)
+                .action(Action::new("issue"))
+                .resource(Resource::new("credential"))
+                .recognized(true)
+                .authorized(true)
+                .record_type(RecordType::Authorization)
+                .build()
+                .unwrap();
+            let repo = LocalStorage::with_records(vec![record]).unwrap();
+            let mut located = query("did:example:known");
+            located["authority_id"] = json!(LOCATED);
+            let body = answer(&repo, false, located, Utc::now()).await.unwrap();
+            assert_eq!(body["recognized"], true, "{body}");
+        }
     }
 
     #[tokio::test]

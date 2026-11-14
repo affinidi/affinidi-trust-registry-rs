@@ -256,6 +256,11 @@ pub fn decode_states(text: &str) -> Result<CapabilityStates, String> {
         let mut states = CapabilityStates::new();
         for stored in file.enablements {
             let key = EnablementKey::new(stored.capability, stored.authority.as_deref());
+            if config_authority(stored.state.config.as_ref()) != key.authority {
+                return Err(format!(
+                    "{key:?} is listed under an authority its config does not name"
+                ));
+            }
             if states.insert(key.clone(), stored.state).is_some() {
                 return Err(format!("{key:?} is listed twice"));
             }
@@ -688,10 +693,6 @@ impl CapabilitySet {
             config
         });
         let key = EnablementKey::of_config(capability, config.as_ref());
-        let mut state = self.state.write().await;
-        if state.get(&key).is_some_and(|s| s.enabled) {
-            return Err(CapabilityError::AlreadyEnabled);
-        }
         let entry = CapabilityState {
             version: version.to_string(),
             enabled: true,
@@ -701,10 +702,15 @@ impl CapabilitySet {
         self.classification
             .check(capability, definition, &entry)
             .map_err(CapabilityError::ConfigInvalid)?;
-        let mut next = state.clone();
-        next.insert(key, entry.clone());
-        self.commit(&mut state, next).await?;
-        Ok(entry)
+        self.change(move |state| {
+            if state.get(&key).is_some_and(|s| s.enabled) {
+                return Err(CapabilityError::AlreadyEnabled);
+            }
+            let mut next = state.clone();
+            next.insert(key, entry.clone());
+            Ok((next, entry))
+        })
+        .await
     }
 
     /// Disable the enablement of `capability` for `authority` (`None`: the
@@ -716,15 +722,40 @@ impl CapabilitySet {
         authority: Option<&str>,
     ) -> Result<(), CapabilityError> {
         let key = EnablementKey::new(capability, authority);
-        let mut state = self.state.write().await;
-        if !state.get(&key).is_some_and(|s| s.enabled) {
-            return Err(CapabilityError::NotEnabled);
-        }
-        let mut next = state.clone();
-        if let Some(entry) = next.get_mut(&key) {
-            entry.enabled = false;
-        }
-        self.commit(&mut state, next).await
+        self.change(move |state| {
+            if !state.get(&key).is_some_and(|s| s.enabled) {
+                return Err(CapabilityError::NotEnabled);
+            }
+            let mut next = state.clone();
+            if let Some(entry) = next.get_mut(&key) {
+                entry.enabled = false;
+            }
+            Ok((next, ()))
+        })
+        .await
+    }
+
+    /// Apply the change `decide` makes to the state, under the state lock, in
+    /// a task of its own: a caller that stops waiting (a handler aborted by a
+    /// timeout or a shutdown) cannot stop it between the save and the swap,
+    /// so the file, the memory and the dispatchers still agree.
+    async fn change<T: Send + 'static>(
+        &self,
+        decide: impl FnOnce(&CapabilityStates) -> Result<(CapabilityStates, T), CapabilityError>
+        + Send
+        + 'static,
+    ) -> Result<T, CapabilityError> {
+        let set = self.weak.upgrade().ok_or_else(|| {
+            CapabilityError::Storage("the capability set is shutting down".to_string())
+        })?;
+        tokio::spawn(async move {
+            let mut state = set.state.write().await;
+            let (next, out) = decide(&state)?;
+            set.commit(&mut state, next).await?;
+            Ok(out)
+        })
+        .await
+        .map_err(|e| CapabilityError::Storage(format!("the state change did not finish: {e}")))?
     }
 
     /// Persist `next`, then make it the state and swap the dispatchers. On a

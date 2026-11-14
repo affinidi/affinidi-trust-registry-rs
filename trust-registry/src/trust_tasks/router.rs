@@ -33,9 +33,11 @@ use serde_json::Value;
 use trust_tasks_rs::{Dispatcher, ErrorResponse, Payload, RejectReason, TrustTask};
 use uuid::Uuid;
 
+use crate::domain::{Action, AuthorityId, EntityId, Resource};
 use crate::domain::{Evaluation, TrustRecord};
 use crate::storage::repository::{
-    RepositoryError, TrustRecordAdminRepository, TrustRecordRepository,
+    RepositoryError, TrustRecordAdminRepository, TrustRecordQuery, TrustRecordRepository,
+    find_either_spelling,
 };
 
 use super::descriptor::{TaskError, spec_error};
@@ -233,14 +235,16 @@ async fn evaluate_query<R>(
 where
     R: TrustRecordRepository + ?Sized,
 {
-    let mut record = repository
-        .find_by_query(query_of(ids.0, ids.1, ids.2, ids.3))
-        .await?;
-    if record.is_none()
-        && let Some(as_written) = query_as_written(ids.0, ids.1, ids.2, ids.3)
-    {
-        record = repository.find_by_query(as_written).await?;
-    }
+    let record = find_either_spelling(
+        repository,
+        TrustRecordQuery::new(
+            EntityId::as_written(ids.0),
+            AuthorityId::as_written(ids.1),
+            Action::new(ids.2),
+            Resource::new(ids.3),
+        ),
+    )
+    .await?;
     let evaluation = Evaluation::of(record.as_ref(), asked, Utc::now());
     Ok((record, evaluation))
 }

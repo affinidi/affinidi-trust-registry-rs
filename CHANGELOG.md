@@ -93,6 +93,12 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   The `TR_CAPABILITY_STATE` file of earlier releases (one slot per capability)
   is read and migrated, and is written in the new format
   (`{"format": 2, "enablements": [...]}`) on the next enable or disable.
+  **Downgrade:** an earlier release refuses to start on a format-2 file. The
+  file is rewritten only by the first enable or disable after the upgrade, so
+  back it up before that (or before upgrading) and restore the backup to go
+  back; otherwise convert it by hand to `{"<capability>": {<state>}}`, keeping
+  one enablement per capability. A format-2 entry whose `authority` is not
+  its config's (normalised) `authority` is refused at load.
 - **`governance/capability/enable` checks what it is given** (#235): a version
   other than the built-in manifest's is `unknownCapability`; `delegate` is
   refused as `configInvalid`, since the registry has no delegation mechanism
@@ -103,9 +109,17 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   queries, the capability authority and the replay-record key all use the bare
   DID, and a write addressed to the registry's did:scid with a locator is
   accepted. A record an earlier release stored with a locator is still reached
-  by the spelling it was stored under (TRQP queries, keyed fetches and deletes
-  fall back to it); re-put it to move it to the bare DID. New
-  `domain::normalise_reference` and `EntityId::as_written` /
+  by the spelling it was stored under: TRQP queries on every transport (the
+  `registry/*` tasks, `POST /recognition` / `/authorization` and DIDComm
+  `trqp/1.0`, through the new `storage::repository::find_either_spelling`),
+  keyed fetches, deletes, and `git-trust/grant` / `revoke` (whose legacy
+  state may name the authority with its locator) fall back to it. A query or
+  delete by the bare DID does not find such a record: a bare-DID delete
+  answers `registry/record/delete:notFound`, which vtc-service treats as
+  done. Re-put it to move it to the bare DID. The CSV backend normalises as it
+  loads, so its located rows are re-keyed in memory, and a file holding both
+  spellings of one key keeps one of them. New `domain::normalise_reference`,
+  `TrustRecordQuery::normalised` and `EntityId::as_written` /
   `AuthorityId::as_written`.
 - **`configs::vta::rotate_did` returns `RotateError`** (`reason`,
   `transient`) instead of a `String`.
