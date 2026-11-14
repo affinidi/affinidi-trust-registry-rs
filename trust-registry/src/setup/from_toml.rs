@@ -64,7 +64,8 @@ pub struct SetupFile {
     /// Where to write the `TR_VTA_CREDENTIAL` bundle. Must not exist yet.
     pub credential_out: PathBuf,
     /// Optionally, where to write the registry's environment (`KEY=value`
-    /// lines). Overwritten if it exists.
+    /// lines). An existing file is replaced only with `--force`, after an
+    /// owner-only backup.
     #[serde(default)]
     pub env_out: Option<PathBuf>,
     /// The transports the registry serves and its DID advertises. The same
@@ -292,7 +293,21 @@ pub(crate) fn parse_setup_file(path: &Path) -> Result<SetupFile, String> {
 }
 
 /// `trust-registry setup --from <file>`.
+///
+/// Everything that can be checked locally is checked before the VTA is
+/// contacted: provisioning is irreversible (it mints the registry's DID and
+/// consumes the setup key's grant), and its reply holds the only copy of the
+/// new admin's private key. So `credential_out` is created (empty, 0600)
+/// up front, `env_out` is checked writable, and after provisioning whatever
+/// cannot be written where it was asked for is saved to an owner-only
+/// recovery file whose path the error names.
 pub async fn run_setup_from_file(path: &Path) -> Result<(), String> {
+    run_setup(path, false).await
+}
+
+/// [`run_setup_from_file`], with `force` allowing an existing `env_out` to be
+/// replaced (after a backup).
+pub(crate) async fn run_setup(path: &Path, force: bool) -> Result<(), String> {
     eprintln!(
         "Running non-interactive Trust Registry setup from {} ...",
         path.display()
@@ -307,6 +322,17 @@ pub async fn run_setup_from_file(path: &Path) -> Result<(), String> {
              provision again (that mints a new DID and admin at the VTA)",
             file.credential_out.display()
         ));
+    }
+    let slot = CredentialSlot::reserve(&file.credential_out)?;
+    if let Some(env_out) = &file.env_out {
+        if env_out.exists() && !force {
+            return Err(format!(
+                "env_out {} already exists; nothing was sent to the VTA. Remove it, or pass \
+                 --force to replace it (it is backed up first)",
+                env_out.display()
+            ));
+        }
+        check_writable(env_out)?;
     }
     let setup_key = EphemeralSetupKey::load_from(&file.setup_key_file).map_err(|e| {
         format!(
@@ -326,29 +352,75 @@ pub async fn run_setup_from_file(path: &Path) -> Result<(), String> {
         file.provision_transport.map(ProvisionTransport::protocol),
     )
     .await?;
+
+    // From here on the VTA has acted: every failure saves what it returned.
     let provision = match reply {
         VtaReply::Full(result) => *result,
-        VtaReply::AdminOnly(_) => {
-            return Err(format!(
+        VtaReply::AdminOnly(admin) => {
+            let reason = format!(
                 "the VTA returned an admin-only reply, but the `{TEMPLATE_NAME}` template \
                  needs it to mint the registry's DID"
+            );
+            let saved = serde_json::json!({
+                "admin_did": admin.admin_did,
+                "admin_private_key_multibase": admin.admin_private_key_mb,
+            });
+            return Err(save_recovery(
+                &file.credential_out,
+                &saved.to_string(),
+                &reason,
             ));
         }
     };
 
-    let outcome = Outcome::from_provision(&provision)?;
-    write_private_file(
-        &file.credential_out,
-        &serde_json::to_string_pretty(&outcome.credential)
-            .map_err(|e| format!("could not serialise the credential: {e}"))?,
-    )?;
+    let outcome = match Outcome::from_provision(&provision) {
+        Ok(outcome) => outcome,
+        Err(reason) => {
+            return Err(save_recovery(
+                &file.credential_out,
+                &provision_recovery_json(&provision),
+                &reason,
+            ));
+        }
+    };
+    let credential_json = match serde_json::to_string_pretty(&outcome.credential) {
+        Ok(json) => json,
+        Err(e) => {
+            return Err(save_recovery(
+                &file.credential_out,
+                &provision_recovery_json(&provision),
+                &format!("could not serialise the credential: {e}"),
+            ));
+        }
+    };
+    if let Err(reason) = slot.commit(&credential_json) {
+        return Err(save_recovery(
+            &file.credential_out,
+            &credential_json,
+            &reason,
+        ));
+    }
+
     let credential_path =
         std::path::absolute(&file.credential_out).unwrap_or_else(|_| file.credential_out.clone());
     let env = file.env_lines(&credential_path);
-    if let Some(env_out) = &file.env_out {
-        std::fs::write(env_out, format!("{}\n", env.join("\n")))
-            .map_err(|e| format!("could not write {}: {e}", env_out.display()))?;
-    }
+    // The credential is safe; a failed env file is a warning, since its lines
+    // are printed below anyway.
+    let env_written = match &file.env_out {
+        Some(env_out) => match backup_existing(env_out)
+            .and_then(|()| std::fs::write(env_out, format!("{}\n", env.join("\n"))))
+        {
+            Ok(()) => Some(env_out),
+            Err(e) => {
+                eprintln!(
+                    "warning: could not write {}: {e}. Use the environment printed below.",
+                    env_out.display()
+                );
+                None
+            }
+        },
+        None => None,
+    };
 
     println!("Trust Registry setup complete.");
     println!("registry_did={}", outcome.registry_did);
@@ -356,7 +428,7 @@ pub async fn run_setup_from_file(path: &Path) -> Result<(), String> {
     println!("vta_did={}", outcome.credential.vta_did);
     println!("context_id={}", file.context);
     println!("credential_path={}", credential_path.display());
-    if let Some(env_out) = &file.env_out {
+    if let Some(env_out) = env_written {
         println!("env_path={}", env_out.display());
     }
     eprintln!();
@@ -364,9 +436,172 @@ pub async fn run_setup_from_file(path: &Path) -> Result<(), String> {
     for line in &env {
         eprintln!("  {line}");
     }
+    eprintln!();
+    eprintln!(
+        "The setup key {} has been handed off and is no longer needed: delete it.",
+        file.setup_key_file.display()
+    );
     Ok(())
 }
 
+/// The credential file, created empty and owner-only before the VTA is
+/// contacted, so a path that cannot be written fails while nothing is lost.
+/// Removed again unless the credential is committed to it.
+struct CredentialSlot {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+}
+
+impl CredentialSlot {
+    fn reserve(path: &Path) -> Result<Self, String> {
+        let file = create_private(path).map_err(|e| {
+            format!(
+                "cannot create the credential file {} ({e}); nothing was sent to the VTA. \
+                 Check that its directory exists and is writable",
+                path.display()
+            )
+        })?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            file: Some(file),
+        })
+    }
+
+    fn commit(mut self, contents: &str) -> Result<(), String> {
+        let Some(mut file) = self.file.take() else {
+            return Err(format!("{} was already written", self.path.display()));
+        };
+        let written = file
+            .write_all(contents.as_bytes())
+            .and_then(|()| file.sync_all());
+        match written {
+            Ok(()) => {
+                // Committed: keep the file.
+                self.path = PathBuf::new();
+                Ok(())
+            }
+            Err(e) => Err(format!("could not write {}: {e}", self.path.display())),
+        }
+    }
+}
+
+impl Drop for CredentialSlot {
+    fn drop(&mut self) {
+        if !self.path.as_os_str().is_empty() {
+            std::fs::remove_file(&self.path).ok();
+        }
+    }
+}
+
+/// Copy an existing `path` to an owner-only `<path>.backup-<UTC>` beside it.
+fn backup_existing(path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let backup = path.with_file_name(format!("{name}.backup-{stamp}"));
+    let mut file = create_private(&backup)?;
+    file.write_all(&std::fs::read(path)?)?;
+    file.sync_all()?;
+    eprintln!("Backed up {} to {}", path.display(), backup.display());
+    Ok(())
+}
+
+/// Fail now if `path` could not be written later.
+fn check_writable(path: &Path) -> Result<(), String> {
+    let existed = path.exists();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| {
+            format!(
+                "cannot write env_out {} ({e}); nothing was sent to the VTA",
+                path.display()
+            )
+        })?;
+    if !existed {
+        std::fs::remove_file(path).ok();
+    }
+    Ok(())
+}
+
+/// Create `path` owner-only, refusing to replace an existing file.
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// What the VTA returned, for an operator to recover from by hand: the
+/// summary and the decrypted payload, private keys included.
+fn provision_recovery_json(provision: &ProvisionResultV2) -> String {
+    serde_json::json!({
+        "bundle_id": provision.bundle_id_hex,
+        "summary": provision.summary,
+        "payload": provision.payload,
+    })
+    .to_string()
+}
+
+/// Where a recovery file may go: beside `credential_out`, then the temp dir.
+fn recovery_candidates(credential_out: &Path, stamp: &str) -> Vec<PathBuf> {
+    let name = credential_out
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "vta-credential.json".into());
+    vec![
+        credential_out.with_file_name(format!("{name}.recovery-{stamp}.json")),
+        std::env::temp_dir().join(format!(
+            "trust-registry-{name}.recovery-{stamp}-{}.json",
+            std::process::id()
+        )),
+    ]
+}
+
+/// Save `contents` (which holds private keys) to the first owner-only
+/// recovery location that can be created, and return the error to report:
+/// `reason`, and where the VTA's reply went.
+fn save_recovery(credential_out: &Path, contents: &str, reason: &str) -> String {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let mut tried = Vec::new();
+    for candidate in recovery_candidates(credential_out, &stamp) {
+        let saved = create_private(&candidate).and_then(|mut f| {
+            f.write_all(contents.as_bytes())?;
+            f.sync_all()
+        });
+        match saved {
+            Ok(()) => {
+                return format!(
+                    "{reason}\n\nThe VTA has already provisioned the registry. What it returned \
+                     (it includes private keys) was saved, owner-only, to {}. Move the \
+                     credential from there to where it belongs, and delete the file.",
+                    candidate.display()
+                );
+            }
+            Err(e) => {
+                std::fs::remove_file(&candidate).ok();
+                tried.push(format!("{} ({e})", candidate.display()));
+            }
+        }
+    }
+    format!(
+        "{reason}\n\nThe VTA has already provisioned the registry, and what it returned could \
+         not be saved anywhere (tried {}). Ask the VTA operator to remove the context's DID \
+         and issue a new grant, then run setup again.",
+        tried.join(", ")
+    )
+}
 /// What phase 2 takes from the provisioning reply.
 struct Outcome {
     registry_did: String,
@@ -413,23 +648,6 @@ impl Outcome {
             credential,
         })
     }
-}
-
-/// Create `path` with `contents`, readable by its owner only, refusing to
-/// replace an existing file.
-fn write_private_file(path: &Path, contents: &str) -> Result<(), String> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut f = options
-        .open(path)
-        .map_err(|e| format!("could not create {}: {e}", path.display()))?;
-    f.write_all(contents.as_bytes())
-        .map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
 /// Drive the provisioning to its reply, publishing to the server the ask names.
@@ -675,14 +893,168 @@ mod tests {
     fn the_credential_file_is_private_and_never_replaced() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vta-credential.json");
-        write_private_file(&path, "{}").unwrap();
-        assert!(write_private_file(&path, "{}").is_err());
+        CredentialSlot::reserve(&path)
+            .unwrap()
+            .commit("{}")
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+        assert!(CredentialSlot::reserve(&path).is_err());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    /// A run that fails before the credential is written leaves no empty
+    /// credential file behind to block the next attempt.
+    #[test]
+    fn an_uncommitted_slot_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vta-credential.json");
+        drop(CredentialSlot::reserve(&path).unwrap());
+        assert!(!path.exists());
+    }
+
+    fn setup_toml(dir: &Path, credential_out: &Path, env_out: Option<&Path>) -> PathBuf {
+        let setup = dir.join("setup.toml");
+        let env_line = env_out
+            .map(|p| format!("env_out = \"{}\"", p.display()))
+            .unwrap_or_default();
+        std::fs::write(
+            &setup,
+            format!(
+                r#"
+                vta_did = "did:webvh:QmVta:dids.example.com:vta"
+                setup_key_file = "{}"
+                credential_out = "{}"
+                {env_line}
+                mediator_did = "{MEDIATOR}"
+                transports = ["didcomm"]
+                [webvh]
+                server_id = "did-hosting-daemon"
+                "#,
+                dir.join("absent-setup-key.json").display(),
+                credential_out.display(),
+            ),
+        )
+        .unwrap();
+        setup
+    }
+
+    /// #223: a credential_out that cannot be created fails before the setup
+    /// key is even loaded, let alone the VTA contacted.
+    #[tokio::test]
+    async fn an_unwritable_credential_out_fails_before_the_vta_is_contacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-dir").join("vta-credential.json");
+        let setup = setup_toml(dir.path(), &missing, None);
+        let err = run_setup_from_file(&setup).await.unwrap_err();
+        assert!(err.contains("cannot create the credential file"), "{err}");
+        assert!(err.contains("nothing was sent to the VTA"), "{err}");
+        assert!(
+            !err.contains("setup key"),
+            "failed later than pre-flight: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unwritable_env_out_fails_before_the_vta_is_contacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let credential = dir.path().join("vta-credential.json");
+        let env_out = dir.path().join("missing").join("vta.env");
+        let setup = setup_toml(dir.path(), &credential, Some(&env_out));
+        let err = run_setup_from_file(&setup).await.unwrap_err();
+        assert!(err.contains("cannot write env_out"), "{err}");
+        assert!(
+            !credential.exists(),
+            "the reserved credential file is removed"
+        );
+    }
+
+    /// An existing env_out is not silently replaced: without --force the run
+    /// stops before the VTA is contacted, and leaves it as it was.
+    #[tokio::test]
+    async fn an_existing_env_out_needs_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let credential = dir.path().join("vta-credential.json");
+        let env_out = dir.path().join("vta.env");
+        std::fs::write(&env_out, "MINE=1\n").unwrap();
+        let setup = setup_toml(dir.path(), &credential, Some(&env_out));
+        let err = run_setup(&setup, false).await.unwrap_err();
+        assert!(
+            err.contains("already exists") && err.contains("--force"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(&env_out).unwrap(), "MINE=1\n");
+        assert!(!credential.exists());
+
+        // With --force the pre-flight passes; this run then stops at the
+        // missing setup key, still before the VTA.
+        let err = run_setup(&setup, true).await.unwrap_err();
+        assert!(err.contains("setup key"), "{err}");
+    }
+
+    #[test]
+    fn a_replaced_env_out_is_backed_up_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_out = dir.path().join("vta.env");
+        std::fs::write(&env_out, "MINE=1\n").unwrap();
+        backup_existing(&env_out).unwrap();
+        let backups: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().contains("vta.env.backup-"))
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), "MINE=1\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&backups[0]).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    /// After provisioning, what the VTA returned is saved owner-only and the
+    /// error says where; with the credential's directory gone, in the temp
+    /// dir.
+    #[test]
+    fn a_post_provision_failure_saves_the_reply_and_says_where() {
+        let dir = tempfile::tempdir().unwrap();
+        let credential = dir.path().join("vta-credential.json");
+        let err = save_recovery(&credential, "{\"secret\":1}", "write failed");
+        assert!(err.starts_with("write failed"), "{err}");
+        let saved: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(saved.len(), 1);
+        assert!(err.contains(&saved[0].display().to_string()), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&saved[0]).unwrap(),
+            "{\"secret\":1}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&saved[0]).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        let gone = dir.path().join("gone").join("vta-credential.json");
+        let err = save_recovery(&gone, "{}", "no directory");
+        let temp = std::env::temp_dir();
+        let saved_to = err
+            .split("owner-only, to ")
+            .nth(1)
+            .and_then(|r| r.split(". Move").next())
+            .expect("a recovery path");
+        assert!(Path::new(saved_to).starts_with(&temp), "{err}");
+        std::fs::remove_file(saved_to).ok();
     }
 
     /// A reply whose rotated admin is a real Ed25519 key, as the VTA's is.

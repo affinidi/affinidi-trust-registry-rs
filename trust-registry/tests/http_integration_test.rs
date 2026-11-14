@@ -411,6 +411,27 @@ async fn test_wellknown_did_endpoint_returns_valid_json() {
     );
 }
 
+/// Every object member named `name` anywhere in `value`, by JSON path.
+fn find_members(value: &Value, name: &str, path: &str, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let child_path = format!("{path}.{key}");
+                if key == name {
+                    out.push(child_path.clone());
+                }
+                find_members(child, name, &child_path, out);
+            }
+        }
+        Value::Array(items) => {
+            for (i, child) in items.iter().enumerate() {
+                find_members(child, name, &format!("{path}[{i}]"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[tokio::test]
 async fn test_wellknown_did_document_no_private_keys() {
     let server_url = get_test_server_url().await;
@@ -426,17 +447,24 @@ async fn test_wellknown_did_document_no_private_keys() {
 
     let doc: Value = response.json().await.unwrap();
 
-    // Check all verification methods don't contain private keys
-    if let Some(methods) = doc["verificationMethod"].as_array() {
-        for method in methods {
-            if let Some(jwk) = method.get("publicKeyJwk") {
-                assert!(
-                    jwk.get("d").is_none(),
-                    "Private key 'd' field should not be present in public JWK"
-                );
-            }
-        }
+    // No private key material in any form, anywhere in the document.
+    for name in ["privateKeyJwk", "privateKeyMultibase", "d"] {
+        let mut found = Vec::new();
+        find_members(&doc, name, "$", &mut found);
+        assert!(
+            found.is_empty(),
+            "the served DID document carries private key material at {found:?}"
+        );
     }
+}
+
+/// The secrets the running registry was configured with, when `.env.test`
+/// holds the profile inline (as the CI pipeline's does).
+fn configured_secrets() -> Option<Vec<Value>> {
+    let raw = env::var("PROFILE_CONFIG").ok()?;
+    let raw = raw.trim().trim_matches('\'');
+    let profile: Value = serde_json::from_str(raw).ok()?;
+    profile["secrets"].as_array().cloned()
 }
 
 #[tokio::test]
@@ -476,31 +504,78 @@ async fn test_wellknown_did_document_structure() {
         }
     }
 
-    // Verify verification methods have correct structure
-    if let Some(methods) = doc["verificationMethod"].as_array() {
-        for method in methods {
-            assert!(
-                method.get("id").is_some(),
-                "Verification method should have an id"
-            );
-            assert!(
-                method.get("type").is_some(),
-                "Verification method should have a type"
-            );
-            assert!(
-                method.get("controller").is_some(),
-                "Verification method should have a controller"
-            );
-            assert!(
-                method.get("publicKeyJwk").is_some(),
-                "Verification method should have publicKeyJwk"
-            );
+    // Every verification method is a Multikey with a public multibase key.
+    let methods = doc["verificationMethod"]
+        .as_array()
+        .expect("verificationMethod array");
+    assert!(!methods.is_empty(), "the document publishes no key");
+    for method in methods {
+        assert!(method["id"].is_string(), "verification method id: {method}");
+        assert_eq!(method["type"], "Multikey", "{method}");
+        assert!(method["controller"].is_string(), "{method}");
+        assert!(
+            method["publicKeyMultibase"]
+                .as_str()
+                .is_some_and(|k| k.starts_with('z')),
+            "publicKeyMultibase must be a base58btc multikey: {method}"
+        );
+        assert!(method.get("publicKeyJwk").is_none(), "{method}");
+    }
+    let method_ids: Vec<&str> = methods.iter().filter_map(|m| m["id"].as_str()).collect();
 
-            // Verify publicKeyJwk structure
-            let jwk = &method["publicKeyJwk"];
-            assert!(jwk.get("kty").is_some(), "JWK should have kty field");
-            assert!(jwk.get("crv").is_some(), "JWK should have crv field");
-            assert!(jwk.get("x").is_some(), "JWK should have x coordinate");
+    // The ids are the configured secrets' own ids, not positional ones.
+    if let Some(secrets) = configured_secrets() {
+        let secret_ids: Vec<&str> = secrets.iter().filter_map(|s| s["id"].as_str()).collect();
+        assert_eq!(
+            method_ids, secret_ids,
+            "verification methods must carry the profile's secret ids"
+        );
+    }
+
+    // X25519 keys (multicodec 0xec, `z6LS…`) only under keyAgreement; every
+    // relationship references a published method.
+    let refs = |rel: &str| -> Vec<String> {
+        doc[rel]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let is_x25519 = |id: &str| {
+        methods.iter().any(|m| {
+            m["id"] == id
+                && m["publicKeyMultibase"]
+                    .as_str()
+                    .is_some_and(|k| k.starts_with("z6LS"))
+        })
+    };
+    for rel in ["authentication", "assertionMethod"] {
+        for id in refs(rel) {
+            assert!(
+                method_ids.contains(&id.as_str()),
+                "{rel} names unknown {id}"
+            );
+            assert!(!is_x25519(&id), "an X25519 key is listed under {rel}: {id}");
+        }
+    }
+    let key_agreement = refs("keyAgreement");
+    assert!(!key_agreement.is_empty(), "keyAgreement is empty");
+    for id in &key_agreement {
+        assert!(
+            method_ids.contains(&id.as_str()),
+            "keyAgreement names unknown {id}"
+        );
+    }
+    for method in methods {
+        let id = method["id"].as_str().unwrap_or_default();
+        if is_x25519(id) {
+            assert!(
+                key_agreement.iter().any(|k| k == id),
+                "X25519 key {id} must be under keyAgreement"
+            );
         }
     }
 }

@@ -21,6 +21,31 @@ release goes GA (`## 0.27.0 (date)`).
 
 ### Breaking
 
+- **`setup-trust-registry` has no default `--did-method`.** With
+  `--mediator-did` it needs one of three identity modes: `--did-method`
+  (new DID), `--tr-did` with `--tr-did-secret-file` (existing DID; each now
+  requires the other), or `--profile` alone (existing profile: loaded and
+  validated, no key generated, which the old default made unreachable). The
+  DIDComm options without `--mediator-did` are refused. Add
+  `--did-method=peer` to keep the old behaviour (#220).
+- **`setup-trust-registry` creates test identities only with
+  `--with-test-identities`** (or `--test-in-pipeline`, now a switch that also
+  accepts `=true`). It no longer opens two test accounts on the mediator and
+  writes `.env.test` on every DIDComm setup (#222).
+- **`generate-secrets` is removed.** It was an undocumented near-copy of
+  `setup-trust-registry` that generated a differently shaped DID;
+  `setup-trust-registry --with-test-identities` covers what it did (#258).
+- **`didcomm::did_document::build_did_document` and
+  `build_verification_methods` return `Result`, and `build_public_jwk` is
+  removed.** A secret that cannot be published is an error rather than a
+  `"publicKeyJwk": {}` entry; the registry stops at startup with it (#204).
+- **`setup-trust-registry --profile` takes a location only** (`file://`,
+  `aws_secrets://`, `aws_parameter_store://`). An inline JSON profile or
+  `string://<JSON>` is refused without being repeated: it put private keys on
+  the command line and the command echoed them. Save the profile to an
+  owner-only file, or use `--tr-did` / `--tr-did-secret-file`.
+- **`trust-registry setup --from` no longer replaces an existing `env_out`**
+  unless given `--force`, which backs it up first (#223).
 - **The registry refuses to start when `ADMIN_DIDS` lists the test client's
   former sample DID** (`did:peer:2.Vz6Mkpun7x…`), whose private keys were
   committed to this repository; anyone could make its proofs. `.env.example`
@@ -511,6 +536,55 @@ release goes GA (`## 0.27.0 (date)`).
   registered but no rule named was served as an unauthenticated read; now it
   is answered `unsupportedType` without being dispatched, as an unregistered
   type always was.
+- **The DID document the registry builds for itself (no `DID_DOCUMENT`)
+  names its keys by their own ids and lists them by key type**: Ed25519,
+  P-256 and secp256k1 under `authentication` and `assertionMethod`, X25519
+  under `keyAgreement` (P-256 / secp256k1 too when the profile has no X25519
+  key, as older profiles do), as `Multikey` with `publicKeyMultibase`. It used to
+  invent `#key-0`, `#key-1`… by position and list every key under every
+  relationship, so peers could not find the key the registry signed and
+  authcrypted with. `setup-trust-registry` now publishes did:web / did:webvh
+  documents from the same builder (`build_did_document_value`), including the
+  DIDComm service's `{uri, accept, routingKeys}` endpoint (#204).
+- **Re-running `setup-trust-registry` no longer replaces the registry's
+  identity.** It refuses, before changing anything, to replace a non-empty
+  `PROFILE_CONFIG`, `MEDIATOR_DID`, `ADMIN_DIDS`, `ACL_MODE` or
+  `ADMIN_AUTHORITIES`, a bundle in the configured secret store, or
+  `did.json` / `did.jsonl` / the profile file, and to set
+  `ENABLE_DIDCOMM=false` over a DIDComm identity. `--force` replaces them
+  after an owner-only backup of each. It never writes an empty value, writes
+  only a bundle that parsed as a profile to a secret store, and does every
+  check, key generation and mediator call before the first write (#191).
+- **`setup-trust-registry` keeps a did:webvh's update and pre-rotation keys**
+  in `did-update-keys.json` (0600); they were discarded, so the DID could never
+  be updated (#221).
+- **`setup-trust-registry` edits `.env` in place**: only the lines it sets
+  change, comments and order are kept, and the file is replaced atomically.
+  A failed mediator call for the test identities exits non-zero instead of
+  printing success; the terminal is restored on every exit path; `fjall` is a
+  storage backend option (`--fjall-path`); `--ddb-table-name` is required for
+  `ddb` instead of defaulting to `test`; `--audit-log-format` accepts only
+  `json` / `text`; and `ADMIN_DIDS` is left out when not given (#222).
+- **The Docker first run after the Quickstart works.** `setup-trust-registry`
+  writes `ENABLE_DIDCOMM=false` without a mediator (and `true` with one)
+  instead of empty DIDComm variables, and the registry reads an empty
+  `MEDIATOR_DID` / `PROFILE_CONFIG` as unset, naming `ENABLE_DIDCOMM=false` in
+  the error. `docker-compose.test.yaml` no longer mounts a directory that does
+  not exist, and the README's Redis compose example builds from
+  `trust-registry/Dockerfile` (#230).
+- **`trust-registry setup --from` never loses the admin credential.** It
+  creates `credential_out` (and checks `env_out` is writable) before contacting
+  the VTA, so a bad path fails while nothing is lost; after provisioning, a
+  reply it cannot use or a credential it cannot write is saved to an
+  owner-only recovery file whose path the error names. A failed `env_out`
+  write is a warning, and the run reminds the operator to delete the spent
+  setup key (#223).
+- **`SECURITY.md` states which versions get security fixes** (N and N-1, per
+  `RELEASES.md`), how fixes ship, and to report by email;
+  `SETUP_COMMAND_REFERENCES.md`
+  matches `--help` (`scid`, `--no-scid-alias`, `--non-interactive`, the
+  `--didweb-url` form) and links the README for the environment reference
+  (#272).
 - **Records whose identifiers contain `#` no longer share a storage key.** The
   Redis, DynamoDB and fjall backends keyed a record by
   `TR#{authority}#{action}#{resource}#{entity}` with the identifiers joined as

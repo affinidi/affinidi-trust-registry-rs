@@ -99,7 +99,7 @@ async fn load_profile_bundle(
     if let Some(bundle) = load_profile_from_secret_store(secrets).await? {
         return Ok((bundle, ProfileSource::SecretStore));
     }
-    let profile_configs_uri = required_env("PROFILE_CONFIG")?;
+    let profile_configs_uri = didcomm_required_env("PROFILE_CONFIG")?;
     let bundle = load_setting("PROFILE_CONFIG", &profile_configs_uri).await?;
     Ok((bundle, ProfileSource::ProfileConfig))
 }
@@ -358,6 +358,22 @@ pub fn parse_profile_from_secrets_str(
     Ok(profile_config)
 }
 
+/// A variable the DIDComm path needs. Empty counts as unset (an `.env` line
+/// `MEDIATOR_DID=` is how a REST-only setup used to leave it), and the error
+/// names the switch that turns the requirement off.
+fn didcomm_required_env(name: &str) -> Result<String, String> {
+    didcomm_required(name, optional_env(name))
+}
+
+fn didcomm_required(name: &str, value: Option<String>) -> Result<String, String> {
+    value.filter(|v| !v.trim().is_empty()).ok_or_else(|| {
+        format!(
+            "{name} is unset or empty, and DIDComm is enabled (ENABLE_DIDCOMM defaults to \
+             true). Set {name}, or set ENABLE_DIDCOMM=false to run the registry over REST only"
+        )
+    })
+}
+
 /// Parse `ADMIN_DIDS`: comma-separated, surrounding space trimmed, empty
 /// entries (a trailing or doubled comma) dropped. A did:scid admin is listed
 /// by its DID; a `?src=` locator says where to fetch it, not who it is
@@ -467,7 +483,7 @@ impl Configs for DidcommConfig {
             audit_config: AuditConfig { log_format },
         };
 
-        let mediator_did = required_env("MEDIATOR_DID")?;
+        let mediator_did = didcomm_required_env("MEDIATOR_DID")?;
 
         #[cfg(feature = "secrets")]
         let secret_store = SecretStoreSettings::from_env()?;
@@ -515,6 +531,7 @@ impl Configs for DidcommConfig {
                 public_url.as_deref(),
                 transport_flags,
             )
+            .map_err(|e| format!("cannot build the DID document from the profile: {e}"))?
         };
 
         let retry_config = DidDocumentRetryConfig::from_env()?;
@@ -542,8 +559,23 @@ impl Configs for DidcommConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        PUBLISHED_SAMPLE_ADMIN_DIDS, check_admin_dids_not_published, parse_admin_authorities,
+        PUBLISHED_SAMPLE_ADMIN_DIDS, check_admin_dids_not_published, didcomm_required,
+        parse_admin_authorities,
     };
+
+    /// `MEDIATOR_DID=` is how a REST-only setup left `.env`: it must read as
+    /// unset, with an error that names `ENABLE_DIDCOMM=false`.
+    #[test]
+    fn an_empty_didcomm_variable_is_unset_and_the_error_names_the_switch() {
+        for value in [None, Some(String::new()), Some("  ".to_string())] {
+            let err = didcomm_required("MEDIATOR_DID", value).unwrap_err();
+            assert!(err.contains("ENABLE_DIDCOMM=false"), "{err}");
+        }
+        assert_eq!(
+            didcomm_required("MEDIATOR_DID", Some("did:example:m".into())).unwrap(),
+            "did:example:m"
+        );
+    }
 
     #[test]
     fn an_admin_list_naming_a_published_sample_identity_is_refused() {
