@@ -10,6 +10,8 @@ use tokio::time::timeout;
 use tracing::error;
 use uuid::Uuid;
 
+use crate::didcomm::error::DIDCommError;
+
 pub mod did_document;
 pub mod error;
 pub mod handlers;
@@ -23,15 +25,49 @@ pub fn get_thread_id(msg: &Message) -> Option<String> {
     msg.thid.clone().or_else(|| Some(msg.id.clone()))
 }
 
-/// Returns the parent thread ID, falling back to thread ID, then message ID.
-pub fn get_parent_thread_id(msg: &Message) -> Option<String> {
-    msg.pthid.clone().or_else(|| get_thread_id(msg))
-}
-
 pub fn new_message_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+/// How long adding a profile (and opening its mediator websocket) may take.
+///
+/// Bounded because the SDK retries authentication indefinitely when the
+/// mediator's ACL denies the DID, so an unbounded `profile_add` would hang
+/// without an error.
+pub const PROFILE_ADD_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Build a `TDK`/`ATM` holding one profile for `did` and register it with the
+/// mediator (opening its websocket when `live_stream` is set), bounded by
+/// [`PROFILE_ADD_TIMEOUT`].
+///
+/// The one bootstrap the pickup listener and the integration tests share.
+pub(crate) async fn connect_profile(
+    alias: &str,
+    did: &str,
+    mediator_did: &str,
+    secrets: Vec<Secret>,
+    live_stream: bool,
+) -> Result<(Arc<ATM>, Arc<ATMProfile>), DIDCommError> {
+    let tdk_profile = TDKProfile::new(alias, did, Some(mediator_did), secrets);
+    let tdk = TDK::new(
+        TDKConfig::builder().with_load_environment(false).build()?,
+        None,
+    )
+    .await?;
+    tdk.add_profile(&tdk_profile).await;
+
+    let atm = tdk.atm.clone().ok_or(DIDCommError::MissingATM)?;
+    let profile = ATMProfile::from_tdk_profile(&atm, &tdk_profile).await?;
+    let profile = timeout(PROFILE_ADD_TIMEOUT, atm.profile_add(&profile, live_stream))
+        .await
+        .inspect_err(|_| {
+            error!("Adding profile {alias:?} timed out after {PROFILE_ADD_TIMEOUT:?}");
+        })??;
+    Ok((Arc::new(atm), profile))
+}
+
+/// [`connect_profile`] for callers outside the crate (the integration tests
+/// act as DIDComm clients with it).
 pub async fn prepare_atm_and_profile(
     alias: &str,
     service_did: &str,
@@ -39,47 +75,7 @@ pub async fn prepare_atm_and_profile(
     secrets: Vec<Secret>,
     live_stream: bool,
 ) -> Result<(Arc<ATM>, Arc<ATMProfile>), Box<dyn std::error::Error>> {
-    let service_profile = TDKProfile::new(alias, service_did, Some(mediator_did), secrets);
-
-    let tdk = TDK::new(
-        TDKConfig::builder()
-            .with_load_environment(false)
-            .build()
-            .map_err(|e| e.to_string())?,
-        None,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    tdk.add_profile(&service_profile).await;
-
-    let atm = tdk
-        .atm
-        .clone()
-        .ok_or_else(|| "Failed to initialize ATM client".to_owned())?;
-
-    // When ACL is denied it keeps trying to authenticate in an infinite loop
-    // https://github.com/affinidi/affinidi-messaging/blob/main/affinidi-messaging-sdk/src/transports/websockets/ws_connection.rs#L229
-    // that's why it gets stuck if acl is denied without throwing any errors
-    // that's why using timeout here so we can continue the loop and not get stuck
-    let service_profile = match timeout(
-        Duration::from_secs(5),
-        atm.profile_add(
-            &ATMProfile::from_tdk_profile(&atm, &service_profile)
-                .await
-                .map_err(|e| e.to_string())?,
-            live_stream,
-        ),
-    )
-    .await
-    {
-        Ok(profile) => profile.map_err(|e| e.to_string())?,
-        Err(err) => {
-            error!("Failed to add profile: {alias:?}, error: {err:#?}");
-            return Err(format!("Failed to add profile: {alias:?}, error: {err:#?}").into());
-        }
-    };
-
-    Ok((Arc::new(atm), service_profile))
+    Ok(connect_profile(alias, service_did, mediator_did, secrets, live_stream).await?)
 }
 
 #[cfg(test)]
@@ -93,23 +89,6 @@ mod tests {
 
         assert_eq!(get_thread_id(&msg), Some("thread-123".to_string()));
     }
-    #[test]
-    fn test_get_parent_thread_id() {
-        let msg = Message::build(new_message_id(), "test".to_string(), serde_json::json!({}))
-            .pthid("pthread-123".to_string())
-            .finalize();
-
-        assert_eq!(get_parent_thread_id(&msg), Some("pthread-123".to_string()));
-    }
-    #[test]
-    fn test_get_parent_thread_id_not_found_getting_thid() {
-        let msg = Message::build(new_message_id(), "test".to_string(), serde_json::json!({}))
-            .thid("thread-123".to_string())
-            .finalize();
-
-        assert_eq!(get_parent_thread_id(&msg), Some("thread-123".to_string()));
-    }
-
     #[test]
     fn test_new_message_id() {
         let id1 = new_message_id();

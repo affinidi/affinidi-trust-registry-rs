@@ -54,6 +54,27 @@ release goes GA (`## 0.27.0 (date)`).
   set `HttpsTransportConfig::allow_non_public_addresses = true`**; set it only
   for a URL you configured, not one taken from a DID document you do not
   control.
+- **`didcomm::listener::MessageHandler::handle` has no default body, and
+  `DefaultHandler` is gone.** The default logged every decrypted message at
+  `info`. Implementations must say what they do, and their result now
+  decides delivery: `Ok` acks the message at the mediator, `Err` leaves it
+  queued for a bounded redelivery.
+- **`didcomm::handlers::ProtocolHandler` declares `handles(&self, type) ->
+  bool`** instead of `get_supported_inbound_message_types`. `BaseHandler` is
+  no longer generic (`BaseHandler::build_from_arc` still takes the
+  repository). `HandlerContext` has no `pthid`, and `didcomm::get_parent_thread_id`
+  is removed: the value fell back to the thread id and was not a parent
+  thread.
+- **The unused DIDComm senders are removed or replaced:**
+  `didcomm::problem_report::send_problem_report` and
+  `didcomm::transport::send_response` (both could address a reply to any
+  DID) are removed; `transport::build_response` is now `build_reply`, and
+  `build_problem_report` takes the report by reference and no `pthid`. Every
+  reply now goes through one sender that only answers the authenticated
+  sender.
+- **`tsp::process_tsp_frame` returns a `tsp::FrameOutcome`** (handled,
+  poison, or transient), which decides whether the pickup listener acks the
+  frame.
 
 ### Added
 
@@ -84,6 +105,12 @@ release goes GA (`## 0.27.0 (date)`).
 
 ### Changed
 
+- **The offline sync runs once when the listener starts**, then every 30 s,
+  so a backlog queued while the registry was down is drained at once. The
+  pickup listener and the integration tests share one ATM bootstrap
+  (`didcomm::PROFILE_ADD_TIMEOUT`, 10 s; `prepare_atm_and_profile` used 5 s).
+  The listener uses the SDK's `atm.message_pickup()` accessor and no longer
+  silences deprecation warnings.
 - **The test client generates its own admin identity.** The repository no
   longer ships `test-client/conf/user_config.json`. On its first run the test
   client creates a new `did:peer` (Ed25519 signing, X25519 key agreement),
@@ -297,6 +324,48 @@ release goes GA (`## 0.27.0 (date)`).
 
 ### Fixed
 
+- **The DIDComm pickup listener deletes a message at the mediator only after
+  handling it** (R1.6). The live stream pulled with `auto_delete = true` and
+  the 30-second offline sync acked its whole batch as soon as the handlers
+  were spawned, so a registry write in flight when the process stopped, or one
+  whose handling failed, was lost. Both now pull without deleting and each
+  message is acked by its own handler task once the handler returns. A
+  handler error, a panic or a handler running past 30 s leaves the message
+  queued. With `--features tsp`, an offline frame the SDK could not unpack
+  (`(None, id)`) is no longer acked at once, since the SDK does not say
+  whether the failure was transient: it is left queued and retried. A TSP
+  frame whose unpack still fails transiently after the in-process retries is
+  also left queued, and a TSP frame that cannot be served because TSP is not
+  enabled is acked and logged. Redelivery is bounded: a message that has
+  failed 5 times over at least 10 minutes is deleted and logged at `error`.
+- **A message the live stream and the offline sync both fetch is handled
+  once** (R1.4). The listener remembers, by mediator message id, what is in
+  flight and what it has handled (bounded, 30 minutes). A copy already being
+  handled is skipped; a copy already handled whose ack did not land is acked
+  again without being answered or applied again. Reads were answered once per
+  fetch, and a failed `messages-received` ack had the same batch re-dispatched
+  every 30 s.
+- **The DIDComm pickup listener stops on shutdown and backs off on errors.**
+  It returns `Ok(())` when the shutdown token is cancelled, after giving
+  running handlers time to finish and ack. A receive error is retried with
+  exponential backoff (250 ms to 5 s) instead of in a tight loop. The SDK's
+  `ProfileError` (the profile's websocket has been torn down) ends the
+  listener with an error, so `/health` reports writes unavailable, instead of
+  being retried for the life of the process.
+- **The pickup listener runs at most 32 handlers at once, each for at most
+  30 s.** It waits for a free slot before taking the next message off the
+  socket, so a burst stays queued at the mediator rather than in memory.
+- **`trqp/1.0` DIDComm queries always get one correlated reply.** The
+  response carries the request's `thid` (or its `id`); a record that does not
+  exist is answered with `recognized` / `authorized` `false`, the queried
+  identifiers, the times and a `message`, instead of `{}`; a body that is not
+  a query gets an `e.p.msg.bad-request` problem report and a repository
+  failure an `e.p.msg.internal-error` one, instead of no reply.
+- **`DIDCOMM_PROTOCOLS.md` examples are real messages**: `type` instead of
+  `type_`, valid JSON, the current `registry/record/*` task versions, the
+  problem codes the registry sends and when, and what happens to an
+  unauthenticated or unsupported message. A unit test now parses every
+  example as a DIDComm message.
 - **Records whose identifiers contain `#` no longer share a storage key.** The
   Redis, DynamoDB and fjall backends keyed a record by
   `TR#{authority}#{action}#{resource}#{entity}` with the identifiers joined as

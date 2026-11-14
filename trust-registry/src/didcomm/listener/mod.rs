@@ -17,31 +17,29 @@ use super::handlers::BaseHandler;
 use crate::configs::{DidcommConfig, ProfileConfig};
 
 pub mod build_listener;
+pub(crate) mod delivery;
 pub mod mediator_functions;
 pub mod start_listener;
+#[cfg(test)]
+mod tests;
 
+/// Handles one unpacked inbound DIDComm message.
+///
+/// The pickup listener acks (deletes) the message at the mediator only after
+/// `handle` returns `Ok`. An `Err` leaves it queued for a bounded redelivery,
+/// so return `Err` only for a failure that may succeed on a later attempt, and
+/// `Ok` once the message has been handled — including when it was answered
+/// with an error or a problem report.
 #[async_trait]
 pub trait MessageHandler: Send + Sync + 'static {
-    // TODO: may grow a lot in case connection to DB and other possible things?
     async fn handle(
         &self,
         atm: &Arc<ATM>,
         profile: &Arc<ATMProfile>,
         message: Message,
         meta: UnpackMetadata,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        info!("[OnlyLoggingHandler]: Message: {:?}", message);
-        info!("[OnlyLoggingHandler]: UnpackMetadata: {:?}", meta);
-        info!("[OnlyLoggingHandler]: profile: {:?}", profile.inner.alias);
-        let _no_warn_please = atm.clone();
-
-        Ok(())
-    }
+    ) -> Result<(), Box<dyn std::error::Error>>;
 }
-
-pub struct DefaultHandler {}
-
-impl MessageHandler for DefaultHandler {}
 
 /// Where the registry's DIDComm connection comes from.
 ///
@@ -112,6 +110,12 @@ pub struct Listener<H: MessageHandler> {
     pub profile: Arc<ATMProfile>,
     pub handler: Arc<H>,
     pub(crate) shutdown: CancellationToken,
+    /// Which mediator message ids are in flight or handled, so a message the
+    /// live stream and the offline sync both fetch is handled once.
+    pub(crate) ledger: Arc<std::sync::Mutex<delivery::DeliveryLedger>>,
+    /// Handler slots; see [`delivery::MAX_INFLIGHT_HANDLERS`].
+    pub(crate) permits: Arc<tokio::sync::Semaphore>,
+    pub(crate) max_inflight: usize,
     /// Routing for TSP frames multiplexed onto the DIDComm pickup socket.
     #[cfg(feature = "tsp")]
     pub(crate) tsp: Option<TspContext>,
@@ -129,9 +133,21 @@ impl<H: MessageHandler> Listener<H> {
             profile,
             handler,
             shutdown,
+            ledger: Arc::default(),
+            permits: Arc::new(tokio::sync::Semaphore::new(delivery::MAX_INFLIGHT_HANDLERS)),
+            max_inflight: delivery::MAX_INFLIGHT_HANDLERS,
             #[cfg(feature = "tsp")]
             tsp: None,
         }
+    }
+
+    /// Bound concurrent handlers to `max` instead of
+    /// [`delivery::MAX_INFLIGHT_HANDLERS`].
+    #[cfg(test)]
+    pub(crate) fn with_max_inflight(mut self, max: usize) -> Self {
+        self.permits = Arc::new(tokio::sync::Semaphore::new(max));
+        self.max_inflight = max;
+        self
     }
 
     /// Attach the TSP dispatcher + proof verifier so TSP frames arriving on the

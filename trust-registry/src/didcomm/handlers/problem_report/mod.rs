@@ -6,8 +6,7 @@ use async_trait::async_trait;
 use tracing::info;
 
 use super::{HandlerContext, ProtocolHandler};
-
-const PROBLEM_REPORT_TYPE: &str = "https://didcomm.org/report-problem/2.0/problem-report";
+use crate::didcomm::problem_report::PROBLEM_REPORT_TYPE;
 
 pub struct ProblemReportHandler;
 
@@ -25,8 +24,8 @@ impl ProblemReportHandler {
 
 #[async_trait]
 impl ProtocolHandler for ProblemReportHandler {
-    fn get_supported_inbound_message_types(&self) -> Vec<String> {
-        vec![PROBLEM_REPORT_TYPE.to_string()]
+    fn handles(&self, message_type: &str) -> bool {
+        message_type == PROBLEM_REPORT_TYPE
     }
 
     async fn handle(
@@ -60,7 +59,7 @@ impl ProtocolHandler for ProblemReportHandler {
             ?args,
             ?escalate_to,
             thid = ?ctx.thid,
-            pthid = ?ctx.pthid,
+            pthid = ?message.pthid,
             "[profile = {}] Problem Report received",
             ctx.profile.inner.alias
         );

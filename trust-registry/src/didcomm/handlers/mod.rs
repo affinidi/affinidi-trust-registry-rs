@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::storage::repository::TrustRecordRepository;
 use affinidi_tdk::{
     didcomm::Message,
     messaging::{ATM, messages::compat::UnpackMetadata, profiles::ATMProfile},
@@ -8,7 +7,7 @@ use affinidi_tdk::{
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
 
-use crate::didcomm::{get_parent_thread_id, get_thread_id, listener::MessageHandler};
+use crate::didcomm::{get_thread_id, listener::MessageHandler};
 
 pub mod build;
 pub mod problem_report;
@@ -26,8 +25,9 @@ pub struct HandlerContext {
     /// Not sufficient to authorise a change: registry writes additionally need
     /// a Data Integrity proof by the same DID.
     pub authenticated_sender: String,
+    /// The request's thread: its `thid`, or its `id` when it has none. Every
+    /// reply is sent on this thread.
     pub thid: Option<String>,
-    pub pthid: Option<String>,
 }
 
 /// The sender an unpack proved, or `None` when the envelope did not bind its
@@ -40,7 +40,8 @@ fn authenticated_sender(message: &Message, meta: &UnpackMetadata) -> Option<Stri
 
 #[async_trait]
 pub trait ProtocolHandler: Send + Sync + 'static {
-    fn get_supported_inbound_message_types(&self) -> Vec<String>;
+    /// Whether this handler serves inbound messages of type `message_type`.
+    fn handles(&self, message_type: &str) -> bool;
 
     async fn handle(
         &self,
@@ -50,14 +51,13 @@ pub trait ProtocolHandler: Send + Sync + 'static {
     ) -> Result<(), Box<dyn std::error::Error>>;
 }
 
-pub struct BaseHandler<R: ?Sized + TrustRecordRepository> {
-    #[allow(dead_code)]
-    repository: Arc<R>,
+/// Routes each inbound DIDComm message to the [`ProtocolHandler`] for its type.
+pub struct BaseHandler {
     protocols_handlers: Vec<Arc<dyn ProtocolHandler>>,
 }
 
 #[async_trait]
-impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for BaseHandler<R> {
+impl MessageHandler for BaseHandler {
     async fn handle(
         &self,
         atm: &Arc<ATM>,
@@ -71,10 +71,10 @@ impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for BaseHandler
         let from = message.from.clone().unwrap_or_default();
         let authenticated_sender = authenticated_sender(&message, &meta);
 
-        let ph = self.protocols_handlers.iter().find(|ph| {
-            ph.get_supported_inbound_message_types()
-                .contains(message_type)
-        });
+        let ph = self
+            .protocols_handlers
+            .iter()
+            .find(|ph| ph.handles(message_type));
 
         if let Some(protocol_handler) = ph {
             // Every handler answers its sender. Without an authenticated
@@ -100,8 +100,7 @@ impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for BaseHandler
                 atm: atm.clone(),
                 profile: profile.clone(),
                 authenticated_sender,
-                thid: get_thread_id(&message).or_else(|| Some(message.id.clone())),
-                pthid: get_parent_thread_id(&message),
+                thid: get_thread_id(&message),
             });
             protocol_handler.handle(&ctx, message, meta).await?;
         } else if is_mediator_transport_message(
@@ -125,11 +124,14 @@ impl<R: ?Sized + TrustRecordRepository + 'static> MessageHandler for BaseHandler
                 &profile.inner.alias
             );
         } else {
-            // send problem report
+            // Not answered: replying to a type we do not speak (with a problem
+            // report) invites a reply loop with an agent that does the same,
+            // and the sender may not be authenticated. Handled, so acked.
             warn!(
                 message_type = ?message.typ,
                 from = ?from,
-                "No handler found. Send problem report or ignore"
+                "[profile = {}] no handler for this message type; dropped",
+                &profile.inner.alias
             );
         }
         Ok(())
@@ -252,7 +254,6 @@ mod tests {
 
         use super::super::{BaseHandler, HandlerContext, ProtocolHandler, authenticated_sender};
         use crate::didcomm::listener::MessageHandler;
-        use crate::storage::adapters::local_storage::LocalStorage;
 
         const TYPE: &str = "https://example.org/test/1.0/ping";
         const CLAIMED: &str = "did:example:someone-else";
@@ -265,8 +266,8 @@ mod tests {
 
         #[async_trait]
         impl ProtocolHandler for Recorder {
-            fn get_supported_inbound_message_types(&self) -> Vec<String> {
-                vec![TYPE.to_string()]
+            fn handles(&self, message_type: &str) -> bool {
+                message_type == TYPE
             }
 
             async fn handle(
@@ -340,7 +341,6 @@ mod tests {
             );
             let recorder = Arc::new(Recorder::default());
             let handler = BaseHandler {
-                repository: Arc::new(LocalStorage::new()),
                 protocols_handlers: vec![recorder.clone()],
             };
             handler.handle(&atm, &profile, message, meta).await.unwrap();
