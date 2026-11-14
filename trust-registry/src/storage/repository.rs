@@ -53,6 +53,16 @@ impl UnreadableRecord {
 }
 
 /// Log a stored value a listing could not decode and note it as unreadable.
+///
+/// Used by the keyed backends only, so unused in a build with none of them.
+#[cfg_attr(
+    not(any(
+        feature = "storage-redis",
+        feature = "storage-ddb",
+        feature = "storage-fjall"
+    )),
+    allow(dead_code)
+)]
 pub(crate) fn skip_unreadable(
     storage_key: String,
     error: &RepositoryError,
