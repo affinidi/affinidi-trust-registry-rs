@@ -176,6 +176,20 @@ async fn handle_grant(
     let authority = require_authority(&authority, &doc)?;
     let subject = doc.payload.subject.to_string();
     let resource = doc.payload.resource.to_string();
+    // A grant must be queryable on every TRQP surface, so the subject and
+    // resource meet the same identifier rules as a `registry/record/put`.
+    // (Revoke does not check them: it must still reach a tuple stored before
+    // the rules.)
+    let (entity_id, resource_id) = EntityId::parse(subject.as_str())
+        .and_then(|e| Resource::parse(resource.as_str()).map(|r| (e, r)))
+        .map_err(|e| {
+            doc.reject_with(
+                new_id(),
+                RejectReason::MalformedRequest {
+                    reason: e.to_string(),
+                },
+            )
+        })?;
     let already_granted = || {
         spec_error(
             &doc,
@@ -194,10 +208,10 @@ async fn handle_grant(
         None => {
             repository
                 .create(TrustRecord::new(
-                    EntityId::new(&subject),
+                    entity_id,
                     AuthorityId::new(&authority),
                     Action::new(ACTION),
-                    Resource::new(&resource),
+                    resource_id,
                     true,
                     true,
                     Context::empty(),
@@ -400,6 +414,39 @@ mod tests {
         .expect("a revoked grant can be granted again");
         assert_eq!(out.payload["granted"], serde_json::json!(true));
         assert!(authorized(&set, "openvtc/openvtc").await);
+    }
+
+    /// A grant no TRQP surface could query is refused, not stored.
+    #[tokio::test]
+    async fn a_grant_with_an_invalid_identifier_is_malformed() {
+        let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::default());
+        let set = set_over(repository.clone());
+        set.enable(
+            "git-trust",
+            "0.1",
+            Some(serde_json::json!({ "authority": AUTHORITY })),
+            None,
+        )
+        .await
+        .unwrap();
+        for (subject, resource) in [(SIGNER, "has spaces <x>"), ("not a did <x>", "repo")] {
+            let err = dispatch(
+                &set,
+                true,
+                task(
+                    grant_spec::Payload::type_uri(),
+                    serde_json::json!({ "subject": subject, "resource": resource }),
+                ),
+            )
+            .await
+            .expect_err("refused");
+            assert_eq!(
+                err.payload.code.to_string(),
+                "malformedRequest",
+                "{subject}"
+            );
+        }
+        assert!(repository.list().await.unwrap().records().is_empty());
     }
 
     /// The code and retry flag a grant or revoke of the test tuple is refused

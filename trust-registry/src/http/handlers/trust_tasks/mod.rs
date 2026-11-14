@@ -4,15 +4,19 @@
 //! (`trusttasks.org/binding/https/0.1`) — as the Trust Task equivalent of the
 //! existing REST TRQP endpoints. Mirroring that surface, the HTTP binding is
 //! **read-only**: it routes the `registry/recognition` and
-//! `registry/authorization` query tasks. Record CRUD stays on the DIDComm
-//! transport (which carries the admin-DID ACL).
+//! `registry/authorization` query tasks. Record writes, `registry/record/query`
+//! and governance tasks are served only over DIDComm and TSP, which
+//! authenticate the sender; the HTTP caller is anonymous.
 //!
 //! A single `TrustTask` JSON document is posted in the body; the handler runs
 //! the framework freshness checks, routes through the read-only dispatcher, and
 //! returns the `#response` (200) or a `trust-task-error` document with the HTTP
-//! status mapped from its code. Bearer-auth identity (for authenticated callers)
-//! is a follow-up; today the HTTP caller is anonymous, which is sufficient for
-//! the read-only query surface.
+//! status mapped from its code.
+//!
+//! A registry with no DID of its own (REST-only, or an embedded config with no
+//! profile) has nothing to issue or sign replies as, so it answers `404` with a
+//! problem document saying so, rather than replies with an empty `issuer` and
+//! no proof.
 
 use axum::{
     Json,
@@ -28,6 +32,7 @@ use uuid::Uuid;
 
 use crate::SharedData;
 use crate::embed::with_reply_signer;
+use crate::http::error::AppError;
 use crate::storage::repository::TrustRecordRepository;
 use crate::trust_tasks::TaskHandler;
 
@@ -71,6 +76,17 @@ where
         }
     };
     let my_vid = state.config.didcomm_config.profile_config.did.clone();
+    // No DID, no identity to issue or sign replies as: refuse rather than
+    // answer with `issuer: ""` and no proof (or reject every document that
+    // names a recipient as `wrongRecipient`).
+    if my_vid.is_empty() {
+        return AppError::NotFound {
+            detail: "This registry has no DID, so it does not serve Trust Tasks over HTTP; \
+                     query it with POST /recognition or POST /authorization"
+                .into(),
+        }
+        .into_response();
+    }
 
     // Parse the framework document. A malformed body cannot be addressed as a
     // conformant error response, so return a plain 400.
