@@ -50,17 +50,43 @@
 //!   binding, and (with a durable store) on any replica and after a restart.
 //! - A copy arriving while the first is executing is refused as retryable and
 //!   is not executed.
-//! - The write and the stored outcome are two steps. If the claimant stops
-//!   between them (the process dies, the store cannot be reached for every
-//!   retry of `complete`, the handler panics), the claim lapses after the
-//!   lease (immediately, for a panic) and a later copy **executes again**.
-//!   That re-execution sees the first one's effect: `registry/record/put`
+//! - An execution never outlives its claim while it is awaited:
+//!   [`execute_once`] stops waiting [`LEASE_MARGIN`] (15 s) before the lease
+//!   lapses and answers with a retryable refusal, leaving the claim to lapse
+//!   rather than releasing it, so a write already sent has the margin to land
+//!   before another copy can claim the id. The lease is at least the DIDComm
+//!   handler timeout plus twice the margin (60 s), so on DIDComm the transport
+//!   gives up first.
+//! - One id never gets two answers from this layer: a claimant that finds its
+//!   claim gone when storing the outcome ([`DedupError::ClaimLost`]) answers
+//!   with the outcome the id holds now, or a retryable refusal when it holds
+//!   none, never with its own.
+//! - The record write and the stored outcome are two steps, and the record
+//!   write is not fenced by the claim token. A later copy **executes again**
+//!   when the claim ends without an outcome while the write may have landed:
+//!   - the process dies between the write and `complete`;
+//!   - the store cannot be reached for any of the 3 tries of `complete`;
+//!   - the handler panics after writing (its claim is released at once);
+//!   - the execution is abandoned at its bound, or the call is cancelled,
+//!     after the write was sent (the claim lapses with the lease);
+//!   - the write's own answer is lost although the write landed (on Redis a
+//!     response timeout after `EXEC` was sent, on DynamoDB a timeout after
+//!     `TransactWriteItems` was sent): the handler reports a transient
+//!     failure, which releases the claim rather than storing it.
+//!
+//!   The re-execution sees the first one's effect: `registry/record/put`
 //!   without `expectedExisting` is an upsert and converges (answering
 //!   `wasCreated: false`); a strict create answers "already exists" and a
 //!   delete "not found", although the first execution succeeded. Whatever the
 //!   re-execution answers is then stored, so every copy after it gets that
-//!   same answer. Nothing executes a third time unless the same failure
-//!   happens again.
+//!   same answer.
+//!
+//! A late `complete` (after the lease, with no other claim since) behaves per
+//! store: Redis and DynamoDB keep a lapsed claim until another copy claims the
+//! id, so it still stores the outcome; the in-memory and fjall stores drop a
+//! lapsed claim when they next evict, and it returns `ClaimLost`. With
+//! executions bounded by the lease this only happens when resolving itself is
+//! slow.
 //!
 //! ## The record of accepted identifiers (VTI-OPS-025..027)
 //!
@@ -117,7 +143,11 @@
 // router allows this lint for the same reason.
 #![allow(clippy::result_large_err)]
 
+// Test-only. Each store's suite uses a different subset of the fixture's
+// hooks (shared, unbounded, restart, guard), so any build with fewer than all
+// backends leaves some of them unused.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) mod conformance;
 #[cfg(feature = "storage-ddb")]
 pub mod dynamodb;
@@ -304,6 +334,13 @@ pub trait MessageIdStore: Send + Sync {
     /// Abandon the claim `token` names so a retry may take it (transient
     /// failures only). Does nothing when that claim no longer holds `key`.
     async fn release(&self, key: &str, token: &ClaimToken) -> Result<(), DedupError>;
+
+    /// How long this store honours an unresolved claim. [`execute_once`]
+    /// stops waiting for a document's execution [`LEASE_MARGIN`] before it,
+    /// so a claim never lapses while its own execution is still awaited.
+    fn in_flight_lease(&self) -> Duration {
+        DEFAULT_IN_FLIGHT_TTL
+    }
 }
 
 enum Entry {
@@ -336,6 +373,12 @@ fn key_issuer(key: &str) -> &str {
 
 fn chrono_duration(duration: Duration) -> chrono::Duration {
     chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
+}
+
+/// `now` plus `duration`, saturating instead of overflowing.
+pub(crate) fn expiry(now: DateTime<Utc>, duration: Duration) -> DateTime<Utc> {
+    now.checked_add_signed(chrono_duration(duration))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
 /// The record kept in process memory: entries, their expiry queues and the
@@ -604,10 +647,14 @@ impl MessageIdStore for MemoryMessageIdStore {
         token: &ClaimToken,
         outcome: &StoredOutcome,
     ) -> Result<(), DedupError> {
-        let expires_at = Utc::now() + chrono_duration(self.config.retention);
+        let expires_at = expiry(Utc::now(), self.config.retention);
         self.lock()
             .complete(key, token, outcome, expires_at)
             .map(|_| ())
+    }
+
+    fn in_flight_lease(&self) -> Duration {
+        self.config.in_flight_lease
     }
 
     async fn release(&self, key: &str, token: &ClaimToken) -> Result<(), DedupError> {
@@ -672,10 +719,29 @@ impl Once {
 const RESOLVE_ATTEMPTS: u32 = 3;
 const RESOLVE_RETRY_DELAY: Duration = Duration::from_millis(100);
 
+/// How a claim was resolved after its document executed.
+#[derive(Debug, PartialEq, Eq)]
+enum Resolution {
+    /// The outcome is stored (or, for a transient failure, the claim is
+    /// released): this execution's outcome is the id's answer.
+    Settled,
+    /// The claim no longer holds the id: another copy claimed it after the
+    /// lease lapsed, or an earlier try of `complete` landed although its
+    /// answer was lost. This execution's outcome is not the id's answer.
+    Lost,
+    /// The store could not be reached: the claim lapses after the lease.
+    Unresolved,
+}
+
 /// Store `outcome` for `key` (or release the claim, for a transient failure),
 /// retrying a store that cannot be reached: an outcome that is not stored
 /// lets a redelivery execute the document again once the lease lapses.
-async fn resolve(store: &dyn MessageIdStore, key: &str, token: &ClaimToken, outcome: &TaskOutcome) {
+async fn resolve(
+    store: &dyn MessageIdStore,
+    key: &str,
+    token: &ClaimToken,
+    outcome: &TaskOutcome,
+) -> Resolution {
     let cacheable = is_cacheable(outcome);
     let stored = cacheable.then(|| StoredOutcome::from_outcome(outcome));
     let mut delay = RESOLVE_RETRY_DELAY;
@@ -686,16 +752,13 @@ async fn resolve(store: &dyn MessageIdStore, key: &str, token: &ClaimToken, outc
             None => store.release(key, token).await,
         };
         match resolution {
-            Ok(()) => return,
+            Ok(()) => return Resolution::Settled,
             Err(DedupError::ClaimLost(reason)) => {
-                // Another copy took the id after this claim's lease lapsed:
-                // the document ran more than once (see "The exact
-                // guarantee"). Its entry stands.
-                tracing::error!(
-                    "Executed {key}, but its claim was taken over before the outcome was \
-                     stored: {reason}"
-                );
-                return;
+                // Either another copy took the id after the lease lapsed, or a
+                // previous attempt here stored the outcome but its answer was
+                // lost. The caller answers with whatever the id holds now.
+                tracing::warn!("The claim on {key} no longer holds it after executing: {reason}");
+                return Resolution::Lost;
             }
             Err(e) if attempt < RESOLVE_ATTEMPTS => {
                 tracing::warn!("Failed to resolve dedup claim {key} (attempt {attempt}): {e}");
@@ -712,6 +775,53 @@ async fn resolve(store: &dyn MessageIdStore, key: &str, token: &ClaimToken, outc
                 );
             }
         }
+    }
+    Resolution::Unresolved
+}
+
+/// How long before its claim's lease lapses [`execute_once`] stops waiting
+/// for a document's execution. It covers resolving the claim and the
+/// response timeout of a write already sent (5 s on Redis).
+pub const LEASE_MARGIN: Duration = Duration::from_secs(15);
+
+/// A retryable refusal of `doc`: the sender re-sends it later.
+fn retry_later(doc: &TrustTask<Value>, reason: &str) -> ErrorResponse {
+    let mut rejection = doc.reject_with(
+        Uuid::new_v4().to_string(),
+        RejectReason::TaskFailed {
+            reason: reason.to_string(),
+            details: None,
+        },
+    );
+    rejection.payload = rejection.payload.with_retryable(true);
+    rejection
+}
+
+/// The id's answer after this execution lost its claim: the outcome stored
+/// for it if there is one, else a retryable refusal. Never this execution's
+/// own outcome, which another execution may contradict.
+async fn answer_after_lost_claim(
+    store: &dyn MessageIdStore,
+    key: &str,
+    digest: &str,
+    doc: &TrustTask<Value>,
+) -> TaskOutcome {
+    match store.claim(key, digest).await {
+        Ok(Claim::Replay(stored)) => stored.into_outcome(),
+        Ok(Claim::Acquired(token)) => {
+            // The entry is gone: give the id back rather than hold it.
+            if let Err(e) = store.release(key, &token).await {
+                tracing::warn!("Failed to release a re-taken claim on {key}: {e}");
+            }
+            Err(retry_later(
+                doc,
+                "the document's outcome could not be recorded",
+            ))
+        }
+        Ok(Claim::InFlight | Claim::Conflict) | Err(_) => Err(retry_later(
+            doc,
+            "an identical document is currently being processed",
+        )),
     }
 }
 
@@ -788,21 +898,48 @@ where
         }
     };
 
-    let outcome = match std::panic::AssertUnwindSafe(execute(doc))
-        .catch_unwind()
-        .await
-    {
-        Ok(outcome) => outcome,
-        Err(panic) => {
+    // Stop waiting before the lease lapses, so no other copy can claim the id
+    // while this execution is still awaited.
+    let bound = store.in_flight_lease().saturating_sub(LEASE_MARGIN);
+    let original = doc.clone();
+    let executed = tokio::time::timeout(
+        bound,
+        std::panic::AssertUnwindSafe(execute(doc)).catch_unwind(),
+    )
+    .await;
+    let outcome = match executed {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(panic)) => {
             if let Err(e) = store.release(&key, &token).await {
                 tracing::error!("Failed to release dedup claim {key} after a panic: {e}");
             }
             std::panic::resume_unwind(panic);
         }
+        Err(_) => {
+            // Whether the write landed is unknown. The claim is left to lapse
+            // (not released), so a write already sent has the margin to land
+            // before a retry can claim the id and execute it again.
+            tracing::error!(
+                "Execution of {key} did not finish within {bound:?}; abandoned, its claim \
+                 lapses with the lease"
+            );
+            return Once::new(
+                Disposition::Executed,
+                Err(retry_later(
+                    &original,
+                    "the document did not finish executing in time",
+                )),
+            );
+        }
     };
 
-    resolve(store, &key, &token, &outcome).await;
-    Once::new(Disposition::Executed, outcome)
+    match resolve(store, &key, &token, &outcome).await {
+        Resolution::Settled | Resolution::Unresolved => Once::new(Disposition::Executed, outcome),
+        Resolution::Lost => Once::new(
+            Disposition::Executed,
+            answer_after_lost_claim(store, &key, digest.as_str(), &original).await,
+        ),
+    }
 }
 
 /// Dispatch `doc`, executing the registry's own writes and the capability
@@ -1377,6 +1514,76 @@ mod tests {
         async fn release(&self, key: &str, token: &ClaimToken) -> Result<(), DedupError> {
             self.inner.release(key, token).await
         }
+    }
+
+    /// An execution still running when its bound (the lease less the
+    /// margin) is reached is abandoned with a retryable refusal.
+    #[tokio::test]
+    async fn an_execution_that_outlives_its_bound_is_refused_and_keeps_the_claim() {
+        // A lease just over the margin bounds the execution to 100 ms.
+        let store =
+            MemoryMessageIdStore::new(DEFAULT_TTL, LEASE_MARGIN + Duration::from_millis(100));
+        let doc = write_doc("slow", Some("did:example:alice"));
+        let once = execute_once(&store, doc.clone(), |doc| async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            ok_outcome(&doc)
+        })
+        .await;
+        let err = once.outcome.expect_err("abandoned");
+        assert!(err.payload.retryable, "the sender is told to retry");
+        // The claim is not released: a write already sent may still land, so
+        // a retry waits for the lease rather than running beside it.
+        assert!(matches!(
+            store
+                .claim(&message_key(&doc), document_digest(&doc).unwrap().as_str())
+                .await
+                .unwrap(),
+            Claim::InFlight
+        ));
+    }
+
+    /// Plays another copy taking the id over: `complete` finds the id
+    /// completed by that copy, with its own outcome.
+    struct TakenOver {
+        inner: MemoryMessageIdStore,
+        other: StoredOutcome,
+    }
+
+    #[async_trait]
+    impl MessageIdStore for TakenOver {
+        async fn claim(&self, key: &str, digest: &str) -> Result<Claim, DedupError> {
+            self.inner.claim(key, digest).await
+        }
+        async fn complete(
+            &self,
+            key: &str,
+            token: &ClaimToken,
+            _outcome: &StoredOutcome,
+        ) -> Result<(), DedupError> {
+            let digest = self.inner.lock().held_by(key, token).expect("held");
+            self.inner.release(key, token).await?;
+            let theirs = acquired(self.inner.claim(key, &digest).await?);
+            self.inner.complete(key, &theirs, &self.other).await?;
+            Err(DedupError::ClaimLost("taken over".to_string()))
+        }
+        async fn release(&self, key: &str, token: &ClaimToken) -> Result<(), DedupError> {
+            self.inner.release(key, token).await
+        }
+    }
+
+    /// A copy whose claim was taken over answers with the id's stored
+    /// outcome, not its own, so one id never gets two answers.
+    #[tokio::test]
+    async fn a_lost_claim_answers_with_the_stored_outcome() {
+        let doc = write_doc("raced", Some("did:example:alice"));
+        let mut theirs = doc.clone();
+        theirs.id = "their-response".to_string();
+        let store = TakenOver {
+            inner: MemoryMessageIdStore::default(),
+            other: StoredOutcome::Completed(theirs.clone()),
+        };
+        let once = execute_once(&store, doc, |doc| async move { ok_outcome(&doc) }).await;
+        assert_eq!(once.outcome.expect("the stored success"), theirs);
     }
 
     /// A store that cannot be reached for a moment does not lose the outcome:

@@ -351,7 +351,17 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   retrying a document whose claimant died gets a definite answer inside the
   5-minute acceptance window. `TR_DEDUP_IN_FLIGHT_LEASE_SEC` sets it.
 - **`RedisStorage` holds a `ConnectionManager`** instead of an exclusively
-  locked `MultiplexedConnection` (#212).
+  locked `MultiplexedConnection` (#212). The Redis backend now needs Redis 5
+  or later.
+- **Upgrade note, DynamoDB:** the record of accepted documents writes items
+  with `PK = MID#<issuer>#<id>` in the records' table, with `PutItem`,
+  `UpdateItem`, `DeleteItem` and `GetItem`. An IAM policy that restricts the
+  registry to `dynamodb:LeadingKeys = TR`, or to the record actions only, must
+  allow `MID#*` leading keys and those actions, or every write is refused as
+  unavailable.
+- **`execute_once` bounds an execution by the store's lease**
+  (`MessageIdStore::in_flight_lease`, new, defaulted) less `LEASE_MARGIN`, and
+  answers a copy whose claim was taken over with the stored outcome.
 
 ### Added
 
@@ -435,9 +445,9 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 - `TR_DEDUP_RETENTION_SEC`, `TR_DEDUP_IN_FLIGHT_LEASE_SEC`,
   `TR_DEDUP_MAX_ENTRIES` and `TR_DEDUP_MAX_ENTRIES_PER_ISSUER`
   (`configs::MessageIdStoreConfig`, `StorageConfig::message_id_config`). A
-  retention shorter than the acceptance window plus skew (360 s), a lease not
-  shorter than the window (300 s), or a zero bound stops startup naming the
-  variable.
+  retention outside 360 s (the acceptance window plus skew) to one day, a
+  lease outside 60 s (the DIDComm handler timeout plus margins) to 299 s, or a
+  zero bound stops startup naming the variable.
 - `TrustRecordAdminRepository::list_matching(&TrustRecordFilter)` (#216): a
   filtered listing. Redis scans only the filter's key prefix (`SCAN MATCH`),
   DynamoDB queries `begins_with(SK, prefix)`, fjall scans the prefix, and CSV

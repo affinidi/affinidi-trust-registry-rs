@@ -16,13 +16,14 @@
 //! are evicted, and any left over are dropped on open.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use serde::{Deserialize, Serialize};
 
-use super::{Claim, ClaimToken, DedupError, Inner, MessageIdStore, StoredOutcome, chrono_duration};
+use super::{Claim, ClaimToken, DedupError, Inner, MessageIdStore, StoredOutcome, expiry};
 use crate::configs::MessageIdStoreConfig;
 
 /// Keyspace (table) holding the outcomes, beside the records'.
@@ -162,7 +163,7 @@ impl MessageIdStore for FjallMessageIdStore {
         let token = token.clone();
         let outcome = outcome.clone();
         self.blocking(move |shared| {
-            let expires_at = Utc::now() + chrono_duration(shared.config.retention);
+            let expires_at = expiry(Utc::now(), shared.config.retention);
             // Held across the write, so the claim cannot change between the
             // check and the record of the outcome.
             let mut inner = shared.lock();
@@ -187,6 +188,10 @@ impl MessageIdStore for FjallMessageIdStore {
                 .map(|_| ())
         })
         .await
+    }
+
+    fn in_flight_lease(&self) -> Duration {
+        self.shared.config.in_flight_lease
     }
 
     async fn release(&self, key: &str, token: &ClaimToken) -> Result<(), DedupError> {

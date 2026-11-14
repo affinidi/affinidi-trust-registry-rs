@@ -24,7 +24,7 @@
 //! in-flight lease. Entries are bounded by their expiry only.
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use aws_sdk_dynamodb::Client;
@@ -275,6 +275,10 @@ impl MessageIdStore for DynamoDbMessageIdStore {
             }
             Err(err) => Err(sdk_unavailable("UpdateItem", err)),
         }
+    }
+
+    fn in_flight_lease(&self) -> Duration {
+        self.config.in_flight_lease
     }
 
     async fn release(&self, key: &str, token: &ClaimToken) -> Result<(), DedupError> {

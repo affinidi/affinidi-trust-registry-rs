@@ -1207,14 +1207,24 @@ uses `PutItem`, `UpdateItem`, `DeleteItem` and `GetItem` on the table, beside
 the `Query`, `GetItem`, `TransactGetItems` and `TransactWriteItems` the records
 use; an IAM policy narrower than the table must allow them.
 
-A copy is executed again only when the registry stops (or loses its store)
-between applying a write and recording its outcome: once the in-flight lease
-(`TR_DEDUP_IN_FLIGHT_LEASE_SEC`) lapses, the next copy runs. The re-run sees the
-first run's effect — a plain `registry/record/put` converges, while a strict
-create answers "already exists" and a delete "not found" — and its answer is
-recorded, so every later copy gets that same answer.
+An execution is abandoned, with a retryable answer, 15 seconds before its
+claim's lease (`TR_DEDUP_IN_FLIGHT_LEASE_SEC`) lapses, so no other copy can
+claim the document while it is still awaited, and a copy that finds its claim
+gone answers with the stored outcome rather than its own. A copy is executed
+again only when a claim ends without a recorded outcome after the write may
+have landed: the registry stops (or loses its store) between applying a write
+and recording its outcome, the execution is abandoned or panics after writing,
+or the write's own answer is lost although it landed (a Redis or DynamoDB
+response timeout). The `dedup` module documentation lists the cases. The re-run
+sees the first run's effect — a plain `registry/record/put` converges, while a
+strict create answers "already exists" and a delete "not found" — and its
+answer is recorded, so every later copy gets that same answer.
 
 ### Redis connections
+
+Redis 5 or later is required: the record of accepted documents runs Lua
+scripts that read the server clock (`TIME`) before writing, which needs
+effects replication, the default from Redis 5.
 
 Reads, listings and the record of accepted documents share one
 auto-reconnecting connection (`redis::aio::ConnectionManager`), used
@@ -1284,8 +1294,8 @@ none of these variables reach it.
 | `DDB_USE_TEST_CREDENTIALS` | `true` to use the SDK's static test credentials, for DynamoDB Local / LocalStack only. Never inferred from the endpoint. | default: `false` |
 | `REDIS_URL` | Redis connection URL. Format: `redis://host:port` or `redis://username:password@host:port/db`. | **Required** when `TR_STORAGE_BACKEND=redis` |
 | `TR_FJALL_PATH` | Directory for the embedded fjall keyspace. | default: `./trust_records.fjall` |
-| `TR_DEDUP_RETENTION_SEC` | How long, in seconds, the [record of accepted documents](#record-of-accepted-documents) keeps a write's outcome for replay. At least `360` (the write acceptance window plus clock skew). | default: `420` |
-| `TR_DEDUP_IN_FLIGHT_LEASE_SEC` | How long, in seconds, a claim on a document being executed is honoured before another copy may take it. At least `1` and less than `300` (the acceptance window). | default: `120` |
+| `TR_DEDUP_RETENTION_SEC` | How long, in seconds, the [record of accepted documents](#record-of-accepted-documents) keeps a write's outcome for replay. At least `360` (the write acceptance window plus clock skew), at most `86400` (one day). | default: `420` |
+| `TR_DEDUP_IN_FLIGHT_LEASE_SEC` | How long, in seconds, a claim on a document being executed is honoured before another copy may take it. At least `60` (the 30 s DIDComm handler timeout plus twice the 15 s margin the registry keeps before the lease lapses) and less than `300` (the acceptance window). | default: `120` |
 | `TR_DEDUP_MAX_ENTRIES` | Most documents the record holds at once, when it is kept in process memory (CSV and in-memory backends, and fjall's index). A positive whole number. | default: `100000` |
 | `TR_DEDUP_MAX_ENTRIES_PER_ISSUER` | Most documents one issuer may hold in a record kept in process memory. At least `1`, at most `TR_DEDUP_MAX_ENTRIES`. | default: `10000` |
 

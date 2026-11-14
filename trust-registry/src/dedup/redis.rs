@@ -24,6 +24,7 @@
 //! admin and authority checks reach a claim.
 
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use redis::Script;
@@ -167,6 +168,10 @@ impl MessageIdStore for RedisMessageIdStore {
                 "{key} is no longer held by this claim"
             )))
         }
+    }
+
+    fn in_flight_lease(&self) -> Duration {
+        self.config.in_flight_lease
     }
 
     async fn release(&self, key: &str, token: &ClaimToken) -> Result<(), DedupError> {

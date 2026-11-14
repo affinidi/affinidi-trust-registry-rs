@@ -178,6 +178,18 @@ impl Default for MessageIdStoreConfig {
     }
 }
 
+/// The longest `TR_DEDUP_RETENTION_SEC` may be. An outcome only has to be
+/// kept for the acceptance window; this bounds what an operator can ask for.
+pub const MAX_RETENTION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// The shortest in-flight lease: the DIDComm handler timeout, plus the
+/// [`LEASE_MARGIN`](crate::dedup::LEASE_MARGIN) `execute_once` keeps before
+/// the lease, plus as much again. A shorter lease could lapse while a handler
+/// the transport still waits for is executing.
+pub fn min_in_flight_lease() -> std::time::Duration {
+    crate::didcomm::listener::delivery::HANDLER_TIMEOUT + 2 * crate::dedup::LEASE_MARGIN
+}
+
 /// The write acceptance window plus the allowed future skew: how long a
 /// document can be accepted for, and so the least the retention may be.
 fn acceptance_span() -> std::time::Duration {
@@ -191,27 +203,33 @@ impl MessageIdStoreConfig {
     ///
     /// - the retention covers the whole acceptance window plus skew (360 s):
     ///   a shorter one would forget a document that can still be accepted,
-    ///   and a redelivery of it would execute again;
-    /// - the in-flight lease is at least 1 s and shorter than the acceptance
-    ///   window (300 s), so a sender retrying a document whose claimant died
-    ///   gets a definite answer before the document is too old;
+    ///   and a redelivery of it would execute again. It is at most one day
+    ///   ([`MAX_RETENTION`]);
+    /// - the in-flight lease is at least [`min_in_flight_lease`] (60 s) and
+    ///   shorter than the acceptance window (300 s), so a handler is not
+    ///   overtaken by a redelivery while it runs, and a sender retrying a
+    ///   document whose claimant died gets a definite answer before the
+    ///   document is too old;
     /// - both entry bounds are at least one, and the per-issuer bound is not
     ///   above the total.
     pub fn validate(&self) -> Result<(), String> {
         let span = acceptance_span();
-        if self.retention < span {
+        if self.retention < span || self.retention > MAX_RETENTION {
             return Err(format!(
                 "TR_DEDUP_RETENTION_SEC must be at least {} (the write acceptance window plus \
-                 skew), got {}",
+                 skew) and at most {} (one day), got {}",
                 span.as_secs(),
+                MAX_RETENTION.as_secs(),
                 self.retention.as_secs()
             ));
         }
         let window = trust_tasks_rs::DEFAULT_MAX_AGE.to_std().unwrap_or_default();
-        if self.in_flight_lease.is_zero() || self.in_flight_lease >= window {
+        let least = min_in_flight_lease();
+        if self.in_flight_lease < least || self.in_flight_lease >= window {
             return Err(format!(
-                "TR_DEDUP_IN_FLIGHT_LEASE_SEC must be at least 1 and less than {} (the write \
-                 acceptance window), got {}",
+                "TR_DEDUP_IN_FLIGHT_LEASE_SEC must be at least {} (the DIDComm handler timeout \
+                 plus a margin) and less than {} (the write acceptance window), got {}",
+                least.as_secs(),
                 window.as_secs(),
                 self.in_flight_lease.as_secs()
             ));
@@ -615,7 +633,7 @@ mod tests {
 
         unsafe {
             std::env::set_var("TR_DEDUP_RETENTION_SEC", "900");
-            std::env::set_var("TR_DEDUP_IN_FLIGHT_LEASE_SEC", "30");
+            std::env::set_var("TR_DEDUP_IN_FLIGHT_LEASE_SEC", "60");
             std::env::set_var("TR_DEDUP_MAX_ENTRIES", "50");
             std::env::set_var("TR_DEDUP_MAX_ENTRIES_PER_ISSUER", "5");
         }
@@ -624,7 +642,7 @@ mod tests {
             loaded.message_id_config,
             MessageIdStoreConfig {
                 retention: std::time::Duration::from_secs(900),
-                in_flight_lease: std::time::Duration::from_secs(30),
+                in_flight_lease: std::time::Duration::from_secs(60),
                 max_entries: 50,
                 max_entries_per_issuer: 5,
             }
@@ -641,6 +659,11 @@ mod tests {
             // Shorter than the acceptance window plus skew.
             ("TR_DEDUP_RETENTION_SEC", "359"),
             ("TR_DEDUP_IN_FLIGHT_LEASE_SEC", "0"),
+            // Shorter than the handler timeout plus margins.
+            ("TR_DEDUP_IN_FLIGHT_LEASE_SEC", "59"),
+            // Over a day, and large enough to overflow a timestamp.
+            ("TR_DEDUP_RETENTION_SEC", "86401"),
+            ("TR_DEDUP_RETENTION_SEC", "18446744073709551615"),
             // Not shorter than the acceptance window.
             ("TR_DEDUP_IN_FLIGHT_LEASE_SEC", "300"),
             ("TR_DEDUP_MAX_ENTRIES", "-1"),
