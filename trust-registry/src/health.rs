@@ -16,9 +16,11 @@
 //!   trip with the mediator, then `ok` while those round trips keep
 //!   succeeding (the offline sync makes one every 30 seconds), `unavailable`
 //!   after consecutive failures, when none has succeeded for
-//!   [`MEDIATOR_STALE_AFTER`], or when the listener stops. A path this process
-//!   cannot observe (a host-driven socket, the TSP delivery layer) is
-//!   `unknown` rather than a guessed `ok`.
+//!   [`MEDIATOR_STALE_AFTER`], or when the listener stops. On the TSP
+//!   delivery-layer path it follows the transport's connection state instead
+//!   (`ok` while connected, `unavailable` while it reconnects). A path this
+//!   process cannot observe (a host-driven socket) is `unknown` rather than a
+//!   guessed `ok`.
 //! - **storage** — a cheap lookup against the record store, made when
 //!   `/health` is asked and cached for [`STORAGE_PROBE_TTL`].
 //! - **verifier** — whether write proofs can be checked for every DID method,
@@ -74,8 +76,8 @@ pub enum WriteStatus {
     /// with the mediator.
     Starting,
     /// The write path is not one this process can observe: the host owns the
-    /// socket ([`DidCommSource::HostDriven`](crate::didcomm::listener::DidCommSource::HostDriven)),
-    /// or the TSP delivery layer drives it. A host can report its own state with
+    /// socket ([`DidCommSource::HostDriven`](crate::didcomm::listener::DidCommSource::HostDriven)).
+    /// A host can report its own state with
     /// [`RegistryHealth::mark_writes_ok`] and
     /// [`RegistryHealth::mark_writes_unavailable`].
     Unknown,

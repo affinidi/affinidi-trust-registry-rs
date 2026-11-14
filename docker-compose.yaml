@@ -4,7 +4,7 @@ services:
   trust-registry:
     image: trust-registry:local
     # Time to drain in-flight requests and DIDComm handlers and send their
-    # deletions to the mediator after SIGTERM (up to 75s in the listener).
+    # deletions to the mediator after SIGTERM (up to 80s in the listener).
     stop_grace_period: 90s
     build:
       context: .
