@@ -23,11 +23,14 @@ DIDComm offers a flexible messaging service that enables you to define higher-le
 
 ## Trust Registry Administration
 
-Trust records are managed with the `registry/record/*` Trust Tasks
-(`registry/record/put/0.1`, `registry/record/delete/0.1` and
-`registry/record/query/0.1`), carried in the DIDComm Trust Task envelope
-(`https://trusttasks.org/binding/didcomm/0.1/envelope`) or over TSP. See
-[Trust Task protocol surface](README.md#trust-task-protocol-surface).
+Trust records are managed with the `registry/record/*` Trust Tasks, carried in
+the DIDComm Trust Task envelope
+(`https://trusttasks.org/binding/didcomm/0.1/envelope`) or over TSP. The
+current versions are `registry/record/put/0.3`, `registry/record/delete/0.2`
+and `registry/record/query/0.3`; a record's validity window needs `put/0.3`.
+The earlier versions are still accepted. The
+[Trust Task protocol surface](README.md#trust-task-protocol-surface) table in
+the README is the authoritative list of tasks and versions.
 
 A write — and a `registry/record/query`, which returns whole records including
 their `context` — is accepted only when all of the following hold:
@@ -64,11 +67,11 @@ answered and change nothing. To migrate:
 
 | `tr-admin/1.0` message | Trust Task |
 | ---------------------- | ---------- |
-| `create-record` | `registry/record/put/0.1` with `"expectedExisting": false` |
-| `update-record` | `registry/record/put/0.1` with `"expectedExisting": true` |
-| `delete-record` | `registry/record/delete/0.1` |
-| `read-record` | `registry/record/query/0.1` naming all four key parts, signed |
-| `list-records` | `registry/record/query/0.1` naming an `authority_id` (plus any other filter; paginated), signed |
+| `create-record` | `registry/record/put/0.3` with `"expectedExisting": false` |
+| `update-record` | `registry/record/put/0.3` with `"expectedExisting": true` |
+| `delete-record` | `registry/record/delete/0.2` |
+| `read-record` | `registry/record/query/0.3` naming all four key parts, signed |
+| `list-records` | `registry/record/query/0.3` naming an `authority_id` (plus any other filter; paginated), signed |
 
 Each of these must be signed and must name an authority the issuer may act
 under, as above: `registry/record/query` is for admins, not the public. The
@@ -95,9 +98,20 @@ There are two roles defined in querying trust records:
 
 - DIDComm v2.1 protocol.
 - An authenticated (authcrypt) message. The registry answers the sender the
-  envelope proves; a message without one (anoncrypt or plaintext) is not
-  answered. Use the REST TRQP endpoints for queries without a DIDComm
-  identity.
+  envelope proves; a message without one (anoncrypt or plaintext) is dropped
+  without an answer — not even a problem report, since there is no proven
+  sender to send one to. Use the REST TRQP endpoints for queries without a
+  DIDComm identity.
+- A `thid` on the request is recommended. Every reply (answer or problem
+  report) carries the request's `thid`, or the request's `id` when it has
+  none, so a client with several queries outstanding can tell the replies
+  apart.
+
+The registry sends exactly one reply per query. A query whose record does not
+exist is answered, not refused: `recognized` (or `authorized`) is `false` and
+`message` says that no such record exists. A query the registry cannot answer
+gets a [problem report](#problem-reporting) instead. A message of a type the
+registry does not serve is dropped without an answer.
 
 ### Workflow
 
@@ -144,9 +158,9 @@ Response | `https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization/
 **Additional Fields:**
 
 - **`record_type`** - Part of the query response. The type of record requested by the verifier.
-- **`time_requested`** - Part of the query response. The date and time the query is sent to the Trust Registry by the verifier.
+- **`time_requested`** - Part of the query response. The date and time the Trust Registry received the query. (`trqp/1.0` carries no `context`, so unlike the REST TRQP endpoints and the `registry/recognition` and `registry/authorization` Trust Tasks it cannot ask about another instant; use those for `context.time`.)
 - **`time_evaluated`** - Part of the query response. The date and time the query is evaluated.
-- **`message`** - Part of the query response. A human-readable message about the result of the query.
+- **`message`** - Part of the query response. A human-readable message about the result of the query, including why the answer is `false` (no such record, or outside the record's validity window).
 
 **Example:**
 
@@ -156,7 +170,7 @@ Request:
 {
     "id": "040d3b97-0be8-43f8-8a95-b3a926aadff1",
     "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization",
+    "type": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization",
     "body": {
       "action": "action_xyz",
       "authority_id": "did:example:authority456",
@@ -165,7 +179,7 @@ Request:
     },
     "from": "<VERIFIER_DID>",
     "to": [
-        "<TRUST_REGISTRY_DID>",
+        "<TRUST_REGISTRY_DID>"
     ],
     "thid": "6a627735-6743-4141-8cb7-1359d778936b"
 }
@@ -177,7 +191,7 @@ Response:
 {
     "id": "040d3b97-0be8-43f8-8a95-b3a926aadff2",
     "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization/response",
+    "type": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-authorization/response",
     "body": {
       "action": "action_xyz",
       "authority_id": "did:example:authority456",
@@ -193,11 +207,11 @@ Response:
       "record_type":"Authorization",
       "time_requested":"2025-12-09T05:33:52Z",
       "time_evaluated":"2025-12-09T05:33:52Z",
-      "message": "did:example:entity123 authorized to action1+resource1 by did:example:authority456 to issue a certificate credential."
+      "message": "did:example:entity123 authorized to action_xyz+resource_abc by did:example:authority456"
     },
     "from": "<TRUST_REGISTRY_DID>",
     "to": [
-        "<VERIFIER_DID>",
+        "<VERIFIER_DID>"
     ],
     "thid": "6a627735-6743-4141-8cb7-1359d778936b"
 }
@@ -224,9 +238,9 @@ Response | `https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition/re
 **Additional Fields:**
 
 - **`record_type`** - Part of the query response. The type of record requested by the verifier.
-- **`time_requested`** - Part of the query response. The date and time the query is sent to the Trust Registry by the verifier.
+- **`time_requested`** - Part of the query response. The date and time the Trust Registry received the query. (`trqp/1.0` carries no `context`, so unlike the REST TRQP endpoints and the `registry/recognition` and `registry/authorization` Trust Tasks it cannot ask about another instant; use those for `context.time`.)
 - **`time_evaluated`** - Part of the query response. The date and time the query is evaluated.
-- **`message`** - Part of the query response. A human-readable message about the result of the query.
+- **`message`** - Part of the query response. A human-readable message about the result of the query, including why the answer is `false` (no such record, or outside the record's validity window).
 
 **Example:**
 
@@ -236,7 +250,7 @@ Request:
 {
     "id": "040d3b97-0be8-43f8-8a95-b3a926aadff1",
     "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition",
+    "type": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition",
     "body": {
       "action": "action_xyz",
       "authority_id": "did:example:authority456",
@@ -245,7 +259,7 @@ Request:
     },
     "from": "<VERIFIER_DID>",
     "to": [
-        "<TRUST_REGISTRY_DID>",
+        "<TRUST_REGISTRY_DID>"
     ],
     "thid": "6a627735-6743-4141-8cb7-1359d778936b"
 }
@@ -257,7 +271,7 @@ Response:
 {
     "id": "040d3b97-0be8-43f8-8a95-b3a926aadff2",
     "typ": "application/didcomm-plain+json",
-    "type_": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition/response",
+    "type": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition/response",
     "body": {
       "action": "action_xyz",
       "authority_id": "did:example:authority456",
@@ -273,11 +287,36 @@ Response:
       "record_type":"Recognition",
       "time_requested":"2025-12-09T05:33:52Z",
       "time_evaluated":"2025-12-09T05:33:52Z",
-      "message": "did:example:entity123 is recognized by did:example:authority456 to issue a certificate credential."
+      "message": "did:example:entity123 recognized by did:example:authority456"
     },
     "from": "<TRUST_REGISTRY_DID>",
     "to": [
-        "<VERIFIER_DID>",
+        "<VERIFIER_DID>"
+    ],
+    "thid": "6a627735-6743-4141-8cb7-1359d778936b"
+}
+```
+
+Response for a record the registry does not hold:
+
+```json
+{
+    "id": "040d3b97-0be8-43f8-8a95-b3a926aadff3",
+    "typ": "application/didcomm-plain+json",
+    "type": "https://affinidi.com/didcomm/protocols/trqp/1.0/query-recognition/response",
+    "body": {
+      "action": "action_xyz",
+      "authority_id": "did:example:authority456",
+      "recognized": false,
+      "entity_id": "did:example:entity123",
+      "resource": "resource_abc",
+      "time_requested":"2025-12-09T05:33:52Z",
+      "time_evaluated":"2025-12-09T05:33:52Z",
+      "message": "did:example:entity123 not recognized by did:example:authority456: no such record"
+    },
+    "from": "<TRUST_REGISTRY_DID>",
+    "to": [
+        "<VERIFIER_DID>"
     ],
     "thid": "6a627735-6743-4141-8cb7-1359d778936b"
 }
@@ -285,32 +324,56 @@ Response:
 
 ## Problem Reporting
 
-The existing Problem Reports defined within the DIDComm v2.1 protocol specification for standard reporting of any issues encountered during the data sharing flow.
+The registry answers a `trqp/1.0` query it cannot answer with a DIDComm v2.1
+problem report, sent to the authenticated sender on the query's thread: `thid`
+is the query's `thid` (or its `id`), and `pthid` names the same thread.
 
 The [PIURI](https://identity.foundation/didcomm-messaging/spec/v2.1/#protocol-identifier-uri) for this protocol is `https://didcomm.org/report-problem/2.0`.
 
+| Code | When the registry sends it |
+| ---- | -------------------------- |
+| `e.p.msg.bad-request` | The query body is not a `trqp/1.0` query (a missing or mistyped `entity_id`, `authority_id`, `action` or `resource`). |
+| `e.p.msg.internal-error` | The registry could not complete the lookup (for example, its storage is unavailable). Retrying later may succeed. |
+
+A missing record is **not** a problem: it is answered with `recognized` or
+`authorized` set to `false` (see above). The codes `e.p.msg.unauthorized`,
+`e.p.msg.not-found` and `e.p.msg.conflict` are defined in the code base but
+the registry does not currently send them.
+
 ```json
 {
-  "type_": "https://didcomm.org/report-problem/2.0/problem-report",
   "id": "345e6789-e89b-12d3-a456-426614174222",
+  "typ": "application/didcomm-plain+json",
+  "type": "https://didcomm.org/report-problem/2.0/problem-report",
+  "from": "<TRUST_REGISTRY_DID>",
+  "to": [
+    "<VERIFIER_DID>"
+  ],
+  "thid": "6a627735-6743-4141-8cb7-1359d778936b",
   "pthid": "6a627735-6743-4141-8cb7-1359d778936b",
   "body": {
-    "code": "e.p.msg.internal-error",
-    "comment": "Record not found: Record not found: did:example:entity123|did:example:authority456|action_xyz|resource_abc"
+    "code": "e.p.msg.bad-request",
+    "comment": "Invalid trqp/1.0 query: missing field `resource`"
   }
 }
 ```
 
-Aside from Trust Registry specific errors, the system also returns errors from the mediator, such as Access Control Lists (ACLs) and message routing issues.
+Trust Tasks (`registry/*`) do not use problem reports: their errors are Trust
+Task error documents in the same envelope as a success.
+
+The mediator may also return its own problem reports, for example when its
+Access Control Lists refuse a message.
 
 For more information, visit the [Problem Reports](https://identity.foundation/didcomm-messaging/spec/v2.1/#problem-reports) section.
 
 
 ## Security Considerations
 
-The protocol requires that all message exchanges between the Administrator and the Trust Registry **MUST** be encrypted and verifiable to ensure confidentiality, integrity, and authenticity.
+Every message to the Trust Registry over DIDComm — administration and queries
+alike — **MUST** be encrypted and verifiable to ensure confidentiality,
+integrity, and authenticity.
 
-- All messages **MUST** use `authcrypt` encryption envelope (e.g., `authcrypt(plaintext)`) to verify the sender authority and the content remains confidential throughout transmission.
+- Messages **MUST** use the `authcrypt` encryption envelope (e.g., `authcrypt(plaintext)`). The registry answers only the sender an authcrypt envelope proves. An anoncrypt or plaintext message is dropped unanswered, whatever its `from` header says, because nothing binds that header to the sender.
 
 **Trust Registry Administration**
 
@@ -322,4 +385,4 @@ The protocol requires that all message exchanges between the Administrator and t
 
 ## Implementation
 
-See the [Trust Registry for Rust](https://github.com/affinidi/affinidi-trust-registry-rs/tree/main/trust-registry/src/didcomm) implementation.
+The DIDComm binding lives in [`trust-registry/src/didcomm`](trust-registry/src/didcomm) in this repository.

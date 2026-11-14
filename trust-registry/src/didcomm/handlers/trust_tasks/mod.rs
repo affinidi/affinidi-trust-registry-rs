@@ -32,10 +32,9 @@ use serde_json::Value;
 use tracing::{error, warn};
 use trust_tasks_didcomm::ENVELOPE_TYPE;
 use trust_tasks_rs::{ErrorResponse, TrustTask};
-use uuid::Uuid;
 
-use crate::didcomm::error::DIDCommError;
 use crate::didcomm::handlers::{HandlerContext, ProtocolHandler};
+use crate::didcomm::transport;
 use crate::trust_tasks::TaskHandler;
 
 /// DIDComm binding handler for the `registry/*` Trust Task family.
@@ -52,10 +51,6 @@ impl TrustTasksHandler {
     pub fn new(tasks: TaskHandler) -> Self {
         Self { tasks }
     }
-}
-
-fn new_id() -> String {
-    Uuid::new_v4().to_string()
 }
 
 /// Decode an inbound DIDComm envelope body and route it through `tasks`.
@@ -101,8 +96,8 @@ pub async fn route_envelope_body(
 
 #[async_trait]
 impl ProtocolHandler for TrustTasksHandler {
-    fn get_supported_inbound_message_types(&self) -> Vec<String> {
-        vec![ENVELOPE_TYPE.to_string()]
+    fn handles(&self, message_type: &str) -> bool {
+        message_type == ENVELOPE_TYPE
     }
 
     async fn handle(
@@ -161,45 +156,13 @@ impl TrustTasksHandler {
             .get("threadId")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let message_id = new_id();
-        let mut builder = Message::build(message_id.clone(), ENVELOPE_TYPE.to_string(), body)
-            .from(ctx.profile.inner.did.clone())
-            .to(ctx.authenticated_sender.clone());
-        if let Some(thid) = thread_id {
-            builder = builder.thid(thid);
-        }
-        let envelope = builder.finalize();
-
-        let packed = ctx
-            .atm
-            .pack_encrypted(
-                &envelope,
-                &ctx.authenticated_sender,
-                Some(&ctx.profile.inner.did),
-                Some(&ctx.profile.inner.did),
-            )
-            .await?;
-
-        let mediator = ctx
-            .profile
-            .to_tdk_profile()
-            .mediator
-            .clone()
-            .ok_or(DIDCommError::MissingMediator)?;
-
-        ctx.atm
-            .forward_and_send_message(
-                &ctx.profile,
-                false,
-                &packed.0,
-                Some(&message_id),
-                &mediator,
-                &ctx.authenticated_sender,
-                None,
-                None,
-                false,
-            )
-            .await?;
+        transport::send_reply(
+            ctx,
+            ENVELOPE_TYPE,
+            body,
+            thread_id.or_else(|| ctx.thid.clone()),
+        )
+        .await?;
         Ok(())
     }
 }

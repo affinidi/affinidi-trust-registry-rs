@@ -6,14 +6,15 @@ use crate::storage::repository::TrustRecordAdminRepository;
 use crate::trust_tasks::TaskHandler;
 use std::sync::Arc;
 
-impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
+impl BaseHandler {
     /// `tasks` is the registry's shared Trust Task handler: the same one the
     /// TSP binding uses, so both answer from one replay record and one audit
     /// trail.
-    pub fn build_from_arc(repository: Arc<R>, tasks: TaskHandler) -> BaseHandler<R> {
-        let trqp = TRQPMessagesHandler {
-            repository: repository.clone(),
-        };
+    pub fn build_from_arc<R>(repository: Arc<R>, tasks: TaskHandler) -> BaseHandler
+    where
+        R: ?Sized + TrustRecordAdminRepository + 'static,
+    {
+        let trqp = TRQPMessagesHandler { repository };
 
         let problem_report_handler = ProblemReportHandler::new();
 
@@ -24,7 +25,6 @@ impl<R: ?Sized + TrustRecordAdminRepository + 'static> BaseHandler<R> {
         let trust_tasks = TrustTasksHandler::new(tasks);
 
         BaseHandler {
-            repository,
             protocols_handlers: vec![
                 Arc::new(trqp),
                 Arc::new(problem_report_handler),
@@ -55,17 +55,20 @@ mod tests {
         );
         let handler = BaseHandler::build_from_arc(repo, tasks);
 
-        let accepted: Vec<String> = handler
-            .protocols_handlers
-            .iter()
-            .flat_map(|protocol| protocol.get_supported_inbound_message_types())
-            .collect();
-
-        assert!(
-            accepted
-                .iter()
-                .all(|message_type| !message_type.contains("/protocols/tr-admin/")),
-            "tr-admin/1.0 message types are still routed: {accepted:?}"
-        );
+        for message_type in [
+            "https://affinidi.com/didcomm/protocols/tr-admin/1.0/create-record",
+            "https://affinidi.com/didcomm/protocols/tr-admin/1.0/update-record",
+            "https://affinidi.com/didcomm/protocols/tr-admin/1.0/delete-record",
+            "https://affinidi.com/didcomm/protocols/tr-admin/1.0/read-record",
+            "https://affinidi.com/didcomm/protocols/tr-admin/1.0/list-records",
+        ] {
+            assert!(
+                !handler
+                    .protocols_handlers
+                    .iter()
+                    .any(|protocol| protocol.handles(message_type)),
+                "{message_type} is still routed"
+            );
+        }
     }
 }

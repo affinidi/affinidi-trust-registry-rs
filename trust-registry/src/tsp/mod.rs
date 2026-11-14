@@ -47,13 +47,12 @@ const UNPACK_MAX_BACKOFF: Duration = Duration::from_millis(1_000);
 
 /// Is this unpack failure worth retrying, or is the frame poison?
 ///
-/// The distinction matters because the frame has **already been deleted from
-/// the mediator** by the time we unpack it (R1.6): whatever we drop here is
-/// gone for good. A transient failure is therefore the dangerous case — a
-/// momentary resolver outage would otherwise discard a valid signed registry
-/// write — so anything resolution- or network-shaped is retried, and only
-/// failures that are deterministic properties of the bytes are treated as
-/// poison.
+/// The distinction decides whether the frame is acked (R1.6): poison is
+/// deleted at the mediator so it stops being redelivered, while a transient
+/// failure leaves it queued. Acking a transient failure would let a momentary
+/// resolver outage discard a valid signed registry write, so anything
+/// resolution- or network-shaped is treated as transient, and only failures
+/// that are deterministic properties of the bytes are treated as poison.
 ///
 /// Mapping (see `affinidi-messaging-sdk` `protocols/tsp.rs`):
 ///
@@ -64,15 +63,16 @@ const UNPACK_MAX_BACKOFF: Duration = Duration::from_millis(1_000);
 /// - [`ATMError::MsgReceiveError`] — envelope parse failure, a message addressed
 ///   to another DID, or decrypt/verify failure. Retrying identical bytes cannot
 ///   change any of these.
-/// - Everything else (notably [`ATMError::SecretsError`], our own key material
-///   missing) is a local misconfiguration that retrying will not fix; it is
-///   logged at error level rather than silently dropped.
+/// - [`ATMError::SecretsError`] — our own key material is missing. Not
+///   retried in-process, but not poison either: [`process_tsp_frame`] leaves
+///   the frame queued, as the SDK's receive leg does.
+/// - Everything else is treated as a property of the bytes.
 ///
 /// `DIDError` does conflate "the resolver is briefly unreachable" with "this DID
 /// does not exist", and the SDK gives us only a string to go on. Treating both
-/// as transient is the deliberate choice: retrying a genuinely bad DID costs a
-/// few hundred milliseconds on a task that has already been spawned, while
-/// dropping a good one loses a signed write permanently.
+/// as transient is the deliberate choice: a genuinely bad DID is redelivered a
+/// bounded number of times before the listener gives up on it, while dropping
+/// a good one loses a signed write permanently.
 fn is_transient_unpack_error(err: &ATMError) -> bool {
     matches!(
         err,
@@ -156,6 +156,21 @@ async fn handle_inbound(tasks: &TaskHandler, sender_did: &str, doc: TrustTask<Va
     }
 }
 
+/// How [`process_tsp_frame`] ended, which decides whether the pickup listener
+/// acks the frame at the mediator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameOutcome {
+    /// Unpacked and routed; the reply was attempted. Ack it.
+    Handled,
+    /// It can never be handled: it does not unpack for a reason that is a
+    /// property of its bytes, or it decrypted to something that is not a Trust
+    /// Task. Ack it so it stops being redelivered.
+    Poison,
+    /// Unpacking still failed transiently (a resolver hiccup) after the
+    /// in-process retries. Leave it queued: the offline sync offers it again.
+    Transient,
+}
+
 /// Process one inbound TSP frame delivered on the **shared** mediator pickup
 /// socket (the same websocket the DIDComm listener drives via
 /// `live_stream_next_frame`). Decrypts it via `atm.tsp()`, routes it through the
@@ -168,28 +183,20 @@ async fn handle_inbound(tasks: &TaskHandler, sender_did: &str, doc: TrustTask<Va
 /// already-decoded qb2). The mediator permits only one websocket per DID, so the
 /// registry must never open a second TSP socket — TSP frames arrive multiplexed
 /// on the DIDComm pickup stream.
+///
+/// The frame is still queued at the mediator while this runs (the listener
+/// pulls with `auto_delete = false`); the returned [`FrameOutcome`] decides
+/// whether the listener acks it (R1.6).
 pub async fn process_tsp_frame(
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
     tasks: &TaskHandler,
     packed: &str,
-) {
+) -> FrameOutcome {
     let alias = &profile.inner.alias;
 
-    // R1.6 — deliberate ack-first, with the loss window narrowed rather than
-    // closed. `process_next_message` pulls frames with `auto_delete = true`, so
-    // the mediator has already deleted this frame before we see it: there is no
-    // ack left to withhold. Acking first is retained as poison defence — a frame
-    // that cannot be unpacked would otherwise be redelivered forever.
-    //
-    // What we can do is stop *transient* failures from consuming the one chance
-    // we get. The packed bytes are still in memory, so a resolver hiccup is
-    // retried in-process instead of discarding a valid signed registry write.
-    //
-    // Write-path dedup now exists ([`crate::dedup`]), so a redelivery would
-    // replay rather than duplicate — but only the in-memory store is wired up,
-    // and it forgets across a restart. Deferring the delete until after durable
-    // handoff therefore waits on a durable dedup store; tracked separately.
+    // A resolver hiccup is retried in-process first, while the bytes are in
+    // hand; only if it persists is the frame left for redelivery.
     let unpacked = retry_transient(
         UNPACK_MAX_ATTEMPTS,
         UNPACK_INITIAL_BACKOFF,
@@ -203,20 +210,29 @@ pub async fn process_tsp_frame(
     let (payload, sender_did) = match unpacked {
         Ok(v) => v,
         Err(e) if is_transient_unpack_error(&e) => {
-            // Retries exhausted on a recoverable fault: this is a lost write,
-            // not a rejected one. Logged at error level because it is a
-            // durability event an operator needs to see, not routine noise.
-            error!(
+            // Not acked: the frame stays queued and the offline sync offers it
+            // again, a bounded number of times.
+            warn!(
                 "[profile = {alias}] TSP unpack still failing after {UNPACK_MAX_ATTEMPTS} \
-                 attempts; the frame is already deleted from the mediator, so a signed \
-                 registry write may have been lost: {e}"
+                 attempts; leaving the frame queued for redelivery: {e}"
             );
-            return;
+            return FrameOutcome::Transient;
+        }
+        Err(e @ ATMError::SecretsError(_)) => {
+            // Our own key material is missing: local configuration, not a
+            // property of the frame (the SDK's receive leg never deletes on it
+            // either). Left queued, so it is not lost while the operator fixes
+            // the keys; the listener bounds the redelivery.
+            error!(
+                "[profile = {alias}] cannot unpack a TSP frame with this registry's keys; \
+                 leaving it queued: {e}"
+            );
+            return FrameOutcome::Transient;
         }
         Err(e) => {
             // Poison: retrying identical bytes cannot succeed.
             warn!("[profile = {alias}] Dropping unusable TSP frame: {e}");
-            return;
+            return FrameOutcome::Poison;
         }
     };
     let doc = match parse_envelope(&payload) {
@@ -224,7 +240,7 @@ pub async fn process_tsp_frame(
         Err(e) => {
             // Also poison — it decrypted cleanly and the contents are wrong.
             warn!("[profile = {alias}] Dropping TSP message from {sender_did}: {e}");
-            return;
+            return FrameOutcome::Poison;
         }
     };
     info!(
@@ -235,6 +251,7 @@ pub async fn process_tsp_frame(
     if let Err(e) = atm.tsp().send(profile, &sender_did, &reply).await {
         error!("[profile = {alias}] Failed to send TSP response to {sender_did}: {e}");
     }
+    FrameOutcome::Handled
 }
 
 /// Dispatch one **already-unpacked** inbound TSP application frame delivered by

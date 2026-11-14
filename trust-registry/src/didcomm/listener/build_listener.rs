@@ -1,57 +1,33 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use affinidi_tdk::messaging::profiles::ATMProfile;
-use affinidi_tdk::{
-    TDK,
-    common::{config::TDKConfig, profiles::TDKProfile},
-};
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::didcomm::error::DIDCommError;
 use crate::{
     configs::ProfileConfig,
-    didcomm::listener::{Listener, MessageHandler},
+    didcomm::{
+        connect_profile,
+        listener::{Listener, MessageHandler},
+    },
 };
 
 impl<H: MessageHandler> Listener<H> {
+    /// Open the registry's own mediator connection for `profile_config` and
+    /// build a listener over it.
     pub async fn build_listener(
         profile_config: ProfileConfig,
         mediator_did: &str,
         handler: H,
         shutdown: CancellationToken,
     ) -> Result<Self, DIDCommError> {
-        let alias = &profile_config.alias;
-        let did = &profile_config.did;
-        let secrets = profile_config.secrets;
-        let live_stream = true;
-
-        let listener_profile_tdk = TDKProfile::new(alias, did, Some(mediator_did), secrets);
-
-        let tdk = TDK::new(
-            TDKConfig::builder().with_load_environment(false).build()?,
-            None,
+        let (atm, profile) = connect_profile(
+            &profile_config.alias,
+            &profile_config.did,
+            mediator_did,
+            profile_config.secrets,
+            true,
         )
         .await?;
-
-        tdk.add_profile(&listener_profile_tdk).await;
-
-        let atm = tdk.atm.clone().ok_or(DIDCommError::MissingATM)?;
-
-        let listener_profile = timeout(
-            Duration::from_secs(10),
-            atm.profile_add(
-                &ATMProfile::from_tdk_profile(&atm, &listener_profile_tdk).await?,
-                live_stream,
-            ),
-        )
-        .await??;
-
-        Ok(Self::new(
-            Arc::new(atm),
-            listener_profile,
-            Arc::new(handler),
-            shutdown,
-        ))
+        Ok(Self::new(atm, profile, Arc::new(handler), shutdown))
     }
 }

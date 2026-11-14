@@ -1,12 +1,12 @@
-use std::sync::Arc;
+//! DIDComm problem reports (DIDComm v2 "Problem Reports"). The registry sends
+//! one in answer to a `trqp/1.0` query it cannot answer; see
+//! `DIDCOMM_PROTOCOLS.md` for when each code is used. Sent through
+//! [`transport::send_problem_report`](super::transport::send_problem_report).
 
-use affinidi_tdk::messaging::{ATM, profiles::ATMProfile};
 use serde_json::json;
-use tracing::{error, info};
 
-use crate::didcomm::error::DIDCommError;
-
-use super::transport;
+/// The problem-report message type.
+pub const PROBLEM_REPORT_TYPE: &str = "https://didcomm.org/report-problem/2.0/problem-report";
 
 pub mod codes {
     pub const ERROR_UNAUTHORIZED: &str = "e.p.msg.unauthorized";
@@ -82,66 +82,6 @@ impl ProblemReport {
 
         body
     }
-}
-
-/// Send a problem report message via ATM
-pub async fn send_problem_report(
-    atm: &Arc<ATM>,
-    profile: &Arc<ATMProfile>,
-    report: ProblemReport,
-    recipient: &str,
-    thid: Option<String>,
-    pthid: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let problem_message = transport::build_problem_report(
-        profile.inner.did.clone(),
-        recipient.to_string(),
-        report,
-        thid,
-        pthid,
-    );
-
-    let message_id = problem_message.id.clone();
-
-    let packed_msg = atm
-        .pack_encrypted(
-            &problem_message,
-            recipient,
-            Some(&profile.inner.did),
-            Some(&profile.inner.did),
-        )
-        .await?;
-
-    let sending_result = atm
-        .forward_and_send_message(
-            profile,
-            false,
-            &packed_msg.0,
-            Some(&message_id),
-            &profile
-                .to_tdk_profile()
-                .mediator
-                .ok_or(DIDCommError::MissingMediator)?,
-            recipient,
-            None,
-            None,
-            false,
-        )
-        .await;
-
-    if let Err(sending_error) = sending_result {
-        error!(
-            "[profile = {}] Failed to send problem report. Error: {:?}",
-            &profile.inner.alias, sending_error
-        );
-        return Err(sending_error.into());
-    }
-
-    info!(
-        "[profile = {}] Problem report sent successfully",
-        &profile.inner.alias
-    );
-    Ok(())
 }
 
 #[cfg(test)]
