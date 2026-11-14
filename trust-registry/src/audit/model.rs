@@ -22,7 +22,9 @@ pub struct AuditLog {
     pub status: AuditStatus,
     pub resource: AuditResource,
     /// Why a write failed or was refused: the error document's code and
-    /// message. `None` for a success, a replay or an in-flight duplicate.
+    /// message. For a success, the reason the requester stated, when the task
+    /// carries one (`governance/capability/disable`, `git-trust/revoke`).
+    /// `None` otherwise, and for a replay or an in-flight duplicate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<AuditReason>,
     pub thread_id: Option<String>,
@@ -268,6 +270,13 @@ impl AuditLogBuilder {
 
     pub fn build_success(self) -> AuditLog {
         self.finish(AuditStatus::Success, None)
+    }
+
+    /// A success, with the reason the requester stated for it (the `reason`
+    /// of a `governance/capability/disable` or `git-trust/revoke`), which the
+    /// specifications say is recorded for audit.
+    pub fn build_success_with(self, stated: impl Into<AuditReason>) -> AuditLog {
+        self.finish(AuditStatus::Success, Some(stated.into()))
     }
 
     pub fn build_failure(self, error: impl Into<AuditReason>) -> AuditLog {

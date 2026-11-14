@@ -65,12 +65,15 @@ use trust_tasks_rs::{
 };
 
 use crate::audit::model::{AuditLogBuilder, AuditLogger, AuditReason, AuditResource, AuditRole};
-use crate::capabilities::{CONFIG_AUTHORITY, CapabilitySet, DispatcherHandle};
+use crate::capabilities::{
+    Acting, CONFIG_AUTHORITY, CapabilitySet, DispatcherHandle, EXT_AUTHORITY, EXT_NAMESPACE,
+    EnablementKey, acting_as, requested_authority,
+};
 use crate::dedup::{
     DEFAULT_QUERY_MAX_ENTRIES, DEFAULT_QUERY_MAX_ENTRIES_PER_ISSUER, Disposition,
     MemoryMessageIdStore, MessageIdStore, execute_once,
 };
-use crate::domain::{Action, AuthorityId, EntityId, Resource};
+use crate::domain::{Action, AuthorityId, EntityId, Resource, normalise_reference};
 use crate::trust_tasks::descriptor::{
     AuthorityRule, CAPABILITY_WRITE, Execution, Field, Replay, TaskDescriptor, descriptor,
     is_reserved,
@@ -93,7 +96,7 @@ fn write_freshness() -> FreshnessPolicy {
 fn required_authority(value: Option<&Value>, what: &str) -> Result<Option<String>, RejectReason> {
     value
         .and_then(Value::as_str)
-        .map(|authority| Some(authority.to_string()))
+        .map(|authority| Some(normalise_reference(authority.to_string())))
         .ok_or_else(|| RejectReason::MalformedRequest {
             reason: format!("{what} must name its authority_id"),
         })
@@ -127,6 +130,29 @@ enum Route {
     Unserved,
 }
 
+/// What [`TaskHandler::resolve_authority`] established for a write.
+#[derive(Default)]
+struct Resolved {
+    /// The authority the write acts under, normalised.
+    authority: Option<String>,
+    /// The dispatcher the write is executed through, when it is not the live
+    /// one: a capability task's enablement, read in the same snapshot as its
+    /// authority.
+    dispatcher: Option<Arc<RegistryDispatcher>>,
+    /// The enablement a capability task or disable acts on.
+    acting: Option<Acting>,
+}
+
+/// Where a capability task that found its enablement is executed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Serve {
+    /// Through the enablement's own task dispatcher (a capability's task).
+    Tasks,
+    /// Through the live admin dispatcher, which serves the governance tasks
+    /// (`governance/capability/disable`).
+    Governance,
+}
+
 /// Where in `doc` one part of the record key is, read as a string.
 fn field(rule: &TaskDescriptor, doc: &TrustTask<Value>, field: Field) -> Option<String> {
     match field {
@@ -153,6 +179,9 @@ struct AuditContext {
     /// The record key (or capability): entity, action, resource. Identifiers
     /// only: never record contents, context or proofs.
     key: (Option<String>, Option<String>, Option<String>),
+    /// The reason the requester stated (`disable`, `revoke`), recorded with
+    /// a success.
+    stated_reason: Option<String>,
 }
 
 impl AuditContext {
@@ -175,6 +204,7 @@ impl AuditContext {
                 field(rule, doc, rule.resource.action),
                 field(rule, doc, rule.resource.resource),
             ),
+            stated_reason: field(rule, doc, rule.audit_reason),
         }
     }
 
@@ -214,7 +244,10 @@ impl AuditContext {
             // records what happened.
             (Some(Disposition::Replayed), _) => builder.build_replayed(),
             (Some(Disposition::InFlight), _) => builder.build_duplicate_in_flight(),
-            (_, Ok(_)) => builder.build_success(),
+            (_, Ok(_)) => match self.stated_reason {
+                Some(stated) => builder.build_success_with(AuditReason::text(stated)),
+                None => builder.build_success(),
+            },
             (_, Err(error)) => {
                 let code = serde_json::to_value(&error.payload.code)
                     .ok()
@@ -402,6 +435,17 @@ impl TaskHandler {
         }
     }
 
+    /// Our own DID in the form `doc` addresses it: as written, when it names
+    /// us with a did:scid `?src=` locator (VTI-KEY-160), so the framework's
+    /// exact recipient check accepts the spelling a sender needs to resolve
+    /// us; our own DID otherwise, which a wrong recipient is refused against.
+    fn addressed_as<'a>(&'a self, doc: &'a TrustTask<Value>) -> &'a str {
+        match doc.recipient.as_deref() {
+            Some(recipient) if same_reference(recipient, &self.my_did) => recipient,
+            _ => &self.my_did,
+        }
+    }
+
     /// Our own DID, as bindings need it to resolve parties.
     pub fn my_did(&self) -> &str {
         &self.my_did
@@ -528,35 +572,42 @@ impl TaskHandler {
         Ok(())
     }
 
-    /// The authority a write acts under.
+    /// The authority a write acts under, normalised (a did:scid without its
+    /// `?src=` locator).
     ///
-    /// Record tasks name it in the payload. A capability task acts under the
-    /// authority its capability was enabled with, and enabling or disabling a
-    /// capability acts under the authority its config names. A write that acts
-    /// on the registry itself — `registry/did/rotate`, or enabling or
-    /// disabling a capability whose config names no authority, or a task of a
-    /// capability that writes no records — acts under the registry's own DID.
+    /// Record tasks name it in the payload. Enabling a capability acts under
+    /// the authority its config names. A capability task, or a disable, acts
+    /// under the authority of the enablement it acts on: of the authorities
+    /// that have enabled the capability, the one the issuer may act for (or,
+    /// when it may act for several, the one the request names in
+    /// `ext.`[`EXT_NAMESPACE`]`.`[`EXT_AUTHORITY`]). A write that acts on the
+    /// registry itself — `registry/did/rotate`, or enabling or disabling a
+    /// capability with no authority, or a task of a capability that writes no
+    /// records — acts under the registry's own DID.
     ///
-    /// `None` only for a capability task or disable whose capability is not
-    /// enabled, which changes nothing: the task is answered as unsupported
-    /// and the disable as `not_enabled`. A write slug with no rule here is
-    /// refused rather than run under no authority.
+    /// `None` only for a capability task or disable when no authority has the
+    /// capability enabled, which changes nothing: the task is answered as
+    /// unsupported and the disable as `notEnabled`. A write slug with no rule
+    /// here is refused rather than run under no authority.
     pub async fn target_authority(
         &self,
         doc: &TrustTask<Value>,
     ) -> Result<Option<String>, RejectReason> {
         self.resolve_authority(doc)
             .await
-            .map(|(authority, _)| authority)
+            .map(|resolved| resolved.authority)
+    }
+
+    /// The registry's own DID, as an authority.
+    fn registry_authority(&self) -> String {
+        normalise_reference(self.my_did.clone())
     }
 
     /// [`target_authority`](Self::target_authority), plus — for a task served
-    /// by a capability — the dispatcher read in the same snapshot as the
-    /// authority, which is the one the task must be dispatched through.
-    async fn resolve_authority(
-        &self,
-        doc: &TrustTask<Value>,
-    ) -> Result<(Option<String>, Option<Arc<RegistryDispatcher>>), RejectReason> {
+    /// by a capability — the enablement it acts on and the dispatcher read in
+    /// the same snapshot as the authority, which is the one the task must be
+    /// dispatched through.
+    async fn resolve_authority(&self, doc: &TrustTask<Value>) -> Result<Resolved, RejectReason> {
         let slug = doc.type_uri.slug();
         let Route::Proven(rule) = self.route(slug) else {
             return Err(no_authority(slug));
@@ -570,23 +621,24 @@ impl TaskHandler {
                     reason: "a capability change must name its capability".to_string(),
                 })
         };
+        let authority_only = |authority: Option<String>| Resolved {
+            authority,
+            ..Resolved::default()
+        };
         match rule.authority {
             AuthorityRule::NotApplicable => Err(no_authority(slug)),
             // The member is read in the spelling the document's version
             // uses. A document carrying the other spelling has no authority
             // here and is refused, before its payload is ever parsed.
-            AuthorityRule::Member { at, what } => Ok((
-                required_authority(
-                    payload.pointer(at.pointer(rule.camel_case(&doc.type_uri))),
-                    what,
-                )?,
-                None,
-            )),
+            AuthorityRule::Member { at, what } => Ok(authority_only(required_authority(
+                payload.pointer(at.pointer(rule.camel_case(&doc.type_uri))),
+                what,
+            )?)),
             AuthorityRule::EnableConfig => {
                 let capability = named_capability()?;
                 let authority = match payload.pointer(&format!("/config/{CONFIG_AUTHORITY}")) {
                     None => None,
-                    Some(Value::String(authority)) => Some(authority.clone()),
+                    Some(Value::String(authority)) => Some(normalise_reference(authority.clone())),
                     Some(_) => {
                         return Err(RejectReason::MalformedRequest {
                             reason: "a capability's authority must be a DID string".to_string(),
@@ -600,52 +652,145 @@ impl TaskHandler {
                         ),
                     });
                 }
-                Ok((Some(authority.unwrap_or_else(|| self.my_did.clone())), None))
+                Ok(authority_only(Some(
+                    authority.unwrap_or_else(|| self.registry_authority()),
+                )))
             }
             AuthorityRule::NamedCapability => {
                 let capability = named_capability()?;
-                self.capability_authority(self.capabilities()?, capability)
+                self.capability_authority(self.capabilities()?, capability, doc, Serve::Governance)
                     .await
             }
             AuthorityRule::Capability(capability) => {
-                self.capability_authority(self.capabilities()?, capability)
+                self.capability_authority(self.capabilities()?, capability, doc, Serve::Tasks)
                     .await
             }
-            AuthorityRule::Registry => Ok((Some(self.my_did.clone()), None)),
+            AuthorityRule::Registry => Ok(authority_only(Some(self.registry_authority()))),
             AuthorityRule::OwningCapability => match self
                 .capabilities
                 .as_deref()
                 .and_then(|capabilities| Some((capabilities, capabilities.write_owner(slug)?)))
             {
                 Some((capabilities, capability)) => {
-                    self.capability_authority(capabilities, capability).await
+                    self.capability_authority(capabilities, capability, doc, Serve::Tasks)
+                        .await
                 }
                 None => Err(no_authority(slug)),
             },
         }
     }
 
-    /// The authority a task of `capability` acts under, and the dispatcher
-    /// read with it: the capability's configured authority, or the registry's
-    /// own DID for a capability that writes no records. `None` when the
-    /// capability is not enabled.
+    /// The authority an enablement with `authority` (`None`: the registry's
+    /// own slot) acts under.
+    fn enablement_authority(
+        &self,
+        capabilities: &CapabilitySet,
+        capability: &str,
+        authority: Option<&str>,
+    ) -> Result<String, RejectReason> {
+        match authority {
+            Some(authority) => Ok(authority.to_string()),
+            None if capabilities.requires_authority(capability) => {
+                Err(unbound_capability(capability))
+            }
+            None => Ok(self.registry_authority()),
+        }
+    }
+
+    /// The enablement of `capability` that `doc` acts on, the authority it
+    /// acts under, and the dispatcher read with it.
+    ///
+    /// Of the authorities that have enabled the capability (only the one
+    /// `doc` names in `ext`, when it names one), the one the issuer may act
+    /// for is chosen. When it may act for none, the first is reported, so the
+    /// authority check refuses the write; when it may act for several, the
+    /// request is refused as ambiguous rather than guessed. When none has
+    /// enabled it, the task acts on no enablement and changes nothing.
     async fn capability_authority(
         &self,
         capabilities: &CapabilitySet,
         capability: &str,
-    ) -> Result<(Option<String>, Option<Arc<RegistryDispatcher>>), RejectReason> {
-        let snapshot = capabilities.snapshot(capability).await;
-        if !snapshot.enabled {
-            return Ok((None, Some(snapshot.dispatcher)));
-        }
-        let authority = match snapshot.authority {
-            Some(authority) => authority,
-            None if capabilities.requires_authority(capability) => {
-                return Err(unbound_capability(capability));
+        doc: &TrustTask<Value>,
+        serve: Serve,
+    ) -> Result<Resolved, RejectReason> {
+        let requested = requested_authority(&doc.payload)
+            .map_err(|reason| RejectReason::MalformedRequest { reason })?;
+        let candidates: Vec<Option<String>> = capabilities
+            .authorities(capability)
+            .await
+            .into_iter()
+            .filter(|authority| requested.is_none() || *authority == requested)
+            .collect();
+        let permitted: Vec<&Option<String>> = candidates
+            .iter()
+            .filter(|authority| {
+                self.enablement_authority(capabilities, capability, authority.as_deref())
+                    .is_ok_and(|acting| self.authorize_authority(doc, Some(&acting)).is_ok())
+            })
+            .collect();
+        let chosen = match (permitted.as_slice(), candidates.first()) {
+            ([one], _) => (*one).clone(),
+            ([], Some(first)) => {
+                // Not one the issuer may act for: named here, refused by the
+                // authority check.
+                let authority =
+                    self.enablement_authority(capabilities, capability, first.as_deref())?;
+                return Ok(Resolved {
+                    authority: Some(authority),
+                    dispatcher: Some(Arc::new(RegistryDispatcher::new())),
+                    acting: Some(Acting::NotEnabled),
+                });
             }
-            None => self.my_did.clone(),
+            ([], None) => return Ok(self.not_enabled(capabilities, requested, serve).await),
+            (_, _) => {
+                return Err(RejectReason::MalformedRequest {
+                    reason: format!(
+                        "{capability} is enabled for several authorities this issuer may act \
+                         for; name the one meant in ext.{EXT_NAMESPACE}.{EXT_AUTHORITY}"
+                    ),
+                });
+            }
         };
-        Ok((Some(authority), Some(snapshot.dispatcher)))
+        let snapshot = capabilities.snapshot(capability, chosen.as_deref()).await;
+        if !snapshot.enabled {
+            // Disabled since the authorities were read.
+            return Ok(self.not_enabled(capabilities, requested, serve).await);
+        }
+        let authority = self.enablement_authority(capabilities, capability, chosen.as_deref())?;
+        Ok(Resolved {
+            authority: Some(authority),
+            dispatcher: Some(match serve {
+                Serve::Tasks => snapshot
+                    .tasks
+                    .unwrap_or_else(|| Arc::new(RegistryDispatcher::new())),
+                Serve::Governance => snapshot.dispatcher,
+            }),
+            acting: Some(Acting::Enablement(EnablementKey::new(
+                capability,
+                chosen.as_deref(),
+            ))),
+        })
+    }
+
+    /// A capability task or disable that acts on no enablement: under the
+    /// authority it named, if any (which the issuer must still be allowed to
+    /// act for), through a dispatcher that does not serve the capability's
+    /// tasks, so a task is answered as unsupported and a disable as
+    /// `notEnabled`.
+    async fn not_enabled(
+        &self,
+        capabilities: &CapabilitySet,
+        requested: Option<String>,
+        serve: Serve,
+    ) -> Resolved {
+        Resolved {
+            authority: requested,
+            dispatcher: Some(match serve {
+                Serve::Tasks => Arc::new(RegistryDispatcher::new()),
+                Serve::Governance => capabilities.dispatcher().read().await.clone(),
+            }),
+            acting: Some(Acting::NotEnabled),
+        }
     }
 
     fn capabilities(&self) -> Result<&CapabilitySet, RejectReason> {
@@ -791,7 +936,7 @@ impl TaskHandler {
                 sender_did.map(str::to_string),
             ));
         }
-        if let Err(reason) = doc.validate_basic(Utc::now(), &self.my_did) {
+        if let Err(reason) = doc.validate_basic(Utc::now(), self.addressed_as(&doc)) {
             return Err(doc.reject_with(new_id(), reason));
         }
         if !served {
@@ -819,7 +964,7 @@ impl TaskHandler {
                 sender_did.map(str::to_string),
             ));
         }
-        if let Err(reason) = doc.validate_basic(Utc::now(), &self.my_did) {
+        if let Err(reason) = doc.validate_basic(Utc::now(), self.addressed_as(&doc)) {
             return Err(doc.reject_with(new_id(), reason));
         }
         if let Err(reason) = self.check_write_document(&doc) {
@@ -837,12 +982,12 @@ impl TaskHandler {
             .as_ref()
             .map(|proof| (proof.verification_method.clone(), proof.created));
 
-        let (authority, snapshot_dispatcher) = match self.resolve_authority(&doc).await {
+        let resolved = match self.resolve_authority(&doc).await {
             Ok(resolved) => resolved,
             Err(reason) => return Err(doc.reject_with(new_id(), reason)),
         };
-        progress.authority = authority.clone();
-        if let Err(reason) = self.authorize_authority(&doc, authority.as_deref()) {
+        progress.authority = resolved.authority.clone();
+        if let Err(reason) = self.authorize_authority(&doc, resolved.authority.as_deref()) {
             return Err(doc.reject_with(new_id(), reason));
         }
 
@@ -866,11 +1011,18 @@ impl TaskHandler {
                 .await
             }
             Execution::Dispatcher => {
-                let dispatcher = match snapshot_dispatcher {
+                let dispatcher = match resolved.dispatcher {
                     Some(dispatcher) => dispatcher,
                     None => self.dispatcher.read().await.clone(),
                 };
-                execute_once(dedup.as_ref(), doc, |doc| handle_document(&dispatcher, doc)).await
+                let execution =
+                    execute_once(dedup.as_ref(), doc, |doc| handle_document(&dispatcher, doc));
+                // A capability task or disable runs knowing the enablement
+                // it acts on, chosen above.
+                match resolved.acting {
+                    Some(acting) => acting_as(acting, execution).await,
+                    None => execution.await,
+                }
             }
         };
         progress.disposition = Some(once.disposition);
@@ -917,14 +1069,17 @@ impl TaskHandler {
                         label,
                     )
                     .await
-                    .map_err(|reason| {
-                        doc.reject_with(
-                            new_id(),
-                            RejectReason::TaskFailed {
-                                reason,
+                    .map_err(|failure| {
+                        // A failure reaching the VTA or resolving the DID may
+                        // pass, so it is retryable: the replay record then
+                        // does not keep it as this document's answer.
+                        let payload =
+                            trust_tasks_rs::ErrorPayload::from(RejectReason::TaskFailed {
+                                reason: failure.reason,
                                 details: None,
-                            },
-                        )
+                            })
+                            .with_retryable(failure.transient);
+                        doc.reject_with(new_id(), payload)
                     })?;
                     let response: Result<$resp, _> = <$resp>::builder()
                         .did(did)
@@ -1543,12 +1698,7 @@ mod tests {
             .expect_err("refused");
 
         assert_eq!(code(&err), "permissionDenied");
-        assert!(
-            f.capabilities
-                .configured_authority("git-trust")
-                .await
-                .is_none()
-        );
+        assert!(f.capabilities.authorities("git-trust").await.is_empty());
     }
 
     #[tokio::test]
@@ -1575,8 +1725,8 @@ mod tests {
             .expect("enable accepted");
 
         assert_eq!(
-            f.capabilities.configured_authority("git-trust").await,
-            Some(did)
+            f.capabilities.authorities("git-trust").await,
+            vec![Some(did)]
         );
         assert!(matches!(last_audit(&f).operation, AuditOperation::Enable));
     }
@@ -1599,12 +1749,7 @@ mod tests {
             .expect_err("refused");
 
         assert_eq!(code(&err), "permissionDenied");
-        assert!(
-            f.capabilities
-                .configured_authority("git-trust")
-                .await
-                .is_some()
-        );
+        assert!(!f.capabilities.authorities("git-trust").await.is_empty());
     }
 
     /// Without the capability set the authority of a capability task cannot
@@ -1638,13 +1783,12 @@ mod tests {
         let store = MemoryCapabilityStore::default();
         store
             .save(&std::collections::BTreeMap::from([(
-                "git-trust".to_string(),
+                EnablementKey::new("git-trust", None),
                 CapabilityState {
                     version: "0.1".to_string(),
                     enabled: true,
                     config: None,
                     enabled_at: Utc::now(),
-                    delegate: None,
                 },
             )]))
             .expect("seed state");
@@ -1693,7 +1837,197 @@ mod tests {
             .expect_err("refused");
 
         assert_eq!(code(&err), "malformedRequest");
-        assert!(!f.capabilities.snapshot("git-trust").await.enabled);
+        assert!(!f.capabilities.snapshot("git-trust", None).await.enabled);
+    }
+
+    // --- enablement per authority ---------------------------------------------
+
+    fn enable_doc(authority: &str) -> Value {
+        json!({
+            "capability": "git-trust",
+            "version": "0.1",
+            "config": { "authority": authority },
+        })
+    }
+
+    async fn grant_record(f: &Fixture, authority: &str) -> Option<bool> {
+        f.repo
+            .read(TrustRecordQuery::new(
+                EntityId::new("did:example:member"),
+                AuthorityId::new(authority),
+                Action::new(git_trust::ACTION),
+                Resource::new("org/repo"),
+            ))
+            .await
+            .ok()
+            .map(|record| record.is_authorized())
+    }
+
+    /// Two communities in one registry each enable git-trust under their own
+    /// authority, grant under it, and disable only their own enablement.
+    #[tokio::test]
+    async fn two_authorities_each_enable_and_use_git_trust() {
+        let (key_a, a) = did_key(90);
+        let (key_b, b) = did_key(91);
+        let f = fixture(vec![a.clone(), b.clone()]);
+        for (key, did) in [(&key_a, &a), (&key_b, &b)] {
+            let doc = signed(unsigned(ENABLE, Some(did), enable_doc(did)), key).await;
+            f.handler
+                .handle(doc, Some(did))
+                .await
+                .expect("each authority enables its own");
+        }
+        assert_eq!(f.capabilities.authorities("git-trust").await.len(), 2);
+
+        for (key, did) in [(&key_a, &a), (&key_b, &b)] {
+            let doc = signed(unsigned(GRANT, Some(did), grant_payload()), key).await;
+            f.handler
+                .handle(doc, Some(did))
+                .await
+                .expect("each grants under its own authority");
+            assert_eq!(grant_record(&f, did).await, Some(true));
+        }
+
+        // A disables its enablement; B's is untouched and still grants.
+        let doc = signed(
+            unsigned(DISABLE, Some(&a), json!({ "capability": "git-trust" })),
+            &key_a,
+        )
+        .await;
+        f.handler.handle(doc, Some(&a)).await.expect("disabled");
+        assert_eq!(
+            f.capabilities.authorities("git-trust").await,
+            vec![Some(b.clone())]
+        );
+
+        let doc = signed(unsigned(GRANT, Some(&a), grant_payload()), &key_a).await;
+        let err = f.handler.handle(doc, Some(&a)).await.expect_err("A is off");
+        // The only enablement left is B's, which A may not act under.
+        assert_eq!(code(&err), "permissionDenied");
+        assert_eq!(grant_record(&f, &b).await, Some(true));
+        let doc = signed(
+            unsigned(DISABLE, Some(&a), json!({ "capability": "git-trust" })),
+            &key_a,
+        )
+        .await;
+        let err = f.handler.handle(doc, Some(&a)).await.expect_err("A is off");
+        assert_eq!(
+            code(&err),
+            "permissionDenied",
+            "B's enablement is not A's to disable"
+        );
+
+        let doc = signed(
+            unsigned(
+                "https://trusttasks.org/spec/git-trust/revoke/0.1",
+                Some(&b),
+                grant_payload(),
+            ),
+            &key_b,
+        )
+        .await;
+        f.handler
+            .handle(doc, Some(&b))
+            .await
+            .expect("B still serves");
+        assert_eq!(grant_record(&f, &b).await, Some(false));
+    }
+
+    /// An admin that may act for two authorities which have both enabled
+    /// git-trust must say which one a grant is under.
+    #[tokio::test]
+    async fn an_admin_of_two_enabled_authorities_names_the_one_meant() {
+        let (key, did) = did_key(92);
+        let f = fixture(vec![did.clone()]);
+        let handler = f.handler.clone().with_admin_authorities(HashMap::from([(
+            did.clone(),
+            vec![OTHER_AUTHORITY.to_string()],
+        )]));
+        enable_git_trust(&f, &did).await;
+        enable_git_trust(&f, OTHER_AUTHORITY).await;
+
+        let doc = signed(unsigned(GRANT, Some(&did), grant_payload()), &key).await;
+        let err = handler
+            .handle(doc, Some(&did))
+            .await
+            .expect_err("ambiguous");
+        assert_eq!(code(&err), "malformedRequest");
+        assert_eq!(grant_record(&f, &did).await, None);
+
+        let mut payload = grant_payload();
+        payload["ext"] = json!({ EXT_NAMESPACE: { EXT_AUTHORITY: OTHER_AUTHORITY } });
+        let doc = signed(unsigned(GRANT, Some(&did), payload), &key).await;
+        handler.handle(doc, Some(&did)).await.expect("named");
+        assert_eq!(grant_record(&f, OTHER_AUTHORITY).await, Some(true));
+        assert_eq!(grant_record(&f, &did).await, None);
+    }
+
+    /// The `reason` a disable or revoke states is kept in its audit entry.
+    #[tokio::test]
+    async fn a_stated_reason_is_audited() {
+        let (key, did) = did_key(93);
+        let f = fixture(vec![did.clone()]);
+        enable_git_trust(&f, &did).await;
+        let doc = signed(unsigned(GRANT, Some(&did), grant_payload()), &key).await;
+        f.handler.handle(doc, Some(&did)).await.expect("granted");
+
+        let mut payload = grant_payload();
+        payload["reason"] = json!("left the project");
+        let doc = signed(
+            unsigned(
+                "https://trusttasks.org/spec/git-trust/revoke/0.1",
+                Some(&did),
+                payload,
+            ),
+            &key,
+        )
+        .await;
+        f.handler.handle(doc, Some(&did)).await.expect("revoked");
+        let entry = last_audit(&f);
+        assert!(matches!(entry.status, AuditStatus::Success));
+        assert_eq!(
+            entry.reason.and_then(|r| r.message).as_deref(),
+            Some("left the project")
+        );
+
+        let doc = signed(
+            unsigned(
+                DISABLE,
+                Some(&did),
+                json!({ "capability": "git-trust", "reason": "moved to another tool" }),
+            ),
+            &key,
+        )
+        .await;
+        f.handler.handle(doc, Some(&did)).await.expect("disabled");
+        assert_eq!(
+            last_audit(&f).reason.and_then(|r| r.message).as_deref(),
+            Some("moved to another tool")
+        );
+    }
+
+    /// A registry whose DID is a did:scid accepts a write addressed to it
+    /// with the `?src=` locator senders resolve it through, and an authority
+    /// written with one is stored without it.
+    #[tokio::test]
+    async fn a_did_scid_registry_is_addressed_with_its_locator() {
+        const SCID_ME: &str = "did:scid:vh:1:registry";
+        let (key, did) = did_key(94);
+        let f = fixture(vec![did.clone()]);
+        let handler = TaskHandler::new(
+            f.capabilities.dispatcher(),
+            SCID_ME,
+            vec![did.clone()],
+            trust_tasks_rs::erase_verifier(trust_tasks_proof::affinidi::Verifier::for_did_key()),
+        )
+        .with_dedup(Arc::new(MemoryMessageIdStore::default()))
+        .with_capabilities(f.capabilities.clone());
+        let mut doc = unsigned(RECORD_PUT, Some(&did), put_payload(&did));
+        doc["recipient"] = json!(format!("{SCID_ME}?src=example.com"));
+        let doc = signed(doc, &key).await;
+
+        handler.handle(doc, Some(&did)).await.expect("accepted");
+        assert!(stored(&f.repo, &did).await);
     }
 
     // --- host-defined capability tasks ----------------------------------------
@@ -1885,7 +2219,7 @@ mod tests {
                 .await
                 .expect_err("refused");
         assert_eq!(code(&err), "permissionDenied");
-        assert!(!b.f.capabilities.snapshot("badge").await.enabled);
+        assert!(!b.f.capabilities.snapshot("badge", None).await.enabled);
 
         let operator =
             b.f.handler
@@ -1895,7 +2229,7 @@ mod tests {
             .handle(signed(enable(), &key).await, Some(&did))
             .await
             .expect("accepted for an admin of the registry DID");
-        assert!(b.f.capabilities.snapshot("badge").await.enabled);
+        assert!(b.f.capabilities.snapshot("badge", None).await.enabled);
     }
 
     /// Disabling a capability that is not enabled changes nothing, and still
@@ -1917,8 +2251,8 @@ mod tests {
                 .await
                 .expect_err("refused");
 
-        assert_eq!(code(&err), "taskFailed");
-        assert!(serde_json::to_string(&err).unwrap().contains("not_enabled"));
+        assert_eq!(code(&err), "governance/capability/disable:notEnabled");
+        assert!(!err.payload.retryable);
     }
 
     // --- registry/did/rotate acts on the registry itself --------------------

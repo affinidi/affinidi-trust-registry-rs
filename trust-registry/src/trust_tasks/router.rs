@@ -24,6 +24,7 @@
 
 use std::sync::Arc;
 
+use affinidi_did_common::scid::strip_scid_src;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::Serialize;
@@ -37,11 +38,12 @@ use crate::storage::repository::{
     RepositoryError, TrustRecordAdminRepository, TrustRecordRepository,
 };
 
+use super::descriptor::{TaskError, spec_error};
 use super::payloads::{
     AuthorizationRequest, AuthorizationResponse, AuthorizationResponseMessage, RecognitionRequest,
     RecognitionResponse, RecognitionResponseMessage, RecordDeleteRequest, RecordDeleteResponse,
-    RecordPutRequest, RecordPutResponse, RecordQueryRequest, RecordQueryResponse, camel, query_of,
-    record_from_v1, record_from_v2, record_to_v1, record_to_v2,
+    RecordPutRequest, RecordPutResponse, RecordQueryRequest, RecordQueryResponse, camel,
+    query_as_written, query_of, record_from_v1, record_from_v2, record_to_v1, record_to_v2,
 };
 
 /// Default `registry/record/query` page size when the request names none.
@@ -64,7 +66,11 @@ pub(crate) fn new_id() -> String {
 }
 
 /// Map a repository error to the closest framework [`RejectReason`].
-fn map_repo_err(err: RepositoryError) -> RejectReason {
+///
+/// A missing or already-present record is `taskFailed` here; a task whose
+/// specification declares codes of its own for those answers through
+/// [`reject_repo_err`] instead.
+pub(crate) fn map_repo_err(err: RepositoryError) -> RejectReason {
     match err {
         RepositoryError::ValidationError(reason) => RejectReason::MalformedRequest { reason },
         RepositoryError::RecordNotFound(reason) | RepositoryError::RecordAlreadyExists(reason) => {
@@ -79,6 +85,21 @@ fn map_repo_err(err: RepositoryError) -> RejectReason {
         RepositoryError::LockPoisoned => RejectReason::InternalError {
             reason: "lock poisoned".to_string(),
         },
+    }
+}
+
+/// The error response for a repository error from `doc`'s task: a missing or
+/// already-present record is answered with the extension code the task's
+/// specification declares for it (`registry/record/put:alreadyExists`,
+/// `registry/record/delete:notFound`, ...), anything else as
+/// [`map_repo_err`] maps it.
+pub(crate) fn reject_repo_err<P>(doc: &TrustTask<P>, err: RepositoryError) -> ErrorResponse {
+    match err {
+        RepositoryError::RecordNotFound(message) => spec_error(doc, TaskError::NotFound, message),
+        RepositoryError::RecordAlreadyExists(message) => {
+            spec_error(doc, TaskError::AlreadyExists, message)
+        }
+        other => doc.reject_with(new_id(), map_repo_err(other)),
     }
 }
 
@@ -212,9 +233,14 @@ async fn evaluate_query<R>(
 where
     R: TrustRecordRepository + ?Sized,
 {
-    let record = repository
+    let mut record = repository
         .find_by_query(query_of(ids.0, ids.1, ids.2, ids.3))
         .await?;
+    if record.is_none()
+        && let Some(as_written) = query_as_written(ids.0, ids.1, ids.2, ids.3)
+    {
+        record = repository.find_by_query(as_written).await?;
+    }
     let evaluation = Evaluation::of(record.as_ref(), asked, Utc::now());
     Ok((record, evaluation))
 }
@@ -474,7 +500,7 @@ where
             let response = P::response(created).map_err(|e| reject_build_err(&doc, e))?;
             respond(&doc, response)
         }
-        Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
+        Err(e) => Err(reject_repo_err(&doc, e)),
     }
 }
 
@@ -514,12 +540,21 @@ where
 {
     let (entity_id, authority_id, action, resource) = doc.payload.key();
     let query = query_of(entity_id, authority_id, action, resource);
-    match repository.delete(query).await {
+    let deleted = match repository.delete(query).await {
+        Err(RepositoryError::RecordNotFound(missing)) => {
+            match query_as_written(entity_id, authority_id, action, resource) {
+                Some(as_written) => repository.delete(as_written).await,
+                None => Err(RepositoryError::RecordNotFound(missing)),
+            }
+        }
+        other => other,
+    };
+    match deleted {
         Ok(()) => {
             let response = P::response().map_err(|e| reject_build_err(&doc, e))?;
             respond(&doc, response)
         }
-        Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
+        Err(e) => Err(reject_repo_err(&doc, e)),
     }
 }
 
@@ -544,7 +579,7 @@ struct RecordFilter<'a> {
 async fn query_records<R>(
     repository: &R,
     f: RecordFilter<'_>,
-) -> Result<(Vec<TrustRecord>, Option<String>), RejectReason>
+) -> Result<(Vec<TrustRecord>, Option<String>), QueryFailure>
 where
     R: TrustRecordAdminRepository + ?Sized,
 {
@@ -553,18 +588,27 @@ where
         (f.entity_id, f.authority_id, f.action, f.resource)
     {
         let query = query_of(entity_id, authority_id, action, resource);
-        return repository
-            .read(query)
-            .await
+        let found = match repository.read(query).await {
+            Err(RepositoryError::RecordNotFound(missing)) => {
+                match query_as_written(entity_id, authority_id, action, resource) {
+                    Some(as_written) => repository.read(as_written).await,
+                    None => Err(RepositoryError::RecordNotFound(missing)),
+                }
+            }
+            other => other,
+        };
+        return found
             .map(|record| (vec![record], None))
-            .map_err(map_repo_err);
+            .map_err(QueryFailure::Repository);
     }
 
     // Partially keyed (or unkeyed): filtered, paginated enumeration.
     let offset: usize = match f.cursor {
         None => 0,
-        Some(cursor) => cursor.parse().map_err(|_| RejectReason::MalformedRequest {
-            reason: "unrecognized cursor".to_string(),
+        Some(cursor) => cursor.parse().map_err(|_| {
+            QueryFailure::Rejected(RejectReason::MalformedRequest {
+                reason: "unrecognized cursor".to_string(),
+            })
         })?,
     };
     let limit = f
@@ -574,9 +618,13 @@ where
         })
         .clamp(1, QUERY_MAX_LIMIT);
 
-    let list = repository.list().await.map_err(map_repo_err)?;
-    let field_matches =
-        |filter: Option<&str>, value: &str| filter.is_none_or(|wanted| wanted == value);
+    let list = repository.list().await.map_err(QueryFailure::Repository)?;
+    // Compared in the normalised form records are stored in, so a filter
+    // naming a did:scid with its `?src=` locator matches, and so does a
+    // record stored with one before references were normalised.
+    let field_matches = |filter: Option<&str>, value: &str| {
+        filter.is_none_or(|wanted| strip_scid_src(wanted) == strip_scid_src(value))
+    };
     // A stored record the backend could not decode fails the query only if it
     // could be one of the matches: answering without it would silently drop a
     // result. One that cannot match is left out (the adapter logged it). The
@@ -590,9 +638,9 @@ where
         })
     });
     if unreadable_could_match {
-        return Err(RejectReason::InternalError {
+        return Err(QueryFailure::Rejected(RejectReason::InternalError {
             reason: "a stored record that may match this query could not be read".to_string(),
-        });
+        }));
     }
     let mut matches: Vec<TrustRecord> = list
         .into_records()
@@ -623,6 +671,13 @@ where
         (offset.saturating_add(limit) < matches.len()).then(|| (offset + limit).to_string());
     let page = matches.into_iter().skip(offset).take(limit).collect();
     Ok((page, next_cursor))
+}
+
+/// Why [`query_records`] could not answer.
+#[derive(Debug)]
+enum QueryFailure {
+    Repository(RepositoryError),
+    Rejected(RejectReason),
 }
 
 /// One version of `registry/record/query`.
@@ -691,7 +746,10 @@ where
 {
     let (page, next_cursor) = query_records(repository.as_ref(), doc.payload.filter())
         .await
-        .map_err(|reason| doc.reject_with(new_id(), reason))?;
+        .map_err(|failure| match failure {
+            QueryFailure::Repository(e) => reject_repo_err(&doc, e),
+            QueryFailure::Rejected(reason) => doc.reject_with(new_id(), reason),
+        })?;
     let records = page
         .iter()
         .map(P::to_wire)
@@ -840,7 +898,7 @@ mod tests {
             filter(None, None),
         ] {
             match query_records(&repo, could_match).await {
-                Err(RejectReason::InternalError { reason }) => {
+                Err(QueryFailure::Rejected(RejectReason::InternalError { reason })) => {
                     assert!(!reason.contains("other"), "{reason}");
                 }
                 other => panic!("expected an internal error, got {other:?}"),
@@ -1443,5 +1501,193 @@ mod tests {
             .await
             .expect_err("snake_case at 0.2 is malformed");
         assert_eq!(err.payload.code.to_string(), "malformedRequest");
+    }
+
+    // --- the specifications' own error codes ----------------------------------
+
+    fn snake_record() -> Value {
+        serde_json::json!({
+            "entity_id": "did:example:entity", "authority_id": "did:example:authority",
+            "action": "issue", "resource": "vc", "record_type": "authorization",
+            "recognized": true, "authorized": true,
+        })
+    }
+
+    fn camel_record() -> Value {
+        serde_json::json!({
+            "entityId": "did:example:entity", "authorityId": "did:example:authority",
+            "action": "issue", "resource": "vc", "recordType": "authorization",
+            "recognized": true, "authorized": true,
+        })
+    }
+
+    async fn code_of(dispatcher: &RegistryDispatcher, doc: TrustTask<Value>) -> (String, bool) {
+        let err = handle_document(dispatcher, doc).await.expect_err("refused");
+        (err.payload.code.to_string(), err.payload.retryable)
+    }
+
+    #[tokio::test]
+    async fn a_strict_put_answers_the_put_specifications_codes() {
+        use crate::storage::adapters::local_storage::LocalStorage;
+        for camel_case in [false, true] {
+            let dispatcher = build_dispatcher(Arc::new(LocalStorage::new()));
+            let put = |expected: bool| {
+                if camel_case {
+                    raw_doc::<camel::RecordPutRequest>(serde_json::json!({
+                        "record": camel_record(), "expectedExisting": expected,
+                    }))
+                } else {
+                    raw_doc::<RecordPutRequest>(serde_json::json!({
+                        "record": snake_record(), "expectedExisting": expected,
+                    }))
+                }
+            };
+            assert_eq!(
+                code_of(&dispatcher, put(true)).await,
+                ("registry/record/put:notFound".to_string(), false),
+                "camel case: {camel_case}"
+            );
+            handle_document(&dispatcher, put(false))
+                .await
+                .expect("created");
+            assert_eq!(
+                code_of(&dispatcher, put(false)).await,
+                ("registry/record/put:alreadyExists".to_string(), false),
+                "camel case: {camel_case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_delete_or_keyed_query_of_a_missing_record_answers_not_found() {
+        use crate::storage::adapters::local_storage::LocalStorage;
+        let dispatcher = build_dispatcher(Arc::new(LocalStorage::new()));
+        let snake_key = serde_json::json!({
+            "entity_id": "e", "authority_id": "a", "action": "x", "resource": "r",
+        });
+        let camel_key = serde_json::json!({
+            "entityId": "e", "authorityId": "a", "action": "x", "resource": "r",
+        });
+        for (doc, expected) in [
+            (
+                raw_doc::<RecordDeleteRequest>(snake_key.clone()),
+                "registry/record/delete:notFound",
+            ),
+            (
+                raw_doc::<camel::RecordDeleteRequest>(camel_key.clone()),
+                "registry/record/delete:notFound",
+            ),
+            (
+                raw_doc::<RecordQueryRequest>(snake_key),
+                "registry/record/query:notFound",
+            ),
+            (
+                raw_doc::<camel::RecordQueryRequest>(camel_key),
+                "registry/record/query:notFound",
+            ),
+        ] {
+            assert_eq!(
+                code_of(&dispatcher, doc).await,
+                (expected.to_string(), false)
+            );
+        }
+    }
+
+    /// A record an earlier release stored under a did:scid with its locator
+    /// is still answered, fetched and deleted by the spelling it was stored
+    /// under.
+    #[tokio::test]
+    async fn a_record_stored_with_a_locator_is_reached_by_that_spelling() {
+        use crate::storage::adapters::local_storage::LocalStorage;
+        const LOCATED: &str = "did:scid:vh:1:abc?src=example.com";
+        let repo = Arc::new(LocalStorage::new());
+        repo.create(TrustRecord::new(
+            EntityId::new("did:example:entity"),
+            AuthorityId::as_written(LOCATED),
+            Action::new("issue"),
+            Resource::new("vc"),
+            true,
+            true,
+            crate::domain::Context::empty(),
+            RecordType::Authorization,
+        ))
+        .await
+        .unwrap();
+        let dispatcher = build_dispatcher(repo);
+        let key = serde_json::json!({
+            "entityId": "did:example:entity", "authorityId": LOCATED,
+            "action": "issue", "resource": "vc",
+        });
+
+        let out = handle_document(
+            &dispatcher,
+            raw_doc::<camel::AuthorizationRequest>(key.clone()),
+        )
+        .await
+        .expect("answered");
+        assert_eq!(out.payload["authorized"], true);
+        handle_document(
+            &dispatcher,
+            raw_doc::<camel::RecordQueryRequest>(key.clone()),
+        )
+        .await
+        .expect("fetched");
+        handle_document(
+            &dispatcher,
+            raw_doc::<camel::RecordDeleteRequest>(key.clone()),
+        )
+        .await
+        .expect("deleted");
+        assert_eq!(
+            code_of(&dispatcher, raw_doc::<camel::RecordDeleteRequest>(key)).await,
+            ("registry/record/delete:notFound".to_string(), false)
+        );
+    }
+
+    /// A record stored, or a filter written, with a did:scid `?src=` locator
+    /// is the same reference as the bare DID.
+    #[tokio::test]
+    async fn a_did_scid_locator_does_not_split_an_authority() {
+        use crate::storage::adapters::local_storage::LocalStorage;
+        let dispatcher = build_dispatcher(Arc::new(LocalStorage::new()));
+        let mut record = camel_record();
+        record["authorityId"] = serde_json::json!("did:scid:vh:1:abc?src=example.com");
+        handle_document(
+            &dispatcher,
+            raw_doc::<camel::RecordPutRequest>(serde_json::json!({ "record": record })),
+        )
+        .await
+        .expect("stored");
+
+        let out = handle_document(
+            &dispatcher,
+            raw_doc::<camel::AuthorizationRequest>(serde_json::json!({
+                "entityId": "did:example:entity", "authorityId": "did:scid:vh:1:abc",
+                "action": "issue", "resource": "vc",
+            })),
+        )
+        .await
+        .expect("answered");
+        assert_eq!(
+            out.payload["authorized"], true,
+            "the bare DID finds it: {}",
+            out.payload
+        );
+
+        for authority in ["did:scid:vh:1:abc", "did:scid:vh:1:abc?src=other.example"] {
+            let out = handle_document(
+                &dispatcher,
+                raw_doc::<camel::RecordQueryRequest>(serde_json::json!({
+                    "authorityId": authority,
+                })),
+            )
+            .await
+            .expect("answered");
+            assert_eq!(out.payload["records"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                out.payload["records"][0]["authorityId"], "did:scid:vh:1:abc",
+                "stored in its normalised form"
+            );
+        }
     }
 }

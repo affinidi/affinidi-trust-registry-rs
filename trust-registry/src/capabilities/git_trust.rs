@@ -24,7 +24,8 @@ use trust_tasks_rs::{RejectReason, TrustTask};
 
 use crate::domain::{Action, AuthorityId, Context, EntityId, RecordType, Resource, TrustRecord};
 use crate::storage::repository::{RepositoryError, TrustRecordAdminRepository, TrustRecordQuery};
-use crate::trust_tasks::router::{new_id, reject_build_err, respond};
+use crate::trust_tasks::descriptor::{TaskError, spec_error};
+use crate::trust_tasks::router::{map_repo_err, new_id, reject_build_err, respond};
 use crate::trust_tasks::{RegistryDispatcher, TaskFuture, TaskOutcome};
 
 use super::{CapabilityDefinition, CapabilityState};
@@ -118,6 +119,11 @@ fn require_authority<P>(
     })
 }
 
+/// `git-trust/grant`: record the tuple as authorized.
+///
+/// A revoked grant is kept (revoke marks it unauthorized), so granting again
+/// over it updates it back to authorized. Only an active grant answers
+/// `git-trust/grant:alreadyGranted`.
 async fn handle_grant(
     repository: Arc<dyn TrustRecordAdminRepository>,
     authority: Option<String>,
@@ -127,17 +133,49 @@ async fn handle_grant(
     let subject = doc.payload.subject.to_string();
     let resource = doc.payload.resource.to_string();
 
-    let record = TrustRecord::new(
-        EntityId::new(&subject),
-        AuthorityId::new(&authority),
-        Action::new(ACTION),
-        Resource::new(&resource),
-        true,
-        true,
-        Context::empty(),
-        RecordType::Authorization,
-    );
-    match repository.create(record).await {
+    let existing = match repository
+        .read(key_of(&subject, &authority, &resource))
+        .await
+    {
+        Ok(record) => Some(record),
+        Err(RepositoryError::RecordNotFound(_)) => None,
+        Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
+    };
+    let written = match &existing {
+        Some(record) if record.is_authorized() => {
+            return Err(spec_error(
+                &doc,
+                TaskError::AlreadyGranted,
+                "an active grant exists for this subject and resource",
+            ));
+        }
+        // A revoked grant: authorize it again, keeping what else it carries.
+        Some(record) => {
+            repository
+                .update(tuple(
+                    &subject,
+                    &authority,
+                    &resource,
+                    record.is_recognized(),
+                    true,
+                    record.context().clone(),
+                ))
+                .await
+        }
+        None => {
+            repository
+                .create(tuple(
+                    &subject,
+                    &authority,
+                    &resource,
+                    true,
+                    true,
+                    Context::empty(),
+                ))
+                .await
+        }
+    };
+    match written {
         Ok(()) => {
             let response: Result<grant_spec::Response, _> = grant_spec::Response::builder()
                 .subject(subject)
@@ -146,23 +184,19 @@ async fn handle_grant(
                 .try_into();
             respond(&doc, response.map_err(|e| reject_build_err(&doc, e))?)
         }
-        Err(RepositoryError::RecordAlreadyExists(_)) => Err(doc.reject_with(
-            new_id(),
-            RejectReason::TaskFailed {
-                reason: "already_granted: an active grant exists for this subject and resource"
-                    .to_string(),
-                details: None,
-            },
+        // Created by a concurrent grant since the read: it is active now.
+        Err(RepositoryError::RecordAlreadyExists(_)) => Err(spec_error(
+            &doc,
+            TaskError::AlreadyGranted,
+            "an active grant exists for this subject and resource",
         )),
-        Err(e) => Err(doc.reject_with(
-            new_id(),
-            RejectReason::InternalError {
-                reason: e.to_string(),
-            },
-        )),
+        Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
     }
 }
 
+/// `git-trust/revoke`: mark an active grant unauthorized, keeping the record
+/// for audit. With no active grant — none at all, or one already revoked —
+/// it answers `git-trust/revoke:notGranted`.
 async fn handle_revoke(
     repository: Arc<dyn TrustRecordAdminRepository>,
     authority: Option<String>,
@@ -172,44 +206,29 @@ async fn handle_revoke(
     let subject = doc.payload.subject.to_string();
     let resource = doc.payload.resource.to_string();
 
-    let query = TrustRecordQuery::new(
-        EntityId::new(&subject),
-        AuthorityId::new(&authority),
-        Action::new(ACTION),
-        Resource::new(&resource),
-    );
-    let existing = match repository.read(query).await {
-        Ok(record) => record,
-        Err(RepositoryError::RecordNotFound(_)) => {
-            return Err(doc.reject_with(
-                new_id(),
-                RejectReason::TaskFailed {
-                    reason: "not_granted: no active grant exists for this subject and resource"
-                        .to_string(),
-                    details: None,
-                },
-            ));
-        }
-        Err(e) => {
-            return Err(doc.reject_with(
-                new_id(),
-                RejectReason::InternalError {
-                    reason: e.to_string(),
-                },
-            ));
-        }
+    let not_granted = || {
+        spec_error(
+            &doc,
+            TaskError::NotGranted,
+            "no active grant exists for this subject and resource",
+        )
+    };
+    let existing = match repository
+        .read(key_of(&subject, &authority, &resource))
+        .await
+    {
+        Ok(record) if record.is_authorized() => record,
+        Ok(_) | Err(RepositoryError::RecordNotFound(_)) => return Err(not_granted()),
+        Err(e) => return Err(doc.reject_with(new_id(), map_repo_err(e))),
     };
 
-    // Revoke = mark unauthorized, retaining the record for audit.
-    let revoked = TrustRecord::new(
-        EntityId::new(&subject),
-        AuthorityId::new(&authority),
-        Action::new(ACTION),
-        Resource::new(&resource),
+    let revoked = tuple(
+        &subject,
+        &authority,
+        &resource,
         existing.is_recognized(),
         false,
         existing.context().clone(),
-        RecordType::Authorization,
     );
     match repository.update(revoked).await {
         Ok(()) => {
@@ -220,13 +239,41 @@ async fn handle_revoke(
                 .try_into();
             respond(&doc, response.map_err(|e| reject_build_err(&doc, e))?)
         }
-        Err(e) => Err(doc.reject_with(
-            new_id(),
-            RejectReason::InternalError {
-                reason: e.to_string(),
-            },
-        )),
+        // Deleted since the read (by `registry/record/delete`).
+        Err(RepositoryError::RecordNotFound(_)) => Err(not_granted()),
+        Err(e) => Err(doc.reject_with(new_id(), map_repo_err(e))),
     }
+}
+
+/// The key of the git-trust tuple for `subject` and `resource`.
+fn key_of(subject: &str, authority: &str, resource: &str) -> TrustRecordQuery {
+    TrustRecordQuery::new(
+        EntityId::new(subject),
+        AuthorityId::new(authority),
+        Action::new(ACTION),
+        Resource::new(resource),
+    )
+}
+
+/// The git-trust tuple for `subject` and `resource`.
+fn tuple(
+    subject: &str,
+    authority: &str,
+    resource: &str,
+    recognized: bool,
+    authorized: bool,
+    context: Context,
+) -> TrustRecord {
+    TrustRecord::new(
+        EntityId::new(subject),
+        AuthorityId::new(authority),
+        Action::new(ACTION),
+        Resource::new(resource),
+        recognized,
+        authorized,
+        context,
+        RecordType::Authorization,
+    )
 }
 
 #[cfg(test)]
@@ -320,18 +367,9 @@ mod tests {
         assert!(authorized(&set, "openvtc/openvtc").await);
 
         // Duplicate grant rejects.
-        assert!(
-            dispatch(
-                &set,
-                true,
-                task(
-                    grant_spec::Payload::type_uri(),
-                    serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
-                ),
-            )
-            .await
-            .is_err(),
-            "already_granted"
+        assert_eq!(
+            refusal(&set, grant_spec::Payload::type_uri()).await,
+            ("git-trust/grant:alreadyGranted".to_string(), false)
         );
 
         // Revoke → TRQP answers false (record retained, not deleted).
@@ -347,6 +385,42 @@ mod tests {
         .expect("revoke succeeds");
         assert_eq!(out.payload["revoked"], serde_json::json!(true));
         assert!(!authorized(&set, "openvtc/openvtc").await);
+
+        // A second revoke finds no active grant.
+        assert_eq!(
+            refusal(&set, revoke_spec::Payload::type_uri()).await,
+            ("git-trust/revoke:notGranted".to_string(), false)
+        );
+
+        // Granting again after a revoke authorizes the retained record.
+        let out = dispatch(
+            &set,
+            true,
+            task(
+                grant_spec::Payload::type_uri(),
+                serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
+            ),
+        )
+        .await
+        .expect("a revoked grant can be granted again");
+        assert_eq!(out.payload["granted"], serde_json::json!(true));
+        assert!(authorized(&set, "openvtc/openvtc").await);
+    }
+
+    /// The code and retry flag a grant or revoke of the test tuple is refused
+    /// with.
+    async fn refusal(set: &CapabilitySet, uri: trust_tasks_rs::TypeUri) -> (String, bool) {
+        let err = dispatch(
+            set,
+            true,
+            task(
+                uri,
+                serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
+            ),
+        )
+        .await
+        .expect_err("refused");
+        (err.payload.code.to_string(), err.payload.retryable)
     }
 
     #[tokio::test]
@@ -362,18 +436,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
-            dispatch(
-                &set,
-                true,
-                task(
-                    revoke_spec::Payload::type_uri(),
-                    serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
-                ),
-            )
-            .await
-            .is_err(),
-            "not_granted"
+        assert_eq!(
+            refusal(&set, revoke_spec::Payload::type_uri()).await,
+            ("git-trust/revoke:notGranted".to_string(), false)
         );
     }
 

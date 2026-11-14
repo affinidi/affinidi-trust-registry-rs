@@ -18,14 +18,16 @@
 //!
 //! The tests below hold this table and the dispatchers to each other: every
 //! Type URI the dispatchers answer has a descriptor, and every descriptor's
-//! Type URIs are answered. Further per-task policy (for example the spec's
-//! extension error codes a task may answer with) belongs here too.
+//! Type URIs are answered. Each descriptor also lists the extension error
+//! codes its specification declares ([`TaskDescriptor::errors`]); the task's
+//! handler answers with them through [`spec_error`], and a test holds the
+//! list to every served version's declaration.
 
 // The 0.1 `registry/*` versions are superseded (the generated types are
 // `#[deprecated]`) and still answered on purpose.
 #![allow(deprecated)]
 
-use trust_tasks_rs::{Payload, TypeUri};
+use trust_tasks_rs::{DeclaredErrorCode, ErrorPayload, ErrorResponse, Payload, TrustTask, TypeUri};
 
 use crate::audit::model::AuditOperation;
 use crate::specs::git_trust::grant::v0_1 as grant_spec;
@@ -33,6 +35,9 @@ use crate::specs::git_trust::revoke::v0_1 as revoke_spec;
 use crate::specs::governance::capability::disable::v0_1 as disable_spec;
 use crate::specs::governance::capability::enable::v0_1 as enable_spec;
 use crate::specs::governance::capability::list::v0_1 as list_spec;
+use crate::specs::registry::record::delete::v0_2 as delete_spec;
+use crate::specs::registry::record::put::v0_3 as put_spec;
+use crate::specs::registry::record::query::v0_3 as query_spec;
 
 use super::payloads::{
     AuthorizationRequest, DidRotateRequest, RecognitionRequest, RecordDeleteRequest,
@@ -152,12 +157,13 @@ pub enum AuthorityRule {
     /// enabled, or the registry's own DID for a capability that writes no
     /// records.
     EnableConfig,
-    /// `governance/capability/disable`: the authority the capability named in
-    /// the payload was enabled with.
+    /// `governance/capability/disable`: the authority of the enablement of
+    /// the capability named in the payload that the issuer may act for.
     NamedCapability,
-    /// A task of this built-in capability: the authority it was enabled with.
+    /// A task of this built-in capability: the authority of the enablement
+    /// the issuer may act for (enablement is per authority).
     Capability(&'static str),
-    /// A task of a capability that is not built in: the authority of the
+    /// A task of a capability that is not built in: as `Capability`, for the
     /// capability the [`CapabilitySet`](crate::capabilities::CapabilitySet)
     /// says owns it.
     OwningCapability,
@@ -180,9 +186,51 @@ pub struct TaskDescriptor {
     pub casing: Casing,
     pub resource: ResourceRule,
     pub authority: AuthorityRule,
+    /// The payload member carrying the requester's stated reason (the
+    /// `reason` of `governance/capability/disable` and `git-trust/revoke`),
+    /// which the audit entry of a success records. [`Field::Absent`] for a
+    /// task without one.
+    pub audit_reason: Field,
+    /// The extension error codes the task's specification declares, by the
+    /// condition each one names. The codes are the same at every version the
+    /// registry serves.
+    pub errors: &'static [(TaskError, DeclaredErrorCode)],
+}
+
+/// A condition a task's specification gives an extension error code of its
+/// own (SPEC §8.5), rather than the generic `taskFailed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskError {
+    /// The record (or key) the task names does not exist.
+    NotFound,
+    /// A record already exists at the key a strict create names.
+    AlreadyExists,
+    /// The named capability, at the named version, is not one this host
+    /// serves.
+    UnknownCapability,
+    /// The capability is already enabled for this authority.
+    AlreadyEnabled,
+    /// The enablement request (its config, manifest or delegate) is not
+    /// acceptable.
+    ConfigInvalid,
+    /// The capability is not enabled for this authority.
+    NotEnabled,
+    /// An active grant already exists for the subject and resource.
+    AlreadyGranted,
+    /// No active grant exists for the subject and resource.
+    NotGranted,
 }
 
 impl TaskDescriptor {
+    /// The code the task's specification declares for `error`, if it declares
+    /// one.
+    pub fn error_code(&self, error: TaskError) -> Option<DeclaredErrorCode> {
+        self.errors
+            .iter()
+            .find(|(condition, _)| *condition == error)
+            .map(|(_, code)| *code)
+    }
+
     /// Whether the task changes the registry.
     pub fn is_write(&self) -> bool {
         self.kind == TaskKind::Write
@@ -247,6 +295,8 @@ const fn read(slug: &'static str, type_uris: &'static [&'static str]) -> TaskDes
         casing: Casing::Single,
         resource: ResourceRule::NONE,
         authority: AuthorityRule::NotApplicable,
+        audit_reason: Field::Absent,
+        errors: &[],
     }
 }
 
@@ -294,6 +344,14 @@ pub static DESCRIPTORS: &[TaskDescriptor] = &[
             at: Member::spelled("/record/authority_id", "/record/authorityId"),
             what: "a record mutation",
         },
+        audit_reason: Field::Absent,
+        errors: &[
+            (
+                TaskError::AlreadyExists,
+                put_spec::error_codes::ALREADY_EXISTS,
+            ),
+            (TaskError::NotFound, put_spec::error_codes::NOT_FOUND),
+        ],
     },
     TaskDescriptor {
         slug: "registry/record/delete",
@@ -307,6 +365,8 @@ pub static DESCRIPTORS: &[TaskDescriptor] = &[
         casing: Casing::CamelFrom(0, 2),
         resource: RECORD_KEY_FLAT,
         authority: AUTHORITY_FLAT_MUTATION,
+        audit_reason: Field::Absent,
+        errors: &[(TaskError::NotFound, delete_spec::error_codes::NOT_FOUND)],
     },
     TaskDescriptor {
         slug: "registry/record/query",
@@ -323,6 +383,8 @@ pub static DESCRIPTORS: &[TaskDescriptor] = &[
             at: Member::spelled("/authority_id", "/authorityId"),
             what: "a record query",
         },
+        audit_reason: Field::Absent,
+        errors: &[(TaskError::NotFound, query_spec::error_codes::NOT_FOUND)],
     },
     // --- the registry itself -------------------------------------------------
     TaskDescriptor {
@@ -337,6 +399,8 @@ pub static DESCRIPTORS: &[TaskDescriptor] = &[
         casing: Casing::CamelFrom(0, 2),
         resource: ResourceRule::NONE,
         authority: AuthorityRule::Registry,
+        audit_reason: Field::Absent,
+        errors: &[],
     },
     // --- capabilities ----------------------------------------------------------
     TaskDescriptor {
@@ -348,6 +412,21 @@ pub static DESCRIPTORS: &[TaskDescriptor] = &[
         casing: Casing::Single,
         resource: CAPABILITY_NAMED,
         authority: AuthorityRule::EnableConfig,
+        audit_reason: Field::Absent,
+        errors: &[
+            (
+                TaskError::UnknownCapability,
+                enable_spec::error_codes::UNKNOWN_CAPABILITY,
+            ),
+            (
+                TaskError::AlreadyEnabled,
+                enable_spec::error_codes::ALREADY_ENABLED,
+            ),
+            (
+                TaskError::ConfigInvalid,
+                enable_spec::error_codes::CONFIG_INVALID,
+            ),
+        ],
     },
     TaskDescriptor {
         slug: "governance/capability/disable",
@@ -358,6 +437,11 @@ pub static DESCRIPTORS: &[TaskDescriptor] = &[
         casing: Casing::Single,
         resource: CAPABILITY_NAMED,
         authority: AuthorityRule::NamedCapability,
+        audit_reason: Field::At(Member::same("/reason")),
+        errors: &[(
+            TaskError::NotEnabled,
+            disable_spec::error_codes::NOT_ENABLED,
+        )],
     },
     TaskDescriptor {
         slug: "git-trust/grant",
@@ -368,6 +452,11 @@ pub static DESCRIPTORS: &[TaskDescriptor] = &[
         casing: Casing::Single,
         resource: GIT_TRUST_KEY,
         authority: AuthorityRule::Capability(GIT_TRUST),
+        audit_reason: Field::Absent,
+        errors: &[(
+            TaskError::AlreadyGranted,
+            grant_spec::error_codes::ALREADY_GRANTED,
+        )],
     },
     TaskDescriptor {
         slug: "git-trust/revoke",
@@ -378,6 +467,8 @@ pub static DESCRIPTORS: &[TaskDescriptor] = &[
         casing: Casing::Single,
         resource: GIT_TRUST_KEY,
         authority: AuthorityRule::Capability(GIT_TRUST),
+        audit_reason: Field::At(Member::same("/reason")),
+        errors: &[(TaskError::NotGranted, revoke_spec::error_codes::NOT_GRANTED)],
     },
 ];
 
@@ -397,11 +488,32 @@ pub static CAPABILITY_WRITE: TaskDescriptor = TaskDescriptor {
     casing: Casing::Single,
     resource: ResourceRule::NONE,
     authority: AuthorityRule::OwningCapability,
+    audit_reason: Field::Absent,
+    errors: &[],
 };
 
 /// The descriptor of one of the registry's own tasks.
 pub fn descriptor(slug: &str) -> Option<&'static TaskDescriptor> {
     DESCRIPTORS.iter().find(|d| d.slug == slug)
+}
+
+/// The error response for `error` on `doc`: the extension code the task's
+/// specification declares for it, with the `retryable` value the
+/// specification gives it, and `message`.
+///
+/// A task whose specification declares no code for `error` answers with
+/// `taskFailed` (non-retryable) and the same message, which is what a
+/// consumer that does not know an extension code reads it as (SPEC §8.5).
+pub fn spec_error<P>(
+    doc: &TrustTask<P>,
+    error: TaskError,
+    message: impl Into<String>,
+) -> ErrorResponse {
+    let payload = match descriptor(doc.type_uri.slug()).and_then(|d| d.error_code(error)) {
+        Some(code) => ErrorPayload::from(code),
+        None => ErrorPayload::new(trust_tasks_rs::StandardCode::TaskFailed),
+    };
+    doc.reject_with(super::router::new_id(), payload.with_message(message))
 }
 
 /// The slug families the registry itself defines. A slug in one of them with
@@ -516,6 +628,131 @@ mod tests {
         let delete = descriptor("registry/record/delete").unwrap();
         assert!(!delete.camel_case(&RecordDeleteRequest::type_uri()));
         assert!(delete.camel_case(&camel::RecordDeleteRequest::type_uri()));
+    }
+
+    /// Every version's declared extension codes, by Type URI.
+    fn declared() -> Vec<(&'static str, &'static [DeclaredErrorCode])> {
+        use crate::specs::git_trust as g;
+        use crate::specs::governance::capability as c;
+        use crate::specs::registry as r;
+        vec![
+            (
+                g::grant::v0_1::Payload::TYPE_URI,
+                g::grant::v0_1::ERROR_CODES,
+            ),
+            (
+                g::revoke::v0_1::Payload::TYPE_URI,
+                g::revoke::v0_1::ERROR_CODES,
+            ),
+            (
+                c::enable::v0_1::Payload::TYPE_URI,
+                c::enable::v0_1::ERROR_CODES,
+            ),
+            (
+                c::disable::v0_1::Payload::TYPE_URI,
+                c::disable::v0_1::ERROR_CODES,
+            ),
+            (c::list::v0_1::Payload::TYPE_URI, c::list::v0_1::ERROR_CODES),
+            (
+                r::record::put::v0_1::Payload::TYPE_URI,
+                r::record::put::v0_1::ERROR_CODES,
+            ),
+            (
+                r::record::put::v0_3::Payload::TYPE_URI,
+                r::record::put::v0_3::ERROR_CODES,
+            ),
+            (
+                r::record::delete::v0_1::Payload::TYPE_URI,
+                r::record::delete::v0_1::ERROR_CODES,
+            ),
+            (
+                r::record::delete::v0_2::Payload::TYPE_URI,
+                r::record::delete::v0_2::ERROR_CODES,
+            ),
+            (
+                r::record::query::v0_1::Payload::TYPE_URI,
+                r::record::query::v0_1::ERROR_CODES,
+            ),
+            (
+                r::record::query::v0_3::Payload::TYPE_URI,
+                r::record::query::v0_3::ERROR_CODES,
+            ),
+            (
+                r::did::rotate::v0_1::Payload::TYPE_URI,
+                r::did::rotate::v0_1::ERROR_CODES,
+            ),
+            (
+                r::did::rotate::v0_2::Payload::TYPE_URI,
+                r::did::rotate::v0_2::ERROR_CODES,
+            ),
+            (
+                r::recognition::v0_1::Payload::TYPE_URI,
+                r::recognition::v0_1::ERROR_CODES,
+            ),
+            (
+                r::recognition::v0_2::Payload::TYPE_URI,
+                r::recognition::v0_2::ERROR_CODES,
+            ),
+            (
+                r::authorization::v0_1::Payload::TYPE_URI,
+                r::authorization::v0_1::ERROR_CODES,
+            ),
+            (
+                r::authorization::v0_2::Payload::TYPE_URI,
+                r::authorization::v0_2::ERROR_CODES,
+            ),
+        ]
+    }
+
+    /// Each descriptor names exactly the extension codes every version it
+    /// serves declares: none is missing, none is invented.
+    #[test]
+    fn each_descriptor_carries_the_codes_its_specification_declares() {
+        let declared = declared();
+        let mut seen = BTreeSet::new();
+        for d in DESCRIPTORS {
+            let ours: BTreeSet<&str> = d.errors.iter().map(|(_, code)| code.code).collect();
+            for uri in d.type_uris {
+                let (_, codes) = declared
+                    .iter()
+                    .find(|(declared_uri, _)| declared_uri == uri)
+                    .unwrap_or_else(|| panic!("{uri} is not in the declared list"));
+                let theirs: BTreeSet<&str> = codes.iter().map(|code| code.code).collect();
+                assert_eq!(ours, theirs, "{uri}");
+                seen.insert(*uri);
+            }
+            for (condition, code) in d.errors {
+                assert_eq!(d.error_code(*condition), Some(*code), "{}", d.slug);
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            declared.len(),
+            "every declared version is served"
+        );
+    }
+
+    #[test]
+    fn a_spec_error_carries_the_declared_code_and_retry_flag() {
+        let doc = TrustTask::new(
+            "urn:uuid:put".to_string(),
+            RecordPutRequest::type_uri(),
+            serde_json::json!({}),
+        );
+        let error = spec_error(&doc, TaskError::AlreadyExists, "taken");
+        assert_eq!(
+            serde_json::to_value(&error.payload.code).unwrap(),
+            "registry/record/put:alreadyExists"
+        );
+        assert!(!error.payload.retryable);
+        assert_eq!(error.payload.message.as_deref(), Some("taken"));
+
+        // A condition the task's specification has no code for.
+        let error = spec_error(&doc, TaskError::NotGranted, "no");
+        assert_eq!(
+            serde_json::to_value(&error.payload.code).unwrap(),
+            "taskFailed"
+        );
     }
 
     #[test]

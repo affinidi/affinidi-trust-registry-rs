@@ -794,10 +794,43 @@ record, window included. The CSV backend reads optional `valid_from` and
 
 Writes are further bound to the authority they act under, which must be the
 issuer's DID or an authority listed for that issuer in `ADMIN_AUTHORITIES`: a
-record's `authority_id`, the authority git-trust was enabled with (for
+record's `authority_id`, the authority git-trust was enabled for (for
 `git-trust/grant` and `revoke`), or the authority a capability's config names
 (for `governance/capability/enable` and `disable`). The authenticated sender on
 its own authorises nothing.
+
+A did:scid reference is one identity with or without its `?src=` locator, so the
+registry stores, keys and compares every `entity_id`/`authority_id`, capability
+authority and replay-record issuer without it, and accepts a write addressed to
+its own did:scid with one. A record an earlier release stored with a locator
+keeps its old key: queries, fetches and deletes that spell the locator the way
+it was stored still reach it, and filtered `registry/record/query` enumerations
+list it under either spelling, but a query by the bare DID does not find it.
+Re-put it (stored under the bare DID) and delete the old spelling to migrate.
+
+Capabilities are enabled **per authority**. Each community enables, for
+example, `git-trust` under its own authority (`config.authority`), and several
+may do so side by side. A grant, revoke or disable acts on the enablement of
+the authority the issuer may act for; an admin listed for several authorities
+that have all enabled the capability names the one it means in the request's
+`ext`: `{"com.affinidi.trust-registry": {"authority": "did:..."}}`.
+`governance/capability/list` returns one entry per enablement, and its
+response's `ext."com.affinidi.trust-registry".entries[i]` names the capability
+and authority of `capabilities[i]`. `enable` accepts only the version of the
+registry's built-in manifest, and refuses `delegate` (the registry has no
+delegation mechanism) and a `manifest` that is not the built-in one. The
+`reason` of a `disable` or `git-trust/revoke` is kept in its audit entry. The
+enablement state file (`TR_CAPABILITY_STATE`) of earlier releases, one slot per
+capability, is read and migrated, and written in the per-authority format on
+the next change.
+
+Refusals carry the codes the task specifications declare: `registry/record/put:alreadyExists`
+and `:notFound` (a strict put), `registry/record/delete:notFound`,
+`registry/record/query:notFound` (a fully keyed query),
+`governance/capability/enable:unknownCapability`, `:alreadyEnabled`,
+`:configInvalid`, `governance/capability/disable:notEnabled`,
+`git-trust/grant:alreadyGranted` and `git-trust/revoke:notGranted`. A
+`git-trust/grant` after a revoke authorizes the retained record again.
 
 A write that acts on the registry itself acts under **the registry's own DID**:
 `registry/did/rotate`, enabling or disabling a capability whose config names no

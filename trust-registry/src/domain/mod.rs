@@ -5,11 +5,53 @@ use std::fmt;
 
 pub mod key;
 
+/// The one form a party reference is stored, keyed and compared in: a
+/// did:scid with its `?src=` locator removed (VTI-KEY-160), anything else as
+/// written. The locator says where to resolve the DID, not who it is, so
+/// `did:scid:…` and `did:scid:…?src=host` are one identity.
+pub fn normalise_reference(reference: String) -> String {
+    let stripped = affinidi_did_common::scid::strip_scid_src(&reference);
+    if stripped.len() == reference.len() {
+        return reference;
+    }
+    stripped.into_owned()
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    #[test]
+    fn a_did_scid_locator_is_dropped_and_anything_else_kept() {
+        assert_eq!(
+            AuthorityId::new("did:scid:vh:1:abc?src=example.com").as_str(),
+            "did:scid:vh:1:abc"
+        );
+        assert_eq!(
+            EntityId::new("did:scid:vh:1:abc?src=example.com#key-1").as_str(),
+            "did:scid:vh:1:abc#key-1"
+        );
+        assert_eq!(
+            AuthorityId::new("did:web:example.com?src=x").as_str(),
+            "did:web:example.com?src=x"
+        );
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct EntityId(String);
 
 impl EntityId {
+    /// A did:scid reference is kept without its `?src=` locator
+    /// ([`normalise_reference`]), so it is stored, keyed and compared in one
+    /// form however the caller wrote it.
     pub fn new(id: impl Into<String>) -> Self {
+        Self(normalise_reference(id.into()))
+    }
+
+    /// The reference exactly as written, not normalised: only for reaching a
+    /// record an earlier release stored with a did:scid `?src=` locator.
+    pub fn as_written(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
@@ -28,7 +70,16 @@ impl fmt::Display for EntityId {
 pub struct AuthorityId(String);
 
 impl AuthorityId {
+    /// A did:scid reference is kept without its `?src=` locator
+    /// ([`normalise_reference`]), so it is stored, keyed and compared in one
+    /// form however the caller wrote it.
     pub fn new(id: impl Into<String>) -> Self {
+        Self(normalise_reference(id.into()))
+    }
+
+    /// The reference exactly as written, not normalised: only for reaching a
+    /// record an earlier release stored with a did:scid `?src=` locator.
+    pub fn as_written(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 

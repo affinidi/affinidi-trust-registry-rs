@@ -257,6 +257,37 @@ pub async fn startup_profile_json(
     Ok(profile.to_string())
 }
 
+/// Why a rotation did not happen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RotateError {
+    pub reason: String,
+    /// Whether the same request may succeed later: a failure reaching the
+    /// VTA or resolving the DID, not one of the registry's own setup.
+    pub transient: bool,
+}
+
+impl RotateError {
+    fn permanent(reason: String) -> Self {
+        Self {
+            reason,
+            transient: false,
+        }
+    }
+
+    fn transient(reason: String) -> Self {
+        Self {
+            reason,
+            transient: true,
+        }
+    }
+}
+
+impl std::fmt::Display for RotateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
 /// Rotate the Trust Registry's VTA-managed `did:webvh` keys.
 ///
 /// Builds a [`vta_sdk::client::VtaClient`] from the credential loaded with the
@@ -275,16 +306,18 @@ pub async fn rotate_did(
     did: &str,
     pre_rotation_count: Option<u32>,
     label: Option<String>,
-) -> Result<(String, String, String), String> {
+) -> Result<(String, String, String), RotateError> {
     use vta_sdk::client::VtaClient;
     use vta_sdk::protocols::did_management::update::RotateDidWebvhKeysBody;
 
-    let vta = vta.ok_or_else(|| "VTA is not configured (TR_VTA_CREDENTIAL unset)".to_string())?;
+    let vta = vta.ok_or_else(|| {
+        RotateError::permanent("VTA is not configured (TR_VTA_CREDENTIAL unset)".to_string())
+    })?;
     let webvh_did = webvh_log_did(did).await?;
 
     let client = VtaClient::from_credential(&vta.credential, vta.url_override.as_deref())
         .await
-        .map_err(|e| format!("VTA authentication failed: {e}"))?;
+        .map_err(|e| RotateError::transient(format!("VTA authentication failed: {e}")))?;
 
     let body = RotateDidWebvhKeysBody {
         pre_rotation_count,
@@ -293,7 +326,7 @@ pub async fn rotate_did(
     let result = client
         .rotate_did_webvh_keys_by_did(&webvh_did, body)
         .await
-        .map_err(|e| format!("VTA did:webvh key rotation failed: {e}"))?;
+        .map_err(|e| RotateError::transient(format!("VTA did:webvh key rotation failed: {e}")))?;
 
     let did = if did.starts_with("did:scid:") {
         strip_scid_src(did).into_owned()
@@ -310,7 +343,7 @@ pub async fn rotate_did(
 /// A bare did:scid resolves only through a source the resolver already holds,
 /// which a fresh one does not; configure the registry's DID as its DID URL
 /// (`did:scid:vh:1:<scid>?src=…`) for this to find the log.
-async fn webvh_log_did(did: &str) -> Result<String, String> {
+async fn webvh_log_did(did: &str) -> Result<String, RotateError> {
     if did
         .strip_prefix("did:webvh:")
         .and_then(|rest| rest.split(':').next())
@@ -323,19 +356,24 @@ async fn webvh_log_did(did: &str) -> Result<String, String> {
         .map(|rest| rest.split(['?', '#']).next().unwrap_or(rest))
         .filter(|s| !s.is_empty())
     else {
-        return Err(format!(
+        return Err(RotateError::permanent(format!(
             "DID {did} is not a did:webvh or did:scid:vh:1; cannot rotate its keys"
-        ));
+        )));
     };
 
     use affinidi_tdk::did_resolver::{DIDCacheClient, config::DIDCacheConfigBuilder};
     let resolver = DIDCacheClient::new(DIDCacheConfigBuilder::default().build())
         .await
-        .map_err(|e| format!("cannot build a DID resolver to find {did}'s log: {e}"))?;
-    let resolved = resolver
-        .resolve(did)
-        .await
-        .map_err(|e| format!("cannot resolve {did} to find its did:webvh log: {e}"))?;
+        .map_err(|e| {
+            RotateError::transient(format!(
+                "cannot build a DID resolver to find {did}'s log: {e}"
+            ))
+        })?;
+    let resolved = resolver.resolve(did).await.map_err(|e| {
+        RotateError::transient(format!(
+            "cannot resolve {did} to find its did:webvh log: {e}"
+        ))
+    })?;
     let prefix = format!("did:webvh:{scid}:");
     resolved
         .doc
@@ -343,7 +381,9 @@ async fn webvh_log_did(did: &str) -> Result<String, String> {
         .iter()
         .find(|alias| alias.starts_with(&prefix))
         .cloned()
-        .ok_or_else(|| format!("{did}'s document names no did:webvh log to rotate"))
+        .ok_or_else(|| {
+            RotateError::permanent(format!("{did}'s document names no did:webvh log to rotate"))
+        })
 }
 
 #[cfg(test)]
@@ -440,7 +480,8 @@ mod tests {
         let err = rotate_did(None, "did:webvh:Qm:example.com", None, None)
             .await
             .expect_err("no VTA");
-        assert!(err.contains("not configured"), "{err}");
+        assert!(err.reason.contains("not configured"), "{err}");
+        assert!(!err.transient, "a missing VTA is not fixed by retrying");
         clear_vta_env();
     }
 
