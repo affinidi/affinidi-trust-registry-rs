@@ -280,11 +280,10 @@ async fn test_request_context_is_not_merged_authorization() {
 
     let json: Value = response.json().await.unwrap();
 
-    // The answer carries the record's stored context as stored; the request's
-    // context is neither merged in nor allowed to override it.
-    let context = &json["context"];
-    assert!(context.get("additional").is_none(), "{context}");
-    assert_ne!(context["test"], "overridden", "{context}");
+    // The answer carries the record's stored context as stored
+    // (sample-data/data.csv: {"additional": "context"}); the request's
+    // members must neither replace nor extend it.
+    assert_eq!(json["context"], json!({ "additional": "context" }));
 }
 
 #[tokio::test]
@@ -314,8 +313,7 @@ async fn test_request_context_is_not_merged_recognition() {
 
     let json: Value = response.json().await.unwrap();
 
-    let context = &json["context"];
-    assert!(context.get("recognition_context").is_none(), "{context}");
+    assert_eq!(json["context"], json!({ "additional": "context" }));
 }
 
 #[tokio::test]
