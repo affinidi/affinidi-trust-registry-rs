@@ -24,17 +24,69 @@
 //! store *claims* an id atomically before dispatch and resolves the claim after:
 //!
 //! ```text
-//!   claim(key, digest) ->  Acquired  -> dispatch -> complete(key, outcome)
-//!                      ->  Replay(o) -> return the original response, do not dispatch
-//!                      ->  InFlight  -> reject as retryable; the sender re-sends and
-//!                                       finds Replay once the first copy resolves
-//!                      ->  Conflict  -> the id was accepted for a different
-//!                                       document: reject as `idConflict`
+//!   claim(key, digest) ->  Acquired(t) -> dispatch -> complete(key, t, outcome)
+//!                      ->  Replay(o)   -> return the original response, do not dispatch
+//!                      ->  InFlight    -> reject as retryable; the sender re-sends and
+//!                                         finds Replay once the first copy resolves
+//!                      ->  Conflict    -> the id was accepted for a different
+//!                                         document: reject as `idConflict`
 //! ```
 //!
 //! [`execute_once`] reports which of these happened ([`Disposition`]) beside
 //! the outcome, so the audit entry of a replayed or in-flight duplicate does
 //! not read as a second execution.
+//!
+//! A claim is a **lease**: it lapses after the in-flight lease
+//! ([`DEFAULT_IN_FLIGHT_TTL`], `TR_DEDUP_IN_FLIGHT_LEASE_SEC`) unless resolved
+//! first, so an id whose claimant died is not blocked until the document
+//! expires. Each claim carries a [`ClaimToken`]; `complete` and `release` act
+//! only for the claim that holds the id, so a claimant whose lease lapsed and
+//! was taken over cannot overwrite or free the new claimant's entry.
+//!
+//! ## The exact guarantee
+//!
+//! - A document is executed **once** when its claimant stores the outcome:
+//!   every later copy inside the retention gets that outcome verbatim, on any
+//!   binding, and (with a durable store) on any replica and after a restart.
+//! - A copy arriving while the first is executing is refused as retryable and
+//!   is not executed.
+//! - An execution never outlives its claim while it is awaited:
+//!   [`execute_once`] stops waiting [`LEASE_MARGIN`] (15 s) before the lease
+//!   lapses and answers with a retryable refusal, leaving the claim to lapse
+//!   rather than releasing it, so a write already sent has the margin to land
+//!   before another copy can claim the id. The lease is at least the DIDComm
+//!   handler timeout plus twice the margin (60 s), so on DIDComm the transport
+//!   gives up first.
+//! - One id never gets two answers from this layer: a claimant that finds its
+//!   claim gone when storing the outcome ([`DedupError::ClaimLost`]) answers
+//!   with the outcome the id holds now, or a retryable refusal when it holds
+//!   none, never with its own.
+//! - The record write and the stored outcome are two steps, and the record
+//!   write is not fenced by the claim token. A later copy **executes again**
+//!   when the claim ends without an outcome while the write may have landed:
+//!   - the process dies between the write and `complete`;
+//!   - the store cannot be reached for any of the 3 tries of `complete`;
+//!   - the handler panics after writing (its claim is released at once);
+//!   - the execution is abandoned at its bound, or the call is cancelled,
+//!     after the write was sent (the claim lapses with the lease);
+//!   - the write's own answer is lost although the write landed (on Redis a
+//!     response timeout after `EXEC` was sent, on DynamoDB a timeout after
+//!     `TransactWriteItems` was sent): the handler reports a transient
+//!     failure, which releases the claim rather than storing it.
+//!
+//!   The re-execution sees the first one's effect: `registry/record/put`
+//!   without `expectedExisting` is an upsert and converges (answering
+//!   `wasCreated: false`); a strict create answers "already exists" and a
+//!   delete "not found", although the first execution succeeded. Whatever the
+//!   re-execution answers is then stored, so every copy after it gets that
+//!   same answer.
+//!
+//! A late `complete` (after the lease, with no other claim since) behaves per
+//! store: Redis and DynamoDB keep a lapsed claim until another copy claims the
+//! id, so it still stores the outcome; the in-memory and fjall stores drop a
+//! lapsed claim when they next evict, and it returns `ClaimLost`. With
+//! executions bounded by the lease this only happens when resolving itself is
+//! slow.
 //!
 //! ## The record of accepted identifiers (VTI-OPS-025..027)
 //!
@@ -50,9 +102,22 @@
 //! A write is refused rather than executed when the store cannot be
 //! consulted: without the record there is no replay protection.
 //!
-//! [`MemoryMessageIdStore`] is the only implementation: it is per process and
-//! lost on restart. [`MessageIdStore`] is the seam a shared, durable store
-//! would implement.
+//! Implementations:
+//!
+//! - [`MemoryMessageIdStore`]: per process, lost on restart. Used with the
+//!   CSV and in-memory record backends, and whenever a host passes a
+//!   repository without a durable store of its own.
+//! - `redis::RedisMessageIdStore` (feature `storage-redis`), shared by every
+//!   replica on one Redis.
+//! - `dynamodb::DynamoDbMessageIdStore` (feature `storage-ddb`), shared by every
+//!   replica on one table.
+//! - `fjall::FjallMessageIdStore` (feature `storage-fjall`), in the record
+//!   database, surviving a restart.
+//!
+//! The record backends hand out theirs through
+//! [`TrustRecordAdminRepository::message_id_store`](crate::storage::repository::TrustRecordAdminRepository::message_id_store),
+//! which the [`TrustRegistryBuilder`](crate::TrustRegistryBuilder) uses by
+//! default. Every implementation passes the suite in `dedup::conformance`.
 //!
 //! A duplicate that arrives after completion replays the **stored response**
 //! rather than being silently dropped. At-least-once exists because responses
@@ -78,17 +143,32 @@
 // router allows this lint for the same reason.
 #![allow(clippy::result_large_err)]
 
+// Test-only. Each store's suite uses a different subset of the fixture's
+// hooks (shared, unbounded, restart, guard), so any build with fewer than all
+// backends leaves some of them unused.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) mod conformance;
+#[cfg(feature = "storage-ddb")]
+pub mod dynamodb;
+#[cfg(feature = "storage-fjall")]
+pub mod fjall;
+#[cfg(feature = "storage-redis")]
+pub mod redis;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trust_tasks_rs::{ErrorResponse, RejectReason, TrustTask, document_digest};
 use uuid::Uuid;
 
+use crate::configs::MessageIdStoreConfig;
 use crate::trust_tasks::TaskOutcome;
 
 /// How long a completed outcome stays replayable: the write acceptance window
@@ -98,7 +178,7 @@ use crate::trust_tasks::TaskOutcome;
 /// its time of issue before the record is consulted, so a redelivery that
 /// arrives after its entry has expired is refused as `expired`, never applied
 /// again. Keeping entries longer would only hold capacity that bounds new
-/// writes.
+/// writes. `TR_DEDUP_RETENTION_SEC` sets it.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(7 * 60);
 
 /// Bounds of the record kept for `registry/record/query` documents, which is
@@ -110,12 +190,14 @@ pub const DEFAULT_QUERY_MAX_ENTRIES_PER_ISSUER: usize = 1_000;
 
 /// How long an unresolved claim is honoured before another copy may take it.
 ///
-/// A handler that panics — or a process that dies mid-dispatch — would
-/// otherwise leave an `InFlight` marker that blocks its message id until TTL.
-/// Reclaiming after this window trades a small duplicate-application risk for
-/// not wedging a write permanently; it is set well above any realistic handler
-/// runtime.
-pub const DEFAULT_IN_FLIGHT_TTL: Duration = Duration::from_secs(5 * 60);
+/// A process that dies mid-dispatch, or a store that cannot be reached to
+/// record the outcome, would otherwise leave an `InFlight` marker that blocks
+/// its message id until the document expires. Two minutes is far above any
+/// realistic handler runtime (a copy re-executes only if the first is still
+/// running when the lease lapses) and leaves most of the five-minute
+/// acceptance window for a retry to get a definite answer.
+/// `TR_DEDUP_IN_FLIGHT_LEASE_SEC` sets it.
+pub const DEFAULT_IN_FLIGHT_TTL: Duration = Duration::from_secs(2 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DedupError {
@@ -125,6 +207,11 @@ pub enum DedupError {
     /// accepted ones.
     #[error("dedup store at capacity: {0}")]
     CapacityReached(String),
+    /// `complete` for a claim that no longer holds the id: its lease lapsed
+    /// and another copy claimed (or completed) it. The other copy's entry is
+    /// left as it is.
+    #[error("dedup claim lost: {0}")]
+    ClaimLost(String),
 }
 
 /// Storage key for a document: `MID#<issuer>#<id>`.
@@ -172,11 +259,39 @@ impl StoredOutcome {
     }
 }
 
+/// Identifies one claim of a message id, so that only that claim can resolve
+/// it ([`MessageIdStore::complete`], [`MessageIdStore::release`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClaimToken(String);
+
+impl ClaimToken {
+    /// A fresh, unique token.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+
+    /// A token as a store persisted it.
+    pub fn from_stored(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for ClaimToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Result of attempting to claim a message id.
 #[derive(Debug)]
 pub enum Claim {
-    /// The caller owns this id and must resolve it with `complete` or `release`.
-    Acquired,
+    /// The caller owns this id and must resolve it with `complete` or
+    /// `release`, passing this token.
+    Acquired(ClaimToken),
     /// Already handled — replay this outcome without dispatching.
     Replay(Box<StoredOutcome>),
     /// Another copy holds the claim right now.
@@ -185,7 +300,7 @@ pub enum Claim {
     Conflict,
 }
 
-/// Durable claim/replay store for message ids.
+/// Claim/replay store for message ids.
 #[async_trait]
 pub trait MessageIdStore: Send + Sync {
     /// Atomically claim `key` for the document whose content identity is
@@ -193,23 +308,46 @@ pub trait MessageIdStore: Send + Sync {
     ///
     /// A key already held for a different `digest` MUST yield
     /// [`Claim::Conflict`], never a replay of the other document's outcome.
+    /// An in-flight claim older than the store's lease, and an outcome older
+    /// than its retention, MUST be treated as absent.
     ///
     /// Implementations MUST make this atomic against concurrent callers (for
     /// a shared store, a conditional put such as `SET NX`). The check-then-set
     /// pattern the record backends use for `create` is **not** sufficient here.
     async fn claim(&self, key: &str, digest: &str) -> Result<Claim, DedupError>;
 
-    /// Resolve a claim with the outcome to replay for later duplicates.
-    async fn complete(&self, key: &str, outcome: &StoredOutcome) -> Result<(), DedupError>;
+    /// Resolve the claim `token` names with the outcome to replay for later
+    /// duplicates, kept for the store's retention.
+    ///
+    /// Stores the outcome when that claim still holds `key`. A store may keep
+    /// a lapsed claim until another copy claims the id, and then completes it
+    /// too. When the claim no longer holds `key` (another copy claimed or
+    /// completed it, or the lapsed claim is gone), changes nothing and
+    /// returns [`DedupError::ClaimLost`].
+    async fn complete(
+        &self,
+        key: &str,
+        token: &ClaimToken,
+        outcome: &StoredOutcome,
+    ) -> Result<(), DedupError>;
 
-    /// Abandon a claim so a retry may take it (transient failures only).
-    async fn release(&self, key: &str) -> Result<(), DedupError>;
+    /// Abandon the claim `token` names so a retry may take it (transient
+    /// failures only). Does nothing when that claim no longer holds `key`.
+    async fn release(&self, key: &str, token: &ClaimToken) -> Result<(), DedupError>;
+
+    /// How long this store honours an unresolved claim. [`execute_once`]
+    /// stops waiting for a document's execution [`LEASE_MARGIN`] before it,
+    /// so a claim never lapses while its own execution is still awaited.
+    fn in_flight_lease(&self) -> Duration {
+        DEFAULT_IN_FLIGHT_TTL
+    }
 }
 
 enum Entry {
     InFlight {
         digest: String,
         claimed_at: DateTime<Utc>,
+        token: ClaimToken,
     },
     Done {
         digest: String,
@@ -233,8 +371,21 @@ fn key_issuer(key: &str) -> &str {
         .map_or("", |(issuer, _)| issuer)
 }
 
+fn chrono_duration(duration: Duration) -> chrono::Duration {
+    chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
+}
+
+/// `now` plus `duration`, saturating instead of overflowing.
+pub(crate) fn expiry(now: DateTime<Utc>, duration: Duration) -> DateTime<Utc> {
+    now.checked_add_signed(chrono_duration(duration))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
+}
+
+/// The record kept in process memory: entries, their expiry queues and the
+/// per-issuer counts. The in-memory store is this behind a lock; the fjall
+/// store also persists its outcomes.
 #[derive(Default)]
-struct Inner {
+pub(crate) struct Inner {
     entries: HashMap<String, Entry>,
     /// Claims in the order they were made, which is the order their in-flight
     /// window closes in. An item whose entry has since completed, been
@@ -258,9 +409,20 @@ impl Inner {
         }
     }
 
-    /// Drop what has expired, oldest first. Each queue item is looked at once,
-    /// so the cost is amortised over the claims that created them.
-    fn evict_expired(&mut self, now: DateTime<Utc>, in_flight: chrono::Duration) {
+    fn insert(&mut self, key: &str, entry: Entry) {
+        if self.entries.insert(key.to_string(), entry).is_none() {
+            *self
+                .per_issuer
+                .entry(key_issuer(key).to_string())
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Drop what has expired, oldest first, and return the keys of the
+    /// outcomes dropped. Each queue item is looked at once, so the cost is
+    /// amortised over the claims that created them.
+    pub(crate) fn evict_expired(&mut self, now: DateTime<Utc>, in_flight: Duration) -> Vec<String> {
+        let in_flight = chrono_duration(in_flight);
         while let Some((claimed_at, key)) = self.in_flight_order.front().cloned() {
             if now.signed_duration_since(claimed_at) < in_flight {
                 break;
@@ -273,6 +435,7 @@ impl Inner {
                 self.remove(&key);
             }
         }
+        let mut expired = Vec::new();
         while let Some((expires_at, key)) = self.done_order.front().cloned() {
             if expires_at > now {
                 break;
@@ -283,45 +446,174 @@ impl Inner {
                 Some(Entry::Done { expires_at: held, .. }) if *held == expires_at
             ) {
                 self.remove(&key);
+                expired.push(key);
             }
         }
+        expired
+    }
+
+    /// Claim `key`, under the bounds of `config`. Expired entries must have
+    /// been evicted first.
+    pub(crate) fn claim(
+        &mut self,
+        key: &str,
+        digest: &str,
+        now: DateTime<Utc>,
+        config: &MessageIdStoreConfig,
+    ) -> Result<Claim, DedupError> {
+        match self.entries.get(key) {
+            Some(Entry::Done { digest: held, .. } | Entry::InFlight { digest: held, .. })
+                if held != digest =>
+            {
+                return Ok(Claim::Conflict);
+            }
+            Some(Entry::Done { outcome, .. }) => return Ok(Claim::Replay(outcome.clone())),
+            Some(Entry::InFlight { .. }) => return Ok(Claim::InFlight),
+            None => {}
+        }
+
+        let issuer = key_issuer(key);
+        if self.entries.len() >= config.max_entries {
+            return Err(DedupError::CapacityReached(
+                "the record of accepted documents is full".to_string(),
+            ));
+        }
+        if self.per_issuer.get(issuer).copied().unwrap_or(0) >= config.max_entries_per_issuer {
+            return Err(DedupError::CapacityReached(format!(
+                "{issuer} has too many documents in the record of accepted documents"
+            )));
+        }
+        let token = ClaimToken::new();
+        self.insert(
+            key,
+            Entry::InFlight {
+                digest: digest.to_string(),
+                claimed_at: now,
+                token: token.clone(),
+            },
+        );
+        self.in_flight_order.push_back((now, key.to_string()));
+        Ok(Claim::Acquired(token))
+    }
+
+    /// Resolve the claim `token` names with `outcome` until `expires_at`, by
+    /// the rule of [`MessageIdStore::complete`]. Returns the digest stored.
+    pub(crate) fn complete(
+        &mut self,
+        key: &str,
+        token: &ClaimToken,
+        outcome: &StoredOutcome,
+        expires_at: DateTime<Utc>,
+    ) -> Result<String, DedupError> {
+        let digest = match self.entries.get(key) {
+            Some(Entry::InFlight {
+                digest,
+                token: held,
+                ..
+            }) if held == token => digest.clone(),
+            Some(_) => {
+                return Err(DedupError::ClaimLost(format!(
+                    "{key} is held by another claim"
+                )));
+            }
+            None => {
+                return Err(DedupError::ClaimLost(format!("the claim on {key} lapsed")));
+            }
+        };
+        self.insert(
+            key,
+            Entry::Done {
+                digest: digest.clone(),
+                outcome: Box::new(outcome.clone()),
+                expires_at,
+            },
+        );
+        self.done_order.push_back((expires_at, key.to_string()));
+        Ok(digest)
+    }
+
+    /// The digest of the claim `token` names, when it still holds `key`.
+    // Used by the fjall store only.
+    #[cfg_attr(not(feature = "storage-fjall"), allow(dead_code))]
+    pub(crate) fn held_by(&self, key: &str, token: &ClaimToken) -> Option<String> {
+        match self.entries.get(key) {
+            Some(Entry::InFlight {
+                digest,
+                token: held,
+                ..
+            }) if held == token => Some(digest.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn release(&mut self, key: &str, token: &ClaimToken) {
+        if matches!(
+            self.entries.get(key),
+            Some(Entry::InFlight { token: held, .. }) if held == token
+        ) {
+            self.remove(key);
+        }
+    }
+
+    /// Restore an outcome persisted by an earlier run. Callers restore in
+    /// expiry order.
+    #[cfg_attr(not(feature = "storage-fjall"), allow(dead_code))]
+    pub(crate) fn restore(
+        &mut self,
+        key: &str,
+        digest: String,
+        outcome: StoredOutcome,
+        expires_at: DateTime<Utc>,
+    ) {
+        self.insert(
+            key,
+            Entry::Done {
+                digest,
+                outcome: Box::new(outcome),
+                expires_at,
+            },
+        );
+        self.done_order.push_back((expires_at, key.to_string()));
     }
 }
 
 /// In-memory store: correct dedup semantics, no durability.
 ///
-/// The only [`MessageIdStore`] implementation, used whatever the record
-/// backend. Its state is lost on restart, which the acceptance window bounds:
-/// a document older than [`DEFAULT_TTL`] is refused on its time of issue. It
-/// is also local to one process: replicas of a registry do not share it.
+/// Used with the CSV and in-memory record backends. Its state is lost on
+/// restart, which the acceptance window bounds: a document older than
+/// [`DEFAULT_TTL`] is refused on its time of issue. It is also local to one
+/// process: replicas of a registry do not share it.
 ///
 /// Bounded: at [`DEFAULT_MAX_ENTRIES`] in total, or
 /// [`DEFAULT_MAX_ENTRIES_PER_ISSUER`] for one issuer, a new claim is refused
 /// rather than evicting an entry, since forgetting an accepted document would
 /// let it be replayed.
 pub struct MemoryMessageIdStore {
-    ttl: Duration,
-    in_flight_ttl: Duration,
-    max_entries: usize,
-    max_entries_per_issuer: usize,
+    config: MessageIdStoreConfig,
     inner: Mutex<Inner>,
 }
 
 impl MemoryMessageIdStore {
     pub fn new(ttl: Duration, in_flight_ttl: Duration) -> Self {
+        Self::from_config(MessageIdStoreConfig {
+            retention: ttl,
+            in_flight_lease: in_flight_ttl,
+            ..MessageIdStoreConfig::default()
+        })
+    }
+
+    /// A store with the retention, lease and bounds of `config`.
+    pub fn from_config(config: MessageIdStoreConfig) -> Self {
         Self {
-            ttl,
-            in_flight_ttl,
-            max_entries: DEFAULT_MAX_ENTRIES,
-            max_entries_per_issuer: DEFAULT_MAX_ENTRIES_PER_ISSUER,
+            config,
             inner: Mutex::new(Inner::default()),
         }
     }
 
     /// Set the total and per-issuer bounds.
     pub fn with_limits(mut self, max_entries: usize, max_entries_per_issuer: usize) -> Self {
-        self.max_entries = max_entries;
-        self.max_entries_per_issuer = max_entries_per_issuer;
+        self.config.max_entries = max_entries;
+        self.config.max_entries_per_issuer = max_entries_per_issuer;
         self
     }
 
@@ -336,7 +628,7 @@ impl MemoryMessageIdStore {
 
 impl Default for MemoryMessageIdStore {
     fn default() -> Self {
-        Self::new(DEFAULT_TTL, DEFAULT_IN_FLIGHT_TTL)
+        Self::from_config(MessageIdStoreConfig::default())
     }
 }
 
@@ -344,71 +636,29 @@ impl Default for MemoryMessageIdStore {
 impl MessageIdStore for MemoryMessageIdStore {
     async fn claim(&self, key: &str, digest: &str) -> Result<Claim, DedupError> {
         let now = Utc::now();
-        let in_flight =
-            chrono::Duration::from_std(self.in_flight_ttl).unwrap_or(chrono::Duration::zero());
         let mut inner = self.lock();
-        inner.evict_expired(now, in_flight);
-
-        match inner.entries.get(key) {
-            Some(Entry::Done { digest: held, .. } | Entry::InFlight { digest: held, .. })
-                if held != digest =>
-            {
-                return Ok(Claim::Conflict);
-            }
-            Some(Entry::Done { outcome, .. }) => return Ok(Claim::Replay(outcome.clone())),
-            Some(Entry::InFlight { .. }) => return Ok(Claim::InFlight),
-            None => {}
-        }
-
-        let issuer = key_issuer(key).to_string();
-        if inner.entries.len() >= self.max_entries {
-            return Err(DedupError::CapacityReached(
-                "the record of accepted documents is full".to_string(),
-            ));
-        }
-        if inner.per_issuer.get(&issuer).copied().unwrap_or(0) >= self.max_entries_per_issuer {
-            return Err(DedupError::CapacityReached(format!(
-                "{issuer} has too many documents in the record of accepted documents"
-            )));
-        }
-        inner.entries.insert(
-            key.to_string(),
-            Entry::InFlight {
-                digest: digest.to_string(),
-                claimed_at: now,
-            },
-        );
-        *inner.per_issuer.entry(issuer).or_insert(0) += 1;
-        inner.in_flight_order.push_back((now, key.to_string()));
-        Ok(Claim::Acquired)
+        inner.evict_expired(now, self.config.in_flight_lease);
+        inner.claim(key, digest, now, &self.config)
     }
 
-    async fn complete(&self, key: &str, outcome: &StoredOutcome) -> Result<(), DedupError> {
-        let expires_at =
-            Utc::now() + chrono::Duration::from_std(self.ttl).unwrap_or(chrono::Duration::zero());
-        let mut inner = self.lock();
-        let digest = match inner.entries.get(key) {
-            Some(Entry::InFlight { digest, .. } | Entry::Done { digest, .. }) => digest.clone(),
-            None => {
-                return Err(DedupError::Unavailable(format!(
-                    "no claim is held for {key}"
-                )));
-            }
-        };
-        inner.entries.insert(
-            key.to_string(),
-            Entry::Done {
-                digest,
-                outcome: Box::new(outcome.clone()),
-                expires_at,
-            },
-        );
-        inner.done_order.push_back((expires_at, key.to_string()));
-        Ok(())
+    async fn complete(
+        &self,
+        key: &str,
+        token: &ClaimToken,
+        outcome: &StoredOutcome,
+    ) -> Result<(), DedupError> {
+        let expires_at = expiry(Utc::now(), self.config.retention);
+        self.lock()
+            .complete(key, token, outcome, expires_at)
+            .map(|_| ())
     }
 
-    async fn release(&self, key: &str) -> Result<(), DedupError> {
-        self.lock().remove(key);
+    fn in_flight_lease(&self) -> Duration {
+        self.config.in_flight_lease
+    }
+
+    async fn release(&self, key: &str, token: &ClaimToken) -> Result<(), DedupError> {
+        self.lock().release(key, token);
         Ok(())
     }
 }
@@ -464,8 +714,123 @@ impl Once {
     }
 }
 
+/// How many times [`execute_once`] tries to store an outcome before leaving
+/// the claim to lapse, and the pause before the second try (doubled after).
+const RESOLVE_ATTEMPTS: u32 = 3;
+const RESOLVE_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// How a claim was resolved after its document executed.
+#[derive(Debug, PartialEq, Eq)]
+enum Resolution {
+    /// The outcome is stored (or, for a transient failure, the claim is
+    /// released): this execution's outcome is the id's answer.
+    Settled,
+    /// The claim no longer holds the id: another copy claimed it after the
+    /// lease lapsed, or an earlier try of `complete` landed although its
+    /// answer was lost. This execution's outcome is not the id's answer.
+    Lost,
+    /// The store could not be reached: the claim lapses after the lease.
+    Unresolved,
+}
+
+/// Store `outcome` for `key` (or release the claim, for a transient failure),
+/// retrying a store that cannot be reached: an outcome that is not stored
+/// lets a redelivery execute the document again once the lease lapses.
+async fn resolve(
+    store: &dyn MessageIdStore,
+    key: &str,
+    token: &ClaimToken,
+    outcome: &TaskOutcome,
+) -> Resolution {
+    let cacheable = is_cacheable(outcome);
+    let stored = cacheable.then(|| StoredOutcome::from_outcome(outcome));
+    let mut delay = RESOLVE_RETRY_DELAY;
+    for attempt in 1..=RESOLVE_ATTEMPTS {
+        let resolution = match &stored {
+            Some(stored) => store.complete(key, token, stored).await,
+            // Transient failure: let the sender's retry try again for real.
+            None => store.release(key, token).await,
+        };
+        match resolution {
+            Ok(()) => return Resolution::Settled,
+            Err(DedupError::ClaimLost(reason)) => {
+                // Either another copy took the id after the lease lapsed, or a
+                // previous attempt here stored the outcome but its answer was
+                // lost. The caller answers with whatever the id holds now.
+                tracing::warn!("The claim on {key} no longer holds it after executing: {reason}");
+                return Resolution::Lost;
+            }
+            Err(e) if attempt < RESOLVE_ATTEMPTS => {
+                tracing::warn!("Failed to resolve dedup claim {key} (attempt {attempt}): {e}");
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+            Err(e) => {
+                // The mutation already happened; losing the record of it means
+                // a redelivery after the lease executes it again, so it is
+                // worth an error-level log.
+                tracing::error!(
+                    "Failed to resolve dedup claim {key}; a redelivery after the in-flight \
+                     lease will execute it again: {e}"
+                );
+            }
+        }
+    }
+    Resolution::Unresolved
+}
+
+/// How long before its claim's lease lapses [`execute_once`] stops waiting
+/// for a document's execution. It covers resolving the claim and the
+/// response timeout of a write already sent (5 s on Redis).
+pub const LEASE_MARGIN: Duration = Duration::from_secs(15);
+
+/// A retryable refusal of `doc`: the sender re-sends it later.
+fn retry_later(doc: &TrustTask<Value>, reason: &str) -> ErrorResponse {
+    let mut rejection = doc.reject_with(
+        Uuid::new_v4().to_string(),
+        RejectReason::TaskFailed {
+            reason: reason.to_string(),
+            details: None,
+        },
+    );
+    rejection.payload = rejection.payload.with_retryable(true);
+    rejection
+}
+
+/// The id's answer after this execution lost its claim: the outcome stored
+/// for it if there is one, else a retryable refusal. Never this execution's
+/// own outcome, which another execution may contradict.
+async fn answer_after_lost_claim(
+    store: &dyn MessageIdStore,
+    key: &str,
+    digest: &str,
+    doc: &TrustTask<Value>,
+) -> TaskOutcome {
+    match store.claim(key, digest).await {
+        Ok(Claim::Replay(stored)) => stored.into_outcome(),
+        Ok(Claim::Acquired(token)) => {
+            // The entry is gone: give the id back rather than hold it.
+            if let Err(e) = store.release(key, &token).await {
+                tracing::warn!("Failed to release a re-taken claim on {key}: {e}");
+            }
+            Err(retry_later(
+                doc,
+                "the document's outcome could not be recorded",
+            ))
+        }
+        Ok(Claim::InFlight | Claim::Conflict) | Err(_) => Err(retry_later(
+            doc,
+            "an identical document is currently being processed",
+        )),
+    }
+}
+
 /// Run `execute` on `doc` at most once per accepted document identifier, by
 /// the claim/replay protocol above.
+///
+/// If `execute` panics, the claim is released before the panic continues, so
+/// a retry executes the document again rather than waiting out the lease. A
+/// call cancelled while `execute` runs leaves the claim to its lease.
 pub async fn execute_once<F, Fut>(
     store: &dyn MessageIdStore,
     doc: TrustTask<Value>,
@@ -491,7 +856,7 @@ where
         }
     };
 
-    match store.claim(&key, digest.as_str()).await {
+    let token = match store.claim(&key, digest.as_str()).await {
         Ok(Claim::Replay(stored)) => {
             tracing::info!("Replaying stored outcome for duplicate write {key}");
             return Once::new(Disposition::Replayed, stored.into_outcome());
@@ -518,7 +883,7 @@ where
                 Err(doc.reject_with(Uuid::new_v4().to_string(), RejectReason::IdConflict)),
             );
         }
-        Ok(Claim::Acquired) => {}
+        Ok(Claim::Acquired(token)) => token,
         Err(e) => {
             // Fail closed: without the record of accepted identifiers a
             // replayed write cannot be told from a fresh one.
@@ -531,25 +896,50 @@ where
                 )),
             );
         }
-    }
-
-    let outcome = execute(doc).await;
-
-    let resolution = if is_cacheable(&outcome) {
-        store
-            .complete(&key, &StoredOutcome::from_outcome(&outcome))
-            .await
-    } else {
-        // Transient failure: let the sender's retry try again for real.
-        store.release(&key).await
     };
-    if let Err(e) = resolution {
-        // The mutation already happened; losing the record of it risks a
-        // duplicate on redelivery, so it is worth an error-level log.
-        tracing::error!("Failed to resolve dedup claim {key}: {e}");
-    }
 
-    Once::new(Disposition::Executed, outcome)
+    // Stop waiting before the lease lapses, so no other copy can claim the id
+    // while this execution is still awaited.
+    let bound = store.in_flight_lease().saturating_sub(LEASE_MARGIN);
+    let original = doc.clone();
+    let executed = tokio::time::timeout(
+        bound,
+        std::panic::AssertUnwindSafe(execute(doc)).catch_unwind(),
+    )
+    .await;
+    let outcome = match executed {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(panic)) => {
+            if let Err(e) = store.release(&key, &token).await {
+                tracing::error!("Failed to release dedup claim {key} after a panic: {e}");
+            }
+            std::panic::resume_unwind(panic);
+        }
+        Err(_) => {
+            // Whether the write landed is unknown. The claim is left to lapse
+            // (not released), so a write already sent has the margin to land
+            // before a retry can claim the id and execute it again.
+            tracing::error!(
+                "Execution of {key} did not finish within {bound:?}; abandoned, its claim \
+                 lapses with the lease"
+            );
+            return Once::new(
+                Disposition::Executed,
+                Err(retry_later(
+                    &original,
+                    "the document did not finish executing in time",
+                )),
+            );
+        }
+    };
+
+    match resolve(store, &key, &token, &outcome).await {
+        Resolution::Settled | Resolution::Unresolved => Once::new(Disposition::Executed, outcome),
+        Resolution::Lost => Once::new(
+            Disposition::Executed,
+            answer_after_lost_claim(store, &key, digest.as_str(), &original).await,
+        ),
+    }
 }
 
 /// Dispatch `doc`, executing the registry's own writes and the capability
@@ -601,6 +991,14 @@ mod tests {
         MemoryMessageIdStore::default()
     }
 
+    #[track_caller]
+    fn acquired(claim: Claim) -> ClaimToken {
+        match claim {
+            Claim::Acquired(token) => token,
+            other => panic!("expected an acquired claim, got {other:?}"),
+        }
+    }
+
     #[test]
     fn key_is_scoped_by_issuer() {
         // Two senders using the same document id must not collide — otherwise
@@ -626,7 +1024,7 @@ mod tests {
         let store = store();
         assert!(matches!(
             store.claim("MID#a#1", "digest").await.unwrap(),
-            Claim::Acquired
+            Claim::Acquired(_)
         ));
         assert!(matches!(
             store.claim("MID#a#1", "digest").await.unwrap(),
@@ -667,9 +1065,13 @@ mod tests {
         let doc = write_doc("1", Some("did:example:alice"));
         let key = message_key(&doc);
 
-        store.claim(&key, "digest").await.unwrap();
+        let token = acquired(store.claim(&key, "digest").await.unwrap());
         store
-            .complete(&key, &StoredOutcome::from_outcome(&ok_outcome(&doc)))
+            .complete(
+                &key,
+                &token,
+                &StoredOutcome::from_outcome(&ok_outcome(&doc)),
+            )
             .await
             .unwrap();
 
@@ -685,12 +1087,12 @@ mod tests {
     #[tokio::test]
     async fn released_claim_can_be_retaken() {
         let store = store();
-        store.claim("MID#a#1", "digest").await.unwrap();
-        store.release("MID#a#1").await.unwrap();
+        let token = acquired(store.claim("MID#a#1", "digest").await.unwrap());
+        store.release("MID#a#1", &token).await.unwrap();
         assert!(
             matches!(
                 store.claim("MID#a#1", "digest").await.unwrap(),
-                Claim::Acquired
+                Claim::Acquired(_)
             ),
             "a released claim must be retryable, not permanently blocked"
         );
@@ -705,7 +1107,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert!(matches!(
             store.claim("MID#a#1", "digest").await.unwrap(),
-            Claim::Acquired
+            Claim::Acquired(_)
         ));
     }
 
@@ -714,16 +1116,20 @@ mod tests {
         let store = MemoryMessageIdStore::new(Duration::from_millis(1), DEFAULT_IN_FLIGHT_TTL);
         let doc = write_doc("1", None);
         let key = message_key(&doc);
-        store.claim(&key, "digest").await.unwrap();
+        let token = acquired(store.claim(&key, "digest").await.unwrap());
         store
-            .complete(&key, &StoredOutcome::from_outcome(&ok_outcome(&doc)))
+            .complete(
+                &key,
+                &token,
+                &StoredOutcome::from_outcome(&ok_outcome(&doc)),
+            )
             .await
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert!(matches!(
             store.claim(&key, "digest").await.unwrap(),
-            Claim::Acquired
+            Claim::Acquired(_)
         ));
     }
 
@@ -893,10 +1299,15 @@ mod tests {
         async fn claim(&self, _key: &str, _digest: &str) -> Result<Claim, DedupError> {
             Err(DedupError::Unavailable("down".to_string()))
         }
-        async fn complete(&self, _key: &str, _outcome: &StoredOutcome) -> Result<(), DedupError> {
+        async fn complete(
+            &self,
+            _key: &str,
+            _token: &ClaimToken,
+            _outcome: &StoredOutcome,
+        ) -> Result<(), DedupError> {
             Err(DedupError::Unavailable("down".to_string()))
         }
-        async fn release(&self, _key: &str) -> Result<(), DedupError> {
+        async fn release(&self, _key: &str, _token: &ClaimToken) -> Result<(), DedupError> {
             Err(DedupError::Unavailable("down".to_string()))
         }
     }
@@ -988,7 +1399,7 @@ mod tests {
         // Nothing was claimed, so the same id is still free.
         assert!(matches!(
             store.claim(&message_key(&read), "digest").await.unwrap(),
-            Claim::Acquired
+            Claim::Acquired(_)
         ));
     }
 
@@ -1030,7 +1441,7 @@ mod tests {
         ));
         assert!(matches!(
             store.claim("MID#b#1", "d").await.unwrap(),
-            Claim::Acquired
+            Claim::Acquired(_)
         ));
     }
 
@@ -1042,18 +1453,165 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert!(matches!(
             store.claim("MID#a#2", "d").await.unwrap(),
-            Claim::Acquired
+            Claim::Acquired(_)
         ));
     }
 
     #[tokio::test]
     async fn released_claims_free_their_issuer_slot() {
         let store = MemoryMessageIdStore::default().with_limits(10, 1);
-        store.claim("MID#a#1", "d").await.unwrap();
-        store.release("MID#a#1").await.unwrap();
+        let token = acquired(store.claim("MID#a#1", "d").await.unwrap());
+        store.release("MID#a#1", &token).await.unwrap();
         assert!(matches!(
             store.claim("MID#a#2", "d").await.unwrap(),
-            Claim::Acquired
+            Claim::Acquired(_)
         ));
     }
+
+    /// A handler that panics releases its claim, so a retry executes rather
+    /// than being told "in flight" until the lease lapses.
+    #[tokio::test]
+    async fn a_panicking_execution_releases_its_claim() {
+        let store = store();
+        let doc = write_doc("panics", Some("did:example:alice"));
+        let panicked = std::panic::AssertUnwindSafe(execute_once(&store, doc.clone(), |_| async {
+            panic!("handler bug")
+        }))
+        .catch_unwind()
+        .await;
+        assert!(panicked.is_err(), "the panic continues");
+
+        let retry = execute_once(&store, doc, |doc| async move { ok_outcome(&doc) }).await;
+        assert_eq!(retry.disposition, Disposition::Executed);
+    }
+
+    /// Fails the first `complete`s as unreachable, then delegates.
+    struct FlakyComplete {
+        inner: MemoryMessageIdStore,
+        failures_left: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl MessageIdStore for FlakyComplete {
+        async fn claim(&self, key: &str, digest: &str) -> Result<Claim, DedupError> {
+            self.inner.claim(key, digest).await
+        }
+        async fn complete(
+            &self,
+            key: &str,
+            token: &ClaimToken,
+            outcome: &StoredOutcome,
+        ) -> Result<(), DedupError> {
+            {
+                let mut left = self.failures_left.lock().unwrap();
+                if *left > 0 {
+                    *left -= 1;
+                    return Err(DedupError::Unavailable("blip".to_string()));
+                }
+            }
+            self.inner.complete(key, token, outcome).await
+        }
+        async fn release(&self, key: &str, token: &ClaimToken) -> Result<(), DedupError> {
+            self.inner.release(key, token).await
+        }
+    }
+
+    /// An execution still running when its bound (the lease less the
+    /// margin) is reached is abandoned with a retryable refusal.
+    #[tokio::test]
+    async fn an_execution_that_outlives_its_bound_is_refused_and_keeps_the_claim() {
+        // A lease just over the margin bounds the execution to 100 ms.
+        let store =
+            MemoryMessageIdStore::new(DEFAULT_TTL, LEASE_MARGIN + Duration::from_millis(100));
+        let doc = write_doc("slow", Some("did:example:alice"));
+        let once = execute_once(&store, doc.clone(), |doc| async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            ok_outcome(&doc)
+        })
+        .await;
+        let err = once.outcome.expect_err("abandoned");
+        assert!(err.payload.retryable, "the sender is told to retry");
+        // The claim is not released: a write already sent may still land, so
+        // a retry waits for the lease rather than running beside it.
+        assert!(matches!(
+            store
+                .claim(&message_key(&doc), document_digest(&doc).unwrap().as_str())
+                .await
+                .unwrap(),
+            Claim::InFlight
+        ));
+    }
+
+    /// Plays another copy taking the id over: `complete` finds the id
+    /// completed by that copy, with its own outcome.
+    struct TakenOver {
+        inner: MemoryMessageIdStore,
+        other: StoredOutcome,
+    }
+
+    #[async_trait]
+    impl MessageIdStore for TakenOver {
+        async fn claim(&self, key: &str, digest: &str) -> Result<Claim, DedupError> {
+            self.inner.claim(key, digest).await
+        }
+        async fn complete(
+            &self,
+            key: &str,
+            token: &ClaimToken,
+            _outcome: &StoredOutcome,
+        ) -> Result<(), DedupError> {
+            let digest = self.inner.lock().held_by(key, token).expect("held");
+            self.inner.release(key, token).await?;
+            let theirs = acquired(self.inner.claim(key, &digest).await?);
+            self.inner.complete(key, &theirs, &self.other).await?;
+            Err(DedupError::ClaimLost("taken over".to_string()))
+        }
+        async fn release(&self, key: &str, token: &ClaimToken) -> Result<(), DedupError> {
+            self.inner.release(key, token).await
+        }
+    }
+
+    /// A copy whose claim was taken over answers with the id's stored
+    /// outcome, not its own, so one id never gets two answers.
+    #[tokio::test]
+    async fn a_lost_claim_answers_with_the_stored_outcome() {
+        let doc = write_doc("raced", Some("did:example:alice"));
+        let mut theirs = doc.clone();
+        theirs.id = "their-response".to_string();
+        let store = TakenOver {
+            inner: MemoryMessageIdStore::default(),
+            other: StoredOutcome::Completed(theirs.clone()),
+        };
+        let once = execute_once(&store, doc, |doc| async move { ok_outcome(&doc) }).await;
+        assert_eq!(once.outcome.expect("the stored success"), theirs);
+    }
+
+    /// A store that cannot be reached for a moment does not lose the outcome:
+    /// `complete` is retried, and the duplicate replays.
+    #[tokio::test]
+    async fn storing_the_outcome_is_retried() {
+        let store = FlakyComplete {
+            inner: MemoryMessageIdStore::default(),
+            failures_left: Mutex::new(RESOLVE_ATTEMPTS - 1),
+        };
+        let doc = write_doc("flaky", Some("did:example:alice"));
+        let first = execute_once(&store, doc.clone(), |doc| async move { ok_outcome(&doc) }).await;
+        assert_eq!(first.disposition, Disposition::Executed);
+        let again = execute_once(&store, doc, |_| async {
+            unreachable!("the outcome was stored on a retry")
+        })
+        .await;
+        assert_eq!(again.disposition, Disposition::Replayed);
+    }
+
+    // The store contract, as every implementation must keep it.
+    crate::dedup::conformance::message_id_store_conformance_tests!(
+        memory,
+        Some(crate::dedup::conformance::StoreFixture::new(|config| {
+            Box::pin(async move {
+                std::sync::Arc::new(MemoryMessageIdStore::from_config(config))
+                    as std::sync::Arc<dyn MessageIdStore>
+            })
+        }))
+    );
 }

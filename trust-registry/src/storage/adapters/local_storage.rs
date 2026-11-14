@@ -107,6 +107,24 @@ impl TrustRecordAdminRepository for LocalStorage {
         let records_vec: Vec<TrustRecord> = records.values().cloned().collect();
         Ok(TrustRecordList::new(records_vec))
     }
+
+    /// Copies only the matching records.
+    async fn list_matching(
+        &self,
+        filter: &TrustRecordFilter,
+    ) -> Result<TrustRecordList, RepositoryError> {
+        let records = self
+            .records
+            .read()
+            .map_err(|_| RepositoryError::LockPoisoned)?;
+        Ok(TrustRecordList::new(
+            records
+                .values()
+                .filter(|record| filter.matches(record))
+                .cloned()
+                .collect(),
+        ))
+    }
 }
 
 #[cfg(test)]

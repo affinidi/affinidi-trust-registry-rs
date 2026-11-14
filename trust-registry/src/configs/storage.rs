@@ -141,6 +141,145 @@ impl Default for FjallStorageConfig {
     }
 }
 
+/// Retention and bounds of the record of accepted Trust Task document
+/// identifiers ([`crate::dedup`], R1.4), whichever store holds it.
+///
+/// | Field | Variable | Default |
+/// |---|---|---|
+/// | `retention` | `TR_DEDUP_RETENTION_SEC` | 420 |
+/// | `in_flight_lease` | `TR_DEDUP_IN_FLIGHT_LEASE_SEC` | 120 |
+/// | `max_entries` | `TR_DEDUP_MAX_ENTRIES` | 100000 |
+/// | `max_entries_per_issuer` | `TR_DEDUP_MAX_ENTRIES_PER_ISSUER` | 10000 |
+///
+/// The entry bounds apply to the stores kept in process memory (the in-memory
+/// store, and the fjall store's index); Redis and DynamoDB entries are bounded
+/// by their retention only. [`Self::validate`] states the constraints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageIdStoreConfig {
+    /// How long a completed outcome is kept for replay.
+    pub retention: std::time::Duration,
+    /// How long an unresolved claim is honoured before another copy may take
+    /// it (the lease that frees an id whose claimant died).
+    pub in_flight_lease: std::time::Duration,
+    /// Most entries held at once, across all issuers.
+    pub max_entries: usize,
+    /// Most entries one issuer may hold at once.
+    pub max_entries_per_issuer: usize,
+}
+
+impl Default for MessageIdStoreConfig {
+    fn default() -> Self {
+        Self {
+            retention: crate::dedup::DEFAULT_TTL,
+            in_flight_lease: crate::dedup::DEFAULT_IN_FLIGHT_TTL,
+            max_entries: crate::dedup::DEFAULT_MAX_ENTRIES,
+            max_entries_per_issuer: crate::dedup::DEFAULT_MAX_ENTRIES_PER_ISSUER,
+        }
+    }
+}
+
+/// The longest `TR_DEDUP_RETENTION_SEC` may be. An outcome only has to be
+/// kept for the acceptance window; this bounds what an operator can ask for.
+pub const MAX_RETENTION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// The shortest in-flight lease: the DIDComm handler timeout, plus the
+/// [`LEASE_MARGIN`](crate::dedup::LEASE_MARGIN) `execute_once` keeps before
+/// the lease, plus as much again. A shorter lease could lapse while a handler
+/// the transport still waits for is executing.
+pub fn min_in_flight_lease() -> std::time::Duration {
+    crate::didcomm::listener::delivery::HANDLER_TIMEOUT + 2 * crate::dedup::LEASE_MARGIN
+}
+
+/// The write acceptance window plus the allowed future skew: how long a
+/// document can be accepted for, and so the least the retention may be.
+fn acceptance_span() -> std::time::Duration {
+    (trust_tasks_rs::DEFAULT_MAX_AGE + trust_tasks_rs::DEFAULT_SKEW)
+        .to_std()
+        .unwrap_or_default()
+}
+
+impl MessageIdStoreConfig {
+    /// Check the constraints, naming the variable that breaks one:
+    ///
+    /// - the retention covers the whole acceptance window plus skew (360 s):
+    ///   a shorter one would forget a document that can still be accepted,
+    ///   and a redelivery of it would execute again. It is at most one day
+    ///   ([`MAX_RETENTION`]);
+    /// - the in-flight lease is at least [`min_in_flight_lease`] (60 s) and
+    ///   shorter than the acceptance window (300 s), so a handler is not
+    ///   overtaken by a redelivery while it runs, and a sender retrying a
+    ///   document whose claimant died gets a definite answer before the
+    ///   document is too old;
+    /// - both entry bounds are at least one, and the per-issuer bound is not
+    ///   above the total.
+    pub fn validate(&self) -> Result<(), String> {
+        let span = acceptance_span();
+        if self.retention < span || self.retention > MAX_RETENTION {
+            return Err(format!(
+                "TR_DEDUP_RETENTION_SEC must be at least {} (the write acceptance window plus \
+                 skew) and at most {} (one day), got {}",
+                span.as_secs(),
+                MAX_RETENTION.as_secs(),
+                self.retention.as_secs()
+            ));
+        }
+        let window = trust_tasks_rs::DEFAULT_MAX_AGE.to_std().unwrap_or_default();
+        let least = min_in_flight_lease();
+        if self.in_flight_lease < least || self.in_flight_lease >= window {
+            return Err(format!(
+                "TR_DEDUP_IN_FLIGHT_LEASE_SEC must be at least {} (the DIDComm handler timeout \
+                 plus a margin) and less than {} (the write acceptance window), got {}",
+                least.as_secs(),
+                window.as_secs(),
+                self.in_flight_lease.as_secs()
+            ));
+        }
+        if self.max_entries == 0 {
+            return Err("TR_DEDUP_MAX_ENTRIES must be a positive whole number (got '0')".into());
+        }
+        if self.max_entries_per_issuer == 0 || self.max_entries_per_issuer > self.max_entries {
+            return Err(format!(
+                "TR_DEDUP_MAX_ENTRIES_PER_ISSUER must be at least 1 and at most \
+                 TR_DEDUP_MAX_ENTRIES ({}), got {}",
+                self.max_entries, self.max_entries_per_issuer
+            ));
+        }
+        Ok(())
+    }
+
+    fn from_env() -> Result<Self, String> {
+        let defaults = Self::default();
+        let count = |name: &str, default: usize| -> Result<usize, String> {
+            let value = positive_env(name, default as u64)?;
+            usize::try_from(value).map_err(|_| format!("{name} is too large (got '{value}')"))
+        };
+        let config = Self {
+            retention: std::time::Duration::from_secs(positive_env(
+                "TR_DEDUP_RETENTION_SEC",
+                defaults.retention.as_secs(),
+            )?),
+            in_flight_lease: std::time::Duration::from_secs(positive_env(
+                "TR_DEDUP_IN_FLIGHT_LEASE_SEC",
+                defaults.in_flight_lease.as_secs(),
+            )?),
+            max_entries: count("TR_DEDUP_MAX_ENTRIES", defaults.max_entries)?,
+            max_entries_per_issuer: count(
+                "TR_DEDUP_MAX_ENTRIES_PER_ISSUER",
+                defaults.max_entries_per_issuer,
+            )?,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+#[async_trait::async_trait]
+impl Configs for MessageIdStoreConfig {
+    async fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self::from_env()?)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StorageConfig {
     pub ddb_storage_config: DynamoDbStorageConfig,
@@ -148,6 +287,9 @@ pub struct StorageConfig {
     pub redis_storage_config: RedisStorageConfig,
     pub fjall_storage_config: FjallStorageConfig,
     pub storage_backend: TrustStorageBackend,
+    /// The record of accepted document identifiers, whichever backend holds
+    /// it.
+    pub message_id_config: MessageIdStoreConfig,
 }
 
 /// The values `TR_STORAGE_BACKEND` accepts, for error messages.
@@ -283,6 +425,7 @@ impl Configs for StorageConfig {
         let storage_backend = load_storage_backend()?;
         let mut config = StorageConfig {
             storage_backend,
+            message_id_config: MessageIdStoreConfig::from_env()?,
             ..Default::default()
         };
         let location = match storage_backend {
@@ -327,6 +470,10 @@ mod tests {
         "DDB_USE_TEST_CREDENTIALS",
         "REDIS_URL",
         "TR_FJALL_PATH",
+        "TR_DEDUP_RETENTION_SEC",
+        "TR_DEDUP_IN_FLIGHT_LEASE_SEC",
+        "TR_DEDUP_MAX_ENTRIES",
+        "TR_DEDUP_MAX_ENTRIES_PER_ISSUER",
     ];
 
     fn clear_storage_env() {
@@ -473,6 +620,65 @@ mod tests {
         unsafe { std::env::set_var("DYNAMODB_ENDPOINT", "http://127.0.0.1:8000") };
         let err = StorageConfig::load().await.expect_err("conflict");
         assert!(err.to_string().contains("DYNAMODB_ENDPOINT"), "{err}");
+        clear_storage_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn message_id_settings_default_and_are_read() {
+        clear_storage_env();
+        let loaded = StorageConfig::load().await.expect("defaults load");
+        assert_eq!(loaded.message_id_config, MessageIdStoreConfig::default());
+        assert_eq!(MessageIdStoreConfig::default().validate(), Ok(()));
+
+        unsafe {
+            std::env::set_var("TR_DEDUP_RETENTION_SEC", "900");
+            std::env::set_var("TR_DEDUP_IN_FLIGHT_LEASE_SEC", "60");
+            std::env::set_var("TR_DEDUP_MAX_ENTRIES", "50");
+            std::env::set_var("TR_DEDUP_MAX_ENTRIES_PER_ISSUER", "5");
+        }
+        let loaded = StorageConfig::load().await.expect("loads");
+        assert_eq!(
+            loaded.message_id_config,
+            MessageIdStoreConfig {
+                retention: std::time::Duration::from_secs(900),
+                in_flight_lease: std::time::Duration::from_secs(60),
+                max_entries: 50,
+                max_entries_per_issuer: 5,
+            }
+        );
+        clear_storage_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_bad_message_id_setting_is_an_error_naming_the_variable() {
+        for (variable, raw) in [
+            ("TR_DEDUP_RETENTION_SEC", "0"),
+            ("TR_DEDUP_RETENTION_SEC", "seven"),
+            // Shorter than the acceptance window plus skew.
+            ("TR_DEDUP_RETENTION_SEC", "359"),
+            ("TR_DEDUP_IN_FLIGHT_LEASE_SEC", "0"),
+            // Shorter than the handler timeout plus margins.
+            ("TR_DEDUP_IN_FLIGHT_LEASE_SEC", "59"),
+            // Over a day, and large enough to overflow a timestamp.
+            ("TR_DEDUP_RETENTION_SEC", "86401"),
+            ("TR_DEDUP_RETENTION_SEC", "18446744073709551615"),
+            // Not shorter than the acceptance window.
+            ("TR_DEDUP_IN_FLIGHT_LEASE_SEC", "300"),
+            ("TR_DEDUP_MAX_ENTRIES", "-1"),
+            ("TR_DEDUP_MAX_ENTRIES_PER_ISSUER", "0"),
+            // Above the total bound.
+            ("TR_DEDUP_MAX_ENTRIES_PER_ISSUER", "100001"),
+        ] {
+            clear_storage_env();
+            unsafe { std::env::set_var(variable, raw) };
+            let err = StorageConfig::load().await.expect_err(raw);
+            assert!(
+                err.to_string().contains(variable),
+                "{variable}={raw}: {err}"
+            );
+        }
         clear_storage_env();
     }
 

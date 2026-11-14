@@ -340,6 +340,28 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   already exists: …`, and the CSV backend no longer uses its own
   `entity|authority|action|resource` format. These strings reach clients as
   the `TaskFailed` reason.
+- **`MessageIdStore` claims carry a token** (#194): `Claim::Acquired` is
+  `Claim::Acquired(ClaimToken)`, and `complete` and `release` take the token.
+  They act only for the claim that still holds the id, so a claimant whose
+  lease lapsed and was taken over cannot overwrite or free the new claim;
+  `complete` then returns the new `DedupError::ClaimLost`. A host's own
+  `MessageIdStore` must follow the new contract (the conformance suite states
+  it).
+- **`dedup::DEFAULT_IN_FLIGHT_TTL` is 2 minutes** (was 5), so a sender
+  retrying a document whose claimant died gets a definite answer inside the
+  5-minute acceptance window. `TR_DEDUP_IN_FLIGHT_LEASE_SEC` sets it.
+- **`RedisStorage` holds a `ConnectionManager`** instead of an exclusively
+  locked `MultiplexedConnection` (#212). The Redis backend now needs Redis 5
+  or later.
+- **Upgrade note, DynamoDB:** the record of accepted documents writes items
+  with `PK = MID#<issuer>#<id>` in the records' table, with `PutItem`,
+  `UpdateItem`, `DeleteItem` and `GetItem`. An IAM policy that restricts the
+  registry to `dynamodb:LeadingKeys = TR`, or to the record actions only, must
+  allow `MID#*` leading keys and those actions, or every write is refused as
+  unavailable.
+- **`execute_once` bounds an execution by the store's lease**
+  (`MessageIdStore::in_flight_lease`, new, defaulted) less `LEASE_MARGIN`, and
+  answers a copy whose claim was taken over with the stored outcome.
 
 ### Added
 
@@ -410,6 +432,30 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   positive_env, env_flag, non_empty_env}`, `configs::vta::VtaConfig` and
   `vta_cache_slot`, `secret_store::{selected_backend, backend_name,
   parse_secret_backend}`.
+- **Durable records of accepted Trust Task documents** (R1.4, #194): Redis
+  (`dedup::redis::RedisMessageIdStore`), DynamoDB
+  (`dedup::dynamodb::DynamoDbMessageIdStore`) and fjall
+  (`dedup::fjall::FjallMessageIdStore`) implementations of `MessageIdStore`.
+  A redelivered or re-sent write is answered with its stored response after a
+  restart, and on every replica sharing the Redis or table, instead of being
+  executed again. `TrustRecordAdminRepository::message_id_store` hands out the
+  backend's store and `TrustRegistryBuilder` uses it when no `dedup_store` is
+  passed; CSV and in-memory keep the in-memory store, with the startup
+  warning. See the README "Record of accepted documents" section.
+- `TR_DEDUP_RETENTION_SEC`, `TR_DEDUP_IN_FLIGHT_LEASE_SEC`,
+  `TR_DEDUP_MAX_ENTRIES` and `TR_DEDUP_MAX_ENTRIES_PER_ISSUER`
+  (`configs::MessageIdStoreConfig`, `StorageConfig::message_id_config`). A
+  retention outside 360 s (the acceptance window plus skew) to one day, a
+  lease outside 60 s (the DIDComm handler timeout plus margins) to 299 s, or a
+  zero bound stops startup naming the variable.
+- `TrustRecordAdminRepository::list_matching(&TrustRecordFilter)` (#216): a
+  filtered listing. Redis scans only the filter's key prefix (`SCAN MATCH`),
+  DynamoDB queries `begins_with(SK, prefix)`, fjall scans the prefix, and CSV
+  and in-memory copy only the matching records. The default lists and
+  filters, so other implementations keep working.
+- A `MessageIdStore` conformance suite (`dedup::conformance`) run against the
+  in-memory and fjall stores always, and the Redis and DynamoDB stores when
+  `TR_TEST_REDIS_URL` / `TR_TEST_DYNAMODB_ENDPOINT` are set.
 
 ### Changed
 
@@ -715,6 +761,22 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   first write. The Docker image now creates `/app/sample-data` owned by the
   `trustregistry` user. Hand edits remain single-writer: an edit saved while
   the registry is writing can be lost (see the README's CSV section).
+- **Redis reads run concurrently and reconnect** (#212). Reads share one
+  auto-reconnecting `ConnectionManager`, cloned per operation, instead of
+  taking an exclusive lock around one connection for every command; a
+  dropped connection (Redis restart, failover, idle reset) is re-established
+  rather than failing every later command until the registry restarts. Each
+  write uses a connection of its own for its `WATCH`/`MULTI`/`EXEC`.
+  Connection and response timeouts are 5 seconds (the response timeout was
+  the crate's 500 ms default). A listing fetches each `SCAN` step with one
+  `MGET` instead of one `GET` per key.
+- **`registry/record/query` reads only what its filter can match** (#216):
+  it calls `list_matching` instead of loading every record, so a query naming
+  an authority costs that authority's records, not the whole store.
+- **A write whose outcome could not be stored is retried**, then left to the
+  in-flight lease; a handler that panics releases its claim at once (#194).
+  The guarantee is documented in `dedup`: a document is executed again only
+  when the registry stops between applying it and recording the outcome.
 
 ### Fixed
 

@@ -2763,11 +2763,16 @@ mod tests {
         async fn complete(
             &self,
             _key: &str,
+            _token: &crate::dedup::ClaimToken,
             _outcome: &crate::dedup::StoredOutcome,
         ) -> Result<(), crate::dedup::DedupError> {
             Ok(())
         }
-        async fn release(&self, _key: &str) -> Result<(), crate::dedup::DedupError> {
+        async fn release(
+            &self,
+            _key: &str,
+            _token: &crate::dedup::ClaimToken,
+        ) -> Result<(), crate::dedup::DedupError> {
             Ok(())
         }
     }

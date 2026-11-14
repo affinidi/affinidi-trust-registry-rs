@@ -16,8 +16,8 @@ pub mod vta;
 pub use didcomm::{AdminConfig, AuditConfig, AuditLogFormat, DidcommConfig, ProfileConfig};
 pub use server::{DEFAULT_CAPABILITY_STATE_PATH, ServerConfig};
 pub use storage::{
-    DynamoDbStorageConfig, FileStorageConfig, FjallStorageConfig, RedisStorageConfig,
-    StorageConfig, TrustStorageBackend,
+    DynamoDbStorageConfig, FileStorageConfig, FjallStorageConfig, MessageIdStoreConfig,
+    RedisStorageConfig, StorageConfig, TrustStorageBackend,
 };
 
 /// Load a configuration section from the process environment.
