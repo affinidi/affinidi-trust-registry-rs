@@ -220,9 +220,10 @@ pub fn served_by(config: &DidcommConfig) -> Transports {
 /// Whether the registry's own local DID document advertises a REST endpoint,
 /// which it does only when a public URL is configured.
 fn local_document_advertises_rest(config: &DidcommConfig) -> bool {
-    serde_json::from_str::<Value>(&config.did_document)
-        .map(|doc| advertised_in(&doc).rest)
-        .unwrap_or(false)
+    config
+        .did_document
+        .as_ref()
+        .is_some_and(|doc| advertised_in(doc).rest)
 }
 
 /// Resolve this registry's own DID and log every disagreement with what this
