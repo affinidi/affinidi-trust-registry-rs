@@ -10,9 +10,9 @@
 //! in-band `issuer` for the proof to be bound to, is refused outright rather
 //! than left to the verifier.
 //!
-//! Verification is backed by [`trust_tasks_proof`]'s Affinidi verifier over the
-//! shared DID-resolver cache; `did:key` issuers verify offline, `did:web` /
-//! `did:webvh` issuers resolve through the cache.
+//! Verification is backed by [`trust_tasks_proof`]'s Affinidi verifier over a
+//! DID-resolver cache of its own ([`build_verifier`]); `did:key` issuers verify
+//! offline, `did:web` / `did:webvh` issuers resolve through the cache.
 //!
 //! A registry write is an operational message (VTI-KEY-084, VTI-KEY-106): it
 //! is signed with the writer's `operational` key, carries the proof purpose
@@ -102,25 +102,168 @@ pub fn requires_proof(slug: &str) -> bool {
     descriptor(slug).is_some_and(|d| d.requires_proof())
 }
 
-/// Build a Data Integrity proof verifier backed by the Affinidi DID-resolver
-/// cache, accepting only keys the signer lists under `authentication`. Falls
-/// back to a `did:key`-only verifier (no network) if the resolver cache cannot
-/// be constructed, so proof verification degrades gracefully rather than
-/// failing startup; a `did:key`'s only key is by construction its
-/// authentication key.
-pub async fn build_verifier() -> Arc<dyn DynProofVerifier> {
-    use affinidi_tdk::did_resolver::{DIDCacheClient, config::DIDCacheConfigBuilder};
+/// Why a write signed by a non-`did:key` issuer could not be verified while
+/// the DID resolver is unavailable. [`verify_proof`] answers it `unavailable`
+/// (retryable), not `proofInvalid`: nothing is wrong with the proof.
+pub const RESOLVER_UNAVAILABLE: &str =
+    "the DID resolver is unavailable, so only did:key issuers can be verified";
 
-    match DIDCacheClient::new(DIDCacheConfigBuilder::default().build()).await {
-        Ok(client) => {
-            let resolver = Arc::new(AuthenticationKeyResolver::new(Arc::new(client)));
-            erase_verifier(Verifier::with_resolver(resolver))
+/// First delay before rebuilding a DID resolver that could not be built.
+const RESOLVER_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// Longest delay between attempts to rebuild the DID resolver.
+const RESOLVER_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The registry's write-proof verifier: the DID-resolver-backed one, or, while
+/// the resolver cannot be built, a `did:key`-only stand-in that a background
+/// task replaces as soon as the resolver builds.
+///
+/// While degraded, a proof whose verification method is not a `did:key` is
+/// refused as [`RESOLVER_UNAVAILABLE`] (answered `unavailable`, so a client
+/// retries) rather than reported invalid.
+pub struct RegistryVerifier {
+    resolving: std::sync::RwLock<Option<Arc<dyn DynProofVerifier>>>,
+    did_key: Arc<dyn DynProofVerifier>,
+}
+
+impl RegistryVerifier {
+    fn degraded() -> Self {
+        Self {
+            resolving: std::sync::RwLock::new(None),
+            did_key: erase_verifier(Verifier::for_did_key()),
+        }
+    }
+
+    fn resolving(verifier: Arc<dyn DynProofVerifier>) -> Self {
+        let this = Self::degraded();
+        this.install(verifier);
+        this
+    }
+
+    fn install(&self, verifier: Arc<dyn DynProofVerifier>) {
+        *self
+            .resolving
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(verifier);
+    }
+
+    fn current(&self) -> Option<Arc<dyn DynProofVerifier>> {
+        self.resolving
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether only `did:key` issuers can be verified.
+    pub fn is_did_key_only(&self) -> bool {
+        self.current().is_none()
+    }
+}
+
+#[async_trait]
+impl DynProofVerifier for RegistryVerifier {
+    async fn verify_json(
+        &self,
+        doc: &TrustTask<Value>,
+    ) -> Result<(), trust_tasks_rs::VerificationError> {
+        if let Some(verifier) = self.current() {
+            return verifier.verify_json(doc).await;
+        }
+        let did_key = doc
+            .proof
+            .as_ref()
+            .is_some_and(|proof| proof.verification_method.starts_with("did:key:"));
+        if did_key {
+            self.did_key.verify_json(doc).await
+        } else {
+            Err(trust_tasks_rs::VerificationError::Other(
+                RESOLVER_UNAVAILABLE.to_string(),
+            ))
+        }
+    }
+}
+
+/// Build the resolver-backed verifier, accepting only keys the signer lists
+/// under `authentication`.
+async fn resolver_verifier() -> Result<Arc<dyn DynProofVerifier>, String> {
+    use affinidi_tdk::did_resolver::config::DIDCacheConfigBuilder;
+
+    let client = DIDCacheClient::new(DIDCacheConfigBuilder::default().build())
+        .await
+        .map_err(|e| e.to_string())?;
+    let resolver = Arc::new(AuthenticationKeyResolver::new(Arc::new(client)));
+    Ok(erase_verifier(Verifier::with_resolver(resolver)))
+}
+
+/// Build the Data Integrity proof verifier, backed by the Affinidi
+/// DID-resolver cache and accepting only keys the signer lists under
+/// `authentication`.
+///
+/// If the resolver cannot be built, start with a `did:key`-only verifier
+/// (`did:key` resolves offline, and its only key is by construction its
+/// authentication key), report it on `health`, and keep rebuilding the
+/// resolver in the background with backoff until it builds or `shutdown` is
+/// cancelled; the full verifier is swapped in the moment it does.
+///
+/// This verifier builds its own resolver cache; it does not share the one the
+/// DIDComm stack holds.
+pub async fn build_verifier(
+    health: &Arc<crate::health::RegistryHealth>,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Arc<dyn DynProofVerifier> {
+    build_verifier_with(resolver_verifier, health, shutdown).await
+}
+
+async fn build_verifier_with<F, Fut>(
+    mut build: F,
+    health: &Arc<crate::health::RegistryHealth>,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Arc<dyn DynProofVerifier>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<Arc<dyn DynProofVerifier>, String>> + Send,
+{
+    match build().await {
+        Ok(verifier) => {
+            health.set_verifier_did_key_only(false);
+            Arc::new(RegistryVerifier::resolving(verifier))
         }
         Err(e) => {
-            tracing::warn!(
-                "DID resolver cache unavailable ({e}); Trust Task proof verification limited to did:key issuers"
+            tracing::error!(
+                "DID resolver cache unavailable ({e}); Trust Task proof verification is \
+                 limited to did:key issuers until it can be built (retrying in the background)"
             );
-            erase_verifier(Verifier::for_did_key())
+            health.set_verifier_did_key_only(true);
+            let verifier = Arc::new(RegistryVerifier::degraded());
+            let target = verifier.clone();
+            let health = health.clone();
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                let mut delay = RESOLVER_RETRY_INITIAL;
+                loop {
+                    tokio::select! {
+                        _ = shutdown.cancelled() => return,
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                    match build().await {
+                        Ok(resolving) => {
+                            target.install(resolving);
+                            health.set_verifier_did_key_only(false);
+                            tracing::info!(
+                                "DID resolver cache built; Trust Task proof verification \
+                                 covers every supported DID method again"
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "DID resolver cache still unavailable ({e}); retrying in {delay:?}"
+                            );
+                            delay = (delay * 2).min(RESOLVER_RETRY_MAX);
+                        }
+                    }
+                }
+            });
+            verifier
         }
     }
 }
@@ -166,12 +309,14 @@ pub async fn verify_proof(
             reason: "a write must name its issuer".to_string(),
         });
     }
-    verifier
-        .verify_json(doc)
-        .await
-        .map_err(|e| RejectReason::ProofInvalid {
+    verifier.verify_json(doc).await.map_err(|e| match e {
+        trust_tasks_rs::VerificationError::Other(reason) if reason == RESOLVER_UNAVAILABLE => {
+            RejectReason::Unavailable { retry_after: None }
+        }
+        e => RejectReason::ProofInvalid {
             reason: e.to_string(),
-        })
+        },
+    })
 }
 
 #[cfg(test)]
@@ -269,5 +414,72 @@ mod tests {
     fn a_key_listed_only_under_assertion_method_is_refused() {
         let doc = document(serde_json::json!([]));
         assert!(!is_authentication_method(&doc, "did:example:writer#key-1"));
+    }
+
+    /// A resolver that cannot be built at start is not given up on: writes by
+    /// non-`did:key` issuers are answered `unavailable` (retryable) while it
+    /// is missing, health says so, and the resolver is swapped in once a
+    /// background attempt succeeds.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_resolver_is_retried_and_swapped_in() {
+        use crate::health::RegistryHealth;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let health = Arc::new(RegistryHealth::new(false));
+        let attempts = Arc::new(AtomicU32::new(0));
+        let counted = attempts.clone();
+        let verifier = build_verifier_with(
+            move || {
+                let counted = counted.clone();
+                async move {
+                    if counted.fetch_add(1, Ordering::SeqCst) < 2 {
+                        Err("resolver cache unavailable".to_string())
+                    } else {
+                        // Stands in for the resolver-backed verifier.
+                        Ok(erase_verifier(Verifier::for_did_key()))
+                    }
+                }
+            },
+            &health,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(health.to_json()["verifier"], "didKeyOnly");
+        assert_eq!(health.to_json()["status"], "degraded");
+        let doc = doc_with_dummy_proof(RECORD_PUT);
+        assert!(
+            matches!(
+                verify_write_proof(&verifier, None, &doc).await,
+                Err(RejectReason::Unavailable { .. })
+            ),
+            "a did:example proof is not invalid, only unverifiable for now"
+        );
+
+        // The paused clock jumps through the backoff.
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(health.to_json()["verifier"], "ok");
+        assert!(matches!(
+            verify_write_proof(&verifier, None, &doc).await,
+            Err(RejectReason::ProofInvalid { .. })
+        ));
+    }
+
+    /// A resolver that builds at once is used directly, and health says so.
+    #[tokio::test]
+    async fn a_resolver_that_builds_is_used_at_once() {
+        let health = Arc::new(crate::health::RegistryHealth::new(false));
+        let verifier = build_verifier_with(
+            || async { Ok(erase_verifier(Verifier::for_did_key())) },
+            &health,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(health.to_json()["verifier"], "ok");
+        assert!(matches!(
+            verify_write_proof(&verifier, None, &doc_with_dummy_proof(RECORD_PUT)).await,
+            Err(RejectReason::ProofInvalid { .. })
+        ));
     }
 }

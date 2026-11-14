@@ -123,6 +123,7 @@ impl<H: MessageHandler> Listener<H> {
         let atm = self.atm.clone();
         let profile = self.profile.clone();
         let ledger = self.ledger.clone();
+        let health = self.health.clone();
         // Boxed: with every feature on, the handler futures nest deeply enough
         // to overflow the compiler's layout depth limit.
         let attempt = Box::pin(self.attempt(work));
@@ -146,6 +147,9 @@ impl<H: MessageHandler> Listener<H> {
                         delivery::GIVE_UP_ATTEMPTS,
                         delivery::GIVE_UP_MIN_AGE
                     );
+                    if let Some(health) = &health {
+                        health.record_given_up();
+                    }
                     ack(&atm, &profile, &id).await;
                 }
             }
@@ -356,6 +360,9 @@ impl<H: MessageHandler> Listener<H> {
                     delivery::GIVE_UP_ATTEMPTS,
                     delivery::GIVE_UP_MIN_AGE
                 );
+                if let Some(health) = &self.health {
+                    health.record_given_up();
+                }
                 ack(&self.atm, &self.profile, id).await;
             }
         }
@@ -376,11 +383,23 @@ impl<H: MessageHandler> Listener<H> {
             tokio::select! {
                 _ = self.shutdown.cancelled() => break,
                 result = self.sync_and_process_offline_messages() => {
-                    if let Err(e) = result {
-                        error!(
-                            "[profile = {}] Offline sync failed: {}",
-                            self.profile.inner.alias, e
-                        );
+                    // Each sync is a round trip with the mediator, which makes
+                    // it the listener's health probe.
+                    match result {
+                        Ok(()) => {
+                            if let Some(health) = &self.health {
+                                health.record_mediator_ok();
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "[profile = {}] Offline sync failed: {}",
+                                self.profile.inner.alias, e
+                            );
+                            if let Some(health) = &self.health {
+                                health.record_mediator_failure();
+                            }
+                        }
                     }
                 }
             }

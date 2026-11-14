@@ -123,7 +123,29 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   `AuthorityId::as_written`.
 - **`configs::vta::rotate_did` returns `RotateError`** (`reason`,
   `transient`) instead of a `String`.
-
+- **`server::start()` returns `std::process::ExitCode`** instead of never
+  returning: success after a SIGTERM/Ctrl-C stop, failure when startup fails
+  or a server task ends on its own. A `main` that called `start().await`
+  returns its value.
+- **`ServerHandle::join` returns `Result<(), BoxError>`**: `Err` when a task
+  ended without a shutdown request, failed, panicked, or had to be aborted
+  after its grace period. `ServerHandle::shutdown` still returns `()` and logs
+  a failure.
+- **`trust_tasks::build_verifier` takes `(&Arc<RegistryHealth>,
+  &CancellationToken)`** and retries a DID resolver that could not be built
+  (see Fixed).
+- **`didcomm::transport_capability::report_at_startup` takes a
+  `&DidcommConfig`** and returns a `health::TransportState`.
+- **`health::WriteStatus` is `#[non_exhaustive]`** and has `Starting` and
+  `Unknown`; `RegistryHealth` no longer derives `Debug` field-by-field (its
+  `Debug` prints the `/health` body).
+- **Removed from the public API:** `SharedData` (now crate-private, as is the
+  `http::handlers` module and `http::application_routes`; mount
+  `TrustRegistry::router()` instead, nesting it under any prefix),
+  `SharedData::service_start_timestamp`, the `api_prefix` parameter of
+  `application_routes`, and `TrustRecordError::MissingTimeRequested` /
+  `MissingTimeEvaluated` (never constructed). `BoxError` is one crate-level
+  alias, `trust_registry::BoxError`.
 - **The registry refuses to start when `ADMIN_DIDS` lists the test client's
   former sample DID** (`did:peer:2.Vz6Mkpun7x…`), whose private keys were
   committed to this repository; anyone could make its proofs. `.env.example`
@@ -369,6 +391,22 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   corrupt-value handling, and that concurrent strict creates of one key
   (split across two handles where the backend allows) produce exactly one
   success.
+- **`/health` reports each dependency** (additive fields; `status` stays
+  `"OK"` when healthy and the response stays `200`): `storage`
+  (`ok`/`unavailable`, a record-store lookup cached for five seconds),
+  `verifier` (`ok`/`didKeyOnly`), `transports` (`ok`/`mismatch`/`unknown`,
+  the advertised-vs-served check) and `givenUpMessages` (messages the DIDComm
+  listener deleted after repeated failures). `writes` gains `starting` and
+  `unknown`. `detail` joins the reasons for every degraded field. Monitors
+  that compared the whole body must compare `status` (the bundled
+  `test-trust-registry` smoke test did). See README, "Health".
+- `RegistryHealth::report` (refreshes the storage probe), `mark_writes_ok`,
+  `mark_writes_unknown`, `with_write_status`, `attach_storage`,
+  `set_verifier_did_key_only`, `set_transports` and `given_up_messages`, so a
+  host driving its own socket can report its write path.
+- `trust_tasks::proof::RegistryVerifier` and `RESOLVER_UNAVAILABLE`;
+  `transport_capability::findings_for`, `served_by` and `CHECK_TIMEOUT`;
+  `server::LISTENER_SHUTDOWN_GRACE`.
 - **Audit entries for writes carry `document_digest`**, the SHA-256 (hex) of
   the canonical JSON of the whole signed document, proof included, so an
   archived copy of a request can be matched to its entry and its proof checked
@@ -419,6 +457,19 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   that cannot be sent is logged, and a client that retries a write with the
   same document id gets the recorded outcome replayed. An existing `outbox`
   keyspace in the messaging store is left as it is and no longer read.
+- **One Trust Task handler per registry.** `TrustRegistry::task_handler()`,
+  `query_task_handler()`, `route_didcomm_envelope` and the HTTP
+  `/trust-tasks` route use clones of handlers built once in
+  `TrustRegistryBuilder::build`, sharing their `registry/record/query` replay
+  record and reply signer, instead of building a new one per call or per
+  request (#249).
+- The embedding and service wiring is no longer duplicated: `serve_registry`
+  uses the registry's own `router()` and `health_router()`, and
+  `RegistryParts` is gone (#250).
+- The DynamoDB backend logs the table and region it uses (or that the AWS SDK
+  default chain chooses the region) at startup.
+- The VTA offline cache warns when it is served from the profile bundle's
+  slot, which is no longer refreshed.
 - **The offline sync runs once when the listener starts**, then every 30 s,
   so a backlog queued while the registry was down is drained at once. The
   pickup listener and the integration tests share one ATM bootstrap
@@ -783,7 +834,37 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   new `AuditLogBuilder::build_success_with`.
 - **`governance/capability/list` reads its `status` from the enum's variants**,
   not its `Debug` text (#235).
-
+- **The standalone binary stops on SIGTERM and Ctrl-C** (#205). It installed
+  no handler, so as PID 1 in the container it ignored `docker stop` until
+  killed, and the graceful HTTP shutdown and the audit log's final flush
+  never ran. It now drains, flushes and exits `0`, and exits non-zero (with
+  one log line, not a panic) only when startup fails or a task ends on its
+  own. It no longer calls `std::process::exit`.
+- **`ServerHandle::shutdown` and `join` wait for every task** (#206): with
+  REST on, the DIDComm listener's handle was dropped when the HTTP task ended,
+  leaving it running. Each task now gets a bounded time to stop and is then
+  aborted. A listener still checking its DID document stops on shutdown.
+- **`/health` no longer reports writes `ok` from boot** (#207, R6.1/R6.2/R6.5):
+  `starting` until the listener's first round trip with the mediator, then
+  driven by the periodic offline sync — `unavailable` after two failures in a
+  row or five minutes without a success, `ok` again on recovery. The listener
+  marks writes unavailable when it stops, whether or not the `ServerHandle`
+  is awaited. A host-driven registry reports `unknown`, and the record store
+  is probed.
+- **A DID resolver that fails to build is retried** (#240). The registry used
+  a `did:key`-only verifier for the life of the process and refused every
+  other admin's write as `proofInvalid`. It now rebuilds the resolver in the
+  background with backoff and swaps it in; meanwhile `/health` says
+  `verifier: didKeyOnly` and such writes are answered `unavailable`
+  (retryable).
+- **The advertised-vs-served transport check runs for every configuration**
+  (#244): REST-only (when a DID is configured) and host-driven registries too,
+  in the background with a 30-second limit, with the result on `/health`. A
+  document advertising only the ToIP `TrustRegistry` type counts as
+  advertising REST, and REST served without `TR_PUBLIC_URL` is no longer
+  reported as unadvertised.
+- `VtaSecretCache::load` tries the legacy slot when the cache's own slot
+  cannot be read, instead of failing.
 - **The DIDComm pickup listener deletes a message at the mediator only after
   handling it** (R1.6). The live stream pulled with `auto_delete = true` and
   the 30-second offline sync acked its whole batch as soon as the handlers

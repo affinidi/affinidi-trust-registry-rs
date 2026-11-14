@@ -108,6 +108,8 @@ pub struct Listener<H: MessageHandler> {
     /// Handler slots; see [`delivery::MAX_INFLIGHT_HANDLERS`].
     pub(crate) permits: Arc<tokio::sync::Semaphore>,
     pub(crate) max_inflight: usize,
+    /// Where mediator round trips and given-up messages are reported.
+    pub(crate) health: Option<Arc<crate::health::RegistryHealth>>,
 }
 
 impl<H: MessageHandler> Listener<H> {
@@ -125,7 +127,21 @@ impl<H: MessageHandler> Listener<H> {
             ledger: Arc::default(),
             permits: Arc::new(tokio::sync::Semaphore::new(delivery::MAX_INFLIGHT_HANDLERS)),
             max_inflight: delivery::MAX_INFLIGHT_HANDLERS,
+            health: None,
         }
+    }
+
+    /// Report mediator round trips (`writes`) and given-up messages
+    /// (`givenUpMessages`) on `health`.
+    pub(crate) fn with_health(
+        mut self,
+        health: Option<Arc<crate::health::RegistryHealth>>,
+    ) -> Self {
+        if let Some(health) = &health {
+            health.attach_pickup_listener();
+        }
+        self.health = health;
+        self
     }
 
     /// Bound concurrent handlers to `max` instead of
@@ -227,33 +243,24 @@ pub(crate) async fn start_one_did_listener(
     health: Option<Arc<crate::health::RegistryHealth>>,
     shutdown: CancellationToken,
 ) -> Result<(), DIDCommError> {
-    // Only the TSP relationship store reports to health.
-    #[cfg(not(feature = "tsp"))]
-    let _ = health;
-    // Does the document peers actually resolve match what this binary serves?
-    // Checked here, before any source-specific setup, because every source has
-    // the same exposure — the published document is written by the provisioning
-    // VTA, not by us, so no runtime flag validation can catch a stale entry.
-    // Advisory only: it logs, it never refuses to start.
-    crate::didcomm::transport_capability::report_at_startup(
-        &profile_config.did,
-        &config.transport_flags,
-    )
-    .await;
-
+    // The advertised-vs-served transport check runs from `TrustRegistryBuilder::build`
+    // for every transport configuration, not here.
     let handler = BaseHandler::build_from_arc(repository, tasks.clone());
 
     let listener = match source {
         DidCommSource::Managed => {
             // We are about to publish this DID as reachable, so refuse to start
-            // until its DID document actually resolves.
-            check_did_document_availability(
-                &profile_config.did,
-                config.retry_config.max_attempts,
-                config.retry_config.initial_delay_secs,
-                config.retry_config.max_delay_secs,
-            )
-            .await?;
+            // until its DID document actually resolves. Its retries can take
+            // minutes, so a shutdown meanwhile stops it rather than waiting.
+            tokio::select! {
+                checked = check_did_document_availability(
+                    &profile_config.did,
+                    config.retry_config.max_attempts,
+                    config.retry_config.initial_delay_secs,
+                    config.retry_config.max_delay_secs,
+                ) => checked?,
+                _ = shutdown.cancelled() => return Ok(()),
+            }
 
             // A TSP-enabled registry receives through the SDK's
             // `DidCommTransport` instead of the pickup loop: that transport
@@ -264,6 +271,11 @@ pub(crate) async fn start_one_did_listener(
             // `crate::messaging` for how the two receive paths differ.
             #[cfg(feature = "tsp")]
             if config.transport_flags.tsp {
+                // The delivery layer does not report its mediator round trips,
+                // so the write path's state is not observable from here (R6.2).
+                if let Some(health) = &health {
+                    health.mark_writes_unknown();
+                }
                 return crate::messaging::service::start_managed_delivery(
                     profile_config,
                     config,
@@ -338,7 +350,9 @@ pub(crate) async fn start_one_did_listener(
         &listener.profile.inner.alias
     );
 
-    Arc::new(listener).start_listening(config).await?;
+    Arc::new(listener.with_health(health))
+        .start_listening(config)
+        .await?;
     Ok(())
 }
 

@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 
 use affinidi_did_common::scid::strip_scid_src;
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::warn;
 use vta_sdk::credentials::CredentialBundle;
 use vta_sdk::did_key::secrets_from_bundle;
 use vta_sdk::did_secrets::DidSecretsBundle;
@@ -58,7 +58,7 @@ use vti_secrets::{SecretBackend, SecretsConfig, create_seed_store};
 use super::loaders::{environment::non_empty_env, load_setting};
 use super::secret_store;
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
+use crate::BoxError;
 
 /// Appended to the configured secret name (Vault path, `Secret` name, keyring
 /// service) to make the VTA cache's own slot.
@@ -199,13 +199,20 @@ impl SecretCache for VtaSecretCache {
             return Ok(None);
         }
         let (cfg, dir) = self.slot();
-        if let Some(json) = secret_store::read_profile(&cfg, &dir)
-            .await
-            .map_err(BoxError::from)?
-        {
-            return Ok(Some(
-                serde_json::from_str(&json).map_err(|e| Box::new(e) as BoxError)?,
-            ));
+        match secret_store::read_profile(&cfg, &dir).await {
+            Ok(Some(json)) => {
+                return Ok(Some(
+                    serde_json::from_str(&json).map_err(|e| Box::new(e) as BoxError)?,
+                ));
+            }
+            Ok(None) => {}
+            // The legacy slot below may still hold a usable cache, and with
+            // the VTA unreachable it is the only way to boot; so a failed read
+            // here is reported, not returned.
+            Err(e) => warn!(
+                "could not read the VTA offline cache from its own slot ({e}); trying the \
+                 profile bundle's slot, where releases before it kept the cache"
+            ),
         }
         // Releases before the cache had its own slot wrote it where the
         // profile bundle lives. Read a cache found there, so an upgrade while
@@ -214,7 +221,11 @@ impl SecretCache for VtaSecretCache {
         match secret_store::read_profile(&self.store, &self.data_dir).await {
             Ok(Some(json)) => match serde_json::from_str::<DidSecretsBundle>(&json) {
                 Ok(bundle) => {
-                    info!("using the VTA offline cache found in the profile bundle's slot");
+                    warn!(
+                        "using the VTA offline cache found in the profile bundle's slot, which \
+                         is no longer refreshed: the next successful VTA fetch writes the cache \
+                         to its own slot"
+                    );
                     Ok(Some(bundle))
                 }
                 Err(_) => Ok(None),
@@ -547,6 +558,41 @@ mod tests {
             .await
             .expect("written");
         let loaded = cache.load().await.expect("loads").expect("legacy cache");
+        assert_eq!(loaded.did, bundle().did);
+    }
+
+    /// A cache slot that cannot be read is no reason to skip the legacy slot:
+    /// with the VTA down, the legacy cache may be the only way to boot.
+    #[tokio::test]
+    async fn an_unreadable_cache_slot_falls_back_to_the_legacy_slot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = plaintext_store();
+        let cache = VtaSecretCache::new(store.clone(), dir.path().to_path_buf());
+        cache.store(&bundle()).await.expect("stored");
+        // Corrupt every file in the cache's own slot.
+        let slot_dir = dir.path().join(VTA_CACHE_DIR);
+        for entry in std::fs::read_dir(&slot_dir).expect("cache slot exists") {
+            let path = entry.expect("entry").path();
+            if path.is_file() {
+                std::fs::write(&path, [0xff, 0xfe, 0xfd]).expect("corrupted");
+            }
+        }
+        assert!(
+            secret_store::read_profile(&vta_cache_slot(&store, dir.path()).0, &slot_dir)
+                .await
+                .is_err(),
+            "the cache slot is unreadable"
+        );
+
+        let legacy = serde_json::to_string(&bundle()).expect("json");
+        secret_store::write_profile(&store, dir.path(), &legacy)
+            .await
+            .expect("written");
+        let loaded = cache
+            .load()
+            .await
+            .expect("an unreadable slot is not fatal")
+            .expect("legacy cache");
         assert_eq!(loaded.did, bundle().did);
     }
 
