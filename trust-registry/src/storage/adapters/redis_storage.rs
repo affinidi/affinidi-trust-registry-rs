@@ -74,6 +74,12 @@ impl RedisStorage {
         Ok(Self { client, connection })
     }
 
+    /// The shared connection, for tests of the stores kept beside the records.
+    #[cfg(test)]
+    pub(crate) fn connection(&self) -> ConnectionManager {
+        self.connection.clone()
+    }
+
     /// A connection of its own for one write.
     async fn write_connection(&self) -> Result<MultiplexedConnection, RepositoryError> {
         self.client
@@ -393,6 +399,18 @@ impl TrustRecordAdminRepository for RedisStorage {
             self.connection.clone(),
             *config,
         ))))
+    }
+
+    /// The Redis capability enablement state
+    /// ([`RedisCapabilityStore`](crate::capabilities::redis::RedisCapabilityStore),
+    /// the hash `CAP#enablements`), over this storage's connection, shared by
+    /// every replica on this Redis.
+    async fn capability_store(
+        &self,
+    ) -> Result<Option<Box<dyn crate::capabilities::CapabilityStateStore>>, RepositoryError> {
+        Ok(Some(Box::new(
+            crate::capabilities::redis::RedisCapabilityStore::new(self.connection.clone()),
+        )))
     }
 }
 

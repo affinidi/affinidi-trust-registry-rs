@@ -23,6 +23,13 @@ pub struct ServerConfig {
     /// state file in whatever directory the host happens to run from, and two
     /// embedded registries in one process would silently share it.
     pub capability_state_path: Option<PathBuf>,
+    /// How often a registry whose capability state is shared with other
+    /// replicas (the Redis and DynamoDB backends) re-reads it in the
+    /// background, so the dispatcher handles a host reads directly converge
+    /// on other replicas' changes. Capability tasks handled by the Trust Task
+    /// handler re-read it before they are authorised, whatever this is.
+    /// Default [`DEFAULT_REFRESH_INTERVAL`](crate::capabilities::DEFAULT_REFRESH_INTERVAL).
+    pub capability_refresh_interval: std::time::Duration,
     /// Bounds on HTTP requests and connections. The body limit applies to the
     /// application routes wherever they are mounted; the rest are applied by
     /// the standalone service.
@@ -35,6 +42,7 @@ impl Default for ServerConfig {
             listen_address: DEFAULT_LISTEN_ADDRESS.to_string(),
             cors_allowed_origins: Vec::new(),
             capability_state_path: None,
+            capability_refresh_interval: crate::capabilities::DEFAULT_REFRESH_INTERVAL,
             http_limits: HttpLimits::default(),
         }
     }
@@ -67,6 +75,10 @@ impl Configs for ServerConfig {
             listen_address,
             cors_allowed_origins,
             capability_state_path: optional_env("TR_CAPABILITY_STATE").map(PathBuf::from),
+            capability_refresh_interval: std::time::Duration::from_secs(positive_env(
+                "TR_CAPABILITY_REFRESH_SECS",
+                crate::capabilities::DEFAULT_REFRESH_INTERVAL.as_secs(),
+            )?),
             http_limits: HttpLimits::from_env()?,
         })
     }

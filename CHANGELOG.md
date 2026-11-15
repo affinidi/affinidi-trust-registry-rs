@@ -21,6 +21,37 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Breaking
 
+- **Capability enablement is shared by replicas on Redis or DynamoDB
+  (#298).** The default capability store now comes from the repository
+  (`TrustRecordAdminRepository::capability_store`, new, default `None`): the
+  Redis adapter keeps the state in the hash `CAP#enablements`, the DynamoDB
+  adapter in the partition `PK = CAP#enablements` of the records' table; CSV,
+  in-memory and fjall keep the `TR_CAPABILITY_STATE` file. Each replica
+  re-reads the shared state before it authorises or serves a capability or
+  `governance/capability/*` task (refusing it as `unavailable` when the state
+  cannot be read) and every `TR_CAPABILITY_REFRESH_SECS` (new, default 5) in
+  the background; enable and disable write one enablement with a
+  compare-and-swap on its revision, so concurrent changes on two replicas lose
+  no update. API: `CapabilityStateStore` is now async and per enablement
+  (`load`, `put(key, expected_revision, state) -> Put`, `is_shared`; `save`
+  is gone); `CapabilitySet::new` is async; `CapabilityState` has a
+  `revision` member; `MemoryCapabilityStore` is `Clone` (clones share one
+  state) and reports itself shared; `ServerConfig` has
+  `capability_refresh_interval`. New: `CapabilitySet::refresh`,
+  `spawn_refresher`, `serves`, `import_state_file`,
+  `TaskHandler::with_capability_refresh`, and the `RedisCapabilityStore` /
+  `DynamoDbCapabilityStore` types. **Upgrade:** on the first start with an
+  empty shared state, a `TR_CAPABILITY_STATE` file is imported once and
+  renamed to `<file>.imported`; with several replicas, the first to start
+  imports its file and the others log that theirs is ignored, so make sure
+  that replica's file holds the intended state (or enable on one replica after
+  the upgrade). **Downgrade:** an earlier release reads only the file. Rename
+  `<file>.imported` back to restore the state as it was at the upgrade;
+  changes made since live only in Redis/DynamoDB (`HGETALL CAP#enablements`,
+  or a `Query` of `PK = CAP#enablements`) and must be re-applied by hand. The
+  state file now carries a `revision` member per enablement, which earlier
+  releases ignore.
+
 - **Dependencies move to the family vta-sdk 0.90 declares (affinidi-crypto
   0.3)**: `vta-sdk` 0.80 → 0.90, `vti-secrets` 0.29 → 0.39 (vti-common 0.66;
   its `SecretsConfig`/`SecretBackend` are in `configs::secret_store`'s public

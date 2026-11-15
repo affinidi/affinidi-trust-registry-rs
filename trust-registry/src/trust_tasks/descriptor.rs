@@ -552,6 +552,7 @@ mod tests {
             Box::new(move || build_dispatcher(base_repo.clone())),
             Box::new(move || build_query_dispatcher(query_repo.clone())),
         )
+        .await
         .unwrap();
         set.enable(
             GIT_TRUST,

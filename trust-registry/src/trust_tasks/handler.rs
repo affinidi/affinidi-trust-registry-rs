@@ -353,6 +353,11 @@ pub struct TaskHandler {
     query_replay: Arc<dyn MessageIdStore>,
     /// Where capability tasks learn the authority they act under.
     capabilities: Option<Arc<CapabilitySet>>,
+    /// A capability set this handler re-reads before serving a task whose
+    /// handling depends on the enablement state, without routing capability
+    /// writes through it: the read-only surface's. A handler with
+    /// [`capabilities`](Self::with_capabilities) re-reads that set instead.
+    capability_refresh: Option<Arc<CapabilitySet>>,
     /// Receives an entry for every write, refusals included.
     audit: Option<Arc<dyn AuditLogger>>,
     /// Signs every reply, errors included. A handler without one sends its
@@ -389,6 +394,7 @@ impl TaskHandler {
                 DEFAULT_QUERY_MAX_ENTRIES_PER_ISSUER,
             )),
             capabilities: None,
+            capability_refresh: None,
             audit: None,
             reply_signer: None,
             #[cfg(feature = "vta")]
@@ -428,9 +434,45 @@ impl TaskHandler {
 
     /// Attach the capability set, which says what authority a capability task
     /// acts under.
+    ///
+    /// Before it authorises or serves a capability task or a
+    /// `governance/capability/*` task, the handler re-reads the set's store
+    /// when other registries share it ([`CapabilitySet::refresh`]), so it
+    /// never decides on an enablement another replica has since changed.
     pub fn with_capabilities(mut self, capabilities: Arc<CapabilitySet>) -> Self {
         self.capabilities = Some(capabilities);
         self
+    }
+
+    /// Re-read `capabilities`' shared store before serving a task whose
+    /// handling depends on the enablement state, as
+    /// [`with_capabilities`](Self::with_capabilities) does, without making the
+    /// set's tasks writes of this handler: for a read-only handler over the
+    /// set's [`query_dispatcher`](CapabilitySet::query_dispatcher).
+    pub fn with_capability_refresh(mut self, capabilities: Arc<CapabilitySet>) -> Self {
+        self.capability_refresh = Some(capabilities);
+        self
+    }
+
+    /// Converge on the enablement state other replicas wrote, before
+    /// handling `slug`, if its handling depends on that state. Refused as
+    /// unavailable (retryable) when the shared store cannot be read: a task
+    /// is never decided on a state the handler could not confirm.
+    async fn refresh_capabilities(&self, slug: &str) -> Result<(), RejectReason> {
+        let Some(set) = self
+            .capabilities
+            .as_ref()
+            .or(self.capability_refresh.as_ref())
+        else {
+            return Ok(());
+        };
+        if !set.serves(slug) {
+            return Ok(());
+        }
+        set.refresh().await.map_err(|e| {
+            tracing::warn!("{slug} refused: the shared capability state could not be read: {e:?}");
+            RejectReason::Unavailable { retry_after: None }
+        })
     }
 
     /// Attach the audit logger that records every write.
@@ -983,6 +1025,9 @@ impl TaskHandler {
             // dispatcher that registers nothing.
             return handle_document(&RegistryDispatcher::new(), doc).await;
         }
+        if let Err(reason) = self.refresh_capabilities(doc.type_uri.slug()).await {
+            return Err(doc.reject_with(new_id(), reason));
+        }
         let dispatcher = self.dispatcher.read().await.clone();
         handle_document(&dispatcher, doc).await
     }
@@ -1021,6 +1066,10 @@ impl TaskHandler {
             .as_ref()
             .map(|proof| (proof.verification_method.clone(), proof.created));
 
+        // After the proof, so only an admin's write makes the store be read.
+        if let Err(reason) = self.refresh_capabilities(doc.type_uri.slug()).await {
+            return Err(doc.reject_with(new_id(), reason));
+        }
         let resolved = match self.resolve_authority(&doc).await {
             Ok(resolved) => resolved,
             Err(reason) => return Err(doc.reject_with(new_id(), reason)),
@@ -1214,16 +1263,32 @@ mod tests {
         (secret, format!("did:key:{public}"))
     }
 
-    fn fixture(admin_dids: Vec<String>) -> Fixture {
-        fixture_with(admin_dids, Vec::new())
+    async fn fixture(admin_dids: Vec<String>) -> Fixture {
+        fixture_with(admin_dids, Vec::new()).await
     }
 
     /// [`fixture`], with `extra` capabilities available beside git-trust.
-    fn fixture_with(
+    async fn fixture_with(
         admin_dids: Vec<String>,
         extra: Vec<crate::capabilities::CapabilityDefinition>,
     ) -> Fixture {
-        let repo = Arc::new(LocalStorage::new());
+        fixture_over(
+            admin_dids,
+            extra,
+            Arc::new(LocalStorage::new()),
+            MemoryCapabilityStore::default(),
+        )
+        .await
+    }
+
+    /// [`fixture_with`], over `repo` and the capability state in `store`: two
+    /// fixtures over clones of one store and one repository are two replicas.
+    async fn fixture_over(
+        admin_dids: Vec<String>,
+        extra: Vec<crate::capabilities::CapabilityDefinition>,
+        repo: Arc<LocalStorage>,
+        store: MemoryCapabilityStore,
+    ) -> Fixture {
         let base_repo = repo.clone();
         let query_repo = repo.clone();
         let mut available =
@@ -1231,10 +1296,11 @@ mod tests {
         available.extend(extra);
         let capabilities = CapabilitySet::new(
             available,
-            Box::new(MemoryCapabilityStore::default()),
+            Box::new(store),
             Box::new(move || build_dispatcher(base_repo.clone())),
             Box::new(move || build_query_dispatcher(query_repo.clone())),
         )
+        .await
         .expect("capability set");
         let audit = Arc::new(RecordingAudit::default());
         let handler = TaskHandler::new(
@@ -1418,7 +1484,7 @@ mod tests {
     #[tokio::test]
     async fn signed_put_under_the_issuers_own_authority_is_stored() {
         let (key, did) = did_key(1);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         let id = doc.id.clone();
 
@@ -1451,7 +1517,7 @@ mod tests {
     #[tokio::test]
     async fn an_accepted_write_records_its_digest_and_approving_key() {
         let (key, did) = did_key(1);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         let digest = trust_tasks_rs::document_digest(&doc).unwrap().to_string();
         let proof = doc.proof.clone().expect("signed");
@@ -1478,7 +1544,7 @@ mod tests {
     async fn a_refused_write_names_no_approving_key() {
         let (key, did) = did_key(1);
         let (_, other) = did_key(2);
-        let f = fixture(vec![other]);
+        let f = fixture(vec![other]).await;
         let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         let digest = trust_tasks_rs::document_digest(&doc).unwrap().to_string();
 
@@ -1516,7 +1582,7 @@ mod tests {
     #[tokio::test]
     async fn a_0_3_put_is_bound_to_its_camel_case_authority() {
         let (key, did) = did_key(1);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(unsigned(Some(&did), put_payload_0_3(&did)), &key).await;
         f.handler
             .handle(doc, Some(&did))
@@ -1533,7 +1599,7 @@ mod tests {
     #[tokio::test]
     async fn a_0_3_put_under_another_authority_is_refused() {
         let (key, did) = did_key(1);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(unsigned(Some(&did), put_payload_0_3(OTHER_AUTHORITY)), &key).await;
         let err = f
             .handler
@@ -1549,7 +1615,7 @@ mod tests {
     #[tokio::test]
     async fn a_0_3_put_in_the_old_spelling_is_refused() {
         let (key, did) = did_key(1);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         // Raw JSON: a 0.1-spelled payload under the 0.3 Type URI, which no
         // generated 0.3 type can express.
         let old_spelling = addressed(
@@ -1578,7 +1644,7 @@ mod tests {
         let did = format!("did:key:{public}");
         let mut key = throwaway;
         key.id = format!("{did}#{public}");
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = sign_with(
             unsigned(Some(&did), put_payload(&did)),
             &key,
@@ -1599,7 +1665,7 @@ mod tests {
     #[tokio::test]
     async fn signed_delete_under_the_issuers_own_authority_is_applied() {
         let (key, did) = did_key(2);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let put = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         f.handler
             .handle(put, Some(&did))
@@ -1621,7 +1687,7 @@ mod tests {
     #[tokio::test]
     async fn put_under_another_authority_is_refused() {
         let (key, did) = did_key(3);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(unsigned(Some(&did), put_payload(OTHER_AUTHORITY)), &key).await;
 
         let err = f
@@ -1645,7 +1711,7 @@ mod tests {
     async fn delete_under_another_authority_is_refused() {
         let (key, did) = did_key(4);
         let (other_key, other_did) = did_key(5);
-        let f = fixture(vec![did.clone(), other_did.clone()]);
+        let f = fixture(vec![did.clone(), other_did.clone()]).await;
         let put = signed(
             unsigned(Some(&other_did), put_payload(&other_did)),
             &other_key,
@@ -1670,7 +1736,7 @@ mod tests {
     #[tokio::test]
     async fn a_configured_extra_authority_is_accepted() {
         let (key, did) = did_key(6);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let handler = f.handler.clone().with_admin_authorities(HashMap::from([(
             did.clone(),
             vec![OTHER_AUTHORITY.to_string()],
@@ -1688,7 +1754,7 @@ mod tests {
     #[tokio::test]
     async fn a_put_naming_no_authority_is_refused() {
         let (key, did) = did_key(7);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         // Raw JSON: a record missing a required member, which the generated
         // type cannot express.
         let mut doc = serde_json::to_value(unsigned(Some(&did), put_payload(&did))).unwrap();
@@ -1739,7 +1805,7 @@ mod tests {
     #[tokio::test]
     async fn a_grant_under_the_issuers_own_authority_is_applied() {
         let (key, did) = did_key(20);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         enable_git_trust(&f, &did).await;
         let doc = signed(unsigned(Some(&did), grant_payload()), &key).await;
 
@@ -1765,7 +1831,7 @@ mod tests {
     #[tokio::test]
     async fn a_grant_under_another_authority_is_refused() {
         let (key, did) = did_key(21);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         enable_git_trust(&f, OTHER_AUTHORITY).await;
         let doc = signed(unsigned(Some(&did), grant_payload()), &key).await;
 
@@ -1783,7 +1849,7 @@ mod tests {
     #[tokio::test]
     async fn enabling_a_capability_under_another_authority_is_refused() {
         let (key, did) = did_key(22);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(
             unsigned(
                 Some(&did),
@@ -1806,7 +1872,7 @@ mod tests {
     #[tokio::test]
     async fn enabling_a_capability_under_the_issuers_own_authority_is_accepted() {
         let (key, did) = did_key(23);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(
             unsigned(Some(&did), enable_payload("git-trust", Some(&did))),
             &key,
@@ -1828,7 +1894,7 @@ mod tests {
     #[tokio::test]
     async fn disabling_a_capability_of_another_authority_is_refused() {
         let (key, did) = did_key(24);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         enable_git_trust(&f, OTHER_AUTHORITY).await;
         let doc = signed(
             unsigned(Some(&did), disable_payload("git-trust", None)),
@@ -1851,7 +1917,7 @@ mod tests {
     #[tokio::test]
     async fn a_capability_task_without_a_capability_set_is_refused() {
         let (key, did) = did_key(25);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         enable_git_trust(&f, &did).await;
         let unbound = TaskHandler::new(
             f.capabilities.dispatcher(),
@@ -1876,15 +1942,18 @@ mod tests {
         let repo = Arc::new(LocalStorage::new());
         let store = MemoryCapabilityStore::default();
         store
-            .save(&std::collections::BTreeMap::from([(
-                EnablementKey::new("git-trust", None),
-                CapabilityState {
+            .put(
+                &EnablementKey::new("git-trust", None),
+                0,
+                &CapabilityState {
                     version: "0.1".to_string(),
                     enabled: true,
                     config: None,
                     enabled_at: Utc::now(),
+                    revision: 0,
                 },
-            )]))
+            )
+            .await
             .expect("seed state");
         let base_repo = repo.clone();
         let query_repo = repo.clone();
@@ -1894,6 +1963,7 @@ mod tests {
             Box::new(move || build_dispatcher(base_repo.clone())),
             Box::new(move || build_query_dispatcher(query_repo.clone())),
         )
+        .await
         .expect("capability set");
         let handler = TaskHandler::new(
             capabilities.dispatcher(),
@@ -1913,7 +1983,7 @@ mod tests {
     #[tokio::test]
     async fn enabling_a_record_writing_capability_without_an_authority_is_refused() {
         let (key, did) = did_key(27);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(
             unsigned(Some(&did), enable_payload("git-trust", None)),
             &key,
@@ -1949,13 +2019,85 @@ mod tests {
             .map(|record| record.is_authorized())
     }
 
+    /// #298: two replicas over one shared capability state. An enable handled
+    /// by A is served by B, and a disable handled by A stops B's grants from
+    /// the next task, with no refresh in between: B re-reads the state before
+    /// it authorises a capability task.
+    #[tokio::test]
+    async fn a_replica_honours_another_replicas_enable_and_disable() {
+        let (key, did) = did_key(95);
+        let (repo, store) = (
+            Arc::new(LocalStorage::new()),
+            MemoryCapabilityStore::default(),
+        );
+        let a = fixture_over(vec![did.clone()], Vec::new(), repo.clone(), store.clone()).await;
+        let b = fixture_over(vec![did.clone()], Vec::new(), repo, store).await;
+
+        let unsupported = b
+            .handler
+            .handle(
+                signed(unsigned(Some(&did), grant_payload()), &key).await,
+                Some(&did),
+            )
+            .await
+            .expect_err("not enabled anywhere yet");
+        assert_eq!(code(&unsupported), "unsupportedType");
+
+        let enable = signed(unsigned(Some(&did), enable_doc(&did)), &key).await;
+        a.handler
+            .handle(enable, Some(&did))
+            .await
+            .expect("A enables");
+        b.handler
+            .handle(
+                signed(unsigned(Some(&did), grant_payload()), &key).await,
+                Some(&did),
+            )
+            .await
+            .expect("B serves A's enable");
+        assert_eq!(grant_record(&b, &did).await, Some(true));
+
+        let disable = signed(
+            unsigned(Some(&did), disable_payload("git-trust", None)),
+            &key,
+        )
+        .await;
+        a.handler
+            .handle(disable, Some(&did))
+            .await
+            .expect("A disables");
+        let refused = b
+            .handler
+            .handle(
+                signed(unsigned(Some(&did), revoke_payload(None)), &key).await,
+                Some(&did),
+            )
+            .await
+            .expect_err("B honours A's disable");
+        assert_eq!(code(&refused), "unsupportedType");
+        assert_eq!(grant_record(&b, &did).await, Some(true), "nothing revoked");
+
+        // B's own disable is decided against the shared state: not enabled.
+        let again = signed(
+            unsigned(Some(&did), disable_payload("git-trust", None)),
+            &key,
+        )
+        .await;
+        let err = b
+            .handler
+            .handle(again, Some(&did))
+            .await
+            .expect_err("refused");
+        assert_eq!(code(&err), "governance/capability/disable:notEnabled");
+    }
+
     /// Two communities in one registry each enable git-trust under their own
     /// authority, grant under it, and disable only their own enablement.
     #[tokio::test]
     async fn two_authorities_each_enable_and_use_git_trust() {
         let (key_a, a) = did_key(90);
         let (key_b, b) = did_key(91);
-        let f = fixture(vec![a.clone(), b.clone()]);
+        let f = fixture(vec![a.clone(), b.clone()]).await;
         for (key, did) in [(&key_a, &a), (&key_b, &b)] {
             let doc = signed(unsigned(Some(did), enable_doc(did)), key).await;
             f.handler
@@ -2016,7 +2158,7 @@ mod tests {
     #[tokio::test]
     async fn an_admin_of_two_enabled_authorities_names_the_one_meant() {
         let (key, did) = did_key(92);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let handler = f.handler.clone().with_admin_authorities(HashMap::from([(
             did.clone(),
             vec![OTHER_AUTHORITY.to_string()],
@@ -2049,7 +2191,7 @@ mod tests {
     #[tokio::test]
     async fn a_stated_reason_is_audited() {
         let (key, did) = did_key(93);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         enable_git_trust(&f, &did).await;
         let doc = signed(unsigned(Some(&did), grant_payload()), &key).await;
         f.handler.handle(doc, Some(&did)).await.expect("granted");
@@ -2089,7 +2231,7 @@ mod tests {
     async fn a_did_scid_registry_is_addressed_with_its_locator() {
         const SCID_ME: &str = "did:scid:vh:1:registry";
         let (key, did) = did_key(94);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let handler = TaskHandler::new(
             f.capabilities.dispatcher(),
             SCID_ME,
@@ -2165,7 +2307,7 @@ mod tests {
 
     async fn badge_fixture(admin_dids: Vec<String>, enabled: bool) -> BadgeFixture {
         let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let f = fixture_with(admin_dids, vec![badge_capability(runs.clone())]);
+        let f = fixture_with(admin_dids, vec![badge_capability(runs.clone())]).await;
         if enabled {
             f.capabilities
                 .enable("badge", "0.1", None, None)
@@ -2327,7 +2469,7 @@ mod tests {
     #[tokio::test]
     async fn rotating_the_registry_did_needs_an_admin_of_the_registry_did() {
         let (key, did) = did_key(65);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(unsigned(Some(&did), rotate_payload()), &key).await;
 
         let err = f
@@ -2345,7 +2487,7 @@ mod tests {
     #[tokio::test]
     async fn an_admin_of_the_registry_did_may_rotate_it() {
         let (key, did) = did_key(66);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let operator = f
             .handler
             .clone()
@@ -2370,7 +2512,7 @@ mod tests {
     #[tokio::test]
     async fn an_unsigned_record_query_is_refused() {
         let (_, did) = did_key(40);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc: TrustTask<Value> =
             untyped(unsigned(Some(&did), query_under(Some(&did)))).expect("parses");
 
@@ -2386,7 +2528,7 @@ mod tests {
     #[tokio::test]
     async fn a_signed_record_query_under_the_issuers_authority_answers() {
         let (key, did) = did_key(41);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let put = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         f.handler
             .handle(put, Some(&did))
@@ -2405,7 +2547,7 @@ mod tests {
     #[tokio::test]
     async fn a_record_query_under_another_authority_is_refused() {
         let (key, did) = did_key(42);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let query = signed(
             unsigned(Some(&did), query_under(Some(OTHER_AUTHORITY))),
             &key,
@@ -2424,7 +2566,7 @@ mod tests {
     #[tokio::test]
     async fn a_record_query_naming_no_authority_is_refused() {
         let (key, did) = did_key(43);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let query = signed(unsigned(Some(&did), query_under(None)), &key).await;
 
         let err = f
@@ -2441,7 +2583,7 @@ mod tests {
     #[tokio::test]
     async fn queries_do_not_use_the_write_record() {
         let (key, did) = did_key(45);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let handler = f
             .handler
             .clone()
@@ -2463,7 +2605,7 @@ mod tests {
     #[tokio::test]
     async fn a_record_query_from_a_non_admin_is_refused() {
         let (key, did) = did_key(44);
-        let f = fixture(vec!["did:example:admin".to_string()]);
+        let f = fixture(vec!["did:example:admin".to_string()]).await;
         let query = signed(unsigned(Some(&did), query_under(Some(&did))), &key).await;
 
         let err = f
@@ -2480,7 +2622,7 @@ mod tests {
     #[tokio::test]
     async fn a_write_without_an_issuer_is_refused() {
         let (key, did) = did_key(8);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let mut doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         doc.issuer = None;
 
@@ -2504,7 +2646,7 @@ mod tests {
     async fn an_issuer_that_is_not_the_sender_is_refused() {
         let (key, did) = did_key(9);
         let (_, sender) = did_key(10);
-        let f = fixture(vec![did.clone(), sender.clone()]);
+        let f = fixture(vec![did.clone(), sender.clone()]).await;
         let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         let err = f
@@ -2523,7 +2665,7 @@ mod tests {
     async fn a_proof_by_another_did_is_refused() {
         let (_, did) = did_key(11);
         let (other_key, other_did) = did_key(12);
-        let f = fixture(vec![did.clone(), other_did.clone()]);
+        let f = fixture(vec![did.clone(), other_did.clone()]).await;
         let mut doc = signed(unsigned(Some(&other_did), put_payload(&did)), &other_key).await;
         doc.issuer = Some(did.clone());
 
@@ -2549,7 +2691,7 @@ mod tests {
         let (key, did) = did_key(40);
         let bare = "did:scid:vh:1:QmScid";
         let located = "did:scid:vh:1:QmScid?src=registry.example";
-        let f = fixture(vec![bare.to_string()]);
+        let f = fixture(vec![bare.to_string()]).await;
         let mut doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         doc.issuer = Some(located.to_string());
         doc.proof.as_mut().expect("signed").verification_method = format!("{located}#key-1");
@@ -2591,7 +2733,7 @@ mod tests {
     #[tokio::test]
     async fn an_assertion_method_proof_is_refused() {
         let (key, did) = did_key(13);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = sign_with(
             unsigned(Some(&did), put_payload(&did)),
             &key,
@@ -2612,7 +2754,7 @@ mod tests {
     #[tokio::test]
     async fn a_tampered_write_is_refused() {
         let (key, did) = did_key(14);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let mut doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         // Raw JSON: the payload changed after signing, which is the point.
         doc.payload["record"]["entity_id"] = json!("did:example:someone-else");
@@ -2630,7 +2772,7 @@ mod tests {
     #[tokio::test]
     async fn a_write_from_a_non_admin_is_denied() {
         let (key, did) = did_key(15);
-        let f = fixture(vec!["did:example:admin".to_string()]);
+        let f = fixture(vec!["did:example:admin".to_string()]).await;
         let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         let err = f
@@ -2647,7 +2789,7 @@ mod tests {
     #[tokio::test]
     async fn an_anonymous_write_is_denied() {
         let (key, did) = did_key(16);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         assert!(matches!(
@@ -2659,7 +2801,7 @@ mod tests {
     #[tokio::test]
     async fn a_write_without_a_proof_is_rejected() {
         let (_, did) = did_key(17);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc: TrustTask<Value> =
             untyped(unsigned(Some(&did), put_payload(&did))).expect("parses");
 
@@ -2673,7 +2815,7 @@ mod tests {
 
     async fn refused_code(edit: impl FnOnce(&mut Value)) -> String {
         let (key, did) = did_key(30);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         // Raw JSON: each caller edits the envelope into a shape the handler
         // must refuse (no recipient, no `issuedAt`, ...).
         let mut unsigned_doc =
@@ -2741,7 +2883,7 @@ mod tests {
     #[tokio::test]
     async fn a_document_id_is_accepted_once_across_bindings() {
         let (key, did) = did_key(31);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let didcomm = f.handler.clone();
         let tsp = f.handler.clone();
         let first = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
@@ -2818,7 +2960,7 @@ mod tests {
     #[tokio::test]
     async fn a_replayed_duplicate_is_audited_as_a_replay() {
         let (key, did) = did_key(33);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         f.handler
@@ -2874,7 +3016,7 @@ mod tests {
     #[tokio::test]
     async fn an_in_flight_duplicate_is_not_audited_as_a_failure() {
         let (key, did) = did_key(34);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let handler = f.handler.clone().with_dedup(Arc::new(AlwaysInFlight));
         let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
@@ -2897,7 +3039,7 @@ mod tests {
     #[tokio::test]
     async fn only_a_proven_admin_is_audited_as_one() {
         let (key, did) = did_key(35);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         f.handler.handle(doc, Some(&did)).await.expect("accepted");
         let entry = last_audit(&f);
@@ -2967,7 +3109,7 @@ mod tests {
     #[tokio::test]
     async fn a_write_without_a_replay_record_is_refused() {
         let (key, did) = did_key(32);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let unrecorded = TaskHandler::new(
             f.capabilities.dispatcher(),
             ME,
@@ -2994,9 +3136,9 @@ mod tests {
 
     // --- Reads -------------------------------------------------------------
 
-    #[test]
-    fn reads_bypass_write_authorization() {
-        let f = fixture(vec![]);
+    #[tokio::test]
+    async fn reads_bypass_write_authorization() {
+        let f = fixture(vec![]).await;
         assert!(
             f.handler
                 .authorize_write(&read_doc(), Some("did:example:anyone"))
@@ -3010,7 +3152,7 @@ mod tests {
     /// directly cannot skip it — reads included.
     #[tokio::test]
     async fn a_read_whose_issuer_is_not_the_sender_is_refused() {
-        let f = fixture(vec![]);
+        let f = fixture(vec![]).await;
         let mut doc = read_doc();
         doc.issuer = Some("did:example:claimed".to_string());
 
@@ -3025,7 +3167,7 @@ mod tests {
 
     #[tokio::test]
     async fn reads_are_not_audited() {
-        let f = fixture(vec![]);
+        let f = fixture(vec![]).await;
         let mut doc = read_doc();
         doc.recipient = Some(ME.to_string());
         let response = f
@@ -3038,9 +3180,9 @@ mod tests {
     }
 
     /// A registry keyed by its own `did:key`, signing its replies with it.
-    fn signing_registry(admin_dids: Vec<String>) -> (TaskHandler, String) {
+    async fn signing_registry(admin_dids: Vec<String>) -> (TaskHandler, String) {
         let (key, registry) = did_key(9);
-        let f = fixture(admin_dids);
+        let f = fixture(admin_dids).await;
         let handler = TaskHandler::new(
             f.capabilities.dispatcher(),
             registry.clone(),
@@ -3075,7 +3217,7 @@ mod tests {
     #[tokio::test]
     async fn a_success_reply_is_signed_by_the_registry() {
         let (key, did) = did_key(1);
-        let (handler, registry) = signing_registry(vec![did.clone()]);
+        let (handler, registry) = signing_registry(vec![did.clone()]).await;
         let mut doc = unsigned(Some(&did), put_payload(&did));
         doc.recipient = Some(registry.clone());
         let doc = signed(doc, &key).await;
@@ -3095,7 +3237,7 @@ mod tests {
     #[tokio::test]
     async fn a_rejection_is_signed_by_the_registry() {
         let (key, did) = did_key(1);
-        let (handler, registry) = signing_registry(Vec::new());
+        let (handler, registry) = signing_registry(Vec::new()).await;
         let mut doc = unsigned(Some(&did), put_payload(&did));
         doc.recipient = Some(registry.clone());
         let doc = signed(doc, &key).await;
@@ -3114,7 +3256,7 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_names_the_registry_whatever_the_request_addressed() {
         let (_, did) = did_key(1);
-        let (handler, registry) = signing_registry(Vec::new());
+        let (handler, registry) = signing_registry(Vec::new()).await;
         let mut doc = unsigned(Some("did:example:someone-else"), put_payload(&did));
         doc.recipient = Some("did:example:not-the-registry".to_string());
         let doc: TrustTask<Value> = untyped(doc).expect("document");
@@ -3183,7 +3325,7 @@ mod tests {
     #[allow(deprecated)]
     async fn every_answered_type_uri_resolves_to_a_generated_schema() {
         let (_, did) = did_key(40);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         enable_git_trust(&f, &did).await;
 
         let mut answered: Vec<String> = Vec::new();
@@ -3248,7 +3390,7 @@ mod tests {
     #[tokio::test]
     async fn a_write_without_an_authenticated_sender_is_audited_as_such() {
         let (key, did) = did_key(40);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         f.handler.handle(doc, None).await.expect_err("refused");
@@ -3263,7 +3405,7 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_records_the_transport_authenticated_sender() {
         let (_, did) = did_key(41);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let doc: TrustTask<Value> =
             untyped(unsigned(Some(&did), put_payload(&did))).expect("document parses");
 

@@ -31,10 +31,25 @@
 //!
 //! # Changes are persisted before they take effect
 //!
-//! Enable and disable build the changed state as a copy, save the copy, and
-//! only then replace the in-memory state and swap the dispatchers. A failed
-//! save changes nothing: memory, disk and dispatchers keep agreeing, and the
-//! retry the `internalError` invites starts from the same state.
+//! Enable and disable re-read the stored state, decide against it, and write
+//! the one enablement they change with a compare-and-swap on its revision
+//! ([`CapabilityStateStore::put`]); only then do they replace the in-memory
+//! state and swap the dispatchers. A failed write changes nothing: memory,
+//! store and dispatchers keep agreeing, and the retry the `internalError`
+//! invites starts from the same state.
+//!
+//! # Replicas share the state of a shared store
+//!
+//! With the Redis or DynamoDB record backend the state lives beside the
+//! records ([`TrustRecordAdminRepository::capability_store`](crate::storage::repository::TrustRecordAdminRepository::capability_store)),
+//! so every replica on that backend sees one state. A write that lost a race
+//! with another replica's ([`Put::Conflict`]) is decided again against the
+//! state that won, so no update is lost. A replica converges on the others'
+//! changes by re-reading the store ([`CapabilitySet::refresh`]): before it
+//! authorises or serves any capability task or governance task (read-through,
+//! so a disable made on one replica is honoured by the next task on every
+//! other), and on an interval ([`CapabilitySet::spawn_refresher`]) for the
+//! dispatcher handles a host reads directly.
 
 // `TaskOutcome`'s error is a whole `trust-task-error` document, which is large
 // by design; boxing it would only move the allocation onto every caller. The
@@ -182,7 +197,7 @@ fn config_authority(config: Option<&Value>) -> Option<String> {
 }
 
 /// Persisted state of one enablement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityState {
     pub version: String,
@@ -190,16 +205,92 @@ pub struct CapabilityState {
     #[serde(default)]
     pub config: Option<Value>,
     pub enabled_at: DateTime<Utc>,
+    /// The revision the store holds this state at: 0 for one never stored
+    /// (or stored by a release that kept no revisions), and one more on every
+    /// write ([`CapabilityStateStore::put`]). Set by the store; a state
+    /// passed to `put` has its own revision ignored.
+    #[serde(default)]
+    pub revision: u64,
 }
 
 /// Every enablement the registry knows of, enabled or retained after a
 /// disable.
 pub type CapabilityStates = BTreeMap<EnablementKey, CapabilityState>;
 
+/// What [`CapabilityStateStore::put`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Put {
+    /// Stored, at this revision.
+    Written(u64),
+    /// The enablement is no longer stored at the revision expected: another
+    /// writer changed it first. Nothing was written.
+    Conflict,
+}
+
 /// Durable store for enablement state.
+///
+/// One entry per [`EnablementKey`], each at a revision. A write is a
+/// compare-and-swap of one entry, atomic against every other writer of the
+/// store, so two registries changing the state at once cannot lose an
+/// update: the one that loses the race is told so, re-reads and decides
+/// again.
+#[async_trait::async_trait]
 pub trait CapabilityStateStore: Send + Sync {
-    fn load(&self) -> Result<CapabilityStates, String>;
-    fn save(&self, state: &CapabilityStates) -> Result<(), String>;
+    /// Every stored enablement, each with the revision it is stored at
+    /// ([`CapabilityState::revision`]), read at one point in time.
+    async fn load(&self) -> Result<CapabilityStates, String>;
+
+    /// Store `state` for `key` if the entry is still at revision `expected`
+    /// (0: no entry), at revision `expected + 1`; otherwise write nothing and
+    /// answer [`Put::Conflict`].
+    async fn put(
+        &self,
+        key: &EnablementKey,
+        expected: u64,
+        state: &CapabilityState,
+    ) -> Result<Put, String>;
+
+    /// Whether another process (or another [`CapabilitySet`]) may change the
+    /// store. A set over a shared store re-reads it before every capability
+    /// task ([`CapabilitySet::refresh`]); over a store only it writes, it
+    /// trusts what it holds.
+    fn is_shared(&self) -> bool {
+        false
+    }
+}
+
+/// The name a shared store keeps an enablement under: its key as a JSON
+/// array, `["git-trust","did:..."]` or `["badge",null]`, which no capability
+/// slug or DID can make ambiguous.
+#[cfg_attr(
+    not(any(feature = "storage-redis", feature = "storage-ddb")),
+    allow(dead_code)
+)]
+pub(crate) fn field(key: &EnablementKey) -> Result<String, String> {
+    serde_json::to_string(&(&key.capability, &key.authority)).map_err(|e| e.to_string())
+}
+
+/// The enablement a [`field`] names.
+#[cfg_attr(
+    not(any(feature = "storage-redis", feature = "storage-ddb")),
+    allow(dead_code)
+)]
+pub(crate) fn key_of(field: &str) -> Result<EnablementKey, String> {
+    let (capability, authority): (String, Option<String>) = serde_json::from_str(field)
+        .map_err(|e| format!("capability state field {field} is not an enablement: {e}"))?;
+    Ok(EnablementKey::new(capability, authority.as_deref()))
+}
+
+/// An entry read from a store is refused if it is keyed under an authority
+/// its config does not name: it would act under one authority while
+/// listed under another.
+fn check_entry(key: &EnablementKey, state: &CapabilityState) -> Result<(), String> {
+    if config_authority(state.config.as_ref()) != key.authority {
+        return Err(format!(
+            "{key:?} is listed under an authority its config does not name"
+        ));
+    }
+    Ok(())
 }
 
 /// The version of the state file format [`encode_states`] writes.
@@ -255,11 +346,7 @@ pub fn decode_states(text: &str) -> Result<CapabilityStates, String> {
         let mut states = CapabilityStates::new();
         for stored in file.enablements {
             let key = EnablementKey::new(stored.capability, stored.authority.as_deref());
-            if config_authority(stored.state.config.as_ref()) != key.authority {
-                return Err(format!(
-                    "{key:?} is listed under an authority its config does not name"
-                ));
-            }
+            check_entry(&key, &stored.state)?;
             if states.insert(key.clone(), stored.state).is_some() {
                 return Err(format!("{key:?} is listed twice"));
             }
@@ -279,21 +366,37 @@ pub fn decode_states(text: &str) -> Result<CapabilityStates, String> {
         .collect())
 }
 
-/// JSON-file-backed store. A save writes a temporary file, syncs it, renames
-/// it over the state file and syncs the directory, so the file is either the
-/// old state or the new one, across a power loss too.
+/// JSON-file-backed store, for a registry that is the only process using it
+/// (the CSV, in-memory and fjall backends). A write re-reads the file, checks
+/// the entry's revision, and writes a temporary file, syncs it, renames it
+/// over the state file and syncs the directory, so the file is either the old
+/// state or the new one, across a power loss too.
+///
+/// The compare-and-swap is atomic between the users of one
+/// `FileCapabilityStore` (and its clones), not between processes: two
+/// registries must not share one state file. Replicas share their state
+/// through a shared record backend instead (Redis, DynamoDB).
+#[derive(Clone)]
 pub struct FileCapabilityStore {
     path: PathBuf,
+    /// Serialises the read-check-write of a put.
+    lock: Arc<std::sync::Mutex<()>>,
 }
 
 impl FileCapabilityStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            lock: Arc::default(),
+        }
     }
-}
 
-impl CapabilityStateStore for FileCapabilityStore {
-    fn load(&self) -> Result<CapabilityStates, String> {
+    /// The state file.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn read(&self) -> Result<CapabilityStates, String> {
         match std::fs::read_to_string(&self.path) {
             Ok(text) => decode_states(&text)
                 .map_err(|e| format!("capability state {} is corrupt: {e}", self.path.display())),
@@ -305,7 +408,7 @@ impl CapabilityStateStore for FileCapabilityStore {
         }
     }
 
-    fn save(&self, state: &CapabilityStates) -> Result<(), String> {
+    fn write(&self, state: &CapabilityStates) -> Result<(), String> {
         let json = encode_states(state)?;
         let parent = self.path.parent().filter(|p| !p.as_os_str().is_empty());
         if let Some(parent) = parent {
@@ -329,22 +432,148 @@ impl CapabilityStateStore for FileCapabilityStore {
         }
         Ok(())
     }
+
+    fn put_blocking(
+        &self,
+        key: &EnablementKey,
+        expected: u64,
+        state: &CapabilityState,
+    ) -> Result<Put, String> {
+        let _held = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut states = self.read()?;
+        if states.get(key).map_or(0, |s| s.revision) != expected {
+            return Ok(Put::Conflict);
+        }
+        let revision = expected + 1;
+        states.insert(
+            key.clone(),
+            CapabilityState {
+                revision,
+                ..state.clone()
+            },
+        );
+        self.write(&states)?;
+        Ok(Put::Written(revision))
+    }
 }
 
-/// In-memory store for tests and ephemeral deployments.
-#[derive(Default)]
+#[async_trait::async_trait]
+impl CapabilityStateStore for FileCapabilityStore {
+    async fn load(&self) -> Result<CapabilityStates, String> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.read())
+            .await
+            .map_err(|e| format!("the state read did not finish: {e}"))?
+    }
+
+    async fn put(
+        &self,
+        key: &EnablementKey,
+        expected: u64,
+        state: &CapabilityState,
+    ) -> Result<Put, String> {
+        let (store, key, state) = (self.clone(), key.clone(), state.clone());
+        tokio::task::spawn_blocking(move || store.put_blocking(&key, expected, &state))
+            .await
+            .map_err(|e| format!("the state write did not finish: {e}"))?
+    }
+}
+
+/// In-memory store for tests and ephemeral deployments. Its clones share one
+/// state, so several [`CapabilitySet`]s over clones of one store behave as
+/// replicas over a shared backend.
+#[derive(Default, Clone)]
 pub struct MemoryCapabilityStore {
-    state: std::sync::Mutex<CapabilityStates>,
+    state: Arc<std::sync::Mutex<CapabilityStates>>,
 }
 
+#[async_trait::async_trait]
 impl CapabilityStateStore for MemoryCapabilityStore {
-    fn load(&self) -> Result<CapabilityStates, String> {
+    async fn load(&self) -> Result<CapabilityStates, String> {
         Ok(self.state.lock().unwrap_or_else(|p| p.into_inner()).clone())
     }
-    fn save(&self, state: &CapabilityStates) -> Result<(), String> {
-        *self.state.lock().unwrap_or_else(|p| p.into_inner()) = state.clone();
-        Ok(())
+
+    async fn put(
+        &self,
+        key: &EnablementKey,
+        expected: u64,
+        state: &CapabilityState,
+    ) -> Result<Put, String> {
+        let mut states = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if states.get(key).map_or(0, |s| s.revision) != expected {
+            return Ok(Put::Conflict);
+        }
+        let revision = expected + 1;
+        states.insert(
+            key.clone(),
+            CapabilityState {
+                revision,
+                ..state.clone()
+            },
+        );
+        Ok(Put::Written(revision))
     }
+
+    /// A clone may be another set's store.
+    fn is_shared(&self) -> bool {
+        true
+    }
+}
+
+/// Import a state file into a shared store, once: when `shared` holds no
+/// enablement and `file` holds some, each is written to `shared` if it is
+/// still absent there (so a replica importing at the same time cannot be
+/// overwritten), and the file is renamed to `<file>.imported`, so it is not
+/// imported again (after the shared state is cleared, say) and a downgraded
+/// registry does not silently serve its stale state. When `shared` already
+/// holds state, the file is left alone and reported as ignored.
+///
+/// Answers how many enablements were imported.
+pub async fn import_state_file(
+    shared: &dyn CapabilityStateStore,
+    file: &FileCapabilityStore,
+) -> Result<usize, String> {
+    let local = file.load().await?;
+    if local.is_empty() {
+        return Ok(0);
+    }
+    if !shared.load().await?.is_empty() {
+        tracing::warn!(
+            "capability state file {} is ignored: the record backend already holds the \
+             capability state every replica shares",
+            file.path().display()
+        );
+        return Ok(0);
+    }
+    let mut imported = 0;
+    for (key, state) in &local {
+        match shared.put(key, 0, state).await? {
+            Put::Written(_) => imported += 1,
+            Put::Conflict => tracing::info!(
+                "capability enablement {key:?} from {} not imported: another replica stored it \
+                 first",
+                file.path().display()
+            ),
+        }
+    }
+    let mut renamed = file.path().as_os_str().to_owned();
+    renamed.push(".imported");
+    let renamed = PathBuf::from(renamed);
+    match std::fs::rename(file.path(), &renamed) {
+        Ok(()) => tracing::info!(
+            "imported {imported} capability enablement(s) from {} into the shared record \
+             backend; the file is no longer read and was renamed to {}",
+            file.path().display(),
+            renamed.display()
+        ),
+        Err(e) => tracing::warn!(
+            "imported {imported} capability enablement(s) from {} into the shared record \
+             backend; the file is no longer read, but could not be renamed to {}: {e}",
+            file.path().display(),
+            renamed.display()
+        ),
+    }
+    Ok(imported)
 }
 
 /// A live, swappable dispatcher the transport bindings read through.
@@ -441,8 +670,22 @@ pub struct CapabilitySet {
     tasks: RwLock<BTreeMap<EnablementKey, Arc<RegistryDispatcher>>>,
     /// Which tasks each available capability serves, enabled or not.
     classification: Classification,
+    /// Serialises this set's reads of the store with its changes, so an
+    /// older read can never replace the state a later one, or a change,
+    /// put in place.
+    sync: tokio::sync::Mutex<()>,
+    /// How many reads of the store have been adopted ([`Self::refresh`]).
+    refreshed: std::sync::atomic::AtomicU64,
     weak: std::sync::Weak<Self>,
 }
+
+/// How many times a change is decided again after losing a race with
+/// another writer of the store.
+const MAX_CHANGE_ATTEMPTS: usize = 8;
+
+/// The interval a set over a shared store re-reads it on by default
+/// ([`CapabilitySet::spawn_refresher`]).
+pub const DEFAULT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Task slug -> the capability that serves it, as a write or as a declared
 /// read, learned once when the [`CapabilitySet`] is built.
@@ -498,6 +741,7 @@ fn probe_state() -> CapabilityState {
         enabled: true,
         config: None,
         enabled_at: DateTime::<Utc>::UNIX_EPOCH,
+        revision: 0,
     }
 }
 
@@ -572,14 +816,14 @@ impl CapabilitySet {
     /// Build the set: load persisted state, then compose the initial
     /// dispatchers (base + every already-enabled capability), so a restart
     /// converges to the persisted enablement.
-    pub fn new(
+    pub async fn new(
         available: Vec<CapabilityDefinition>,
         store: Box<dyn CapabilityStateStore>,
         base: Box<dyn Fn() -> RegistryDispatcher + Send + Sync>,
         base_query: Box<dyn Fn() -> RegistryDispatcher + Send + Sync>,
     ) -> Result<Arc<Self>, String> {
         let store: Arc<dyn CapabilityStateStore> = Arc::from(store);
-        let state = store.load()?;
+        let state = store.load().await?;
         let available: BTreeMap<String, CapabilityDefinition> = available
             .into_iter()
             .map(|d| (d.manifest.capability.to_string(), d))
@@ -610,6 +854,8 @@ impl CapabilitySet {
                 query_dispatcher: Arc::new(RwLock::new(Arc::new(composed.query))),
                 tasks: RwLock::new(composed.tasks),
                 weak: weak.clone(),
+                sync: tokio::sync::Mutex::new(()),
+                refreshed: std::sync::atomic::AtomicU64::new(0),
                 classification,
                 available,
                 state: RwLock::new(state),
@@ -697,17 +943,16 @@ impl CapabilitySet {
             enabled: true,
             config,
             enabled_at: Utc::now(),
+            revision: 0,
         };
         self.classification
             .check(capability, definition, &entry)
             .map_err(CapabilityError::ConfigInvalid)?;
-        self.change(move |state| {
-            if state.get(&key).is_some_and(|s| s.enabled) {
+        self.change(key, move |current| {
+            if current.is_some_and(|s| s.enabled) {
                 return Err(CapabilityError::AlreadyEnabled);
             }
-            let mut next = state.clone();
-            next.insert(key, entry.clone());
-            Ok((next, entry))
+            Ok(entry.clone())
         })
         .await
     }
@@ -721,58 +966,183 @@ impl CapabilitySet {
         authority: Option<&str>,
     ) -> Result<(), CapabilityError> {
         let key = EnablementKey::new(capability, authority);
-        self.change(move |state| {
-            if !state.get(&key).is_some_and(|s| s.enabled) {
-                return Err(CapabilityError::NotEnabled);
-            }
-            let mut next = state.clone();
-            if let Some(entry) = next.get_mut(&key) {
-                entry.enabled = false;
-            }
-            Ok((next, ()))
+        self.change(key, |current| match current {
+            Some(entry) if entry.enabled => Ok(CapabilityState {
+                enabled: false,
+                ..entry.clone()
+            }),
+            _ => Err(CapabilityError::NotEnabled),
         })
         .await
+        .map(|_| ())
     }
 
-    /// Apply the change `decide` makes to the state, under the state lock, in
-    /// a task of its own: a caller that stops waiting (a handler aborted by a
-    /// timeout or a shutdown) cannot stop it between the save and the swap,
-    /// so the file, the memory and the dispatchers still agree.
-    async fn change<T: Send + 'static>(
+    /// Change the enablement `key` to what `decide` makes of its stored state
+    /// (`None`: not stored), and answer the state written.
+    ///
+    /// Re-reads the store and decides against what it holds, then writes the
+    /// one entry with a compare-and-swap on the revision read. When another
+    /// writer (another replica) changed the entry in between, the write is
+    /// refused and the change is decided again against the state that won,
+    /// so no update is lost and a decision is never made on a stale state.
+    ///
+    /// Runs in a task of its own: a caller that stops waiting (a handler
+    /// aborted by a timeout or a shutdown) cannot stop it between the write
+    /// and the swap, so the store, the memory and the dispatchers still
+    /// agree.
+    async fn change(
         &self,
-        decide: impl FnOnce(&CapabilityStates) -> Result<(CapabilityStates, T), CapabilityError>
+        key: EnablementKey,
+        decide: impl Fn(Option<&CapabilityState>) -> Result<CapabilityState, CapabilityError>
         + Send
         + 'static,
-    ) -> Result<T, CapabilityError> {
+    ) -> Result<CapabilityState, CapabilityError> {
         let set = self.weak.upgrade().ok_or_else(|| {
             CapabilityError::Storage("the capability set is shutting down".to_string())
         })?;
         tokio::spawn(async move {
-            let mut state = set.state.write().await;
-            let (next, out) = decide(&state)?;
-            set.commit(&mut state, next).await?;
-            Ok(out)
+            let _serial = set.sync.lock().await;
+            for attempt in 0..MAX_CHANGE_ATTEMPTS {
+                if attempt > 0 {
+                    // Back off a little more after each lost race, so
+                    // replicas contending for one enablement spread out.
+                    tokio::time::sleep(std::time::Duration::from_millis(5 << attempt)).await;
+                }
+                set.read_store().await?;
+                let current = set.state.read().await.get(&key).cloned();
+                let expected = current.as_ref().map_or(0, |s| s.revision);
+                let next = decide(current.as_ref())?;
+                match set
+                    .store
+                    .put(&key, expected, &next)
+                    .await
+                    .map_err(CapabilityError::Storage)?
+                {
+                    Put::Written(revision) => {
+                        let next = CapabilityState { revision, ..next };
+                        let mut state = set.state.write().await;
+                        state.insert(key, next.clone());
+                        set.rebuild(&state).await;
+                        return Ok(next);
+                    }
+                    Put::Conflict => {
+                        tracing::debug!(
+                            "capability enablement {key:?} was changed by another replica; \
+                             deciding again"
+                        );
+                    }
+                }
+            }
+            Err(CapabilityError::Storage(format!(
+                "capability enablement {key:?} kept changing under this change; gave up after \
+                 {MAX_CHANGE_ATTEMPTS} attempts"
+            )))
         })
         .await
         .map_err(|e| CapabilityError::Storage(format!("the state change did not finish: {e}")))?
     }
 
-    /// Persist `next`, then make it the state and swap the dispatchers. On a
-    /// failed save nothing changes.
-    async fn commit(
-        &self,
-        state: &mut CapabilityStates,
-        next: CapabilityStates,
-    ) -> Result<(), CapabilityError> {
-        let store = self.store.clone();
-        let to_save = next.clone();
-        tokio::task::spawn_blocking(move || store.save(&to_save))
-            .await
-            .map_err(|e| CapabilityError::Storage(format!("the state save did not finish: {e}")))?
-            .map_err(CapabilityError::Storage)?;
-        *state = next;
-        self.rebuild(state).await;
+    /// Read the store and adopt what it holds as the state, swapping the
+    /// dispatchers if it differs. Call with [`Self::sync`] held.
+    async fn read_store(&self) -> Result<(), CapabilityError> {
+        let loaded = self.store.load().await.map_err(CapabilityError::Storage)?;
+        if *self.state.read().await != loaded {
+            let mut state = self.state.write().await;
+            *state = loaded;
+            self.rebuild(&state).await;
+        }
+        self.refreshed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Converge on changes other registries made to a shared store: re-read
+    /// it and adopt what it holds. Does nothing over a store only this set
+    /// writes ([`CapabilityStateStore::is_shared`]).
+    ///
+    /// The [`TaskHandler`](crate::trust_tasks::TaskHandler) calls this before
+    /// it authorises or serves any capability or governance task, so the
+    /// decision is made on the state as it was read after the task arrived:
+    /// a disable made on another replica is honoured from the next task on.
+    /// Concurrent callers share one read when it began after they called.
+    ///
+    /// An error (the store unreachable) leaves the state as it was; the
+    /// handler then refuses the task as unavailable rather than decide on a
+    /// state it could not confirm.
+    pub async fn refresh(&self) -> Result<(), CapabilityError> {
+        if !self.store.is_shared() {
+            return Ok(());
+        }
+        let set = self.weak.upgrade().ok_or_else(|| {
+            CapabilityError::Storage("the capability set is shutting down".to_string())
+        })?;
+        let arrived = self.refreshed.load(std::sync::atomic::Ordering::SeqCst);
+        // In a task of its own, so a caller that stops waiting cannot stop
+        // it between adopting the state and swapping the dispatchers.
+        tokio::spawn(async move {
+            let _serial = set.sync.lock().await;
+            // Two reads adopted since this call arrived: the second began
+            // after it, so it is as fresh as one this call would make.
+            if set.refreshed.load(std::sync::atomic::Ordering::SeqCst) >= arrived + 2 {
+                return Ok(());
+            }
+            set.read_store().await
+        })
+        .await
+        .map_err(|e| CapabilityError::Storage(format!("the state refresh did not finish: {e}")))?
+    }
+
+    /// Whether `slug` is a task whose handling depends on the enablement
+    /// state: a capability's own task (write or read), or a
+    /// `governance/capability/*` task.
+    pub fn serves(&self, slug: &str) -> bool {
+        self.classification.writes.contains_key(slug)
+            || self.classification.reads.contains_key(slug)
+            || [
+                list_spec::Payload::type_uri(),
+                enable_spec::Payload::type_uri(),
+                disable_spec::Payload::type_uri(),
+            ]
+            .iter()
+            .any(|uri| uri.slug() == slug)
+    }
+
+    /// Re-read a shared store every `every`, so the dispatcher handles a host
+    /// reads directly ([`dispatcher`](Self::dispatcher),
+    /// [`query_dispatcher`](Self::query_dispatcher)) converge on other
+    /// registries' changes within that interval. Tasks handled by the
+    /// [`TaskHandler`](crate::trust_tasks::TaskHandler) do not wait for it:
+    /// they re-read the store first ([`refresh`](Self::refresh)). Returns
+    /// `None`, starting nothing, over a store only this set writes. Ends with
+    /// `shutdown`, or when the set is dropped.
+    pub fn spawn_refresher(
+        self: &Arc<Self>,
+        every: std::time::Duration,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        if !self.store.is_shared() {
+            return None;
+        }
+        let weak = self.weak.clone();
+        Some(tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(every);
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticks.tick().await;
+            loop {
+                tokio::select! {
+                    _ = ticks.tick() => {
+                        let Some(set) = weak.upgrade() else { return };
+                        if let Err(e) = set.refresh().await {
+                            tracing::warn!(
+                                "could not re-read the shared capability state (tasks are \
+                                 refused until it can be read): {e:?}"
+                            );
+                        }
+                    }
+                    _ = shutdown.cancelled() => return,
+                }
+            }
+        }))
     }
 
     /// List capabilities, one entry per enablement: the enabled ones, and with
@@ -1253,7 +1623,13 @@ async fn handle_list(
     respond(&doc, response.map_err(|e| reject_build_err(&doc, e))?)
 }
 
+#[cfg(test)]
+pub(crate) mod conformance;
+#[cfg(feature = "storage-ddb")]
+pub mod dynamodb;
 pub mod git_trust;
+#[cfg(feature = "storage-redis")]
+pub mod redis;
 
 #[cfg(test)]
 mod tests {
@@ -1337,13 +1713,14 @@ mod tests {
         Box::new(Dispatcher::new)
     }
 
-    fn set_with(slug: &str) -> Arc<CapabilitySet> {
+    async fn set_with(slug: &str) -> Arc<CapabilitySet> {
         CapabilitySet::new(
             vec![test_capability(slug)],
             Box::new(MemoryCapabilityStore::default()),
             empty_base(),
             empty_base(),
         )
+        .await
         .unwrap()
     }
 
@@ -1357,6 +1734,7 @@ mod tests {
             empty_base(),
             empty_base(),
         )
+        .await
         .unwrap();
 
         assert!(matches!(
@@ -1401,13 +1779,13 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_capability_does_not_serve() {
-        let set = set_with("demo");
+        let set = set_with("demo").await;
         assert!(!dispatch_ok(&set).await, "off by default");
     }
 
     #[tokio::test]
     async fn enable_serves_and_disable_stops() {
-        let set = set_with("demo");
+        let set = set_with("demo").await;
         set.enable("demo", "0.1", None, None).await.unwrap();
         assert!(dispatch_ok(&set).await);
 
@@ -1417,7 +1795,7 @@ mod tests {
 
     #[tokio::test]
     async fn error_taxonomy() {
-        let set = set_with("demo");
+        let set = set_with("demo").await;
         assert!(matches!(
             set.enable("nope", "0.1", None, None).await.unwrap_err(),
             CapabilityError::UnknownCapability(_)
@@ -1451,6 +1829,7 @@ mod tests {
                 empty_base(),
                 empty_base(),
             )
+            .await
             .unwrap();
             set.enable("demo", "0.1", None, None).await.unwrap();
         }
@@ -1461,13 +1840,14 @@ mod tests {
             empty_base(),
             empty_base(),
         )
+        .await
         .unwrap();
         assert!(dispatch_ok(&set).await, "enablement survives restart");
     }
 
     #[tokio::test]
     async fn enable_and_list_work_over_the_wire() {
-        let set = set_with("demo");
+        let set = set_with("demo").await;
 
         // governance/capability/enable as a dispatched document.
         let enable_doc = doc(enable_payload("demo", "0.1"));
@@ -1542,6 +1922,7 @@ mod tests {
             empty_base(),
             empty_base(),
         )
+        .await
         .unwrap();
         set.enable("demo", "0.1", None, None).await.unwrap();
 
@@ -1559,15 +1940,15 @@ mod tests {
 
     /// The classification is known before the capability is enabled, so a
     /// task never changes kind when its capability is switched on.
-    #[test]
-    fn writes_are_known_while_the_capability_is_off() {
-        let set = set_with("demo");
+    #[tokio::test]
+    async fn writes_are_known_while_the_capability_is_off() {
+        let set = set_with("demo").await;
         assert!(set.is_write("registry/recognition"));
         assert!(!slugs(&set.query_dispatcher()).contains("registry/recognition"));
     }
 
-    #[test]
-    fn git_trust_tasks_are_not_on_the_read_only_surface() {
+    #[tokio::test]
+    async fn git_trust_tasks_are_not_on_the_read_only_surface() {
         let repo = Arc::new(crate::storage::adapters::local_storage::LocalStorage::new());
         let base_repo = repo.clone();
         let query_repo = repo.clone();
@@ -1577,6 +1958,7 @@ mod tests {
             Box::new(move || crate::trust_tasks::build_dispatcher(base_repo.clone())),
             Box::new(move || crate::trust_tasks::build_query_dispatcher(query_repo.clone())),
         )
+        .await
         .unwrap();
         let state = BTreeMap::from([(
             EnablementKey::new("git-trust", Some("did:example:a")),
@@ -1647,7 +2029,7 @@ mod tests {
         definition
     }
 
-    fn set_of(
+    async fn set_of(
         definition: CapabilityDefinition,
         store: MemoryCapabilityStore,
     ) -> Arc<CapabilitySet> {
@@ -1657,13 +2039,14 @@ mod tests {
             empty_base(),
             empty_base(),
         )
+        .await
         .unwrap()
     }
 
     #[tokio::test]
     async fn enabling_a_state_that_adds_an_unclassified_task_is_refused() {
         for definition in [state_dependent_write("demo"), state_dependent_read("demo")] {
-            let set = set_of(definition, MemoryCapabilityStore::default());
+            let set = set_of(definition, MemoryCapabilityStore::default()).await;
             let refused = set
                 .enable(
                     "demo",
@@ -1694,15 +2077,17 @@ mod tests {
         for definition in [state_dependent_write("demo"), state_dependent_read("demo")] {
             let store = MemoryCapabilityStore::default();
             store
-                .save(&BTreeMap::from([(
-                    EnablementKey::new("demo", None),
-                    CapabilityState {
+                .put(
+                    &EnablementKey::new("demo", None),
+                    0,
+                    &CapabilityState {
                         config: Some(serde_json::json!({ "extra": true })),
                         ..probe_state()
                     },
-                )]))
+                )
+                .await
                 .unwrap();
-            let set = set_of(definition, store);
+            let set = set_of(definition, store).await;
             for handle in [set.dispatcher(), set.query_dispatcher()] {
                 let served = slugs(&handle);
                 assert!(!served.contains("registry/authorization"));
@@ -1729,7 +2114,7 @@ mod tests {
                 Box::pin(async move { Ok(doc.respond_with(new_id(), serde_json::json!({}))) })
             })
         });
-        let set = set_of(definition, MemoryCapabilityStore::default());
+        let set = set_of(definition, MemoryCapabilityStore::default()).await;
         set.enable("demo", "0.1", None, None).await.unwrap();
 
         let verifier =
@@ -1749,47 +2134,59 @@ mod tests {
         assert_eq!(runs.load(Ordering::SeqCst), 1, "the redelivery is replayed");
     }
 
-    fn refused(definitions: Vec<CapabilityDefinition>) -> String {
+    async fn refused(definitions: Vec<CapabilityDefinition>) -> String {
         match CapabilitySet::new(
             definitions,
             Box::new(MemoryCapabilityStore::default()),
             empty_base(),
             empty_base(),
-        ) {
+        )
+        .await
+        {
             Ok(_) => panic!("the set should be refused"),
             Err(e) => e,
         }
     }
 
-    #[test]
-    fn a_task_declared_as_both_read_and_write_is_refused() {
+    #[tokio::test]
+    async fn a_task_declared_as_both_read_and_write_is_refused() {
         use crate::specs::registry::recognition::v0_1 as recognition;
         let mut definition = test_capability("demo");
         definition.register_reads = Some(Arc::new(|d: RegistryDispatcher, _: &CapabilityState| {
             answers_handled::<recognition::Payload>(d)
         }));
-        assert!(refused(vec![definition]).contains("declares registry/recognition as a read"));
+        assert!(
+            refused(vec![definition])
+                .await
+                .contains("declares registry/recognition as a read")
+        );
     }
 
-    #[test]
-    fn a_registry_write_declared_as_a_read_is_refused() {
+    #[tokio::test]
+    async fn a_registry_write_declared_as_a_read_is_refused() {
         use crate::specs::registry::record::put::v0_3 as put;
         let mut definition = test_capability("demo");
         definition.register_reads = Some(Arc::new(|d: RegistryDispatcher, _: &CapabilityState| {
             answers_handled::<put::Payload>(d)
         }));
-        assert!(refused(vec![definition]).contains("registry/record/put"));
-    }
-
-    #[test]
-    fn two_capabilities_registering_one_task_are_refused() {
         assert!(
-            refused(vec![test_capability("one"), test_capability("two")]).contains("both register")
+            refused(vec![definition])
+                .await
+                .contains("registry/record/put")
         );
     }
 
-    #[test]
-    fn a_capability_registering_a_registry_task_is_refused() {
+    #[tokio::test]
+    async fn two_capabilities_registering_one_task_are_refused() {
+        assert!(
+            refused(vec![test_capability("one"), test_capability("two")])
+                .await
+                .contains("both register")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capability_registering_a_registry_task_is_refused() {
         let error = match CapabilitySet::new(
             vec![test_capability("demo")],
             Box::new(MemoryCapabilityStore::default()),
@@ -1799,7 +2196,9 @@ mod tests {
                     Dispatcher::new(),
                 )
             }),
-        ) {
+        )
+        .await
+        {
             Ok(_) => panic!("the set should be refused"),
             Err(e) => e,
         };
@@ -1808,7 +2207,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_defaults_to_enabled_only() {
-        let set = set_with("demo");
+        let set = set_with("demo").await;
         assert!(set.list(false).await.is_empty());
         assert_eq!(set.list(true).await.len(), 1, "available listing");
         set.enable("demo", "0.1", None, None).await.unwrap();
@@ -1817,25 +2216,39 @@ mod tests {
 
     // --- a failed save changes nothing ----------------------------------------
 
-    /// A store whose next save fails, once.
+    /// A shared store whose next save fails, once, and whose reads fail while
+    /// `fail_load` is set.
     #[derive(Default)]
     struct FailingOnce {
         inner: MemoryCapabilityStore,
         fail_next: std::sync::atomic::AtomicBool,
+        fail_load: std::sync::atomic::AtomicBool,
     }
 
+    #[async_trait::async_trait]
     impl CapabilityStateStore for Arc<FailingOnce> {
-        fn load(&self) -> Result<CapabilityStates, String> {
-            self.inner.load()
+        async fn load(&self) -> Result<CapabilityStates, String> {
+            if self.fail_load.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("unreachable".to_string());
+            }
+            self.inner.load().await
         }
-        fn save(&self, state: &CapabilityStates) -> Result<(), String> {
+        fn is_shared(&self) -> bool {
+            true
+        }
+        async fn put(
+            &self,
+            key: &EnablementKey,
+            expected: u64,
+            state: &CapabilityState,
+        ) -> Result<Put, String> {
             if self
                 .fail_next
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
             {
                 return Err("disk full".to_string());
             }
-            self.inner.save(state)
+            self.inner.put(key, expected, state).await
         }
     }
 
@@ -1848,6 +2261,7 @@ mod tests {
             empty_base(),
             empty_base(),
         )
+        .await
         .unwrap();
 
         store
@@ -1860,7 +2274,7 @@ mod tests {
         assert!(!set.snapshot("demo", None).await.enabled);
         assert!(set.list(false).await.is_empty());
         assert!(!dispatch_ok(&set).await);
-        assert!(store.load().unwrap().is_empty());
+        assert!(store.load().await.unwrap().is_empty());
         set.enable("demo", "0.1", None, None)
             .await
             .expect("the retry starts from the same state");
@@ -1875,7 +2289,7 @@ mod tests {
         ));
         assert!(set.snapshot("demo", None).await.enabled);
         assert!(dispatch_ok(&set).await, "still served, as the disk says");
-        assert!(store.load().unwrap().values().all(|s| s.enabled));
+        assert!(store.load().await.unwrap().values().all(|s| s.enabled));
         set.disable("demo", None).await.expect("the retry disables");
         assert!(!dispatch_ok(&set).await);
     }
@@ -1884,7 +2298,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_the_manifest_version_is_enabled() {
-        let set = set_with("demo");
+        let set = set_with("demo").await;
         assert!(matches!(
             set.enable("demo", "9.9", None, None).await,
             Err(CapabilityError::UnknownCapability(_))
@@ -1912,7 +2326,7 @@ mod tests {
 
     #[tokio::test]
     async fn enable_and_disable_answer_their_specifications_codes() {
-        let set = set_with("demo");
+        let set = set_with("demo").await;
         let refused = |code: &str| Err((code.to_string(), false));
         assert_eq!(
             wire(&set, doc(enable_payload("nope", "0.1"))).await,
@@ -1964,10 +2378,10 @@ mod tests {
 
     // --- enablement per authority ----------------------------------------------
 
-    fn writer_set() -> Arc<CapabilitySet> {
+    async fn writer_set() -> Arc<CapabilitySet> {
         let mut definition = test_capability("writer");
         definition.requires_authority = true;
-        set_of(definition, MemoryCapabilityStore::default())
+        set_of(definition, MemoryCapabilityStore::default()).await
     }
 
     fn for_authority(authority: &str) -> Option<Value> {
@@ -1976,7 +2390,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_authority_enables_and_disables_its_own() {
-        let set = writer_set();
+        let set = writer_set().await;
         set.enable("writer", "0.1", for_authority("did:example:a"), None)
             .await
             .unwrap();
@@ -2012,7 +2426,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_did_scid_authority_is_one_enablement_with_or_without_its_locator() {
-        let set = writer_set();
+        let set = writer_set().await;
         set.enable(
             "writer",
             "0.1",
@@ -2038,7 +2452,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_reports_each_enablement_with_its_authority() {
-        let set = writer_set();
+        let set = writer_set().await;
         for authority in ["did:example:a", "did:example:b"] {
             set.enable("writer", "0.1", for_authority(authority), None)
                 .await
@@ -2089,8 +2503,8 @@ mod tests {
 
     // --- the state file ---------------------------------------------------------
 
-    #[test]
-    fn the_single_slot_state_file_is_migrated() {
+    #[tokio::test]
+    async fn the_single_slot_state_file_is_migrated() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("capabilities.json");
         std::fs::write(
@@ -2114,7 +2528,7 @@ mod tests {
         )
         .unwrap();
         let store = FileCapabilityStore::new(&path);
-        let states = store.load().expect("the old format loads");
+        let states = store.load().await.expect("the old format loads");
         let keys: Vec<&EnablementKey> = states.keys().collect();
         assert_eq!(
             keys,
@@ -2124,18 +2538,186 @@ mod tests {
             ]
         );
 
-        store.save(&states).unwrap();
+        // Any write rewrites the whole file in the per-authority format; the
+        // migrated entries start at revision 0.
+        let demo = EnablementKey::new("demo", None);
+        assert_eq!(states[&demo].revision, 0);
+        assert_eq!(
+            store.put(&demo, 0, &states[&demo]).await.unwrap(),
+            Put::Written(1)
+        );
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written["format"], STATE_FORMAT);
         assert_eq!(written["enablements"][1]["authority"], "did:scid:vh:1:abc");
         assert!(written["enablements"][1].get("delegate").is_none());
-        let reloaded = store.load().unwrap();
+        assert_eq!(written["enablements"][0]["revision"], 1);
+        let reloaded = store.load().await.unwrap();
         assert_eq!(reloaded.keys().collect::<Vec<_>>(), keys);
+        assert_eq!(reloaded[&demo].revision, 1);
+    }
+
+    /// A state file written by this release (with revisions) is read by the
+    /// releases before it, which ignore the member: a downgrade keeps the
+    /// state.
+    #[test]
+    fn a_state_file_with_revisions_reads_without_them() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        #[allow(dead_code)]
+        struct EarlierState {
+            version: String,
+            enabled: bool,
+            #[serde(default)]
+            config: Option<Value>,
+            enabled_at: DateTime<Utc>,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct EarlierEnablement {
+            capability: String,
+            #[serde(default)]
+            authority: Option<String>,
+            #[serde(flatten)]
+            state: EarlierState,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct EarlierFile {
+            format: u64,
+            enablements: Vec<EarlierEnablement>,
+        }
+        let states = BTreeMap::from([(
+            EnablementKey::new("demo", None),
+            CapabilityState {
+                revision: 7,
+                ..probe_state()
+            },
+        )]);
+        let text = encode_states(&states).unwrap();
+        let earlier: EarlierFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(earlier.format, STATE_FORMAT);
+        assert!(earlier.enablements[0].state.enabled);
+        assert_eq!(decode_states(&text).unwrap(), states);
     }
 
     #[test]
     fn a_state_file_of_an_unknown_format_is_refused() {
         assert!(decode_states(r#"{ "format": 3, "enablements": [] }"#).is_err());
+    }
+
+    // --- the store conformance suite, and replicas over one store -------------
+
+    fn memory_fixture() -> conformance::CapabilityStoreFixture {
+        conformance::CapabilityStoreFixture::new(|| {
+            Box::pin(async {
+                let store = MemoryCapabilityStore::default();
+                (
+                    Box::new(store.clone()) as Box<dyn CapabilityStateStore>,
+                    Box::new(store) as Box<dyn CapabilityStateStore>,
+                )
+            })
+        })
+    }
+
+    /// Two handles on one file (one store and its clone, as one process
+    /// holds it), each test in a file of its own.
+    fn file_fixture() -> conformance::CapabilityStoreFixture {
+        conformance::CapabilityStoreFixture::new(|| {
+            Box::pin(async {
+                let path = std::env::temp_dir()
+                    .join(format!("tr-capabilities-{}.json", uuid::Uuid::new_v4()));
+                let store = FileCapabilityStore::new(path);
+                (
+                    Box::new(store.clone()) as Box<dyn CapabilityStateStore>,
+                    Box::new(store) as Box<dyn CapabilityStateStore>,
+                )
+            })
+        })
+    }
+
+    conformance::capability_store_conformance_tests!(memory_caps, Some(memory_fixture()));
+    conformance::capability_store_conformance_tests!(file_caps, Some(file_fixture()));
+    conformance::replica_tests!(memory_replicas, Some(memory_fixture()));
+
+    /// A set over a store only it writes (a state file) does not re-read it
+    /// before tasks: it trusts what it holds.
+    #[tokio::test]
+    async fn a_set_over_its_own_file_does_not_re_read_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capabilities.json");
+        let set = CapabilitySet::new(
+            vec![test_capability("demo")],
+            Box::new(FileCapabilityStore::new(&path)),
+            empty_base(),
+            empty_base(),
+        )
+        .await
+        .unwrap();
+        std::fs::write(&path, "not json").unwrap();
+        set.refresh().await.expect("not read, so not refused");
+        assert!(
+            set.spawn_refresher(
+                std::time::Duration::from_millis(10),
+                tokio_util::sync::CancellationToken::new()
+            )
+            .is_none()
+        );
+    }
+
+    /// A shared store that cannot be read fails the refresh, and leaves the
+    /// state as it was.
+    #[tokio::test]
+    async fn an_unreadable_shared_store_fails_the_refresh() {
+        let store = Arc::new(FailingOnce::default());
+        let set = CapabilitySet::new(
+            vec![test_capability("demo")],
+            Box::new(store.clone()),
+            empty_base(),
+            empty_base(),
+        )
+        .await
+        .unwrap();
+        set.enable("demo", "0.1", None, None).await.unwrap();
+        store
+            .fail_load
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            set.refresh().await,
+            Err(CapabilityError::Storage(_))
+        ));
+        assert!(set.snapshot("demo", None).await.enabled);
+    }
+
+    /// The background refresher brings a set's dispatcher handles in line
+    /// with another set's change, without any task.
+    #[tokio::test]
+    async fn the_refresher_converges_the_dispatcher_handles() {
+        let store = MemoryCapabilityStore::default();
+        let set_over = |store: MemoryCapabilityStore| async move {
+            CapabilitySet::new(
+                vec![test_capability("demo")],
+                Box::new(store),
+                empty_base(),
+                empty_base(),
+            )
+            .await
+            .unwrap()
+        };
+        let (a, b) = (set_over(store.clone()).await, set_over(store).await);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let refresher = b
+            .spawn_refresher(std::time::Duration::from_millis(20), shutdown.clone())
+            .expect("a shared store is re-read");
+        a.enable("demo", "0.1", None, None).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !dispatch_ok(&b).await {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("B's dispatcher serves A's enable");
+        shutdown.cancel();
+        refresher.await.unwrap();
     }
 }

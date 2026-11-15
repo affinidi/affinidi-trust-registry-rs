@@ -61,7 +61,7 @@ use crate::audit::bounded::BoundedAuditLogger;
 use crate::audit::model::AuditLogger;
 use crate::capabilities::{
     CapabilityDefinition, CapabilitySet, CapabilityStateStore, DispatcherHandle,
-    FileCapabilityStore,
+    FileCapabilityStore, import_state_file,
 };
 use crate::configs::TrustRegistryConfig;
 use crate::dedup::{MemoryMessageIdStore, MessageIdStore};
@@ -314,6 +314,7 @@ fn query_task_handler(
         Vec::new(),
         verifier.clone(),
     )
+    .with_capability_refresh(capabilities.clone())
     .with_audit(audit.clone() as Arc<dyn AuditLogger>);
     with_reply_signer(handler, config)
 }
@@ -370,9 +371,16 @@ impl TrustRegistryBuilder {
 
     /// Where capability enablement state is persisted.
     ///
-    /// Defaults to a [`FileCapabilityStore`] at
-    /// `config.server_config.capability_state_path()`. A host that already has
-    /// durable storage should pass its own, or
+    /// Defaults to the repository's shared store
+    /// ([`TrustRecordAdminRepository::capability_store`]): with the Redis and
+    /// DynamoDB backends the state lives beside the records, so every replica
+    /// on them agrees on it. On the first start with an empty shared store, a
+    /// state file at `config.server_config.capability_state_path()` is
+    /// imported into it once ([`import_state_file`]). With a repository that
+    /// has no shared store (CSV, in-memory, fjall, a host's own) the default
+    /// is a [`FileCapabilityStore`] at that path, which must not be shared by
+    /// several processes. A host that already has durable storage should pass
+    /// its own, or
     /// [`MemoryCapabilityStore`](crate::capabilities::MemoryCapabilityStore)
     /// for an ephemeral registry.
     pub fn capability_store(mut self, store: Box<dyn CapabilityStateStore>) -> Self {
@@ -490,11 +498,35 @@ impl TrustRegistryBuilder {
             .map(Ok)
             .unwrap_or_else(|| default_capabilities(repository.clone()))?;
 
-        let store = self.capability_store.unwrap_or_else(|| {
-            Box::new(FileCapabilityStore::new(
-                self.config.server_config.capability_state_path(),
-            ))
-        });
+        let local_state =
+            FileCapabilityStore::new(self.config.server_config.capability_state_path());
+        let store: Box<dyn CapabilityStateStore> = match self.capability_store {
+            Some(store) => store,
+            None => match repository.capability_store().await.map_err(|e| {
+                BoxError::from(format!(
+                    "the shared capability state could not be opened: {e}"
+                ))
+            })? {
+                Some(shared) => {
+                    // First start on a shared backend: carry over what this
+                    // registry enabled in its own file, once.
+                    import_state_file(shared.as_ref(), &local_state)
+                        .await
+                        .map_err(|e| {
+                            BoxError::from(format!(
+                                "the capability state file could not be imported into the \
+                                 shared record backend: {e}"
+                            ))
+                        })?;
+                    info!(
+                        "Capability enablement is kept in the record backend, shared by every \
+                         replica on it"
+                    );
+                    shared
+                }
+                None => Box::new(local_state),
+            },
+        };
 
         // One set owns the live dispatchers every transport reads through, so
         // enabling a capability takes effect everywhere without a restart.
@@ -506,9 +538,16 @@ impl TrustRegistryBuilder {
             Box::new(move || crate::trust_tasks::build_dispatcher(base_repository.clone())),
             Box::new(move || crate::trust_tasks::build_query_dispatcher(query_repository.clone())),
         )
+        .await
         .map_err(BoxError::from)?;
 
         let shutdown = self.shutdown.unwrap_or_default();
+        // Over a shared store, the dispatcher handles converge on other
+        // replicas' changes within the interval; tasks re-read it first.
+        let _refresher = capabilities.spawn_refresher(
+            self.config.server_config.capability_refresh_interval,
+            shutdown.clone(),
+        );
         let didcomm_source = self.didcomm_source.unwrap_or_default();
         let health = Arc::new(RegistryHealth::with_write_status(
             match (self.config.didcomm_config.is_enabled, &didcomm_source) {
