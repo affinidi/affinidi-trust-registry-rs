@@ -96,16 +96,37 @@ pub const WRITE_ACCEPTANCE_WINDOW: chrono::TimeDelta = trust_tasks_rs::DEFAULT_M
 /// A refusal the framework marks `retryable` is not final: storage
 /// unavailable, an internal error, the same document still in flight, or a
 /// proof that could not be verified now (the DID resolver unavailable, or the
-/// issuer's DID failing to resolve transiently). A transport that can leave
-/// the inbound message queued at its mediator should do so (R1.6), so the
-/// registry tries it again under the delivery give-up bounds; the replay
-/// record does not keep a retryable refusal as the document's answer
-/// ([`crate::dedup`]), so the retry is decided afresh.
+/// issuer's DID failing to resolve transiently). The replay record does not
+/// keep a retryable refusal as the document's answer ([`crate::dedup`]), so a
+/// retry of the same document is decided afresh. Whether the inbound message
+/// is kept for the registry to retry is [`leave_queued`].
 pub fn is_final_answer(outcome: &Result<TrustTask<Value>, ErrorResponse>) -> bool {
     match outcome {
         Ok(_) => true,
         Err(err) => !err.payload.retryable,
     }
+}
+
+/// Whether a transport should leave the inbound message queued at its
+/// mediator, for the registry to handle again, rather than ack it (R1.6).
+///
+/// Only when the answer is not final ([`is_final_answer`]) **and** the reply
+/// carrying it could not be sent (the send failed; a send that hangs is cut
+/// off by the handler timeout, which retains the message too).
+///
+/// A retryable refusal that reached the sender is a handoff to the sender:
+/// it now owns the retry, and the message is acked. A sender such as
+/// vtc-service re-sends a refused write as a new document (a new id), and
+/// the replay record is per document id; if the registry also kept retrying
+/// the original, the same mutation could be applied twice, and the stale
+/// original could land after a later, contradicting write. A refusal the
+/// sender never received leaves nobody to retry, so that message is kept,
+/// under the delivery give-up bounds (`didcomm::listener::delivery`).
+///
+/// A final answer is acked whether or not its reply was sent: it is
+/// recorded, and a copy of the same document is answered from the record.
+pub fn leave_queued(outcome: &Result<TrustTask<Value>, ErrorResponse>, reply_sent: bool) -> bool {
+    !is_final_answer(outcome) && !reply_sent
 }
 
 fn write_freshness() -> FreshnessPolicy {
@@ -2744,13 +2765,14 @@ mod tests {
     }
 
     /// #302: a write whose issuer's DID did not resolve in time is refused
-    /// `unavailable` (retryable), is not final (so a transport leaves it
-    /// queued), and is not kept as the document's answer: the redelivery,
-    /// once the DID resolves, is applied rather than answered with the
-    /// refusal again. A DID that is not found stays `proofInvalid` and final.
+    /// `unavailable` (retryable), is not final, and is never stored as the
+    /// document's answer: the same document sent again (by the sender, or
+    /// redelivered when the refusal could not be sent), once the DID
+    /// resolves, is applied rather than answered with the refusal again. A
+    /// DID that is not found stays `proofInvalid` and final.
     #[tokio::test]
     async fn a_transient_resolution_failure_is_retryable_and_not_recorded() {
-        use crate::trust_tasks::proof::tests::{NOT_FOUND, TIMEOUT, verifier_failing_with};
+        use crate::trust_tasks::proof::tests::{TIMEOUT, not_found, verifier_failing_with};
 
         let (key, did) = did_key(36);
         let f = fixture(vec![did.clone()]);
@@ -2784,7 +2806,7 @@ mod tests {
 
         // A definitive answer about the DID is final.
         let other = signed(unsigned(Some(&did), put_payload_at(&did, "other")), &key).await;
-        let outcome = over(verifier_failing_with(NOT_FOUND))
+        let outcome = over(verifier_failing_with(not_found()))
             .handle(other, Some(&did))
             .await;
         assert!(is_final_answer(&outcome));

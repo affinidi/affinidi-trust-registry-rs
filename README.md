@@ -1235,7 +1235,14 @@ Because the file is replaced by renaming a new file over it:
 Trust Task writes are delivered at least once, so the registry keeps a record
 of the documents it has accepted (by issuer and document id) and answers a
 redelivered copy with the stored response instead of executing it again
-(R1.4). Where that record lives follows the storage backend:
+(R1.4): a write is applied at most once per document id. A refusal marked
+retryable (`unavailable`, `internalError`, the same document still in
+flight; including a writer's DID that did not resolve now) is never stored as
+the answer. Once such a refusal has reached the sender, the inbound message
+is deleted at the mediator and the sender owns the retry: re-send the same
+document, or a new one. The registry keeps the message queued, and tries it
+again itself, only when it could not send the refusal. Where that record
+lives follows the storage backend:
 
 | Backend | Record | Survives a restart | Shared by replicas |
 | ------- | ------ | ------------------ | ------------------ |

@@ -187,12 +187,12 @@ impl TrustRegistry {
     /// `None` means the body was not a usable Trust Task document: there is no
     /// thread or issuer to address an error to, so drop it rather than reply.
     ///
-    /// When the outcome is not final
-    /// ([`is_final_answer`](crate::trust_tasks::is_final_answer): a retryable
-    /// refusal, such as a proof whose issuer's DID did not resolve now), the
-    /// built-in listener sends it and leaves the message queued at the
-    /// mediator for redelivery rather than deleting it (R1.6); a host should
-    /// do the same.
+    /// Whether to delete the message at the mediator once the answer is sent
+    /// is [`leave_queued`](crate::trust_tasks::leave_queued), the rule the
+    /// built-in listeners follow (R1.6): ack a final answer, and ack a
+    /// retryable refusal (such as a proof whose issuer's DID did not resolve
+    /// now) that reached the sender, which then owns the retry; keep the
+    /// message queued only when a retryable refusal could not be sent.
     pub async fn route_didcomm_envelope(
         &self,
         body: serde_json::Value,

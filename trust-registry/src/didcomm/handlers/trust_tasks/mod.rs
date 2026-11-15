@@ -121,40 +121,47 @@ impl ProtocolHandler for TrustTasksHandler {
             return Ok(());
         };
 
-        let last_word = crate::trust_tasks::is_final_answer(&outcome);
-        match &outcome {
+        let reply_sent = match &outcome {
             Ok(response) => self.send(ctx, response).await,
             Err(err) => self.send(ctx, err).await,
-        }
-        if last_word {
-            return Ok(());
-        }
-        // R1.6: a retryable refusal (storage unavailable, the same document
-        // in flight, a proof that could not be verified now because the
-        // issuer's DID did not resolve) is not this message's answer. The
-        // refusal is sent, so the sender knows to retry, and the message is
-        // reported unhandled, so the listener leaves it queued at the mediator
-        // and tries it again under the give-up bounds of
-        // `didcomm::listener::delivery`, as the TSP path does.
-        //
-        // Trade-off, taken deliberately: each redelivery that is refused again
-        // answers again, so a sender may see the same retryable refusal more
-        // than once (bounded by `GIVE_UP_ATTEMPTS` over `GIVE_UP_MIN_AGE`), and
-        // a redelivery that succeeds answers after a refusal. Acking instead
-        // would lose a valid signed write whose sender does not retry. A
-        // write is applied at most once either way: the replay record does
-        // not keep a retryable refusal, and keeps the final outcome.
-        Err(Box::new(RetryableRefusal(
-            outcome
-                .err()
-                .map(|err| err.payload.code.to_string())
-                .unwrap_or_default(),
-        )))
+        };
+        // R1.6, handoff to the sender: see `delivery_result`.
+        delivery_result(&outcome, reply_sent).map_err(Into::into)
     }
 }
 
-/// A Trust Task answered with a retryable refusal: the message is left queued
-/// for redelivery rather than acked.
+/// What the listener should be told about a message answered with `outcome`,
+/// given whether the reply reached the mediator: `Ok` to ack it, `Err` to
+/// leave it queued for redelivery ([`crate::trust_tasks::leave_queued`]).
+///
+/// R1.6, handoff to the sender: a retryable refusal (storage unavailable, the
+/// same document in flight, a proof that could not be verified now because
+/// the issuer's DID did not resolve) that was delivered transfers the retry to
+/// the sender, so the message is acked. The registry retrying the original
+/// as well could apply the same mutation twice (a sender such as vtc-service
+/// re-sends it under a new document id) or land it after a later write. Only
+/// a retryable refusal whose reply could not be sent is left queued, since
+/// the sender never learned it must retry; it is tried again under the
+/// give-up bounds of `didcomm::listener::delivery`. The TSP path applies the
+/// same rule.
+pub fn delivery_result(
+    outcome: &Result<TrustTask<Value>, ErrorResponse>,
+    reply_sent: bool,
+) -> Result<(), RetryableRefusal> {
+    if !crate::trust_tasks::leave_queued(outcome, reply_sent) {
+        return Ok(());
+    }
+    Err(RetryableRefusal(
+        outcome
+            .as_ref()
+            .err()
+            .map(|err| err.payload.code.to_string())
+            .unwrap_or_default(),
+    ))
+}
+
+/// A Trust Task answered with a retryable refusal that could not be sent:
+/// the message is left queued for redelivery rather than acked.
 #[derive(Debug)]
 pub struct RetryableRefusal(String);
 
@@ -162,7 +169,7 @@ impl std::fmt::Display for RetryableRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "answered with a retryable `{}` refusal; left queued for redelivery",
+            "a retryable `{}` refusal could not be sent; left queued for redelivery",
             self.0
         )
     }
@@ -173,13 +180,18 @@ impl std::error::Error for RetryableRefusal {}
 impl TrustTasksHandler {
     /// Pack `doc` as an [`ENVELOPE_TYPE`] DIDComm message and forward it to the
     /// original sender through the mediator. Errors are logged, not propagated —
-    /// a failed reply must not tear down the listener.
-    async fn send<T: Serialize>(&self, ctx: &Arc<HandlerContext>, doc: &T) {
-        if let Err(e) = self.try_send(ctx, doc).await {
-            error!(
-                "[profile = {}] Failed to send Trust Task response to {}: {}",
-                ctx.profile.inner.alias, ctx.authenticated_sender, e
-            );
+    /// a failed reply must not tear down the listener. Returns whether it was
+    /// sent.
+    async fn send<T: Serialize>(&self, ctx: &Arc<HandlerContext>, doc: &T) -> bool {
+        match self.try_send(ctx, doc).await {
+            Ok(()) => true,
+            Err(e) => {
+                error!(
+                    "[profile = {}] Failed to send Trust Task response to {}: {}",
+                    ctx.profile.inner.alias, ctx.authenticated_sender, e
+                );
+                false
+            }
         }
     }
 
@@ -214,17 +226,45 @@ mod tests {
 
     use super::*;
 
+    /// R1.6, handoff to the sender: a retryable refusal that was sent is
+    /// acked (the sender owns the retry); one that could not be sent is left
+    /// queued; a final answer is acked whether or not it was sent.
+    #[test]
+    fn a_delivered_retryable_refusal_is_acked_and_an_undelivered_one_kept() {
+        use crate::specs::registry::record::put::v0_1 as put_spec;
+        use trust_tasks_rs::{Payload as _, RejectReason};
+        let doc = TrustTask::new("d1", put_spec::Payload::type_uri(), Value::Null);
+        let unavailable =
+            Err(doc.reject_with("r1", RejectReason::Unavailable { retry_after: None }));
+        let invalid = Err(doc.reject_with(
+            "r2",
+            RejectReason::ProofInvalid {
+                reason: "bad".into(),
+            },
+        ));
+        assert!(delivery_result(&unavailable, true).is_ok(), "sent: acked");
+        assert!(
+            delivery_result(&unavailable, false).is_err(),
+            "not sent: kept"
+        );
+        assert!(delivery_result(&invalid, true).is_ok());
+        assert!(delivery_result(&invalid, false).is_ok(), "final: acked");
+        let answered = Ok(doc.respond_with("r3", Value::Null));
+        assert!(delivery_result(&answered, false).is_ok());
+    }
+
     /// #302, the delivery-path consequence: a write refused because its
-    /// issuer's DID did not resolve in time is answered and then reported
-    /// unhandled, so the pickup listener leaves it queued for redelivery; a
-    /// write refused because the DID is not found is handled, so it is acked.
+    /// issuer's DID did not resolve in time, whose refusal cannot be sent
+    /// (no mediator here), is reported unhandled, so the pickup listener
+    /// leaves it queued for redelivery; a write refused because the DID is
+    /// not found is final, so it is acked even though its reply was not sent.
     #[tokio::test]
-    async fn a_retryable_refusal_is_left_queued_and_a_final_one_acked() {
+    async fn an_unsent_retryable_refusal_is_left_queued_and_a_final_one_acked() {
         use crate::didcomm::listener::delivery::{Ack, DeliveryLedger, Outcome};
         use crate::specs::registry::record::put::v0_1 as put_spec;
         use crate::storage::adapters::local_storage::LocalStorage;
         use crate::trust_tasks::build_dispatcher;
-        use crate::trust_tasks::proof::tests::{NOT_FOUND, TIMEOUT, verifier_failing_with};
+        use crate::trust_tasks::proof::tests::{TIMEOUT, not_found, verifier_failing_with};
         use affinidi_tdk::common::{TDKSharedState, config::TDKConfig};
         use affinidi_tdk::messaging::{ATM, config::ATMConfig, profiles::ATMProfile};
         use std::time::Duration;
@@ -303,7 +343,7 @@ mod tests {
             )
             .finalize()
         };
-        let binding = |resolver_error| {
+        let binding = |resolver_error: String| {
             let repo = Arc::new(LocalStorage::new());
             let dispatcher = Arc::new(RwLock::new(Arc::new(build_dispatcher(repo))));
             TrustTasksHandler::new(
@@ -325,7 +365,7 @@ mod tests {
 
         let transient = tokio::time::timeout(
             Duration::from_secs(20),
-            binding(TIMEOUT).handle(&ctx, write(), UnpackMetadata::default()),
+            binding(TIMEOUT.to_string()).handle(&ctx, write(), UnpackMetadata::default()),
         )
         .await
         .expect("bounded");
@@ -339,7 +379,7 @@ mod tests {
 
         let definitive = tokio::time::timeout(
             Duration::from_secs(20),
-            binding(NOT_FOUND).handle(&ctx, write(), UnpackMetadata::default()),
+            binding(not_found()).handle(&ctx, write(), UnpackMetadata::default()),
         )
         .await
         .expect("bounded");
