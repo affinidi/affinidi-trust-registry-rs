@@ -4,11 +4,11 @@
 //!
 //! Test-only (`#[cfg(test)]` on its `mod` line), where a panic is the failure
 //! report.
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::panic, deprecated)]
 
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::RwLock;
 use trust_tasks_rs::TrustTask;
 
@@ -43,18 +43,36 @@ pub(crate) fn seeded_handler() -> TaskHandler {
     )
 }
 
-/// An unsigned query of `type_uri` for the seeded record, from the client to
-/// the registry.
+/// An unsigned query of `type_uri` (`registry/recognition/0.1` or
+/// `registry/authorization/0.1`) for the seeded record, from the client to
+/// the registry, its payload built with that version's generated type.
 pub(crate) fn query_doc(type_uri: &str) -> TrustTask<Value> {
+    use crate::trust_tasks::payloads::{AuthorizationRequest, RecognitionRequest};
+    use trust_tasks_rs::Payload as _;
+
+    macro_rules! payload {
+        ($req:ty) => {{
+            let request: $req = <$req>::builder()
+                .entity_id("did:example:entity")
+                .authority_id("did:example:authority")
+                .action("issue")
+                .resource("vc")
+                .try_into()
+                .expect("valid query");
+            serde_json::to_value(request).expect("serialises")
+        }};
+    }
+    let payload = if type_uri == AuthorizationRequest::TYPE_URI {
+        payload!(AuthorizationRequest)
+    } else if type_uri == RecognitionRequest::TYPE_URI {
+        payload!(RecognitionRequest)
+    } else {
+        panic!("query_doc serves the 0.1 TRQP queries, not {type_uri}")
+    };
     let mut doc = TrustTask::new(
         format!("urn:uuid:{}", uuid::Uuid::new_v4()),
         type_uri.parse().expect("valid type uri"),
-        json!({
-            "entity_id": "did:example:entity",
-            "authority_id": "did:example:authority",
-            "action": "issue",
-            "resource": "vc"
-        }),
+        payload,
     );
     doc.issuer = Some(CLIENT_DID.to_string());
     doc.recipient = Some(REGISTRY_DID.to_string());
