@@ -73,32 +73,6 @@ fn verification_method_id(did: &str, secret: &Secret) -> Result<String, String> 
     }
 }
 
-/// The public key of `secret` as a multikey (`z…`).
-///
-/// An EC secret read from a JWK holds its public key as `x || y`, without
-/// the `0x04` prefix the SDK's point compression expects, so its multibase
-/// form fails there. Such a key is re-derived from its private half, and the
-/// derived public key must equal the JWK's, else the secret is inconsistent.
-fn public_multibase(secret: &Secret) -> Result<String, String> {
-    match secret.get_public_keymultibase() {
-        Ok(multibase) => Ok(multibase),
-        Err(first) if matches!(secret.get_key_type(), KeyType::P256 | KeyType::Secp256k1) => {
-            let derived = secret
-                .get_private_keymultibase()
-                .and_then(|private| Secret::from_multibase(&private, None))
-                .map_err(|e| format!("{first}; re-deriving from the private key: {e}"))?;
-            let ours = secret.get_public_bytes();
-            let theirs = derived.get_public_bytes();
-            if theirs.len() == ours.len() + 1 && theirs.ends_with(ours) {
-                derived.get_public_keymultibase().map_err(|e| e.to_string())
-            } else {
-                Err("the private key does not match the public key".to_string())
-            }
-        }
-        Err(e) => Err(e.to_string()),
-    }
-}
-
 /// One verification method per secret, with the purpose its key type serves.
 ///
 /// A secret whose key cannot be published (an unsupported type, or material
@@ -116,7 +90,11 @@ pub fn build_verification_methods_for(
             let purpose = key_purpose(key_type).ok_or_else(|| {
                 format!("{id}: key type {key_type:?} cannot be published in the DID document")
             })?;
-            let multibase = public_multibase(secret)
+            // A JWK-loaded EC secret holds the same SEC1 point a generated one
+            // does (affinidi-secrets-resolver 0.5.19), and a JWK whose public
+            // half is not its private key's is refused when it is parsed.
+            let multibase = secret
+                .get_public_keymultibase()
                 .map_err(|e| format!("{id}: no public multibase form for this key: {e}"))?;
             Ok((
                 serde_json::json!({
@@ -455,16 +433,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A secret from its JWK, as a profile bundle carries it.
-    fn secret(id: &str, jwk: Value) -> Secret {
-        serde_json::from_value(json!({
-            "id": id,
-            "type": "JsonWebKey2020",
-            "privateKeyJwk": jwk,
-        }))
-        .unwrap()
-    }
-
     fn ed25519(id: &str) -> Secret {
         let mut s = Secret::generate_ed25519(None, None);
         s.id = id.to_string();
@@ -605,21 +573,24 @@ mod tests {
     }
 
     /// A JWK whose private half is not its public key's is refused rather
-    /// than published under a key the registry cannot sign for.
+    /// than published under a key the registry cannot sign for. Since
+    /// affinidi-secrets-resolver 0.5.19 the refusal comes when the secret is
+    /// read, so such a profile never loads.
     #[test]
     fn an_ec_secret_whose_halves_disagree_is_an_error() {
-        let p256 = secret(
-            "did:web:example.com#key-1",
-            json!({
+        let err = serde_json::from_value::<Secret>(json!({
+            "id": "did:web:example.com#key-1",
+            "type": "JsonWebKey2020",
+            "privateKeyJwk": {
                 "crv": "P-256",
                 "d": "ctKLNB9cXUO3yD-jMCaRi680RmHOFuS30nVogmEhkx4",
                 "kty": "EC",
                 "x": "DEtsdJXfi7IuqaZFkRW_aBwHHpID1jQjPqN_Y46zlZM",
                 "y": "LQs6Q-gGqgtrUW2iEfb9YRyvPAuNALceHqGYs4sNwh4"
-            }),
-        );
-        let err = build_verification_methods_for("did:web:example.com", &[p256]).unwrap_err();
-        assert!(err.contains("does not match"), "{err}");
+            },
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
     }
 
     /// A key that cannot be represented is a configuration error, never an
@@ -629,16 +600,7 @@ mod tests {
         let bad_id = ed25519("key-1");
         assert!(build_verification_methods_for("did:web:example.com", &[bad_id]).is_err());
 
-        let p384 = secret(
-            "did:web:example.com#key-1",
-            json!({
-                "kty": "EC",
-                "crv": "P-384",
-                "x": "iA7lWQLzVrKGEFjfGMfMHfTEZ2KnLiKU7JuNT3E7ygsfE7ygAqtV1UYAsHSdGI_6",
-                "y": "vbYb9_K4xs7YpWSiNm8TbqQcGGbtBY-v6ySSOihkzCjQwX4yU8QEf0Kl9F2-RoWh",
-                "d": "u2jqGxbGJMKbDCgtyDiOjJWaQ2ZtFYsLNuUDxx3t-kG5k-gl_6Wd2b5JX5brQWwA"
-            }),
-        );
+        let p384 = Secret::generate_p384(Some("did:web:example.com#key-1"), None).unwrap();
         let err = build_verification_methods_for("did:web:example.com", &[p384]).unwrap_err();
         assert!(err.contains("cannot be published"), "{err}");
 

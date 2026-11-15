@@ -22,10 +22,6 @@ https = ["dep:reqwest", "dep:tokio"]
 # DIDComm binding over the ATM mediator (trust-tasks-didcomm envelope).
 didcomm = [
     "dep:affinidi-tdk",
-    # affinidi-crypto 0.2 caps (see `[dependencies]`).
-    "dep:affinidi-did-common",
-    "dep:affinidi-messaging-didcomm",
-    "dep:affinidi-secrets-resolver",
     "dep:affinidi-messaging-core",
     "dep:trust-tasks-didcomm",
     "dep:tokio",
@@ -35,10 +31,6 @@ didcomm = [
 # 0.x dependency, so this stays opt-in.
 tsp = [
     "dep:affinidi-tdk",
-    # affinidi-crypto 0.2 caps (see `[dependencies]`).
-    "dep:affinidi-did-common",
-    "dep:affinidi-messaging-didcomm",
-    "dep:affinidi-secrets-resolver",
     "dep:affinidi-messaging-sdk",
     "dep:affinidi-messaging-core",
     "dep:trust-tasks-tsp",
@@ -48,12 +40,6 @@ tsp = [
 ]
 
 [dependencies]
-# Caps only, never used directly: they keep a resolve without our lockfile on
-# the affinidi-crypto 0.2 releases the affinidi-tdk 0.37 family needs. See the
-# workspace Cargo.toml. Switched on with either mediator transport.
-affinidi-did-common = { workspace = true, optional = true }
-affinidi-messaging-didcomm = { workspace = true, optional = true }
-affinidi-secrets-resolver = { workspace = true, optional = true }
 async-trait.workspace = true
 chrono.workspace = true
 serde.workspace = true
