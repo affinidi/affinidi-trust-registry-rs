@@ -54,6 +54,31 @@ jobs:
       contents: read
     steps:
       - uses: affinidi/pipeline-rust/.github/actions/release-guards@2bbccfe101c0261cc9ee2252383bc62cb00cd469 # main, 2026-11-09
+  schedule:
+    # RELEASES.md's schedule table is generated from the v* tags
+    # (scripts/release_schedule.py); release-schedule.yml opens the PR that
+    # updates it after each tag. This fails a PR into main whose table does
+    # not match the tags, so it cannot drift. PRs into main only: a release
+    # branch's copy of RELEASES.md is not maintained, and on push the check
+    # would hold nightly back between a tag and the schedule PR's merge.
+    name: release schedule
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Every tag, with the commits they name but no trees or blobs
+          # beyond the checkout's own.
+          fetch-depth: 0
+          filter: 'tree:0'
+          persist-credentials: false
+      - name: Unit tests for the generator
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: The table matches the tags
+        run: python3 scripts/release_schedule.py
   semver:
     # Patch releases must be semver-compatible. Every PR into a release branch
     # (a backport, a `release-direct` fix, a prep PR) is checked against the

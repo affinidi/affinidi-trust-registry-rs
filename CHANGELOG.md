@@ -450,6 +450,18 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Added
 
+- **Release support policy and a generated release schedule (#272).**
+  RELEASES.md and SECURITY.md state the commitment explicitly: the newest two
+  GA minor releases (N and N-1) are supported, however short-lived — at the
+  current cadence N-1 may be supported for only days, so track the latest GA —
+  what "supported" means, and how a fix is delivered (backport label, then a
+  patch release). The schedule table in RELEASES.md is now generated from the
+  `v*` tags by `scripts/release_schedule.py` (with unit tests);
+  `release-schedule.yml` regenerates it after every release tag and opens the
+  PR, and the `release schedule` job in `checks.yaml` fails a PR into `main`
+  whose table does not match the tags. Its dates are UTC, which moves 0.29's
+  RC/GA date and 0.27's end of life from 2026-10-29 to 2026-10-28 (the date
+  0.29's changelog heading already carries).
 - **`trql-client`: `trql_client::trust_tasks`** re-exports `TrustTask`,
   `TrustTaskCode` and `StandardCode`, so matching a rejection code or
   implementing `TrqlTransport` needs no direct `trust-tasks-rs` dependency.
