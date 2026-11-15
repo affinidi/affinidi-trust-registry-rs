@@ -21,6 +21,17 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Breaking
 
+- **Dependencies move within the affinidi-tdk 0.37 family**: `vti-secrets`
+  0.29 → 0.38 (its `SecretsConfig`/`SecretBackend` are in
+  `configs::secret_store`'s public signatures, so an embedder naming them
+  needs vti-secrets 0.38), `vta-sdk` 0.80 → 0.89, `affinidi-tdk` 0.37.6,
+  `affinidi-messaging-sdk` 0.45.17, `affinidi-messaging-core` 0.1.14 and the
+  `trust-tasks-*` crates 0.37.15 (`trust-tasks-build` 0.1.4).
+  `affinidi-did-common` is capped below 0.4.7, whose public key types moved to
+  affinidi-crypto 0.3 and no longer match the 0.2 the rest of the family is
+  built on (trust-tasks-proof stops compiling); the lockfile likewise holds
+  `affinidi-messaging-didcomm` at 0.15.13 and `affinidi-secrets-resolver` at
+  0.5.17 for the same reason. Every other dependency is at its latest release.
 - **TRQP identifiers are validated wherever a client supplies one** (#210).
   `EntityId`, `AuthorityId`, `Action` and `Resource` gain `parse` and
   `TryFrom<String>`/`TryFrom<&str>` (non-empty, at most
@@ -524,6 +535,17 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Changed
 
+- **No hand-built Trust Tasks.** The `registry/*` records map to and from
+  the domain `TrustRecord` through `From<&TrustRecord>` /
+  `TryFrom<&spec::TrustRecord>` implemented on the generated
+  `registry/record/{put,query}` record types, replacing the hand-written
+  `WireRecordV1`/`WireRecordV2` mirrors and their JSON round-trip; the
+  `governance/capability/list` manifest is converted from the `enable` one
+  field by field; the git-trust manifest and the list response's `ext` are
+  built with the generated builders and `Ext`/`ExtKey`; the test client sends
+  `registry/record/*` requests built from its own generated `specs` module
+  (new `test-client/trust-tasks.lock`). Golden tests pin each version's wire
+  JSON, which is unchanged.
 - **The unused durable outbox is gone** (#201). A TSP-enabled registry opened
   a fjall `outbox` keyspace and ran three outbox loops that nothing ever sent
   through. Replies are sent once, synchronously, from the handler; a reply
