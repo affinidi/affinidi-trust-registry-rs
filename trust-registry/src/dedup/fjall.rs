@@ -23,7 +23,9 @@ use chrono::{DateTime, Utc};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use serde::{Deserialize, Serialize};
 
-use super::{Claim, ClaimToken, DedupError, Inner, MessageIdStore, StoredOutcome, expiry};
+use super::{
+    Claim, ClaimToken, Clock, DedupError, Inner, MessageIdStore, StoredOutcome, expiry, wall_clock,
+};
 use crate::configs::MessageIdStoreConfig;
 
 /// Keyspace (table) holding the outcomes, beside the records'.
@@ -39,6 +41,7 @@ struct Persisted {
 
 struct Shared {
     config: MessageIdStoreConfig,
+    clock: Clock,
     db: Database,
     keyspace: Keyspace,
     inner: Mutex<Inner>,
@@ -78,10 +81,19 @@ impl FjallMessageIdStore {
     /// Open the store in `db`, loading the outcomes still inside their
     /// retention. Blocking: call it from a blocking context.
     pub fn open(db: Database, config: MessageIdStoreConfig) -> Result<Self, DedupError> {
+        Self::open_with_clock(db, config, wall_clock())
+    }
+
+    /// [`open`](Self::open), reading the time from `clock`.
+    pub(crate) fn open_with_clock(
+        db: Database,
+        config: MessageIdStoreConfig,
+        clock: Clock,
+    ) -> Result<Self, DedupError> {
         let keyspace = db
             .keyspace(KEYSPACE_NAME, KeyspaceCreateOptions::default)
             .map_err(unavailable)?;
-        let now = Utc::now();
+        let now = clock();
         let mut live = Vec::new();
         let mut stale = Vec::new();
         for guard in keyspace.iter() {
@@ -113,6 +125,7 @@ impl FjallMessageIdStore {
         }
         let shared = Shared {
             config,
+            clock,
             db,
             keyspace,
             inner: Mutex::new(inner),
@@ -142,7 +155,7 @@ impl MessageIdStore for FjallMessageIdStore {
         let key = key.to_string();
         let digest = digest.to_string();
         self.blocking(move |shared| {
-            let now = Utc::now();
+            let now = (shared.clock)();
             let mut inner = shared.lock();
             let expired = inner.evict_expired(now, shared.config.in_flight_lease);
             let claim = inner.claim(&key, &digest, now, &shared.config);
@@ -163,7 +176,7 @@ impl MessageIdStore for FjallMessageIdStore {
         let token = token.clone();
         let outcome = outcome.clone();
         self.blocking(move |shared| {
-            let expires_at = expiry(Utc::now(), shared.config.retention);
+            let expires_at = expiry((shared.clock)(), shared.config.retention);
             // Held across the write, so the claim cannot change between the
             // check and the record of the outcome.
             let mut inner = shared.lock();
@@ -205,7 +218,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use crate::dedup::conformance::StoreFixture;
+    use crate::dedup::conformance::{StoreFixture, TestClock};
 
     /// The database at one path, opened on demand and closed by `restart`.
     struct Holder {
@@ -231,15 +244,20 @@ mod tests {
         });
         let make = Arc::clone(&holder);
         let restart = Arc::clone(&holder);
+        let clock = TestClock::new();
+        let reads = Arc::clone(&clock);
         StoreFixture::new(move |config| {
             let holder = Arc::clone(&make);
+            let clock = reads.clock();
             Box::pin(async move {
                 let db = holder.db();
                 Arc::new(
-                    tokio::task::spawn_blocking(move || FjallMessageIdStore::open(db, config))
-                        .await
-                        .expect("open task")
-                        .expect("open store"),
+                    tokio::task::spawn_blocking(move || {
+                        FjallMessageIdStore::open_with_clock(db, config, clock)
+                    })
+                    .await
+                    .expect("open task")
+                    .expect("open store"),
                 ) as Arc<dyn MessageIdStore>
             })
         })
@@ -249,6 +267,7 @@ mod tests {
                 holder.db.lock().unwrap().take();
             })
         })
+        .with_clock(clock)
         .with_guard(dir)
     }
 
