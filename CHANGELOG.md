@@ -21,23 +21,34 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Breaking
 
-- **Dependencies move within the affinidi-tdk 0.37 family**: `vti-secrets`
-  0.29 → 0.38 (its `SecretsConfig`/`SecretBackend` are in
-  `configs::secret_store`'s public signatures, so an embedder naming them
-  needs vti-secrets 0.38), `vta-sdk` 0.80 → 0.89, `affinidi-tdk` 0.37.6,
-  `affinidi-messaging-sdk` 0.45.17, `affinidi-messaging-core` 0.1.14 and the
-  `trust-tasks-*` crates 0.37.15 (`trust-tasks-build` 0.1.4).
-  Three crates are capped, in the workspace and directly by `trust-registry`
-  and (with `didcomm`/`tsp`) `trql-client`: `affinidi-did-common`
-  `>=0.4.5, <0.4.7`, `affinidi-messaging-didcomm` `>=0.15.9, <0.15.14` and
-  `affinidi-secrets-resolver` `>=0.5.15, <0.5.18`. Those patch releases moved
-  their public key types to affinidi-crypto 0.3, which no longer match the 0.2
-  the rest of the family is built on (trust-tasks-proof and
-  affinidi-data-integrity stop compiling); the caps keep a resolve without our
-  lockfile (an embedder, `cargo install`) on a working set. They lift with the
-  move to a family on affinidi-crypto 0.3 (affinidi-tdk 0.45+,
-  affinidi-messaging-sdk 0.47+, trust-tasks 0.39+). Every other dependency is at
-  its latest release.
+- **Dependencies move to the family vta-sdk 0.90 declares (affinidi-crypto
+  0.3)**: `vta-sdk` 0.80 → 0.90, `vti-secrets` 0.29 → 0.39 (vti-common 0.66;
+  its `SecretsConfig`/`SecretBackend` are in `configs::secret_store`'s public
+  signatures, so an embedder naming them needs vti-secrets 0.39),
+  `affinidi-tdk` 0.37 → 0.45, `affinidi-messaging-sdk` 0.45 → 0.47.2,
+  `affinidi-messaging-core` 0.1.14, `affinidi-did-common` 0.4.7, the
+  `trust-tasks-*` runtime crates 0.37 → 0.39, `trust-tasks-build` 0.1 → 0.2,
+  and (test only) `affinidi-messaging-test-mediator` 0.53. Types from
+  `affinidi-tdk`, `affinidi-messaging-sdk` and `trust-tasks-rs` cross the
+  public API of `trust-registry` and `trql-client`, so an embedder moves with
+  them. The three caps an intermediate step needed (`affinidi-did-common`
+  `<0.4.7`, `affinidi-messaging-didcomm` `<0.15.14`,
+  `affinidi-secrets-resolver` `<0.5.18`) are gone, and so are the direct
+  `affinidi-messaging-didcomm` / `affinidi-secrets-resolver` dependencies that
+  carried them: a resolve without our lockfile (an embedder, `cargo install`)
+  lands on one affinidi-crypto (0.3), one affinidi-tdk, one messaging SDK and
+  one trust-tasks-rs. Every other dependency is at its latest release.
+  - A DID profile secret whose JWK public key is not its private key's is now
+    refused when the profile is read (affinidi-secrets-resolver 0.5.19), not
+    when the DID document is built; either way the registry does not start.
+    The registry's own re-derivation for JWK-loaded P-256/secp256k1 keys is
+    removed, since the resolver now loads them in the form it publishes.
+  - Write proofs from a DID that names `localhost` or a private-network host
+    are refused before resolution, and each resolution has a 10 s deadline
+    (trust-tasks-proof 0.38 `CachedDidResolver`). The registry's DID resolver
+    already refused such hosts (`HostPolicy::PublicOnly`), so only the
+    message changes; a resolution that times out is `proofInvalid`, as any
+    other resolver failure already was.
 - **TRQP identifiers are validated wherever a client supplies one** (#210).
   `EntityId`, `AuthorityId`, `Action` and `Resource` gain `parse` and
   `TryFrom<String>`/`TryFrom<&str>` (non-empty, at most
