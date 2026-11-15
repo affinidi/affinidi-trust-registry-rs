@@ -630,16 +630,102 @@ mod tests {
         TrqlClient::new(Arc::new(MockTransport(f)), "did:example:registry")
     }
 
+    use crate::payloads::{v0_1, v0_2};
+    use crate::specs::registry::{authorization, recognition};
+
+    /// The registry's evaluation time in every canned answer.
+    fn evaluated() -> DateTime<Utc> {
+        "2026-07-16T00:00:00Z".parse().unwrap()
+    }
+
+    fn instant(s: &str) -> DateTime<Utc> {
+        s.parse().unwrap()
+    }
+
+    /// The request payload, parsed as the generated type the client sent.
+    fn sent<P: DeserializeOwned>(request: &TrustTask<Value>) -> P {
+        serde_json::from_value(request.payload.clone()).expect("a generated request payload")
+    }
+
+    /// The reply document to `request` carrying `payload`, a generated
+    /// response type.
+    fn reply_with<P: Serialize>(request: &TrustTask<Value>, payload: P) -> TrustTask<Value> {
+        request.respond_with(
+            "urn:uuid:reply".to_string(),
+            serde_json::to_value(payload).unwrap(),
+        )
+    }
+
+    /// A 0.2 authorization answer echoing the request's tuple, with `edit`
+    /// applied to the generated builder (to substitute a member, add `asOf`).
+    fn authorization_answer(
+        request: &TrustTask<Value>,
+        authorized: bool,
+        edit: impl FnOnce(
+            authorization::v0_2::builder::Response,
+        ) -> authorization::v0_2::builder::Response,
+    ) -> TrustTask<Value> {
+        let asked: v0_2::AuthorizationRequest = sent(request);
+        let response: v0_2::AuthorizationResponse = edit(
+            v0_2::AuthorizationResponse::builder()
+                .entity_id(asked.entity_id)
+                .authority_id(asked.authority_id)
+                .action(asked.action)
+                .resource(asked.resource)
+                .authorized(authorized)
+                .evaluated_at(evaluated()),
+        )
+        .try_into()
+        .unwrap();
+        reply_with(request, response)
+    }
+
+    /// [`authorization_answer`] for `registry/recognition/0.2`.
+    fn recognition_answer(
+        request: &TrustTask<Value>,
+        recognized: bool,
+        edit: impl FnOnce(recognition::v0_2::builder::Response) -> recognition::v0_2::builder::Response,
+    ) -> TrustTask<Value> {
+        let asked: v0_2::RecognitionRequest = sent(request);
+        let response: v0_2::RecognitionResponse = edit(
+            v0_2::RecognitionResponse::builder()
+                .entity_id(asked.entity_id)
+                .authority_id(asked.authority_id)
+                .action(asked.action)
+                .resource(asked.resource)
+                .recognized(recognized)
+                .evaluated_at(evaluated()),
+        )
+        .try_into()
+        .unwrap();
+        reply_with(request, response)
+    }
+
+    /// A 0.1 authorization answer echoing the request's tuple, with `edit`
+    /// applied to the generated builder.
+    fn authorization_answer_v0_1(
+        request: &TrustTask<Value>,
+        edit: impl FnOnce(
+            authorization::v0_1::builder::Response,
+        ) -> authorization::v0_1::builder::Response,
+    ) -> TrustTask<Value> {
+        let asked: v0_1::AuthorizationRequest = sent(request);
+        let response: v0_1::AuthorizationResponse = edit(
+            v0_1::AuthorizationResponse::builder()
+                .entity_id(asked.entity_id)
+                .authority_id(asked.authority_id)
+                .action(asked.action)
+                .resource(asked.resource)
+                .authorized(true)
+                .time_evaluated(evaluated()),
+        )
+        .try_into()
+        .unwrap();
+        reply_with(request, response)
+    }
+
     fn authorized_response(request: &TrustTask<Value>, authorized: bool) -> TrustTask<Value> {
-        let payload = serde_json::json!({
-            "entityId": request.payload["entityId"],
-            "authorityId": request.payload["authorityId"],
-            "action": request.payload["action"],
-            "resource": request.payload["resource"],
-            "authorized": authorized,
-            "evaluatedAt": "2026-07-16T00:00:00Z",
-        });
-        request.respond_with("urn:uuid:reply".to_string(), payload)
+        authorization_answer(request, authorized, |b| b)
     }
 
     fn query() -> TrqpQuery {
@@ -695,9 +781,7 @@ mod tests {
     async fn wrong_response_type_is_a_contract_error() {
         let client = client_over(|req| {
             let mut reply = authorized_response(&req, true);
-            reply.type_uri = "https://trusttasks.org/spec/registry/recognition/0.1#response"
-                .parse()
-                .unwrap();
+            reply.type_uri = v0_1::RecognitionResponse::type_uri();
             Ok(reply)
         });
         let err = client.authorization(query()).await.unwrap_err();
@@ -708,6 +792,7 @@ mod tests {
     async fn malformed_response_payload_is_a_contract_error_not_transport() {
         let client = client_over(|req| {
             // `authorized` missing: the strict payload must fail to parse.
+            // Raw JSON: a payload the generated response type cannot express.
             let payload = serde_json::json!({ "unexpected": true });
             Ok(req.respond_with("urn:uuid:reply".to_string(), payload))
         });
@@ -718,17 +803,7 @@ mod tests {
 
     #[tokio::test]
     async fn recognition_parses_recognized_flag() {
-        let client = client_over(|req| {
-            let payload = serde_json::json!({
-                "entityId": req.payload["entityId"],
-                "authorityId": req.payload["authorityId"],
-                "action": req.payload["action"],
-                "resource": req.payload["resource"],
-                "recognized": false,
-                "evaluatedAt": "2026-07-16T00:00:00Z",
-            });
-            Ok(req.respond_with("urn:uuid:reply".to_string(), payload))
-        });
+        let client = client_over(|req| Ok(recognition_answer(&req, false, |b| b)));
         let response = client.recognition(query()).await.unwrap();
         assert!(!response.recognized, "absence of trust reads as false");
     }
@@ -755,9 +830,14 @@ mod tests {
         field: &str,
         value: &str,
     ) -> TrustTask<Value> {
-        let mut reply = authorized_response(request, true);
-        reply.payload[field] = Value::String(value.to_string());
-        reply
+        let value = value.to_string();
+        authorization_answer(request, true, |b| match field {
+            "entityId" => b.entity_id(value),
+            "authorityId" => b.authority_id(value),
+            "action" => b.action(value),
+            "resource" => b.resource(value),
+            other => panic!("not a tuple member: {other}"),
+        })
     }
 
     #[tokio::test]
@@ -824,9 +904,9 @@ mod tests {
     #[tokio::test]
     async fn a_denial_must_also_answer_the_question_asked() {
         let client = client_over(|req| {
-            let mut reply = authorized_response(&req, false);
-            reply.payload["authorityId"] = Value::String("did:example:other".to_string());
-            Ok(reply)
+            Ok(authorization_answer(&req, false, |b| {
+                b.authority_id("did:example:other")
+            }))
         });
         let err = client.authorization(query()).await.unwrap_err();
         assert!(
@@ -838,15 +918,9 @@ mod tests {
     #[tokio::test]
     async fn recognition_answers_are_checked_too() {
         let client = client_over(|req| {
-            let payload = serde_json::json!({
-                "entityId": req.payload["entityId"],
-                "authorityId": "did:example:other",
-                "action": req.payload["action"],
-                "resource": req.payload["resource"],
-                "recognized": true,
-                "evaluatedAt": "2026-07-16T00:00:00Z",
-            });
-            Ok(req.respond_with("urn:uuid:reply".to_string(), payload))
+            Ok(recognition_answer(&req, true, |b| {
+                b.authority_id("did:example:other")
+            }))
         });
         let err = client.recognition(query()).await.unwrap_err();
         assert!(
@@ -862,6 +936,8 @@ mod tests {
     async fn omitted_tuple_member_is_a_contract_error_not_a_mismatch() {
         let client = client_over(|req| {
             let mut reply = authorized_response(&req, true);
+            // Raw JSON: a payload missing a required member, which the
+            // generated response type cannot express.
             reply
                 .payload
                 .as_object_mut()
@@ -931,19 +1007,13 @@ mod tests {
                     message: None,
                 });
             }
-            let payload = serde_json::json!({
-                "entity_id": req.payload["entity_id"],
-                "authority_id": if authority_answered.is_empty() {
-                    req.payload["authority_id"].clone()
+            Ok(authorization_answer_v0_1(&req, |b| {
+                if authority_answered.is_empty() {
+                    b
                 } else {
-                    Value::String(authority_answered.to_string())
-                },
-                "action": req.payload["action"],
-                "resource": req.payload["resource"],
-                "authorized": true,
-                "time_evaluated": "2026-07-16T00:00:00Z",
-            });
-            Ok(req.respond_with("urn:uuid:reply".to_string(), payload))
+                    b.authority_id(authority_answered)
+                }
+            }))
         })
     }
 
@@ -1039,6 +1109,7 @@ mod tests {
                     serde_json::from_str(schema).expect("schema is JSON");
                 assert!(schema.is_object(), "{uri}: schema is not an object");
             }
+            // Raw JSON: a non-object, which no generated type can express.
             assert!(
                 serde_json::from_value::<Resp>(serde_json::json!("not a payload")).is_err(),
                 "{uri}: response type accepted a non-object"
@@ -1068,10 +1139,15 @@ mod tests {
         "2026-01-01T00:00:00Z".parse().unwrap()
     }
 
-    /// A 0.2 answer echoing `as_of` (or none, for `Value::Null` removed).
+    /// A 0.2 answer echoing `as_of` (or none).
     fn answer_as_of(request: &TrustTask<Value>, as_of: Option<&str>) -> TrustTask<Value> {
-        let mut reply = authorized_response(request, true);
-        if let Some(as_of) = as_of {
+        let mut reply = authorization_answer(request, true, |b| b.as_of(as_of.map(instant)));
+        // Raw JSON: the generated type writes one canonical spelling of an
+        // instant (`Z`); these tests are about the spelling of the echo (an
+        // offset of `+00:00`), so the exact string goes on the wire.
+        if let Some(as_of) = as_of
+            && reply.payload["asOf"] != as_of
+        {
             reply.payload["asOf"] = Value::String(as_of.to_string());
         }
         reply
@@ -1120,10 +1196,9 @@ mod tests {
         assert!(!err.is_retryable());
 
         let client = client_over(|req| {
-            let mut reply = answer_as_of(&req, Some("2025-12-31T23:59:59Z"));
-            reply.payload["recognized"] = Value::Bool(true);
-            reply.payload.as_object_mut().unwrap().remove("authorized");
-            Ok(reply)
+            Ok(recognition_answer(&req, true, |b| {
+                b.as_of(Some(instant("2025-12-31T23:59:59Z")))
+            }))
         });
         assert!(matches!(
             client.recognition(query().at(asked_time())).await,
@@ -1183,18 +1258,9 @@ mod tests {
                     });
                 }
                 assert_eq!(req.payload["context"]["time"], "2026-01-01T00:00:00Z");
-                let mut payload = serde_json::json!({
-                    "entity_id": req.payload["entity_id"],
-                    "authority_id": req.payload["authority_id"],
-                    "action": req.payload["action"],
-                    "resource": req.payload["resource"],
-                    "authorized": true,
-                    "time_evaluated": "2026-07-16T00:00:00Z",
-                });
-                if let Some(echoed) = echoed {
-                    payload["time_requested"] = Value::String(echoed.to_string());
-                }
-                Ok(req.respond_with("urn:uuid:reply".to_string(), payload))
+                Ok(authorization_answer_v0_1(&req, |b| {
+                    b.time_requested(echoed.map(instant))
+                }))
             });
             let result = client.authorization(query().at(asked_time())).await;
             if ok {

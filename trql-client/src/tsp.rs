@@ -324,17 +324,26 @@ mod tests {
 
     #[test]
     fn envelope_round_trips() {
+        use crate::payloads::v0_1::AuthorizationRequest;
+        use trust_tasks_rs::Payload as _;
+        let request: AuthorizationRequest = AuthorizationRequest::builder()
+            .entity_id("did:example:e")
+            .authority_id("did:example:a")
+            .action("issue")
+            .resource("vc")
+            .try_into()
+            .unwrap();
         let doc = TrustTask::new(
             "urn:uuid:1".to_string(),
-            "https://trusttasks.org/spec/registry/authorization/0.1"
-                .parse()
-                .unwrap(),
-            serde_json::json!({"entity_id": "did:example:e"}),
+            AuthorizationRequest::type_uri(),
+            serde_json::to_value(request).unwrap(),
         );
         let bytes = build_envelope(&doc).unwrap();
         let parsed = parse_envelope(&bytes).unwrap();
         assert_eq!(parsed.id, "urn:uuid:1");
-        assert_eq!(parsed.payload["entity_id"], "did:example:e");
+        assert_eq!(parsed.type_uri, AuthorizationRequest::type_uri());
+        let payload: AuthorizationRequest = serde_json::from_value(parsed.payload).unwrap();
+        assert_eq!(payload.entity_id, "did:example:e");
     }
 
     /// Another VID that knows the request id and echoes the asked tuple does
@@ -374,6 +383,8 @@ mod tests {
 
     #[test]
     fn wrong_envelope_type_is_rejected() {
+        // Raw JSON: a binding envelope of another type, which is the input
+        // under test (and trust-tasks-tsp exposes no envelope type).
         let bytes = serde_json::to_vec(
             &serde_json::json!({ "type": "https://example.org/other", "document": {} }),
         )

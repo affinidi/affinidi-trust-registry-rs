@@ -582,6 +582,8 @@ mod tests {
     #[test]
     fn a_malformed_envelope_is_deleted_as_poison() {
         let pending = PendingReplies::new();
+        // Raw JSON: a body that is not a Trust Task document is the input
+        // under test.
         let msg = Message::build(
             "urn:uuid:envelope".to_string(),
             ENVELOPE_TYPE.to_string(),
