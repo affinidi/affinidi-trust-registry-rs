@@ -28,7 +28,6 @@ use affinidi_did_common::scid::strip_scid_src;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 use trust_tasks_rs::{Dispatcher, ErrorResponse, Payload, RejectReason, TrustTask};
 use uuid::Uuid;
@@ -45,7 +44,7 @@ use super::payloads::{
     AuthorizationRequest, AuthorizationResponse, AuthorizationResponseMessage, RecognitionRequest,
     RecognitionResponse, RecognitionResponseMessage, RecordDeleteRequest, RecordDeleteResponse,
     RecordPutRequest, RecordPutResponse, RecordQueryRequest, RecordQueryResponse, camel,
-    query_as_written, query_of, record_from_v1, record_from_v2, record_to_v1, record_to_v2,
+    query_as_written, query_of,
 };
 
 /// Default `registry/record/query` page size when the request names none.
@@ -429,7 +428,7 @@ trait PutWire: Payload + Send + 'static {
 /// replaces any window the stored record had.
 impl PutWire for RecordPutRequest {
     fn record(&self) -> Result<TrustRecord, String> {
-        record_from_v1(&self.record)
+        TrustRecord::try_from(&self.record)
     }
     fn expected_existing(&self) -> Option<bool> {
         self.expected_existing
@@ -448,7 +447,7 @@ impl PutWire for RecordPutRequest {
 /// refused as `malformedRequest`.
 impl PutWire for camel::RecordPutRequest {
     fn record(&self) -> Result<TrustRecord, String> {
-        record_from_v2(&self.record)
+        TrustRecord::try_from(&self.record)
     }
     fn expected_existing(&self) -> Option<bool> {
         self.expected_existing
@@ -670,20 +669,21 @@ enum QueryFailure {
 /// One version of `registry/record/query`.
 trait QueryWire: Payload + Send + 'static {
     /// The record in this version's wire form.
-    type Record: DeserializeOwned;
+    type Record: for<'a> From<&'a TrustRecord>;
     fn filter(&self) -> RecordFilter<'_>;
-    fn to_wire(record: &TrustRecord) -> Result<Self::Record, String>;
     fn response(
         records: Vec<Self::Record>,
         next_cursor: Option<String>,
     ) -> Result<impl Serialize, String>;
 }
 
-/// [`QueryWire`] for one version. `$to_wire` is the record mapping: 0.1
-/// records have no validity window, so a stored window is left out of the
-/// answer; 0.3 records are lowerCamelCase, window included.
+/// [`QueryWire`] for one version. `$record` is that version's generated
+/// record, mapped from the domain record by its `From<&TrustRecord>`
+/// ([`super::payloads`]): 0.1 records have no validity window, so a stored
+/// window is left out of the answer; 0.3 records are lowerCamelCase, window
+/// included.
 macro_rules! query_wire {
-    ($req:ty, $resp:ty, $record:ty, $to_wire:ident) => {
+    ($req:ty, $resp:ty, $record:ty) => {
         impl QueryWire for $req {
             type Record = $record;
             fn filter(&self) -> RecordFilter<'_> {
@@ -695,9 +695,6 @@ macro_rules! query_wire {
                     cursor: self.cursor.as_deref(),
                     limit: self.limit.map(|l| l.get()),
                 }
-            }
-            fn to_wire(record: &TrustRecord) -> Result<Self::Record, String> {
-                $to_wire(record)
             }
             fn response(
                 records: Vec<Self::Record>,
@@ -716,14 +713,12 @@ macro_rules! query_wire {
 query_wire!(
     RecordQueryRequest,
     RecordQueryResponse,
-    crate::specs::registry::record::query::v0_1::TrustRecord,
-    record_to_v1
+    crate::specs::registry::record::query::v0_1::TrustRecord
 );
 query_wire!(
     camel::RecordQueryRequest,
     camel::RecordQueryResponse,
-    crate::specs::registry::record::query::v0_3::TrustRecord,
-    record_to_v2
+    crate::specs::registry::record::query::v0_3::TrustRecord
 );
 
 async fn handle_query<R, P>(repository: Arc<R>, doc: TrustTask<P>) -> TaskOutcome
@@ -737,11 +732,7 @@ where
             QueryFailure::Repository(e) => reject_repo_err(&doc, e),
             QueryFailure::Rejected(reason) => doc.reject_with(new_id(), reason),
         })?;
-    let records = page
-        .iter()
-        .map(P::to_wire)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|reason| doc.reject_with(new_id(), RejectReason::InternalError { reason }))?;
+    let records = page.iter().map(P::Record::from).collect();
     let response = P::response(records, next_cursor).map_err(|e| reject_build_err(&doc, e))?;
     respond(&doc, response)
 }
@@ -1052,7 +1043,7 @@ mod tests {
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
             ext: None,
-            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
+            record: (&sample_record()).into(),
             expected_existing: None,
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
@@ -1072,7 +1063,7 @@ mod tests {
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
             ext: None,
-            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
+            record: (&sample_record()).into(),
             expected_existing: None,
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
@@ -1093,7 +1084,7 @@ mod tests {
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
             ext: None,
-            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
+            record: (&sample_record()).into(),
             expected_existing: Some(false),
         });
         let out = handle_document(&dispatcher, doc).await;
@@ -1107,7 +1098,7 @@ mod tests {
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
             ext: None,
-            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
+            record: (&sample_record()).into(),
             expected_existing: Some(true),
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
@@ -1336,7 +1327,7 @@ mod tests {
         let dispatcher = build_query_dispatcher(repo);
         let doc = value_doc(RecordPutRequest {
             ext: None,
-            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
+            record: (&sample_record()).into(),
             expected_existing: None,
         });
         let out = handle_document(&dispatcher, doc).await;

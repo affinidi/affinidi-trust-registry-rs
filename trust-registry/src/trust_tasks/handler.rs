@@ -249,10 +249,9 @@ impl AuditContext {
                 None => builder.build_success(),
             },
             (_, Err(error)) => {
-                let code = serde_json::to_value(&error.payload.code)
-                    .ok()
-                    .and_then(|code| code.as_str().map(str::to_string))
-                    .filter(|code| !code.is_empty());
+                // The wire spelling (`Display` is what `TrustTaskCode`
+                // serialises as).
+                let code = Some(error.payload.code.to_string()).filter(|code| !code.is_empty());
                 let unauthorized = !proven
                     || matches!(
                         code.as_deref(),

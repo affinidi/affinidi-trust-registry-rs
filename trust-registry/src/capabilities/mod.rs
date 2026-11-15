@@ -41,7 +41,7 @@
 // router allows this lint for the same reason.
 #![allow(clippy::result_large_err)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -58,7 +58,6 @@ use trust_tasks_rs::{Dispatcher, Payload as _, RejectReason, TrustTask, TypeUri}
 
 use crate::domain::normalise_reference;
 use crate::trust_tasks::descriptor::{TaskError, spec_error};
-use crate::trust_tasks::payloads::reserialize;
 use crate::trust_tasks::proof::requires_proof;
 use crate::trust_tasks::router::{new_id, reject_build_err, respond};
 use crate::trust_tasks::{RegistryDispatcher, TaskFuture, TaskOutcome};
@@ -1097,12 +1096,100 @@ async fn handle_disable(
 
 /// One entry of the list response's `ext.`[`EXT_NAMESPACE`]`.entries`, which
 /// says which enablement `capabilities[i]` is: the list specification's
-/// entries have no member for it.
+/// entries have no member for it. A vendor extension: SPEC §4.5.1 leaves the
+/// structure under a namespace to its owner, so no generated type exists.
 #[derive(Serialize)]
 struct ListedEntry {
     capability: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     authority: Option<String>,
+}
+
+/// The value of the list response's `ext.`[`EXT_NAMESPACE`] (see
+/// [`ListedEntry`]).
+#[derive(Serialize)]
+struct ListedExt {
+    entries: Vec<ListedEntry>,
+}
+
+/// The list specification carries its own generated copy of the shared
+/// `governance/_shared` `CapabilityManifest`; the two copies are the same
+/// schema, so every member maps across unchanged. The string members are
+/// re-validated by the list copy's own constraints (identical to the enable
+/// copy's), hence `TryFrom`.
+impl TryFrom<&enable_spec::CapabilityManifest> for list_spec::CapabilityManifest {
+    type Error = String;
+
+    fn try_from(m: &enable_spec::CapabilityManifest) -> Result<Self, String> {
+        use enable_spec::CapabilityManifestConsentClassValue as From;
+        use list_spec::CapabilityManifestConsentClassValue as To;
+        let text = |e: list_spec::error::ConversionError| e.to_string();
+        let consent_class = m
+            .consent_class
+            .iter()
+            .map(|(operation, class)| {
+                let class = match class {
+                    From::Normal => To::Normal,
+                    From::Elevated => To::Elevated,
+                    From::Destructive => To::Destructive,
+                };
+                (operation.clone(), class)
+            })
+            .collect();
+        let ext = m
+            .ext
+            .as_ref()
+            .map(|ext| {
+                ext.iter()
+                    .map(|(key, value)| {
+                        Ok((
+                            list_spec::ExtKey::try_from(key.as_str()).map_err(text)?,
+                            value.clone(),
+                        ))
+                    })
+                    .collect::<Result<HashMap<_, _>, String>>()
+                    .map(list_spec::Ext::from)
+            })
+            .transpose()?;
+        Ok(Self {
+            capability: m.capability.as_str().try_into().map_err(text)?,
+            config_schema: m.config_schema.clone(),
+            consent_class,
+            description: m
+                .description
+                .as_ref()
+                .map(|d| d.as_str().try_into())
+                .transpose()
+                .map_err(text)?,
+            ext,
+            external_adapters: m
+                .external_adapters
+                .iter()
+                .map(
+                    |adapter| list_spec::CapabilityManifestExternalAdaptersItem {
+                        kind: adapter.kind.clone(),
+                        ref_: adapter.ref_.clone(),
+                    },
+                )
+                .collect(),
+            lifecycle_hooks: m.lifecycle_hooks.clone(),
+            roles: m.roles.clone(),
+            specs: m.specs.clone(),
+            title: m
+                .title
+                .as_ref()
+                .map(|t| t.as_str().try_into())
+                .transpose()
+                .map_err(text)?,
+            version: m.version.as_str().try_into().map_err(text)?,
+            vocabulary: m.vocabulary.as_ref().map(|vocabulary| {
+                list_spec::CapabilityManifestVocabulary {
+                    actions: vocabulary.actions.clone(),
+                    resource_pattern: vocabulary.resource_pattern.clone(),
+                }
+            }),
+        })
+    }
 }
 
 async fn handle_list(
@@ -1135,9 +1222,8 @@ async fn handle_list(
         if !enabled && listed.state.is_some() {
             continue;
         }
-        // The list spec carries its own copy of the shared manifest type.
-        let manifest: list_spec::CapabilityManifest =
-            reserialize(&listed.manifest).map_err(|e| reject_build_err(&doc, e))?;
+        let manifest = list_spec::CapabilityManifest::try_from(&listed.manifest)
+            .map_err(|e| reject_build_err(&doc, e))?;
         let enabled_at = listed
             .state
             .as_ref()
@@ -1155,10 +1241,11 @@ async fn handle_list(
                 .try_into();
         entries.push(entry.map_err(|e| reject_build_err(&doc, e))?);
     }
-    let ext: list_spec::Ext = reserialize(&serde_json::json!({
-        EXT_NAMESPACE: { "entries": described }
-    }))
-    .map_err(|e| reject_build_err(&doc, e))?;
+    let namespace =
+        list_spec::ExtKey::try_from(EXT_NAMESPACE).map_err(|e| reject_build_err(&doc, e))?;
+    let entries_ext = serde_json::to_value(ListedExt { entries: described })
+        .map_err(|e| reject_build_err(&doc, e))?;
+    let ext = list_spec::Ext::from(HashMap::from([(namespace, entries_ext)]));
     let response: Result<list_spec::Response, _> = list_spec::Response::builder()
         .capabilities(entries)
         .ext(Some(ext))
