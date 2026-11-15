@@ -48,6 +48,10 @@ exceptions = [
     # file-level copyleft and we link it unmodified, so it does not reach our
     # own sources.
     { allow = ["MPL-2.0"], crate = "option-ext" },
+    # psm 0.1.32's build dependency (psm <- pest_stack_guard <- pest), new with
+    # the dependency update. Apache-2.0 with the LLVM linking exception, which
+    # only relaxes Apache-2.0's attribution terms for embedded code.
+    { allow = ["Apache-2.0 WITH LLVM-exception"], crate = "ar_archive_writer" },
 ]
 
 # Sigh
