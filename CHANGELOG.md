@@ -27,11 +27,17 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   needs vti-secrets 0.38), `vta-sdk` 0.80 → 0.89, `affinidi-tdk` 0.37.6,
   `affinidi-messaging-sdk` 0.45.17, `affinidi-messaging-core` 0.1.14 and the
   `trust-tasks-*` crates 0.37.15 (`trust-tasks-build` 0.1.4).
-  `affinidi-did-common` is capped below 0.4.7, whose public key types moved to
-  affinidi-crypto 0.3 and no longer match the 0.2 the rest of the family is
-  built on (trust-tasks-proof stops compiling); the lockfile likewise holds
-  `affinidi-messaging-didcomm` at 0.15.13 and `affinidi-secrets-resolver` at
-  0.5.17 for the same reason. Every other dependency is at its latest release.
+  Three crates are capped, in the workspace and directly by `trust-registry`
+  and (with `didcomm`/`tsp`) `trql-client`: `affinidi-did-common`
+  `>=0.4.5, <0.4.7`, `affinidi-messaging-didcomm` `>=0.15.9, <0.15.14` and
+  `affinidi-secrets-resolver` `>=0.5.15, <0.5.18`. Those patch releases moved
+  their public key types to affinidi-crypto 0.3, which no longer match the 0.2
+  the rest of the family is built on (trust-tasks-proof and
+  affinidi-data-integrity stop compiling); the caps keep a resolve without our
+  lockfile (an embedder, `cargo install`) on a working set. They lift with the
+  move to a family on affinidi-crypto 0.3 (affinidi-tdk 0.45+,
+  affinidi-messaging-sdk 0.47+, trust-tasks 0.39+). Every other dependency is at
+  its latest release.
 - **TRQP identifiers are validated wherever a client supplies one** (#210).
   `EntityId`, `AuthorityId`, `Action` and `Resource` gain `parse` and
   `TryFrom<String>`/`TryFrom<&str>` (non-empty, at most

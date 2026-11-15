@@ -731,14 +731,21 @@ mod tests {
     /// Tasks: never a reply issued by `""` without a proof.
     #[tokio::test]
     async fn without_a_did_trust_tasks_are_not_served() {
-        let task = json!({
-            "id": "req-1",
-            "type": "https://trusttasks.org/spec/registry/recognition/0.1",
-            "payload": {
-                "entity_id": ENTITY, "authority_id": AUTHORITY,
-                "action": "issue", "resource": "vc"
-            }
-        });
+        use crate::trust_tasks::payloads::camel::RecognitionRequest;
+        use trust_tasks_rs::{Payload as _, TrustTask};
+        let payload: RecognitionRequest = RecognitionRequest::builder()
+            .entity_id(ENTITY)
+            .authority_id(AUTHORITY)
+            .action("issue")
+            .resource("vc")
+            .try_into()
+            .expect("valid request");
+        let task = serde_json::to_value(TrustTask::new(
+            "req-1",
+            RecognitionRequest::type_uri(),
+            payload,
+        ))
+        .expect("serialises");
         let got = call(
             app().await,
             Request::post("/trust-tasks")

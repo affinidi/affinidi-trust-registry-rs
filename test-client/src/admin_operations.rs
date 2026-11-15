@@ -32,6 +32,12 @@ pub struct CommonCrudInput {
     /// The admin's secrets; its authentication key signs writes.
     pub secrets: Vec<Secret>,
     pub trust_registry_did: String,
+    /// The record the request is about.
+    pub record: RecordInput,
+}
+
+/// The record key (and type) a request names; builds each request's payload.
+pub struct RecordInput {
     pub entity_id: String,
     pub authority_id: String,
     pub action: String,
@@ -41,7 +47,7 @@ pub struct CommonCrudInput {
 
 type BoxError = Box<dyn std::error::Error>;
 
-impl CommonCrudInput {
+impl RecordInput {
     /// The `registry/record/put/0.3` record at this input's key. `context`, the
     /// record's opaque governance context, must be a JSON object.
     fn record(
@@ -109,7 +115,7 @@ pub async fn create_record(
     authorized: bool,
     context: Option<Value>,
 ) -> Result<String, BoxError> {
-    let payload = input.put(recognized, authorized, context, false)?;
+    let payload = input.record.put(recognized, authorized, context, false)?;
     send_trust_task(&input, payload).await
 }
 
@@ -120,24 +126,24 @@ pub async fn update_record(
     authorized: bool,
     context: Option<Value>,
 ) -> Result<String, BoxError> {
-    let payload = input.put(recognized, authorized, context, true)?;
+    let payload = input.record.put(recognized, authorized, context, true)?;
     send_trust_task(&input, payload).await
 }
 
 pub async fn delete_record(input: CommonCrudInput) -> Result<String, BoxError> {
-    let payload = input.delete()?;
+    let payload = input.record.delete()?;
     send_trust_task(&input, payload).await
 }
 
 pub async fn read_record(input: CommonCrudInput) -> Result<String, BoxError> {
-    let payload = input.read()?;
+    let payload = input.record.read()?;
     send_trust_task(&input, payload).await
 }
 
 /// List the records held under the input's authority.
 pub async fn list_records(input: CommonCrudInput) -> Result<String, BoxError> {
     let payload: query::Payload = query::Payload::builder()
-        .authority_id(Some(input.authority_id.clone()))
+        .authority_id(Some(input.record.authority_id.clone()))
         .try_into()?;
     send_trust_task(&input, payload).await
 }
@@ -350,27 +356,45 @@ mod tests {
     /// The requests the demo sends keep their wire form (R3.6).
     #[test]
     fn requests_keep_their_wire_form() {
-        let record: put::TrustRecord = put::TrustRecord::builder()
-            .entity_id("did:example:entity")
-            .authority_id("did:example:authority")
-            .action("issue")
-            .resource("vc")
-            .recognized(Some(true))
-            .authorized(Some(false))
-            .record_type(put::RecordType::Authorization)
-            .try_into()
-            .unwrap();
-        let put: put::Payload = put::Payload::builder()
-            .record(record)
-            .expected_existing(Some(false))
-            .try_into()
-            .unwrap();
+        let input = RecordInput {
+            entity_id: "did:example:entity".to_string(),
+            authority_id: "did:example:authority".to_string(),
+            action: "issue".to_string(),
+            resource: "vc".to_string(),
+            record_type: "authorization".to_string(),
+        };
+        // No context: none on the wire, as the hand-built body (which set it
+        // only when given) also did.
+        let put = input.put(true, false, None, false).unwrap();
         assert_eq!(
             serde_json::to_string(&put).unwrap(),
             r#"{"expectedExisting":false,"record":{"action":"issue","authorityId":"did:example:authority","authorized":false,"entityId":"did:example:entity","recognized":true,"recordType":"authorization","resource":"vc"}}"#
         );
+        // An empty context is now omitted too (the hand-built body sent
+        // `"context":{}`); the registry reads an absent and an empty context
+        // alike.
+        let put = input
+            .put(true, false, Some(serde_json::json!({})), true)
+            .unwrap();
+        assert!(!serde_json::to_string(&put).unwrap().contains("context"));
+        let with_context = input
+            .put(
+                true,
+                false,
+                Some(serde_json::json!({ "tier": "gold" })),
+                true,
+            )
+            .unwrap();
         assert_eq!(
-            serde_json::to_string(&request().payload).unwrap(),
+            serde_json::to_value(&with_context).unwrap()["record"]["context"],
+            serde_json::json!({ "tier": "gold" })
+        );
+        assert_eq!(
+            serde_json::to_string(&input.delete().unwrap()).unwrap(),
+            r#"{"action":"issue","authorityId":"did:example:authority","entityId":"did:example:entity","resource":"vc"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&input.read().unwrap()).unwrap(),
             r#"{"action":"issue","authorityId":"did:example:authority","entityId":"did:example:entity","resource":"vc"}"#
         );
     }

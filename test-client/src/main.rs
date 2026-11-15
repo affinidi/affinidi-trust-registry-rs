@@ -18,8 +18,8 @@ use serde_json::json;
 
 use crate::{
     admin_operations::{
-        CommonCrudInput, Reply, await_reply, create_record, delete_record, list_records,
-        read_record, update_record,
+        CommonCrudInput, RecordInput, Reply, await_reply, create_record, delete_record,
+        list_records, read_record, update_record,
     },
     service_configs::{ADMIN_ALIAS, UserConfig, load_user_config},
 };
@@ -201,11 +201,13 @@ async fn main() -> Result<()> {
         profile: Arc::clone(&profile),
         trust_registry_did: trust_registry_did.clone(),
         secrets: did_config.secrets.clone(),
-        entity_id: entity_id.to_string(),
-        authority_id: did.clone(),
-        action: action.to_string(),
-        resource: resource.to_string(),
-        record_type: "authorization".to_string(),
+        record: RecordInput {
+            entity_id: entity_id.to_string(),
+            authority_id: did.clone(),
+            action: action.to_string(),
+            resource: resource.to_string(),
+            record_type: "authorization".to_string(),
+        },
     };
     let record = || input("did:example:entity123", "action_xyz", "resource_abc");
 

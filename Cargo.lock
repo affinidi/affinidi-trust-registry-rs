@@ -7069,8 +7069,11 @@ dependencies = [
 name = "trql-client"
 version = "0.32.0"
 dependencies = [
+ "affinidi-did-common",
  "affinidi-messaging-core",
+ "affinidi-messaging-didcomm",
  "affinidi-messaging-sdk",
+ "affinidi-secrets-resolver",
  "affinidi-tdk",
  "async-trait",
  "axum",
@@ -7098,7 +7101,9 @@ version = "0.32.0"
 dependencies = [
  "affinidi-did-common",
  "affinidi-messaging-core",
+ "affinidi-messaging-didcomm",
  "affinidi-messaging-sdk",
+ "affinidi-secrets-resolver",
  "affinidi-tdk",
  "anyhow",
  "async-trait",
