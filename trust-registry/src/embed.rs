@@ -692,6 +692,7 @@ mod tests {
         let registry = registry().await;
         let outcome = registry
             .route_didcomm_envelope(
+                // Raw JSON: a body that is not a Trust Task document at all.
                 serde_json::json!({"not": "a trust task"}),
                 "did:example:peer",
             )
@@ -904,11 +905,15 @@ mod tests {
     /// `registry/record/query` delivered twice is answered from the replay
     /// record the second time, not executed again. Before, each call built a
     /// handler with an empty record of its own, so the redelivery re-ran.
+    // `deprecated`: the superseded 0.1 query, as the test always sent.
+    #[allow(deprecated)]
     #[tokio::test]
     async fn task_handlers_share_one_query_replay_record() {
         use crate::domain::*;
         use crate::storage::repository::TrustRecordQuery;
+        use crate::trust_tasks::payloads::{RecordQueryRequest, RecordQueryResponse};
         use trust_tasks_proof::affinidi::{SignOptions, sign_trust_task};
+        use trust_tasks_rs::Payload as _;
 
         const ME: &str = "did:example:registry";
         let (key, admin) = did_key(7);
@@ -939,16 +944,20 @@ mod tests {
             .await
             .expect("builds");
 
-        let unsigned = serde_json::json!({
-            "id": format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-            "type": "https://trusttasks.org/spec/registry/record/query/0.1",
-            "issuer": admin,
-            "recipient": ME,
-            "issuedAt": chrono::Utc::now(),
-            "payload": { "authority_id": admin },
-        });
+        let query: RecordQueryRequest = RecordQueryRequest::builder()
+            .authority_id(Some(admin.clone()))
+            .try_into()
+            .expect("valid query");
+        let mut unsigned = trust_tasks_rs::TrustTask::new(
+            format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+            RecordQueryRequest::type_uri(),
+            query,
+        );
+        unsigned.issuer = Some(admin.clone());
+        unsigned.recipient = Some(ME.to_string());
+        unsigned.issued_at = Some(chrono::Utc::now());
         let signed = sign_trust_task(
-            &unsigned,
+            &serde_json::to_value(&unsigned).expect("serialises"),
             &key,
             SignOptions::new().with_proof_purpose(crate::trust_tasks::proof::WRITE_PROOF_PURPOSE),
         )
@@ -957,7 +966,9 @@ mod tests {
         let doc: trust_tasks_rs::TrustTask<serde_json::Value> =
             serde_json::from_value(signed).expect("parses");
         let records = |response: trust_tasks_rs::TrustTask<serde_json::Value>| {
-            response.payload["records"].as_array().map(Vec::len)
+            serde_json::from_value::<RecordQueryResponse>(response.payload)
+                .ok()
+                .map(|answer| answer.records.len())
         };
 
         let first = registry

@@ -251,9 +251,8 @@ mod tests {
         let (first, second) = (replica().await, replica().await);
         let mut doc = trust_tasks_rs::TrustTask::new(
             uuid::Uuid::new_v4().to_string(),
-            "https://trusttasks.org/spec/registry/record/put/0.1"
-                .parse()
-                .expect("type uri"),
+            <crate::trust_tasks::payloads::camel::RecordPutRequest as trust_tasks_rs::Payload>::type_uri(),
+            // Raw JSON: an opaque payload; the store never reads it.
             serde_json::json!({ "n": 1 }),
         );
         doc.issuer = Some("did:example:replicas".to_string());

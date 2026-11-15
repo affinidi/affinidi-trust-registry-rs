@@ -659,9 +659,8 @@ mod tests {
         let outcome = StoredOutcome::Rejected(
             trust_tasks_rs::TrustTask::new(
                 "1".to_string(),
-                "https://trusttasks.org/spec/registry/record/put/0.1"
-                    .parse()
-                    .expect("type uri"),
+                <crate::trust_tasks::payloads::camel::RecordPutRequest as trust_tasks_rs::Payload>::type_uri(),
+                // Raw JSON: an opaque payload; the store never reads it.
                 serde_json::json!({}),
             )
             .reject_with("e".to_string(), trust_tasks_rs::RejectReason::IdConflict),

@@ -375,9 +375,46 @@ mod tests {
         .unwrap()
     }
 
-    fn task(uri: trust_tasks_rs::TypeUri, payload: Value) -> TrustTask<Value> {
-        TrustTask::new(new_id(), uri, payload)
+    /// A document carrying `payload`, typed by its generated payload type.
+    fn task<P: trust_tasks_rs::Payload + serde::Serialize>(payload: P) -> TrustTask<Value> {
+        TrustTask::new(
+            new_id(),
+            P::type_uri(),
+            serde_json::to_value(payload).expect("payload serialises"),
+        )
     }
+
+    fn grant(subject: &str, resource: &str) -> TrustTask<Value> {
+        let payload: grant_spec::Payload = grant_spec::Payload::builder()
+            .subject(subject)
+            .resource(resource)
+            .try_into()
+            .expect("valid grant");
+        task(payload)
+    }
+
+    fn revoke(subject: &str, resource: &str) -> TrustTask<Value> {
+        let payload: revoke_spec::Payload = revoke_spec::Payload::builder()
+            .subject(subject)
+            .resource(resource)
+            .try_into()
+            .expect("valid revoke");
+        task(payload)
+    }
+
+    fn granted(out: TrustTask<Value>) -> bool {
+        serde_json::from_value::<grant_spec::Response>(out.payload)
+            .expect("a grant response")
+            .granted
+    }
+
+    fn revoked(out: TrustTask<Value>) -> bool {
+        serde_json::from_value::<revoke_spec::Response>(out.payload)
+            .expect("a revoke response")
+            .revoked
+    }
+
+    const REPO: &str = "openvtc/openvtc";
 
     async fn dispatch(
         set: &CapabilitySet,
@@ -394,20 +431,19 @@ mod tests {
     }
 
     async fn authorized(set: &CapabilitySet, resource: &str) -> bool {
-        let out = dispatch(
-            set,
-            false,
-            task(
-                authz::Payload::type_uri(),
-                serde_json::json!({
-                    "entity_id": SIGNER, "authority_id": AUTHORITY,
-                    "action": ACTION, "resource": resource
-                }),
-            ),
-        )
-        .await
-        .expect("authorization query answers");
-        out.payload["authorized"] == serde_json::json!(true)
+        let query: authz::Payload = authz::Payload::builder()
+            .entity_id(SIGNER)
+            .authority_id(AUTHORITY)
+            .action(ACTION)
+            .resource(resource)
+            .try_into()
+            .expect("valid authorization query");
+        let out = dispatch(set, false, task(query))
+            .await
+            .expect("authorization query answers");
+        serde_json::from_value::<authz::Response>(out.payload)
+            .expect("an authorization response")
+            .authorized
     }
 
     #[tokio::test]
@@ -426,57 +462,36 @@ mod tests {
         .unwrap();
 
         // Grant over the wire → TRQP answers true.
-        let out = dispatch(
-            &set,
-            true,
-            task(
-                grant_spec::Payload::type_uri(),
-                serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
-            ),
-        )
-        .await
-        .expect("grant succeeds");
-        assert_eq!(out.payload["granted"], serde_json::json!(true));
+        let out = dispatch(&set, true, grant(SIGNER, REPO))
+            .await
+            .expect("grant succeeds");
+        assert!(granted(out));
         assert!(authorized(&set, "openvtc/openvtc").await);
 
         // Duplicate grant rejects.
         assert_eq!(
-            refusal(&set, grant_spec::Payload::type_uri()).await,
+            refusal(&set, grant(SIGNER, REPO)).await,
             ("git-trust/grant:alreadyGranted".to_string(), false)
         );
 
         // Revoke → TRQP answers false (record retained, not deleted).
-        let out = dispatch(
-            &set,
-            true,
-            task(
-                revoke_spec::Payload::type_uri(),
-                serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
-            ),
-        )
-        .await
-        .expect("revoke succeeds");
-        assert_eq!(out.payload["revoked"], serde_json::json!(true));
+        let out = dispatch(&set, true, revoke(SIGNER, REPO))
+            .await
+            .expect("revoke succeeds");
+        assert!(revoked(out));
         assert!(!authorized(&set, "openvtc/openvtc").await);
 
         // A second revoke finds no active grant.
         assert_eq!(
-            refusal(&set, revoke_spec::Payload::type_uri()).await,
+            refusal(&set, revoke(SIGNER, REPO)).await,
             ("git-trust/revoke:notGranted".to_string(), false)
         );
 
         // Granting again after a revoke authorizes the retained record.
-        let out = dispatch(
-            &set,
-            true,
-            task(
-                grant_spec::Payload::type_uri(),
-                serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
-            ),
-        )
-        .await
-        .expect("a revoked grant can be granted again");
-        assert_eq!(out.payload["granted"], serde_json::json!(true));
+        let out = dispatch(&set, true, grant(SIGNER, REPO))
+            .await
+            .expect("a revoked grant can be granted again");
+        assert!(granted(out));
         assert!(authorized(&set, "openvtc/openvtc").await);
     }
 
@@ -493,17 +508,18 @@ mod tests {
         )
         .await
         .unwrap();
-        for (subject, resource) in [(SIGNER, "has spaces <x>"), ("not a did <x>", "repo")] {
-            let err = dispatch(
-                &set,
-                true,
-                task(
-                    grant_spec::Payload::type_uri(),
-                    serde_json::json!({ "subject": subject, "resource": resource }),
-                ),
-            )
-            .await
-            .expect_err("refused");
+        // Raw JSON: `not a did <x>` fails the generated subject pattern, so the
+        // typed builder cannot send it; the point is the registry refusing it.
+        let not_a_did = TrustTask::new(
+            new_id(),
+            grant_spec::Payload::type_uri(),
+            serde_json::json!({ "subject": "not a did <x>", "resource": "repo" }),
+        );
+        for (subject, doc) in [
+            (SIGNER, grant(SIGNER, "has spaces <x>")),
+            ("not a did <x>", not_a_did),
+        ] {
+            let err = dispatch(&set, true, doc).await.expect_err("refused");
             assert_eq!(
                 err.payload.code.to_string(),
                 "malformedRequest",
@@ -515,17 +531,8 @@ mod tests {
 
     /// The code and retry flag a grant or revoke of the test tuple is refused
     /// with.
-    async fn refusal(set: &CapabilitySet, uri: trust_tasks_rs::TypeUri) -> (String, bool) {
-        let err = dispatch(
-            set,
-            true,
-            task(
-                uri,
-                serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
-            ),
-        )
-        .await
-        .expect_err("refused");
+    async fn refusal(set: &CapabilitySet, doc: TrustTask<Value>) -> (String, bool) {
+        let err = dispatch(set, true, doc).await.expect_err("refused");
         (err.payload.code.to_string(), err.payload.retryable)
     }
 
@@ -543,7 +550,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            refusal(&set, revoke_spec::Payload::type_uri()).await,
+            refusal(&set, revoke(SIGNER, REPO)).await,
             ("git-trust/revoke:notGranted".to_string(), false)
         );
     }
@@ -581,16 +588,7 @@ mod tests {
         let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::default());
         let set = set_over(repository);
         assert!(
-            dispatch(
-                &set,
-                true,
-                task(
-                    grant_spec::Payload::type_uri(),
-                    serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
-                ),
-            )
-            .await
-            .is_err(),
+            dispatch(&set, true, grant(SIGNER, REPO),).await.is_err(),
             "off by default"
         );
     }
@@ -651,31 +649,17 @@ mod tests {
         };
 
         assert_eq!(
-            refusal(&set, grant_spec::Payload::type_uri()).await,
+            refusal(&set, grant(SIGNER, REPO)).await,
             ("git-trust/grant:alreadyGranted".to_string(), false)
         );
-        let out = dispatch(
-            &set,
-            true,
-            task(
-                revoke_spec::Payload::type_uri(),
-                serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
-            ),
-        )
-        .await
-        .expect("the legacy grant is revoked");
-        assert_eq!(out.payload["revoked"], serde_json::json!(true));
+        let out = dispatch(&set, true, revoke(SIGNER, REPO))
+            .await
+            .expect("the legacy grant is revoked");
+        assert!(revoked(out));
         assert!(!stored().await);
-        dispatch(
-            &set,
-            true,
-            task(
-                grant_spec::Payload::type_uri(),
-                serde_json::json!({ "subject": SIGNER, "resource": "openvtc/openvtc" }),
-            ),
-        )
-        .await
-        .expect("granted again");
+        dispatch(&set, true, grant(SIGNER, REPO))
+            .await
+            .expect("granted again");
         assert!(stored().await);
     }
 }
