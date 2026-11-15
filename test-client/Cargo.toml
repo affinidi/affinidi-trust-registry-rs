@@ -23,5 +23,9 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 uuid.workspace = true
 
+[build-dependencies]
+# Generates the `specs` module from trust-tasks.lock (see build.rs).
+trust-tasks-build.workspace = true
+
 [lints]
 workspace = true

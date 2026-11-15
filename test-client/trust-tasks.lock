@@ -1,0 +1,21 @@
+# Written by `trust-tasks`. Do not edit by hand.
+version = 1
+registry = "https://trusttasks.org"
+
+[[task]]
+slug = "registry/record/delete"
+version = "0.2"
+type_uri = "https://trusttasks.org/spec/registry/record/delete/0.2"
+digest = "sha256:40b359c9a8823b0815828140a4bf3be1944b686a72f9b01927c64c69bd0b38a1"
+
+[[task]]
+slug = "registry/record/put"
+version = "0.3"
+type_uri = "https://trusttasks.org/spec/registry/record/put/0.3"
+digest = "sha256:a3082fbd2bf0513c95052f38753920adbe10371a076f550944a3c01bef2538d4"
+
+[[task]]
+slug = "registry/record/query"
+version = "0.3"
+type_uri = "https://trusttasks.org/spec/registry/record/query/0.3"
+digest = "sha256:c3e5158ff54ce6c79d3b242d9d2022c01e3c98254b7950a6378511853672f957"

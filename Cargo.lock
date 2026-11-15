@@ -6617,6 +6617,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "trust-tasks-build",
  "trust-tasks-didcomm",
  "trust-tasks-proof",
  "trust-tasks-rs",
