@@ -41,7 +41,7 @@
 // router allows this lint for the same reason.
 #![allow(clippy::result_large_err)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -58,7 +58,6 @@ use trust_tasks_rs::{Dispatcher, Payload as _, RejectReason, TrustTask, TypeUri}
 
 use crate::domain::normalise_reference;
 use crate::trust_tasks::descriptor::{TaskError, spec_error};
-use crate::trust_tasks::payloads::reserialize;
 use crate::trust_tasks::proof::requires_proof;
 use crate::trust_tasks::router::{new_id, reject_build_err, respond};
 use crate::trust_tasks::{RegistryDispatcher, TaskFuture, TaskOutcome};
@@ -1097,12 +1096,100 @@ async fn handle_disable(
 
 /// One entry of the list response's `ext.`[`EXT_NAMESPACE`]`.entries`, which
 /// says which enablement `capabilities[i]` is: the list specification's
-/// entries have no member for it.
+/// entries have no member for it. A vendor extension: SPEC §4.5.1 leaves the
+/// structure under a namespace to its owner, so no generated type exists.
 #[derive(Serialize)]
 struct ListedEntry {
     capability: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     authority: Option<String>,
+}
+
+/// The value of the list response's `ext.`[`EXT_NAMESPACE`] (see
+/// [`ListedEntry`]).
+#[derive(Serialize)]
+struct ListedExt {
+    entries: Vec<ListedEntry>,
+}
+
+/// The list specification carries its own generated copy of the shared
+/// `governance/_shared` `CapabilityManifest`; the two copies are the same
+/// schema, so every member maps across unchanged. The string members are
+/// re-validated by the list copy's own constraints (identical to the enable
+/// copy's), hence `TryFrom`.
+impl TryFrom<&enable_spec::CapabilityManifest> for list_spec::CapabilityManifest {
+    type Error = String;
+
+    fn try_from(m: &enable_spec::CapabilityManifest) -> Result<Self, String> {
+        use enable_spec::CapabilityManifestConsentClassValue as From;
+        use list_spec::CapabilityManifestConsentClassValue as To;
+        let text = |e: list_spec::error::ConversionError| e.to_string();
+        let consent_class = m
+            .consent_class
+            .iter()
+            .map(|(operation, class)| {
+                let class = match class {
+                    From::Normal => To::Normal,
+                    From::Elevated => To::Elevated,
+                    From::Destructive => To::Destructive,
+                };
+                (operation.clone(), class)
+            })
+            .collect();
+        let ext = m
+            .ext
+            .as_ref()
+            .map(|ext| {
+                ext.iter()
+                    .map(|(key, value)| {
+                        Ok((
+                            list_spec::ExtKey::try_from(key.as_str()).map_err(text)?,
+                            value.clone(),
+                        ))
+                    })
+                    .collect::<Result<HashMap<_, _>, String>>()
+                    .map(list_spec::Ext::from)
+            })
+            .transpose()?;
+        Ok(Self {
+            capability: m.capability.as_str().try_into().map_err(text)?,
+            config_schema: m.config_schema.clone(),
+            consent_class,
+            description: m
+                .description
+                .as_ref()
+                .map(|d| d.as_str().try_into())
+                .transpose()
+                .map_err(text)?,
+            ext,
+            external_adapters: m
+                .external_adapters
+                .iter()
+                .map(
+                    |adapter| list_spec::CapabilityManifestExternalAdaptersItem {
+                        kind: adapter.kind.clone(),
+                        ref_: adapter.ref_.clone(),
+                    },
+                )
+                .collect(),
+            lifecycle_hooks: m.lifecycle_hooks.clone(),
+            roles: m.roles.clone(),
+            specs: m.specs.clone(),
+            title: m
+                .title
+                .as_ref()
+                .map(|t| t.as_str().try_into())
+                .transpose()
+                .map_err(text)?,
+            version: m.version.as_str().try_into().map_err(text)?,
+            vocabulary: m.vocabulary.as_ref().map(|vocabulary| {
+                list_spec::CapabilityManifestVocabulary {
+                    actions: vocabulary.actions.clone(),
+                    resource_pattern: vocabulary.resource_pattern.clone(),
+                }
+            }),
+        })
+    }
 }
 
 async fn handle_list(
@@ -1135,9 +1222,8 @@ async fn handle_list(
         if !enabled && listed.state.is_some() {
             continue;
         }
-        // The list spec carries its own copy of the shared manifest type.
-        let manifest: list_spec::CapabilityManifest =
-            reserialize(&listed.manifest).map_err(|e| reject_build_err(&doc, e))?;
+        let manifest = list_spec::CapabilityManifest::try_from(&listed.manifest)
+            .map_err(|e| reject_build_err(&doc, e))?;
         let enabled_at = listed
             .state
             .as_ref()
@@ -1155,10 +1241,11 @@ async fn handle_list(
                 .try_into();
         entries.push(entry.map_err(|e| reject_build_err(&doc, e))?);
     }
-    let ext: list_spec::Ext = reserialize(&serde_json::json!({
-        EXT_NAMESPACE: { "entries": described }
-    }))
-    .map_err(|e| reject_build_err(&doc, e))?;
+    let namespace =
+        list_spec::ExtKey::try_from(EXT_NAMESPACE).map_err(|e| reject_build_err(&doc, e))?;
+    let entries_ext = serde_json::to_value(ListedExt { entries: described })
+        .map_err(|e| reject_build_err(&doc, e))?;
+    let ext = list_spec::Ext::from(HashMap::from([(namespace, entries_ext)]));
     let response: Result<list_spec::Response, _> = list_spec::Response::builder()
         .capabilities(entries)
         .ext(Some(ext))
@@ -1177,12 +1264,43 @@ mod tests {
     use trust_tasks_rs::{Dispatcher, Payload, TrustTask};
 
     fn manifest(slug: &str) -> CapabilityManifest {
-        serde_json::from_value(serde_json::json!({
-            "capability": slug,
-            "version": "0.1",
-            "specs": [format!("{slug}/*")]
-        }))
-        .unwrap()
+        CapabilityManifest::builder()
+            .capability(slug)
+            .version("0.1")
+            .specs(vec![format!("{slug}/*")])
+            .try_into()
+            .unwrap()
+    }
+
+    /// A document carrying `payload`, typed by its generated payload type.
+    fn doc<P: Payload + Serialize>(payload: P) -> TrustTask<Value> {
+        TrustTask::new(
+            new_id(),
+            P::type_uri(),
+            serde_json::to_value(payload).unwrap(),
+        )
+    }
+
+    fn enable_payload(capability: &str, version: &str) -> enable_spec::Payload {
+        enable_spec::Payload::builder()
+            .capability(capability)
+            .version(version)
+            .try_into()
+            .unwrap()
+    }
+
+    fn disable_payload(capability: &str) -> disable_spec::Payload {
+        disable_spec::Payload::builder()
+            .capability(capability)
+            .try_into()
+            .unwrap()
+    }
+
+    fn list_payload(status: Option<list_spec::PayloadStatus>) -> list_spec::Payload {
+        list_spec::Payload::builder()
+            .status(status)
+            .try_into()
+            .unwrap()
     }
 
     /// A capability whose handler answers `registry/recognition` (a type the
@@ -1196,6 +1314,8 @@ mod tests {
                     Box::pin(async move {
                         Ok(doc.respond_with(
                             "urn:uuid:test-reply".to_string(),
+                            // Raw JSON: a test-only capability's marker answer,
+                            // not a registry/recognition response.
                             serde_json::json!({ "handled": true }),
                         ))
                     })
@@ -1258,12 +1378,17 @@ mod tests {
 
     fn recognition_doc() -> TrustTask<Value> {
         use crate::specs::registry::recognition::v0_1 as recognition;
+        let query: recognition::Payload = recognition::Payload::builder()
+            .entity_id("e")
+            .authority_id("a")
+            .action("x")
+            .resource("r")
+            .try_into()
+            .unwrap();
         TrustTask::new(
             "urn:uuid:q".to_string(),
             recognition::Payload::type_uri(),
-            serde_json::json!({
-                "entity_id": "e", "authority_id": "a", "action": "x", "resource": "r"
-            }),
+            serde_json::to_value(query).unwrap(),
         )
     }
 
@@ -1342,43 +1467,32 @@ mod tests {
 
     #[tokio::test]
     async fn enable_and_list_work_over_the_wire() {
-        use trust_tasks_rs::Payload as _;
         let set = set_with("demo");
 
         // governance/capability/enable as a dispatched document.
-        let enable_doc = TrustTask::new(
-            "urn:uuid:en".to_string(),
-            enable_spec::Payload::type_uri(),
-            serde_json::json!({ "capability": "demo", "version": "0.1" }),
-        );
+        let enable_doc = doc(enable_payload("demo", "0.1"));
         let d = set.dispatcher().read().await.clone();
         let out = crate::trust_tasks::handle_document(&d, enable_doc)
             .await
             .expect("enable succeeds");
-        assert_eq!(out.payload["enabled"], serde_json::json!(true));
+        let enabled: enable_spec::Response = serde_json::from_value(out.payload).unwrap();
+        assert!(enabled.enabled);
         assert!(
             dispatch_ok(&set).await,
             "capability serves after wire enable"
         );
 
         // list over the read-only surface reports it.
-        let list_doc = TrustTask::new(
-            "urn:uuid:ls".to_string(),
-            list_spec::Payload::type_uri(),
-            serde_json::json!({}),
-        );
+        let list_doc = doc(list_payload(None));
         let q = set.query_dispatcher().read().await.clone();
         let out = crate::trust_tasks::handle_document(&q, list_doc)
             .await
             .expect("list succeeds");
-        assert_eq!(out.payload["capabilities"].as_array().unwrap().len(), 1);
+        let listed: list_spec::Response = serde_json::from_value(out.payload).unwrap();
+        assert_eq!(listed.capabilities.len(), 1);
 
         // enable/disable are NOT on the read-only surface.
-        let enable_on_query = TrustTask::new(
-            "urn:uuid:en2".to_string(),
-            enable_spec::Payload::type_uri(),
-            serde_json::json!({ "capability": "demo", "version": "0.1" }),
-        );
+        let enable_on_query = doc(enable_payload("demo", "0.1"));
         assert!(
             crate::trust_tasks::handle_document(&q, enable_on_query)
                 .await
@@ -1392,6 +1506,7 @@ mod tests {
             Box::pin(async move {
                 Ok(doc.respond_with(
                     "urn:uuid:test-reply".to_string(),
+                    // Raw JSON: a test-only capability's marker answer.
                     serde_json::json!({ "handled": true }),
                 ))
             })
@@ -1610,6 +1725,7 @@ mod tests {
             let counted = counted.clone();
             d.on::<recognition::Payload, _>(move |doc| -> crate::trust_tasks::TaskFuture {
                 counted.fetch_add(1, Ordering::SeqCst);
+                // Raw JSON: a test-only capability's empty answer.
                 Box::pin(async move { Ok(doc.respond_with(new_id(), serde_json::json!({}))) })
             })
         });
@@ -1786,13 +1902,9 @@ mod tests {
         assert!(!set.snapshot("demo", None).await.enabled);
     }
 
-    async fn wire(
-        set: &CapabilitySet,
-        uri: TypeUri,
-        payload: Value,
-    ) -> Result<Value, (String, bool)> {
+    async fn wire(set: &CapabilitySet, doc: TrustTask<Value>) -> Result<Value, (String, bool)> {
         let d = set.dispatcher().read().await.clone();
-        crate::trust_tasks::handle_document(&d, TrustTask::new(new_id(), uri, payload))
+        crate::trust_tasks::handle_document(&d, doc)
             .await
             .map(|out| out.payload)
             .map_err(|err| (err.payload.code.to_string(), err.payload.retryable))
@@ -1801,85 +1913,51 @@ mod tests {
     #[tokio::test]
     async fn enable_and_disable_answer_their_specifications_codes() {
         let set = set_with("demo");
-        let enable = enable_spec::Payload::type_uri();
         let refused = |code: &str| Err((code.to_string(), false));
         assert_eq!(
-            wire(
-                &set,
-                enable.clone(),
-                serde_json::json!({ "capability": "nope", "version": "0.1" })
-            )
-            .await,
+            wire(&set, doc(enable_payload("nope", "0.1"))).await,
             refused("governance/capability/enable:unknownCapability")
         );
         assert_eq!(
-            wire(
-                &set,
-                enable.clone(),
-                serde_json::json!({ "capability": "demo", "version": "0.2" })
-            )
-            .await,
+            wire(&set, doc(enable_payload("demo", "0.2"))).await,
             refused("governance/capability/enable:unknownCapability")
         );
+        let mut bad_config = enable_payload("demo", "0.1");
+        bad_config.config = serde_json::Map::from_iter([("bad".to_string(), Value::from(1))]);
         assert_eq!(
-            wire(
-                &set,
-                enable.clone(),
-                serde_json::json!({ "capability": "demo", "version": "0.1", "config": { "bad": 1 } })
-            )
-            .await,
+            wire(&set, doc(bad_config)).await,
             refused("governance/capability/enable:configInvalid")
         );
+        let mut delegated = enable_payload("demo", "0.1");
+        delegated.delegate = Some("did:example:companion".to_string());
+        delegated.manifest = Some(manifest("demo"));
         assert_eq!(
-            wire(
-                &set,
-                enable.clone(),
-                serde_json::json!({
-                    "capability": "demo", "version": "0.1", "delegate": "did:example:companion",
-                    "manifest": manifest("demo"),
-                })
-            )
-            .await,
+            wire(&set, doc(delegated)).await,
             refused("governance/capability/enable:configInvalid")
         );
-        let mut other = serde_json::to_value(manifest("demo")).unwrap();
-        other["title"] = serde_json::json!("Not the built-in one");
+        let mut other = manifest("demo");
+        other.title = Some("Not the built-in one".parse().unwrap());
+        let mut foreign_manifest = enable_payload("demo", "0.1");
+        foreign_manifest.manifest = Some(other);
         assert_eq!(
-            wire(
-                &set,
-                enable.clone(),
-                serde_json::json!({ "capability": "demo", "version": "0.1", "manifest": other })
-            )
-            .await,
+            wire(&set, doc(foreign_manifest)).await,
             refused("governance/capability/enable:configInvalid")
         );
-        wire(
-            &set,
-            enable.clone(),
-            serde_json::json!({ "capability": "demo", "version": "0.1", "manifest": manifest("demo") }),
-        )
-        .await
-        .expect("the host's own manifest is accepted");
+        let mut own_manifest = enable_payload("demo", "0.1");
+        own_manifest.manifest = Some(manifest("demo"));
+        wire(&set, doc(own_manifest))
+            .await
+            .expect("the host's own manifest is accepted");
         assert_eq!(
-            wire(
-                &set,
-                enable,
-                serde_json::json!({ "capability": "demo", "version": "0.1" })
-            )
-            .await,
+            wire(&set, doc(enable_payload("demo", "0.1"))).await,
             refused("governance/capability/enable:alreadyEnabled")
         );
 
-        let disable = disable_spec::Payload::type_uri();
-        wire(
-            &set,
-            disable.clone(),
-            serde_json::json!({ "capability": "demo" }),
-        )
-        .await
-        .expect("disabled");
+        wire(&set, doc(disable_payload("demo")))
+            .await
+            .expect("disabled");
         assert_eq!(
-            wire(&set, disable, serde_json::json!({ "capability": "demo" })).await,
+            wire(&set, doc(disable_payload("demo"))).await,
             refused("governance/capability/disable:notEnabled")
         );
     }
@@ -1966,46 +2044,45 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let list = |status: Option<&str>| {
-            let payload = match status {
-                Some(status) => serde_json::json!({ "status": status }),
-                None => serde_json::json!({}),
-            };
+        let list = |status: Option<list_spec::PayloadStatus>| {
             let set = set.clone();
             async move {
                 let q = set.query_dispatcher().read().await.clone();
-                crate::trust_tasks::handle_document(
-                    &q,
-                    TrustTask::new(new_id(), list_spec::Payload::type_uri(), payload),
-                )
-                .await
-                .expect("listed")
-                .payload
+                let out = crate::trust_tasks::handle_document(&q, doc(list_payload(status)))
+                    .await
+                    .expect("listed");
+                serde_json::from_value::<list_spec::Response>(out.payload).unwrap()
             }
         };
+        // The registry's vendor extension: opaque to the spec (SPEC §4.5.1),
+        // so its content is compared as JSON.
+        let entries = |out: &list_spec::Response| {
+            let namespace = list_spec::ExtKey::try_from(EXT_NAMESPACE).unwrap();
+            out.ext.as_ref().unwrap()[&namespace]["entries"].clone()
+        };
         let out = list(None).await;
-        assert_eq!(out["capabilities"].as_array().unwrap().len(), 2);
+        assert_eq!(out.capabilities.len(), 2);
         assert_eq!(
-            out["ext"][EXT_NAMESPACE]["entries"],
+            entries(&out),
             serde_json::json!([
                 { "capability": "writer", "authority": "did:example:a" },
                 { "capability": "writer", "authority": "did:example:b" },
             ])
         );
         assert!(
-            list(Some("available")).await["capabilities"]
-                .as_array()
-                .unwrap()
+            list(Some(list_spec::PayloadStatus::Available))
+                .await
+                .capabilities
                 .is_empty()
         );
 
         set.disable("writer", Some("did:example:a")).await.unwrap();
         set.disable("writer", Some("did:example:b")).await.unwrap();
-        let out = list(Some("all")).await;
-        assert_eq!(out["capabilities"].as_array().unwrap().len(), 1, "{out}");
-        assert_eq!(out["capabilities"][0]["enabled"], false);
+        let out = list(Some(list_spec::PayloadStatus::All)).await;
+        assert_eq!(out.capabilities.len(), 1, "{out:?}");
+        assert!(!out.capabilities[0].enabled);
         assert_eq!(
-            out["ext"][EXT_NAMESPACE]["entries"],
+            entries(&out),
             serde_json::json!([{ "capability": "writer" }])
         );
     }

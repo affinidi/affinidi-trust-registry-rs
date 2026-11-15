@@ -586,18 +586,21 @@ pub(crate) mod tests {
     /// A well-formed authorization `#response` correlated to `request_id`
     /// that echoes the asked tuple, as the registry would send it.
     pub(crate) fn reply_to(request_id: &str) -> TrustTask<Value> {
+        use crate::payloads::v0_2::AuthorizationResponse;
+        use trust_tasks_rs::Payload as _;
+        let response: AuthorizationResponse = AuthorizationResponse::builder()
+            .entity_id("did:example:e")
+            .authority_id("did:example:a")
+            .action("act")
+            .resource("res")
+            .authorized(true)
+            .evaluated_at(chrono::Utc::now())
+            .try_into()
+            .unwrap();
         let mut doc = TrustTask::new(
             "urn:uuid:reply".to_string(),
-            "https://trusttasks.org/spec/registry/authorization/0.2#response"
-                .parse()
-                .unwrap(),
-            serde_json::json!({
-                "entity_id": "did:example:e",
-                "authority_id": "did:example:a",
-                "action": "act",
-                "resource": "res",
-                "authorized": true,
-            }),
+            AuthorizationResponse::type_uri(),
+            serde_json::to_value(response).unwrap(),
         );
         doc.thread_id = Some(request_id.to_string());
         doc

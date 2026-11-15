@@ -734,6 +734,7 @@ mod tests {
 
     #[test]
     fn a_spec_error_carries_the_declared_code_and_retry_flag() {
+        // Raw JSON payload: only the document's type matters to `spec_error`.
         let doc = TrustTask::new(
             "urn:uuid:put".to_string(),
             RecordPutRequest::type_uri(),
@@ -741,7 +742,7 @@ mod tests {
         );
         let error = spec_error(&doc, TaskError::AlreadyExists, "taken");
         assert_eq!(
-            serde_json::to_value(&error.payload.code).unwrap(),
+            error.payload.code.to_string(),
             "registry/record/put:alreadyExists"
         );
         assert!(!error.payload.retryable);
@@ -749,10 +750,7 @@ mod tests {
 
         // A condition the task's specification has no code for.
         let error = spec_error(&doc, TaskError::NotGranted, "no");
-        assert_eq!(
-            serde_json::to_value(&error.payload.code).unwrap(),
-            "taskFailed"
-        );
+        assert_eq!(error.payload.code.to_string(), "taskFailed");
     }
 
     #[test]

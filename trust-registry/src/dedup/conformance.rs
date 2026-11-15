@@ -25,7 +25,9 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use serde_json::Value;
-use trust_tasks_rs::TrustTask;
+use trust_tasks_rs::{Payload as _, TrustTask};
+
+use crate::trust_tasks::payloads::camel::RecordPutRequest;
 
 use super::{Claim, ClaimToken, DedupError, MessageIdStore, StoredOutcome};
 use crate::configs::MessageIdStoreConfig;
@@ -133,9 +135,9 @@ impl Keys {
 fn outcome(marker: &str) -> StoredOutcome {
     let doc = TrustTask::new(
         marker.to_string(),
-        "https://trusttasks.org/spec/registry/record/put/0.1"
-            .parse()
-            .expect("type uri"),
+        RecordPutRequest::type_uri(),
+        // Raw JSON: an opaque payload the store must round-trip verbatim; a
+        // marker member no Trust Task payload has identifies each outcome.
         serde_json::json!({ "marker": marker, "nested": { "list": [1, 2, 3] } }),
     );
     StoredOutcome::Completed(doc)
@@ -211,9 +213,8 @@ pub(crate) async fn a_completed_claim_replays_its_outcome(fixture: &StoreFixture
     let token = acquired(store.claim(&key, "digest").await);
     let doc = TrustTask::new(
         "2".to_string(),
-        "https://trusttasks.org/spec/registry/record/put/0.1"
-            .parse()
-            .expect("type uri"),
+        RecordPutRequest::type_uri(),
+        // Raw JSON: an opaque payload; only the rejection is stored.
         serde_json::json!({}),
     );
     let rejection = doc.reject_with("err".to_string(), trust_tasks_rs::RejectReason::IdConflict);

@@ -11,17 +11,15 @@
 //! Each generated module exposes a `Payload` (request) and a `Response`. They
 //! are aliased to request/response names here: the snake_case versions at the
 //! top level, the lowerCamelCase ones in [`camel`]. The hand-written part is
-//! the bridge between the two record wire forms and the registry's own
-//! [`crate::domain`] types (`record_to_v1`, `record_from_v2`, ...) and the
+//! the mapping between each generated wire record and the registry's own
+//! [`crate::domain::TrustRecord`] — `From<&TrustRecord>` and
+//! `TryFrom<&spec::TrustRecord>` implemented on the generated types — and the
 //! repository query built from a record key (`query_of`).
 
 // The 0.1 `registry/*` versions are superseded (the generated types are
 // `#[deprecated]`), and this registry still answers them on purpose: peers that
 // have not moved to the lowerCamelCase versions keep working.
 #![allow(deprecated)]
-
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 
 use crate::specs::registry;
 
@@ -110,49 +108,19 @@ pub mod camel {
 
 // --- Record wire forms ---------------------------------------------------------
 //
-// One explicit mapping per wire form, rather than a JSON round-trip through the
-// domain type: the 0.1 form has no validity window (and its generated types
-// reject unknown members, so the window must be dropped, not passed through),
-// and the 0.2 form spells every member differently.
+// Each served version carries its own generated `TrustRecord` (the generator
+// gives every task a copy of the `registry/_shared` record): 0.1 of
+// `registry/record/put` and `registry/record/query` is snake_case with no
+// validity window, 0.3 is lowerCamelCase with the optional window. The mapping
+// to and from the domain record is implemented on those generated types
+// (`From<&TrustRecord>` out, `TryFrom<&spec::TrustRecord>` in), explicitly and
+// field by field, not as a JSON round-trip: the 0.1 types reject unknown
+// members, so the window must be dropped, not passed through.
 
-/// The 0.1 record (`registry/_shared/0.1` `TrustRecord`): snake_case, no window.
-#[derive(Serialize, Deserialize)]
-struct WireRecordV1 {
-    entity_id: String,
-    authority_id: String,
-    action: String,
-    resource: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    recognized: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    authorized: Option<bool>,
-    #[serde(default, skip_serializing_if = "Map::is_empty")]
-    context: Map<String, Value>,
-    record_type: RecordType,
-}
+use crate::specs::registry::record::{put, query};
 
-/// The 0.2 record (`registry/_shared/0.2` `TrustRecord`): lowerCamelCase, with
-/// the optional validity window.
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WireRecordV2 {
-    entity_id: String,
-    authority_id: String,
-    action: String,
-    resource: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    recognized: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    authorized: Option<bool>,
-    #[serde(default, skip_serializing_if = "Map::is_empty")]
-    context: Map<String, Value>,
-    record_type: RecordType,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    valid_from: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    valid_until: Option<DateTime<Utc>>,
-}
-
+/// The domain record's opaque context as the JSON object every wire form
+/// carries (an empty object is omitted on the wire).
 fn context_map(record: &TrustRecord) -> Map<String, Value> {
     record
         .context()
@@ -162,15 +130,17 @@ fn context_map(record: &TrustRecord) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// Validate and assemble a domain record from the members every wire form
+/// shares, plus the window of the forms that carry one.
 #[allow(clippy::too_many_arguments)]
 fn build_record(
-    entity_id: String,
-    authority_id: String,
-    action: String,
-    resource: String,
+    entity_id: &str,
+    authority_id: &str,
+    action: &str,
+    resource: &str,
     recognized: Option<bool>,
     authorized: Option<bool>,
-    context: Map<String, Value>,
+    context: &Map<String, Value>,
     record_type: RecordType,
     valid_from: Option<DateTime<Utc>>,
     valid_until: Option<DateTime<Utc>>,
@@ -183,7 +153,7 @@ fn build_record(
         .authority_id(AuthorityId::parse(authority_id).map_err(invalid)?)
         .action(Action::parse(action).map_err(invalid)?)
         .resource(Resource::parse(resource).map_err(invalid)?)
-        .context(Context::new(Value::Object(context)))
+        .context(Context::new(Value::Object(context.clone())))
         .record_type(record_type)
         .valid_from(valid_from)
         .valid_until(valid_until);
@@ -196,71 +166,111 @@ fn build_record(
     builder.build().map_err(|e| e.to_string())
 }
 
-/// A domain record in the 0.1 wire form. The validity window is dropped: a
-/// 0.1 reader has no member for it.
-pub(crate) fn record_to_v1<T: DeserializeOwned>(record: &TrustRecord) -> Result<T, String> {
-    reserialize(&WireRecordV1 {
-        entity_id: record.entity_id().to_string(),
-        authority_id: record.authority_id().to_string(),
-        action: record.action().to_string(),
-        resource: record.resource().to_string(),
-        recognized: record.recognized_value(),
-        authorized: record.authorized_value(),
-        context: context_map(record),
-        record_type: record.record_type().clone(),
-    })
+/// `From`/`TryFrom` between the domain record and one generated wire record,
+/// plus the record-type enum that version generated for it. `window` says
+/// whether the version carries `validFrom`/`validUntil`: without it the window
+/// is dropped going out (that reader has no member for it) and absent coming
+/// in.
+macro_rules! record_wire {
+    ($m:ident :: $v:ident, window = false) => {
+        record_wire!(@record_type $m::$v);
+        impl From<&TrustRecord> for $m::$v::TrustRecord {
+            /// The 0.1 wire form: the validity window is dropped.
+            fn from(record: &TrustRecord) -> Self {
+                Self {
+                    entity_id: record.entity_id().to_string(),
+                    authority_id: record.authority_id().to_string(),
+                    action: record.action().to_string(),
+                    resource: record.resource().to_string(),
+                    recognized: record.recognized_value(),
+                    authorized: record.authorized_value(),
+                    context: context_map(record),
+                    record_type: record.record_type().clone().into(),
+                }
+            }
+        }
+        impl TryFrom<&$m::$v::TrustRecord> for TrustRecord {
+            type Error = String;
+            /// A 0.1 wire record (no validity window).
+            fn try_from(w: &$m::$v::TrustRecord) -> Result<Self, String> {
+                build_record(
+                    &w.entity_id,
+                    &w.authority_id,
+                    &w.action,
+                    &w.resource,
+                    w.recognized,
+                    w.authorized,
+                    &w.context,
+                    w.record_type.into(),
+                    None,
+                    None,
+                )
+            }
+        }
+    };
+    ($m:ident :: $v:ident, window = true) => {
+        record_wire!(@record_type $m::$v);
+        impl From<&TrustRecord> for $m::$v::TrustRecord {
+            /// The lowerCamelCase wire form, window included.
+            fn from(record: &TrustRecord) -> Self {
+                Self {
+                    entity_id: record.entity_id().to_string(),
+                    authority_id: record.authority_id().to_string(),
+                    action: record.action().to_string(),
+                    resource: record.resource().to_string(),
+                    recognized: record.recognized_value(),
+                    authorized: record.authorized_value(),
+                    context: context_map(record),
+                    record_type: record.record_type().clone().into(),
+                    valid_from: record.valid_from(),
+                    valid_until: record.valid_until(),
+                }
+            }
+        }
+        impl TryFrom<&$m::$v::TrustRecord> for TrustRecord {
+            type Error = String;
+            /// A lowerCamelCase wire record. Refuses a window whose
+            /// `validFrom` is not earlier than its `validUntil`.
+            fn try_from(w: &$m::$v::TrustRecord) -> Result<Self, String> {
+                build_record(
+                    &w.entity_id,
+                    &w.authority_id,
+                    &w.action,
+                    &w.resource,
+                    w.recognized,
+                    w.authorized,
+                    &w.context,
+                    w.record_type.into(),
+                    w.valid_from,
+                    w.valid_until,
+                )
+            }
+        }
+    };
+    (@record_type $m:ident :: $v:ident) => {
+        impl From<RecordType> for $m::$v::RecordType {
+            fn from(record_type: RecordType) -> Self {
+                match record_type {
+                    RecordType::Authorization => Self::Authorization,
+                    RecordType::Recognition => Self::Recognition,
+                }
+            }
+        }
+        impl From<$m::$v::RecordType> for RecordType {
+            fn from(record_type: $m::$v::RecordType) -> Self {
+                match record_type {
+                    $m::$v::RecordType::Authorization => Self::Authorization,
+                    $m::$v::RecordType::Recognition => Self::Recognition,
+                }
+            }
+        }
+    };
 }
 
-/// A domain record in the 0.2 wire form, window included.
-pub(crate) fn record_to_v2<T: DeserializeOwned>(record: &TrustRecord) -> Result<T, String> {
-    reserialize(&WireRecordV2 {
-        entity_id: record.entity_id().to_string(),
-        authority_id: record.authority_id().to_string(),
-        action: record.action().to_string(),
-        resource: record.resource().to_string(),
-        recognized: record.recognized_value(),
-        authorized: record.authorized_value(),
-        context: context_map(record),
-        record_type: record.record_type().clone(),
-        valid_from: record.valid_from(),
-        valid_until: record.valid_until(),
-    })
-}
-
-/// A 0.1 wire record as a domain record (no validity window).
-pub(crate) fn record_from_v1<T: Serialize>(spec: &T) -> Result<TrustRecord, String> {
-    let w: WireRecordV1 = reserialize(spec)?;
-    build_record(
-        w.entity_id,
-        w.authority_id,
-        w.action,
-        w.resource,
-        w.recognized,
-        w.authorized,
-        w.context,
-        w.record_type,
-        None,
-        None,
-    )
-}
-
-/// A 0.2 wire record as a domain record. Refuses a window whose `validFrom`
-/// is not earlier than its `validUntil`.
-pub(crate) fn record_from_v2<T: Serialize>(spec: &T) -> Result<TrustRecord, String> {
-    let w: WireRecordV2 = reserialize(spec)?;
-    build_record(
-        w.entity_id,
-        w.authority_id,
-        w.action,
-        w.resource,
-        w.recognized,
-        w.authorized,
-        w.context,
-        w.record_type,
-        w.valid_from,
-        w.valid_until,
-    )
-}
+record_wire!(put::v0_1, window = false);
+record_wire!(query::v0_1, window = false);
+record_wire!(put::v0_3, window = true);
+record_wire!(query::v0_3, window = true);
 
 // --- Glue between the spec payloads and the domain --------------------------
 
@@ -302,28 +312,11 @@ pub(crate) fn query_as_written(
         })
 }
 
-/// Convert between two types with the same JSON shape by re-serialising
-/// through JSON.
-///
-/// Used only between a generated spec record and the hand-written wire record
-/// that mirrors it ([`WireRecordV1`] / [`WireRecordV2`]). The mapping that
-/// decides anything — between a wire record and the domain record — is the
-/// explicit one above.
-pub(crate) fn reserialize<A, B>(value: &A) -> Result<B, String>
-where
-    A: Serialize,
-    B: DeserializeOwned,
-{
-    let json = serde_json::to_value(value).map_err(|e| e.to_string())?;
-    serde_json::from_value(json).map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use crate::domain::{Action, AuthorityId, EntityId, RecordType, Resource, TrustRecordBuilder};
     use trust_tasks_rs::Payload;
 
     #[test]
@@ -370,6 +363,8 @@ mod tests {
         }
     }
 
+    // Raw JSON in: the point is to pin the wire spelling the generated types
+    // accept, which their own builders cannot show.
     #[test]
     fn put_and_query_use_the_spec_wire_field_names() {
         // `expectedExisting` / `nextCursor` are camelCase on the wire (framework
@@ -398,6 +393,7 @@ mod tests {
         assert_eq!(json["nextCursor"], "50");
     }
 
+    // Raw JSON in, for the same reason as above.
     #[test]
     fn recognition_request_uses_verbatim_trqp_field_names() {
         let json = serde_json::json!({
@@ -413,27 +409,157 @@ mod tests {
         assert!(req.context.and_then(|c| c.time).is_some());
     }
 
-    #[test]
-    fn domain_record_round_trips_to_and_from_the_spec_record() {
-        let domain = TrustRecordBuilder::new()
+    // --- Record wire forms: golden JSON -------------------------------------
+    //
+    // The expected strings below are the wire bytes for each served version,
+    // pinned literally (R3.4/R3.6): member spelling, member order, and which
+    // optional members are omitted. They are the bytes the generated record
+    // types serialised to before the mapping moved onto them, so a change
+    // here is a wire change for every consumer.
+
+    const V1_RECORD: &str = r#"{"action":"issue","authority_id":"did:example:authority","context":{"tier":"gold"},"entity_id":"did:example:entity","recognized":true,"record_type":"recognition","resource":"vc"}"#;
+    const V2_RECORD: &str = r#"{"action":"issue","authorityId":"did:example:authority","context":{"tier":"gold"},"entityId":"did:example:entity","recognized":true,"recordType":"recognition","resource":"vc","validFrom":"2026-01-01T00:00:00Z","validUntil":"2027-01-01T00:00:00Z"}"#;
+    /// An authorization record with no context and no window: both omitted.
+    const V1_BARE: &str = r#"{"action":"issue","authority_id":"did:example:authority","authorized":false,"entity_id":"did:example:entity","record_type":"authorization","resource":"vc"}"#;
+    const V2_BARE: &str = r#"{"action":"issue","authorityId":"did:example:authority","authorized":false,"entityId":"did:example:entity","recordType":"authorization","resource":"vc"}"#;
+
+    fn instant(s: &str) -> DateTime<Utc> {
+        s.parse().expect("RFC 3339 instant")
+    }
+
+    /// A recognition record with a context and a validity window.
+    fn windowed() -> TrustRecord {
+        recognition(true)
+    }
+
+    /// The same recognition record, with or without its window.
+    fn recognition(window: bool) -> TrustRecord {
+        let (from, until) = if window {
+            (
+                Some(instant("2026-01-01T00:00:00Z")),
+                Some(instant("2027-01-01T00:00:00Z")),
+            )
+        } else {
+            (None, None)
+        };
+        TrustRecordBuilder::new()
             .entity_id(EntityId::new("did:example:entity"))
             .authority_id(AuthorityId::new("did:example:authority"))
             .action(Action::new("issue"))
             .resource(Resource::new("vc"))
             .recognized(true)
-            .authorized(true)
+            .context(Context::new(serde_json::json!({ "tier": "gold" })))
+            .record_type(RecordType::Recognition)
+            .valid_from(from)
+            .valid_until(until)
+            .build()
+            .expect("valid record")
+    }
+
+    fn bare() -> TrustRecord {
+        TrustRecordBuilder::new()
+            .entity_id(EntityId::new("did:example:entity"))
+            .authority_id(AuthorityId::new("did:example:authority"))
+            .action(Action::new("issue"))
+            .resource(Resource::new("vc"))
+            .authorized(false)
             .record_type(RecordType::Authorization)
             .build()
-            .expect("valid record");
+            .expect("valid record")
+    }
 
-        // domain -> spec -> domain must be lossless.
-        let spec: registry::record::put::v0_1::TrustRecord =
-            reserialize(&domain).expect("domain -> spec");
-        assert_eq!(spec.entity_id, "did:example:entity");
-        assert_eq!(spec.record_type.to_string(), "authorization");
+    /// `domain -> spec` for one version produces exactly `expected`, and
+    /// `expected` parses back (through the generated type) to `back`.
+    macro_rules! golden {
+        ($spec:ty, $domain:expr, $expected:expr, $back:expr) => {{
+            let spec = <$spec>::from(&$domain);
+            assert_eq!(serde_json::to_string(&spec).unwrap(), $expected);
+            let parsed: $spec = serde_json::from_str($expected).unwrap();
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), $expected);
+            assert_eq!(TrustRecord::try_from(&parsed).unwrap(), $back);
+        }};
+    }
 
-        let back: crate::domain::TrustRecord = reserialize(&spec).expect("spec -> domain");
-        assert_eq!(back, domain);
+    /// The 0.1 records (put in, query out) drop the window, and a 0.1 record
+    /// read back has none.
+    #[test]
+    fn v0_1_records_keep_their_snake_case_wire_form_without_a_window() {
+        let unwindowed = recognition(false);
+        golden!(
+            put::v0_1::TrustRecord,
+            windowed(),
+            V1_RECORD,
+            unwindowed.clone()
+        );
+        golden!(query::v0_1::TrustRecord, windowed(), V1_RECORD, unwindowed);
+        golden!(put::v0_1::TrustRecord, bare(), V1_BARE, bare());
+        golden!(query::v0_1::TrustRecord, bare(), V1_BARE, bare());
+    }
+
+    /// The 0.3 records are lowerCamelCase and carry the window both ways.
+    #[test]
+    fn v0_3_records_keep_their_camel_case_wire_form_with_the_window() {
+        golden!(put::v0_3::TrustRecord, windowed(), V2_RECORD, windowed());
+        golden!(query::v0_3::TrustRecord, windowed(), V2_RECORD, windowed());
+        golden!(put::v0_3::TrustRecord, bare(), V2_BARE, bare());
+        golden!(query::v0_3::TrustRecord, bare(), V2_BARE, bare());
+    }
+
+    /// A whole `registry/record/query` answer, per version, around the record.
+    #[test]
+    fn record_query_responses_keep_their_wire_form() {
+        let v1: RecordQueryResponse = RecordQueryResponse::builder()
+            .records(vec![(&windowed()).into()])
+            .next_cursor(Some("50".to_string()))
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&v1).unwrap(),
+            format!(r#"{{"nextCursor":"50","records":[{V1_RECORD}]}}"#)
+        );
+        let v3: camel::RecordQueryResponse = camel::RecordQueryResponse::builder()
+            .records(vec![(&windowed()).into()])
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&v3).unwrap(),
+            format!(r#"{{"records":[{V2_RECORD}]}}"#)
+        );
+    }
+
+    /// A whole `registry/record/put` request, per version, around the record.
+    #[test]
+    fn record_put_requests_keep_their_wire_form() {
+        let v1: RecordPutRequest = RecordPutRequest::builder()
+            .record(put::v0_1::TrustRecord::from(&bare()))
+            .expected_existing(Some(false))
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&v1).unwrap(),
+            format!(r#"{{"expectedExisting":false,"record":{V1_BARE}}}"#)
+        );
+        let v3: camel::RecordPutRequest = camel::RecordPutRequest::builder()
+            .record(put::v0_3::TrustRecord::from(&windowed()))
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&v3).unwrap(),
+            format!(r#"{{"record":{V2_RECORD}}}"#)
+        );
+    }
+
+    /// Inbound records are validated like any client-supplied value: an
+    /// inverted window and an invalid identifier are refused.
+    #[test]
+    fn inbound_records_are_validated() {
+        let mut inverted = put::v0_3::TrustRecord::from(&windowed());
+        std::mem::swap(&mut inverted.valid_from, &mut inverted.valid_until);
+        assert!(TrustRecord::try_from(&inverted).is_err());
+
+        let mut empty_entity = put::v0_1::TrustRecord::from(&bare());
+        empty_entity.entity_id = String::new();
+        assert!(TrustRecord::try_from(&empty_entity).is_err());
     }
 
     #[test]

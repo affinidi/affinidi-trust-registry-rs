@@ -28,7 +28,6 @@ use affinidi_did_common::scid::strip_scid_src;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 use trust_tasks_rs::{Dispatcher, ErrorResponse, Payload, RejectReason, TrustTask};
 use uuid::Uuid;
@@ -45,7 +44,7 @@ use super::payloads::{
     AuthorizationRequest, AuthorizationResponse, AuthorizationResponseMessage, RecognitionRequest,
     RecognitionResponse, RecognitionResponseMessage, RecordDeleteRequest, RecordDeleteResponse,
     RecordPutRequest, RecordPutResponse, RecordQueryRequest, RecordQueryResponse, camel,
-    query_as_written, query_of, record_from_v1, record_from_v2, record_to_v1, record_to_v2,
+    query_as_written, query_of,
 };
 
 /// Default `registry/record/query` page size when the request names none.
@@ -429,7 +428,7 @@ trait PutWire: Payload + Send + 'static {
 /// replaces any window the stored record had.
 impl PutWire for RecordPutRequest {
     fn record(&self) -> Result<TrustRecord, String> {
-        record_from_v1(&self.record)
+        TrustRecord::try_from(&self.record)
     }
     fn expected_existing(&self) -> Option<bool> {
         self.expected_existing
@@ -448,7 +447,7 @@ impl PutWire for RecordPutRequest {
 /// refused as `malformedRequest`.
 impl PutWire for camel::RecordPutRequest {
     fn record(&self) -> Result<TrustRecord, String> {
-        record_from_v2(&self.record)
+        TrustRecord::try_from(&self.record)
     }
     fn expected_existing(&self) -> Option<bool> {
         self.expected_existing
@@ -670,20 +669,21 @@ enum QueryFailure {
 /// One version of `registry/record/query`.
 trait QueryWire: Payload + Send + 'static {
     /// The record in this version's wire form.
-    type Record: DeserializeOwned;
+    type Record: for<'a> From<&'a TrustRecord>;
     fn filter(&self) -> RecordFilter<'_>;
-    fn to_wire(record: &TrustRecord) -> Result<Self::Record, String>;
     fn response(
         records: Vec<Self::Record>,
         next_cursor: Option<String>,
     ) -> Result<impl Serialize, String>;
 }
 
-/// [`QueryWire`] for one version. `$to_wire` is the record mapping: 0.1
-/// records have no validity window, so a stored window is left out of the
-/// answer; 0.3 records are lowerCamelCase, window included.
+/// [`QueryWire`] for one version. `$record` is that version's generated
+/// record, mapped from the domain record by its `From<&TrustRecord>`
+/// ([`super::payloads`]): 0.1 records have no validity window, so a stored
+/// window is left out of the answer; 0.3 records are lowerCamelCase, window
+/// included.
 macro_rules! query_wire {
-    ($req:ty, $resp:ty, $record:ty, $to_wire:ident) => {
+    ($req:ty, $resp:ty, $record:ty) => {
         impl QueryWire for $req {
             type Record = $record;
             fn filter(&self) -> RecordFilter<'_> {
@@ -695,9 +695,6 @@ macro_rules! query_wire {
                     cursor: self.cursor.as_deref(),
                     limit: self.limit.map(|l| l.get()),
                 }
-            }
-            fn to_wire(record: &TrustRecord) -> Result<Self::Record, String> {
-                $to_wire(record)
             }
             fn response(
                 records: Vec<Self::Record>,
@@ -716,14 +713,12 @@ macro_rules! query_wire {
 query_wire!(
     RecordQueryRequest,
     RecordQueryResponse,
-    crate::specs::registry::record::query::v0_1::TrustRecord,
-    record_to_v1
+    crate::specs::registry::record::query::v0_1::TrustRecord
 );
 query_wire!(
     camel::RecordQueryRequest,
     camel::RecordQueryResponse,
-    crate::specs::registry::record::query::v0_3::TrustRecord,
-    record_to_v2
+    crate::specs::registry::record::query::v0_3::TrustRecord
 );
 
 async fn handle_query<R, P>(repository: Arc<R>, doc: TrustTask<P>) -> TaskOutcome
@@ -737,11 +732,7 @@ where
             QueryFailure::Repository(e) => reject_repo_err(&doc, e),
             QueryFailure::Rejected(reason) => doc.reject_with(new_id(), reason),
         })?;
-    let records = page
-        .iter()
-        .map(P::to_wire)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|reason| doc.reject_with(new_id(), RejectReason::InternalError { reason }))?;
+    let records = page.iter().map(P::Record::from).collect();
     let response = P::response(records, next_cursor).map_err(|e| reject_build_err(&doc, e))?;
     respond(&doc, response)
 }
@@ -754,6 +745,8 @@ mod tests {
     use crate::domain::{
         Action, AuthorityId, EntityId, RecordType, Resource, TrustRecord, TrustRecordBuilder,
     };
+    use crate::specs::registry::authorization::{v0_1 as authz1, v0_2 as authz2};
+    use crate::specs::registry::recognition::v0_2 as recog2;
     use crate::storage::repository::{TrustRecordList, TrustRecordQuery, UnreadableRecord};
     use std::sync::Mutex;
     use trust_tasks_rs::Payload;
@@ -1052,7 +1045,7 @@ mod tests {
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
             ext: None,
-            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
+            record: (&sample_record()).into(),
             expected_existing: None,
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
@@ -1072,7 +1065,7 @@ mod tests {
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
             ext: None,
-            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
+            record: (&sample_record()).into(),
             expected_existing: None,
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
@@ -1093,7 +1086,7 @@ mod tests {
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
             ext: None,
-            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
+            record: (&sample_record()).into(),
             expected_existing: Some(false),
         });
         let out = handle_document(&dispatcher, doc).await;
@@ -1107,7 +1100,7 @@ mod tests {
         let dispatcher = build_dispatcher(repo.clone());
         let doc = value_doc(RecordPutRequest {
             ext: None,
-            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
+            record: (&sample_record()).into(),
             expected_existing: Some(true),
         });
         let out = handle_document(&dispatcher, doc).await.expect("ok");
@@ -1249,10 +1242,10 @@ mod tests {
     async fn unknown_type_is_rejected() {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_dispatcher(repo);
+        // Raw JSON: a task no specification defines, so no generated type.
         let doc = TrustTask::new(
             new_id(),
-            "https://trusttasks.org/spec/registry/does-not-exist/0.1"
-                .parse()
+            trust_tasks_rs::TypeUri::canonical("registry/does-not-exist", 0, 1)
                 .expect("valid type uri"),
             serde_json::json!({}),
         );
@@ -1268,9 +1261,8 @@ mod tests {
             .registered_uris()
             .into_iter()
             .map(|u| {
-                u.to_string()
-                    .trim_start_matches("https://trusttasks.org/spec/")
-                    .to_string()
+                let u: trust_tasks_rs::TypeUri = u.parse().expect("a Type URI");
+                format!("{}/{}.{}", u.slug(), u.major(), u.minor())
             })
             .collect();
         uris.sort();
@@ -1336,7 +1328,7 @@ mod tests {
         let dispatcher = build_query_dispatcher(repo);
         let doc = value_doc(RecordPutRequest {
             ext: None,
-            record: record_to_v1(&sample_record()).expect("domain -> spec record"),
+            record: (&sample_record()).into(),
             expected_existing: None,
         });
         let out = handle_document(&dispatcher, doc).await;
@@ -1370,16 +1362,162 @@ mod tests {
             .expect("valid record")
     }
 
+    /// A document carrying `payload` under `P`'s Type URI, for input the
+    /// generated `P` cannot express (each caller says why).
     fn raw_doc<P: Payload>(payload: Value) -> TrustTask<Value> {
         TrustTask::new(new_id(), P::type_uri(), payload)
     }
 
-    async fn answer(repo: MockRepo, doc: TrustTask<Value>) -> Value {
+    /// `doc`'s answer from a dispatcher over `repo`, as the generated
+    /// response type `R`.
+    async fn answer<R: serde::de::DeserializeOwned>(repo: MockRepo, doc: TrustTask<Value>) -> R {
         let dispatcher = build_dispatcher(Arc::new(repo));
-        handle_document(&dispatcher, doc)
+        let payload = handle_document(&dispatcher, doc)
             .await
             .expect("ok response")
-            .payload
+            .payload;
+        serde_json::from_value(payload).expect("the response type")
+    }
+
+    /// The answer's payload as `R`.
+    fn parsed<R: serde::de::DeserializeOwned>(out: TrustTask<Value>) -> R {
+        serde_json::from_value(out.payload).expect("the response type")
+    }
+
+    /// A TRQP query (the generated module `$m`'s `Payload`) about `$ids`,
+    /// optionally as of `time`.
+    macro_rules! v2_query {
+        ($m:ident, $ids:expr, $time:expr) => {{
+            let (entity, authority, action, resource): (&str, &str, &str, &str) = $ids;
+            let time: Option<&str> = $time;
+            let context = time.map(|t| {
+                $m::QueryContext::builder()
+                    .time(Some(ts(t)))
+                    // The builder has no default for the flattened map.
+                    .extra(std::collections::HashMap::new())
+                    .try_into()
+                    .expect("valid context")
+            });
+            let request: $m::Payload = $m::Payload::builder()
+                .entity_id(entity)
+                .authority_id(authority)
+                .action(action)
+                .resource(resource)
+                .context(context)
+                .try_into()
+                .expect("valid request");
+            value_doc(request)
+        }};
+    }
+
+    const SAMPLE_IDS: (&str, &str, &str, &str) =
+        ("did:example:entity", "did:example:authority", "issue", "vc");
+
+    fn v2_authorization(time: Option<&str>) -> TrustTask<Value> {
+        v2_query!(authz2, SAMPLE_IDS, time)
+    }
+
+    fn v2_recognition(time: Option<&str>) -> TrustTask<Value> {
+        v2_query!(recog2, SAMPLE_IDS, time)
+    }
+
+    /// A lowerCamelCase record (0.3) for `registry/record/put`.
+    #[allow(clippy::too_many_arguments)]
+    fn camel_put_record(
+        entity: &str,
+        authority: &str,
+        action: &str,
+        resource: &str,
+        record_type: RecordType,
+        flags: Option<bool>,
+        window: (Option<&str>, Option<&str>),
+    ) -> crate::specs::registry::record::put::v0_3::TrustRecord {
+        crate::specs::registry::record::put::v0_3::TrustRecord::builder()
+            .entity_id(entity)
+            .authority_id(authority)
+            .action(action)
+            .resource(resource)
+            .record_type(crate::specs::registry::record::put::v0_3::RecordType::from(
+                record_type,
+            ))
+            .recognized(flags)
+            .authorized(flags)
+            .valid_from(window.0.map(ts))
+            .valid_until(window.1.map(ts))
+            .try_into()
+            .expect("valid record")
+    }
+
+    fn camel_put(
+        record: crate::specs::registry::record::put::v0_3::TrustRecord,
+        expected_existing: Option<bool>,
+    ) -> TrustTask<Value> {
+        let put: camel::RecordPutRequest = camel::RecordPutRequest::builder()
+            .record(record)
+            .expected_existing(expected_existing)
+            .try_into()
+            .expect("valid put");
+        value_doc(put)
+    }
+
+    /// A 0.2 key (`registry/record/delete`) or 0.3 key
+    /// (`registry/record/query`) with every member set.
+    fn camel_delete(key: (&str, &str, &str, &str)) -> TrustTask<Value> {
+        let request: camel::RecordDeleteRequest = camel::RecordDeleteRequest::builder()
+            .entity_id(key.0)
+            .authority_id(key.1)
+            .action(key.2)
+            .resource(key.3)
+            .try_into()
+            .expect("valid delete");
+        value_doc(request)
+    }
+
+    fn camel_query(
+        key: (Option<&str>, Option<&str>, Option<&str>, Option<&str>),
+    ) -> TrustTask<Value> {
+        let own = |v: Option<&str>| v.map(str::to_string);
+        let request: camel::RecordQueryRequest = camel::RecordQueryRequest::builder()
+            .entity_id(own(key.0))
+            .authority_id(own(key.1))
+            .action(own(key.2))
+            .resource(own(key.3))
+            .try_into()
+            .expect("valid query");
+        value_doc(request)
+    }
+
+    fn snake_delete(key: (&str, &str, &str, &str)) -> TrustTask<Value> {
+        let request: RecordDeleteRequest = RecordDeleteRequest::builder()
+            .entity_id(key.0)
+            .authority_id(key.1)
+            .action(key.2)
+            .resource(key.3)
+            .try_into()
+            .expect("valid delete");
+        value_doc(request)
+    }
+
+    fn snake_query(key: (&str, &str, &str, &str)) -> TrustTask<Value> {
+        let request: RecordQueryRequest = RecordQueryRequest::builder()
+            .entity_id(Some(key.0.to_string()))
+            .authority_id(Some(key.1.to_string()))
+            .action(Some(key.2.to_string()))
+            .resource(Some(key.3.to_string()))
+            .try_into()
+            .expect("valid query");
+        value_doc(request)
+    }
+
+    fn some4<'a>(
+        key: (&'a str, &'a str, &'a str, &'a str),
+    ) -> (
+        Option<&'a str>,
+        Option<&'a str>,
+        Option<&'a str>,
+        Option<&'a str>,
+    ) {
+        (Some(key.0), Some(key.1), Some(key.2), Some(key.3))
     }
 
     fn windowed_repo() -> MockRepo {
@@ -1389,34 +1527,18 @@ mod tests {
         }
     }
 
-    fn v2_query(time: Option<&str>) -> Value {
-        let mut q = serde_json::json!({
-            "entityId": "did:example:entity",
-            "authorityId": "did:example:authority",
-            "action": "issue",
-            "resource": "vc",
-        });
-        if let Some(t) = time {
-            q["context"] = serde_json::json!({ "time": t });
-        }
-        q
-    }
-
     #[tokio::test]
     async fn v2_authorization_inside_the_window_is_authorized_and_echoes_as_of() {
-        let out = answer(
+        // The 0.2 response type refuses unknown members, so parsing it also
+        // proves no snake_case member (`time_evaluated`) is sent.
+        let out: camel::AuthorizationResponse = answer(
             windowed_repo(),
-            raw_doc::<camel::AuthorizationRequest>(v2_query(Some("2026-06-01T00:00:00Z"))),
+            v2_authorization(Some("2026-06-01T00:00:00Z")),
         )
         .await;
-        assert_eq!(out["authorized"], true);
-        assert_eq!(out["entityId"], "did:example:entity");
-        assert_eq!(out["asOf"], "2026-06-01T00:00:00Z");
-        assert!(out["evaluatedAt"].is_string());
-        assert!(
-            out.get("time_evaluated").is_none(),
-            "0.2 is lowerCamelCase: {out}"
-        );
+        assert!(out.authorized);
+        assert_eq!(out.entity_id, "did:example:entity");
+        assert_eq!(out.as_of, Some(ts("2026-06-01T00:00:00Z")));
     }
 
     #[tokio::test]
@@ -1426,15 +1548,12 @@ mod tests {
             // validUntil is exclusive.
             ("2027-01-01T00:00:00Z", "stopped being valid"),
         ] {
-            let out = answer(
-                windowed_repo(),
-                raw_doc::<camel::AuthorizationRequest>(v2_query(Some(time))),
-            )
-            .await;
-            assert_eq!(out["authorized"], false, "{time}: {out}");
+            let out: camel::AuthorizationResponse =
+                answer(windowed_repo(), v2_authorization(Some(time))).await;
+            assert!(!out.authorized, "{time}: {out:?}");
             assert!(
-                out["message"].as_str().unwrap_or_default().contains(reason),
-                "{time}: {out}"
+                out.message.as_deref().is_some_and(|m| m.contains(reason)),
+                "{time}: {out:?}"
             );
         }
     }
@@ -1443,53 +1562,46 @@ mod tests {
     async fn explicit_time_gets_no_start_leeway() {
         // 30 s before validFrom: inside the 60 s allowance, but the client
         // named the instant, so it is judged exactly.
-        let out = answer(
+        let out: camel::RecognitionResponse = answer(
             windowed_repo(),
-            raw_doc::<camel::RecognitionRequest>(v2_query(Some("2025-12-31T23:59:30Z"))),
+            v2_recognition(Some("2025-12-31T23:59:30Z")),
         )
         .await;
-        assert_eq!(out["recognized"], false, "{out}");
+        assert!(!out.recognized, "{out:?}");
     }
 
     #[tokio::test]
     async fn the_0_1_queries_apply_the_window_too() {
-        let out = answer(
+        let out: AuthorizationResponse = answer(
             windowed_repo(),
-            raw_doc::<AuthorizationRequest>(serde_json::json!({
-                "entity_id": "did:example:entity",
-                "authority_id": "did:example:authority",
-                "action": "issue",
-                "resource": "vc",
-                "context": { "time": "2030-01-01T00:00:00Z" },
-            })),
+            v2_query!(authz1, SAMPLE_IDS, Some("2030-01-01T00:00:00Z")),
         )
         .await;
-        assert_eq!(out["authorized"], false, "{out}");
-        assert_eq!(out["time_requested"], "2030-01-01T00:00:00Z");
+        assert!(!out.authorized, "{out:?}");
+        assert_eq!(out.time_requested, Some(ts("2030-01-01T00:00:00Z")));
     }
 
     #[tokio::test]
     async fn v2_put_stores_the_window() {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_dispatcher(repo.clone());
-        let out = handle_document(
-            &dispatcher,
-            raw_doc::<camel::RecordPutRequest>(serde_json::json!({
-                "record": {
-                    "entityId": "did:example:entity",
-                    "authorityId": "did:example:authority",
-                    "action": "issue",
-                    "resource": "vc",
-                    "authorized": true,
-                    "recordType": "authorization",
-                    "validFrom": "2026-01-01T00:00:00Z",
-                    "validUntil": "2027-01-01T00:00:00Z",
-                }
-            })),
-        )
-        .await
-        .expect("stored");
-        assert_eq!(out.payload["wasCreated"], true);
+        let record: crate::specs::registry::record::put::v0_3::TrustRecord =
+            crate::specs::registry::record::put::v0_3::TrustRecord::builder()
+                .entity_id("did:example:entity")
+                .authority_id("did:example:authority")
+                .action("issue")
+                .resource("vc")
+                .authorized(Some(true))
+                .record_type(crate::specs::registry::record::put::v0_3::RecordType::Authorization)
+                .valid_from(Some(ts("2026-01-01T00:00:00Z")))
+                .valid_until(Some(ts("2027-01-01T00:00:00Z")))
+                .try_into()
+                .expect("valid record");
+        let out = handle_document(&dispatcher, camel_put(record, None))
+            .await
+            .expect("stored");
+        let ack: camel::RecordPutResponse = parsed(out);
+        assert!(ack.was_created);
         let created = repo.created.lock().expect("lock");
         assert_eq!(created[0].valid_from(), Some(ts("2026-01-01T00:00:00Z")));
         assert_eq!(created[0].valid_until(), Some(ts("2027-01-01T00:00:00Z")));
@@ -1499,19 +1611,18 @@ mod tests {
     async fn v2_put_with_an_inverted_window_is_malformed() {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_dispatcher(repo.clone());
-        let err = handle_document(
-            &dispatcher,
-            raw_doc::<camel::RecordPutRequest>(serde_json::json!({
-                "record": {
-                    "entityId": "e", "authorityId": "a", "action": "x", "resource": "r",
-                    "recordType": "recognition",
-                    "validFrom": "2027-01-01T00:00:00Z",
-                    "validUntil": "2026-01-01T00:00:00Z",
-                }
-            })),
-        )
-        .await
-        .expect_err("refused");
+        let inverted = camel_put_record(
+            "e",
+            "a",
+            "x",
+            "r",
+            RecordType::Recognition,
+            None,
+            (Some("2027-01-01T00:00:00Z"), Some("2026-01-01T00:00:00Z")),
+        );
+        let err = handle_document(&dispatcher, camel_put(inverted, None))
+            .await
+            .expect_err("refused");
         assert_eq!(err.payload.code.to_string(), "malformedRequest");
         assert!(repo.created.lock().expect("lock").is_empty());
     }
@@ -1529,17 +1640,25 @@ mod tests {
         ] {
             let repo = Arc::new(MockRepo::default());
             let dispatcher = build_dispatcher(repo.clone());
-            let mut record = serde_json::json!({
-                "entityId": "did:example:e", "authorityId": "did:example:a",
-                "action": "x", "resource": "r", "recordType": "recognition",
-            });
-            record[field] = serde_json::json!(bad);
-            let err = handle_document(
-                &dispatcher,
-                raw_doc::<camel::RecordPutRequest>(serde_json::json!({ "record": record })),
-            )
-            .await
-            .expect_err("refused");
+            let mut record = camel_put_record(
+                "did:example:e",
+                "did:example:a",
+                "x",
+                "r",
+                RecordType::Recognition,
+                None,
+                (None, None),
+            );
+            let slot = match field {
+                "entityId" => &mut record.entity_id,
+                "authorityId" => &mut record.authority_id,
+                "action" => &mut record.action,
+                _ => &mut record.resource,
+            };
+            *slot = bad.to_string();
+            let err = handle_document(&dispatcher, camel_put(record, None))
+                .await
+                .expect_err("refused");
             assert_eq!(err.payload.code.to_string(), "malformedRequest", "{field}");
             assert!(repo.created.lock().expect("lock").is_empty(), "{field}");
         }
@@ -1551,18 +1670,18 @@ mod tests {
     async fn a_validated_put_stores_normalised_party_references() {
         let repo = Arc::new(MockRepo::default());
         let dispatcher = build_dispatcher(repo.clone());
-        handle_document(
-            &dispatcher,
-            raw_doc::<camel::RecordPutRequest>(serde_json::json!({
-                "record": {
-                    "entityId": "did:scid:vh:1:entity?src=example.com",
-                    "authorityId": "did:scid:vh:1:authority?src=example.com",
-                    "action": "x", "resource": "r", "recordType": "recognition",
-                }
-            })),
-        )
-        .await
-        .expect("stored");
+        let located = camel_put_record(
+            "did:scid:vh:1:entity?src=example.com",
+            "did:scid:vh:1:authority?src=example.com",
+            "x",
+            "r",
+            RecordType::Recognition,
+            None,
+            (None, None),
+        );
+        handle_document(&dispatcher, camel_put(located, None))
+            .await
+            .expect("stored");
         let created = repo.created.lock().expect("lock");
         assert_eq!(created[0].entity_id().as_str(), "did:scid:vh:1:entity");
         assert_eq!(
@@ -1602,10 +1721,6 @@ mod tests {
                 .resource(Resource::new("vc"))
                 .record_type(RecordType::Authorization)
         };
-        let ids = serde_json::json!({
-            "entityId": "did:example:entity", "authorityId": "did:example:authority",
-            "action": "issue", "resource": "vc",
-        });
         for record in [
             base().authorized(false).recognized(false).build(),
             base().build(),
@@ -1615,61 +1730,48 @@ mod tests {
                 record: Some(record.clone()),
                 ..Default::default()
             };
-            let out = answer(repo(), raw_doc::<camel::AuthorizationRequest>(ids.clone())).await;
-            assert_eq!(out["authorized"], false, "{out}");
-            let message = out["message"].as_str().expect("a message");
-            assert!(message.contains("not authorized"), "{message}");
-            let out = answer(repo(), raw_doc::<camel::RecognitionRequest>(ids.clone())).await;
-            assert_eq!(out["recognized"], false, "{out}");
-            let message = out["message"].as_str().expect("a message");
-            assert!(message.contains("not recognized"), "{message}");
+            let out: camel::AuthorizationResponse = answer(repo(), v2_authorization(None)).await;
+            assert!(!out.authorized, "{out:?}");
+            let message = out.message.expect("a message");
+            assert!(message.contains("not authorized"), "{}", *message);
+            let out: camel::RecognitionResponse = answer(repo(), v2_recognition(None)).await;
+            assert!(!out.recognized, "{out:?}");
+            let message = out.message.expect("a message");
+            assert!(message.contains("not recognized"), "{}", *message);
         }
     }
 
     #[tokio::test]
     async fn query_0_3_returns_the_window_and_0_1_leaves_it_out() {
-        let keyed = |camel: bool| {
-            let (e, a) = if camel {
-                ("entityId", "authorityId")
-            } else {
-                ("entity_id", "authority_id")
-            };
-            serde_json::json!({ e: "did:example:entity", a: "did:example:authority", "action": "issue", "resource": "vc" })
-        };
-        let v2_out = answer(
-            windowed_repo(),
-            raw_doc::<camel::RecordQueryRequest>(keyed(true)),
-        )
-        .await;
-        let record = &v2_out["records"][0];
-        assert_eq!(record["validFrom"], "2026-01-01T00:00:00Z");
-        assert_eq!(record["recordType"], "authorization");
+        let v2_out: camel::RecordQueryResponse =
+            answer(windowed_repo(), camel_query(some4(SAMPLE_IDS))).await;
+        let record = &v2_out.records[0];
+        assert_eq!(record.valid_from, Some(ts("2026-01-01T00:00:00Z")));
+        assert_eq!(
+            record.record_type,
+            crate::specs::registry::record::query::v0_3::RecordType::Authorization
+        );
 
-        // A 0.1 reader rejects unknown members, so the window is not sent.
-        let v1_out = answer(windowed_repo(), raw_doc::<RecordQueryRequest>(keyed(false))).await;
-        let record = &v1_out["records"][0];
-        assert_eq!(record["record_type"], "authorization");
-        assert!(
-            record.get("valid_from").is_none() && record.get("validFrom").is_none(),
-            "{record}"
+        // A 0.1 reader rejects unknown members, so the window is not sent:
+        // the 0.1 response type (which refuses unknown members) parses it.
+        let v1_out: RecordQueryResponse = answer(windowed_repo(), snake_query(SAMPLE_IDS)).await;
+        assert_eq!(
+            v1_out.records[0].record_type,
+            crate::specs::registry::record::query::v0_1::RecordType::Authorization
         );
     }
 
     #[tokio::test]
     async fn v2_delete_uses_camel_case_members() {
-        let out = answer(
-            MockRepo::default(),
-            raw_doc::<camel::RecordDeleteRequest>(serde_json::json!({
-                "entityId": "e", "authorityId": "a", "action": "x", "resource": "r",
-            })),
-        )
-        .await;
-        assert_eq!(out["ok"], true);
+        let out: camel::RecordDeleteResponse =
+            answer(MockRepo::default(), camel_delete(("e", "a", "x", "r"))).await;
+        assert!(out.ok);
     }
 
     #[tokio::test]
     async fn the_old_spelling_is_refused_at_the_new_version() {
         let dispatcher = build_dispatcher(Arc::new(windowed_repo()));
+        // Raw JSON: the 0.1 spelling at 0.2, which no generated type expresses.
         let snake = serde_json::json!({
             "entity_id": "did:example:entity",
             "authority_id": "did:example:authority",
@@ -1684,22 +1786,6 @@ mod tests {
 
     // --- the specifications' own error codes ----------------------------------
 
-    fn snake_record() -> Value {
-        serde_json::json!({
-            "entity_id": "did:example:entity", "authority_id": "did:example:authority",
-            "action": "issue", "resource": "vc", "record_type": "authorization",
-            "recognized": true, "authorized": true,
-        })
-    }
-
-    fn camel_record() -> Value {
-        serde_json::json!({
-            "entityId": "did:example:entity", "authorityId": "did:example:authority",
-            "action": "issue", "resource": "vc", "recordType": "authorization",
-            "recognized": true, "authorized": true,
-        })
-    }
-
     async fn code_of(dispatcher: &RegistryDispatcher, doc: TrustTask<Value>) -> (String, bool) {
         let err = handle_document(dispatcher, doc).await.expect_err("refused");
         (err.payload.code.to_string(), err.payload.retryable)
@@ -1712,13 +1798,17 @@ mod tests {
             let dispatcher = build_dispatcher(Arc::new(LocalStorage::new()));
             let put = |expected: bool| {
                 if camel_case {
-                    raw_doc::<camel::RecordPutRequest>(serde_json::json!({
-                        "record": camel_record(), "expectedExisting": expected,
-                    }))
+                    value_doc(camel::RecordPutRequest {
+                        ext: None,
+                        record: (&sample_record()).into(),
+                        expected_existing: Some(expected),
+                    })
                 } else {
-                    raw_doc::<RecordPutRequest>(serde_json::json!({
-                        "record": snake_record(), "expectedExisting": expected,
-                    }))
+                    value_doc(RecordPutRequest {
+                        ext: None,
+                        record: (&sample_record()).into(),
+                        expected_existing: Some(expected),
+                    })
                 }
             };
             assert_eq!(
@@ -1741,29 +1831,12 @@ mod tests {
     async fn a_delete_or_keyed_query_of_a_missing_record_answers_not_found() {
         use crate::storage::adapters::local_storage::LocalStorage;
         let dispatcher = build_dispatcher(Arc::new(LocalStorage::new()));
-        let snake_key = serde_json::json!({
-            "entity_id": "e", "authority_id": "a", "action": "x", "resource": "r",
-        });
-        let camel_key = serde_json::json!({
-            "entityId": "e", "authorityId": "a", "action": "x", "resource": "r",
-        });
+        let key = ("e", "a", "x", "r");
         for (doc, expected) in [
-            (
-                raw_doc::<RecordDeleteRequest>(snake_key.clone()),
-                "registry/record/delete:notFound",
-            ),
-            (
-                raw_doc::<camel::RecordDeleteRequest>(camel_key.clone()),
-                "registry/record/delete:notFound",
-            ),
-            (
-                raw_doc::<RecordQueryRequest>(snake_key),
-                "registry/record/query:notFound",
-            ),
-            (
-                raw_doc::<camel::RecordQueryRequest>(camel_key),
-                "registry/record/query:notFound",
-            ),
+            (snake_delete(key), "registry/record/delete:notFound"),
+            (camel_delete(key), "registry/record/delete:notFound"),
+            (snake_query(key), "registry/record/query:notFound"),
+            (camel_query(some4(key)), "registry/record/query:notFound"),
         ] {
             assert_eq!(
                 code_of(&dispatcher, doc).await,
@@ -1793,32 +1866,20 @@ mod tests {
         .await
         .unwrap();
         let dispatcher = build_dispatcher(repo);
-        let key = serde_json::json!({
-            "entityId": "did:example:entity", "authorityId": LOCATED,
-            "action": "issue", "resource": "vc",
-        });
+        let key = ("did:example:entity", LOCATED, "issue", "vc");
 
-        let out = handle_document(
-            &dispatcher,
-            raw_doc::<camel::AuthorizationRequest>(key.clone()),
-        )
-        .await
-        .expect("answered");
-        assert_eq!(out.payload["authorized"], true);
-        handle_document(
-            &dispatcher,
-            raw_doc::<camel::RecordQueryRequest>(key.clone()),
-        )
-        .await
-        .expect("fetched");
-        handle_document(
-            &dispatcher,
-            raw_doc::<camel::RecordDeleteRequest>(key.clone()),
-        )
-        .await
-        .expect("deleted");
+        let out = handle_document(&dispatcher, v2_query!(authz2, key, None))
+            .await
+            .expect("answered");
+        assert!(parsed::<camel::AuthorizationResponse>(out).authorized);
+        handle_document(&dispatcher, camel_query(some4(key)))
+            .await
+            .expect("fetched");
+        handle_document(&dispatcher, camel_delete(key))
+            .await
+            .expect("deleted");
         assert_eq!(
-            code_of(&dispatcher, raw_doc::<camel::RecordDeleteRequest>(key)).await,
+            code_of(&dispatcher, camel_delete(key)).await,
             ("registry/record/delete:notFound".to_string(), false)
         );
     }
@@ -1829,42 +1890,43 @@ mod tests {
     async fn a_did_scid_locator_does_not_split_an_authority() {
         use crate::storage::adapters::local_storage::LocalStorage;
         let dispatcher = build_dispatcher(Arc::new(LocalStorage::new()));
-        let mut record = camel_record();
-        record["authorityId"] = serde_json::json!("did:scid:vh:1:abc?src=example.com");
-        handle_document(
-            &dispatcher,
-            raw_doc::<camel::RecordPutRequest>(serde_json::json!({ "record": record })),
-        )
-        .await
-        .expect("stored");
+        let record = camel_put_record(
+            "did:example:entity",
+            "did:scid:vh:1:abc?src=example.com",
+            "issue",
+            "vc",
+            RecordType::Authorization,
+            Some(true),
+            (None, None),
+        );
+        handle_document(&dispatcher, camel_put(record, None))
+            .await
+            .expect("stored");
 
         let out = handle_document(
             &dispatcher,
-            raw_doc::<camel::AuthorizationRequest>(serde_json::json!({
-                "entityId": "did:example:entity", "authorityId": "did:scid:vh:1:abc",
-                "action": "issue", "resource": "vc",
-            })),
+            v2_query!(
+                authz2,
+                ("did:example:entity", "did:scid:vh:1:abc", "issue", "vc"),
+                None
+            ),
         )
         .await
         .expect("answered");
-        assert_eq!(
-            out.payload["authorized"], true,
-            "the bare DID finds it: {}",
-            out.payload
-        );
+        let answer: camel::AuthorizationResponse = parsed(out);
+        assert!(answer.authorized, "the bare DID finds it: {answer:?}");
 
         for authority in ["did:scid:vh:1:abc", "did:scid:vh:1:abc?src=other.example"] {
             let out = handle_document(
                 &dispatcher,
-                raw_doc::<camel::RecordQueryRequest>(serde_json::json!({
-                    "authorityId": authority,
-                })),
+                camel_query((None, Some(authority), None, None)),
             )
             .await
             .expect("answered");
-            assert_eq!(out.payload["records"].as_array().unwrap().len(), 1);
+            let listed: camel::RecordQueryResponse = parsed(out);
+            assert_eq!(listed.records.len(), 1);
             assert_eq!(
-                out.payload["records"][0]["authorityId"], "did:scid:vh:1:abc",
+                listed.records[0].authority_id, "did:scid:vh:1:abc",
                 "stored in its normalised form"
             );
         }

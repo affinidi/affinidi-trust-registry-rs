@@ -192,18 +192,19 @@ impl Client {
 
     /// A Trust Task from this client to `recipient`, signed with its key when
     /// `sign` is set.
-    pub async fn trust_task(
+    ///
+    /// `payload` is a generated request payload; the document's `type` is its
+    /// Type URI.
+    pub async fn trust_task<P: trust_tasks_rs::Payload>(
         &self,
         recipient: &str,
-        type_uri: &str,
-        payload: Value,
+        payload: P,
         sign: bool,
     ) -> Result<TrustTask<Value>, String> {
+        let payload = serde_json::to_value(payload).map_err(|e| e.to_string())?;
         let mut doc = TrustTask::new(
             format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-            type_uri
-                .parse()
-                .map_err(|e| format!("type URI {type_uri}: {e:?}"))?,
+            P::type_uri(),
             payload,
         );
         doc.issuer = Some(self.did.clone());

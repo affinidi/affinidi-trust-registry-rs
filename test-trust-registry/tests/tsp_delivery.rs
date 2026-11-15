@@ -10,7 +10,9 @@
 //! ```
 
 #![cfg(feature = "tsp")]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+// `deprecated`: queries with the superseded `registry/recognition/0.1` on
+// purpose (the registry still serves it).
+#![allow(clippy::unwrap_used, clippy::expect_used, deprecated)]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -20,7 +22,7 @@ use affinidi_messaging_sdk::messages::fetch::FetchOptions;
 use affinidi_messaging_test_mediator::{TestEnvironment, TestMediatorUser, TestUser};
 use affinidi_tdk::didcomm::Message;
 use affinidi_tdk::messaging::protocols::mediator::acls::AccessListModeType;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use trust_registry::configs::storage::StorageConfig;
 use trust_registry::configs::{
@@ -33,9 +35,9 @@ use trust_registry::health::WriteStatus;
 use trust_registry::server::{ServerHandle, serve};
 use trust_registry::storage::adapters::local_storage::LocalStorage;
 use trust_registry::storage::repository::TrustRecordAdminRepository;
-use trust_registry::trust_tasks::payloads::type_uris;
+use trust_registry::trust_tasks::payloads::{RecognitionRequest, RecognitionResponse};
 use trust_tasks_didcomm::ENVELOPE_TYPE;
-use trust_tasks_rs::TrustTask;
+use trust_tasks_rs::{Payload as _, TrustTask};
 
 fn sample_record() -> TrustRecord {
     TrustRecordBuilder::new()
@@ -122,16 +124,22 @@ async fn inbox_len(env: &TestEnvironment, identity: &TestMediatorUser) -> usize 
 
 /// Send a `trqp` recognition query over DIDComm and wait for the reply on its
 /// thread.
-async fn recognition_over_didcomm(env: &TestEnvironment, client: &TestUser, tr_did: &str) -> Value {
+async fn recognition_over_didcomm(
+    env: &TestEnvironment,
+    client: &TestUser,
+    tr_did: &str,
+) -> RecognitionResponse {
+    let payload: RecognitionRequest = RecognitionRequest::builder()
+        .entity_id("did:example:entity")
+        .authority_id("did:example:authority")
+        .action("issue")
+        .resource("vc")
+        .try_into()
+        .expect("valid recognition request");
     let mut request = TrustTask::new(
         format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-        type_uris::RECOGNITION.parse().expect("valid type uri"),
-        json!({
-            "entity_id": "did:example:entity",
-            "authority_id": "did:example:authority",
-            "action": "issue",
-            "resource": "vc"
-        }),
+        RecognitionRequest::type_uri(),
+        serde_json::to_value(payload).unwrap(),
     );
     request.issuer = Some(client.did.clone());
     request.recipient = Some(tr_did.to_string());
@@ -177,7 +185,7 @@ async fn recognition_over_didcomm(env: &TestEnvironment, client: &TestUser, tr_d
             }
             let reply: TrustTask<Value> = serde_json::from_value(message.body).unwrap();
             if reply.thread_id.as_deref() == Some(request.id.as_str()) {
-                return reply.payload;
+                return serde_json::from_value(reply.payload).expect("a recognition response");
             }
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -204,7 +212,7 @@ async fn a_tsp_enabled_registry_answers_didcomm_and_can_be_rebuilt() {
 
     let first = spawn_tsp_registry(&env, &identity, &store).await;
     let reply = recognition_over_didcomm(&env, &client, &identity.did).await;
-    assert_eq!(reply["recognized"], json!(true), "first instance");
+    assert!(reply.recognized, "first instance");
     first.shutdown().await;
     // The SDK's background delete queue is dropped when the ATM shuts down,
     // so the registry deletes what it handled directly before it stops: the
@@ -226,7 +234,7 @@ async fn a_tsp_enabled_registry_answers_didcomm_and_can_be_rebuilt() {
 
     let second = spawn_tsp_registry(&env, &identity, &store).await;
     let reply = recognition_over_didcomm(&env, &client, &identity.did).await;
-    assert_eq!(reply["recognized"], json!(true), "rebuilt instance");
+    assert!(reply.recognized, "rebuilt instance");
     assert_eq!(
         second.health().write_status(),
         WriteStatus::Ok,

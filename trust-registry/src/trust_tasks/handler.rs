@@ -249,10 +249,9 @@ impl AuditContext {
                 None => builder.build_success(),
             },
             (_, Err(error)) => {
-                let code = serde_json::to_value(&error.payload.code)
-                    .ok()
-                    .and_then(|code| code.as_str().map(str::to_string))
-                    .filter(|code| !code.is_empty());
+                // The wire spelling (`Display` is what `TrustTaskCode`
+                // serialises as).
+                let code = Some(error.payload.code.to_string()).filter(|code| !code.is_empty());
                 let unauthorized = !proven
                     || matches!(
                         code.as_deref(),
@@ -1113,28 +1112,36 @@ impl TaskHandler {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // `deprecated`: the superseded 0.1 `registry/*` types are exercised on
+    // purpose, as the registry still answers them.
+    #![allow(clippy::unwrap_used, clippy::expect_used, deprecated)]
 
     use super::*;
     use crate::audit::model::{AuditLog, AuditOperation, AuditRole, AuditStatus};
     use crate::capabilities::{MemoryCapabilityStore, git_trust};
     use crate::dedup::MemoryMessageIdStore;
     use crate::domain::{Action, AuthorityId, EntityId, Resource};
+    use crate::specs::git_trust::{grant::v0_1 as grant_spec, revoke::v0_1 as revoke_spec};
+    use crate::specs::governance::capability::{
+        disable::v0_1 as disable_spec, enable::v0_1 as enable_spec,
+    };
+    use crate::specs::registry::did::rotate::v0_2 as rotate_spec;
+    use crate::specs::registry::record::{
+        delete::v0_1 as delete_spec, put::v0_1 as put_spec, put::v0_3 as put3_spec,
+        query::v0_1 as query_spec,
+    };
     use crate::storage::adapters::local_storage::LocalStorage;
     use crate::storage::repository::{TrustRecordAdminRepository, TrustRecordQuery};
+    use crate::trust_tasks::payloads::RecognitionRequest;
     use crate::trust_tasks::{build_dispatcher, build_query_dispatcher};
     use affinidi_tdk::secrets_resolver::secrets::Secret;
     use serde_json::json;
     use std::sync::Mutex;
     use trust_tasks_proof::affinidi::{SignOptions, sign_trust_task};
+    use trust_tasks_rs::Payload as _;
     use uuid::Uuid;
 
     const ME: &str = "did:example:registry";
-    const RECORD_PUT: &str = "https://trusttasks.org/spec/registry/record/put/0.1";
-    const RECORD_DELETE: &str = "https://trusttasks.org/spec/registry/record/delete/0.1";
-    const GRANT: &str = "https://trusttasks.org/spec/git-trust/grant/0.1";
-    const ENABLE: &str = "https://trusttasks.org/spec/governance/capability/enable/0.1";
-    const DISABLE: &str = "https://trusttasks.org/spec/governance/capability/disable/0.1";
     const OTHER_AUTHORITY: &str = "did:example:another-community";
 
     #[derive(Default)]
@@ -1207,50 +1214,114 @@ mod tests {
         }
     }
 
-    fn unsigned(type_uri: &str, issuer: Option<&str>, payload: Value) -> Value {
-        let mut doc = json!({
-            "id": format!("urn:uuid:{}", Uuid::new_v4()),
-            "type": type_uri,
-            "recipient": ME,
-            "issuedAt": Utc::now(),
-            "payload": payload,
-        });
-        if let Some(issuer) = issuer {
-            doc["issuer"] = json!(issuer);
-        }
+    /// `doc` as a write the tests send: addressed to the registry, issued now,
+    /// by `issuer`.
+    fn addressed<P>(mut doc: TrustTask<P>, issuer: Option<&str>) -> TrustTask<P> {
+        doc.recipient = Some(ME.to_string());
+        doc.issued_at = Some(Utc::now());
+        doc.issuer = issuer.map(str::to_string);
         doc
     }
 
-    fn put_payload(authority: &str) -> Value {
-        json!({
-            "record": {
-                "entity_id": "did:example:member",
-                "authority_id": authority,
-                "action": "git.commit.sign",
-                "resource": "repo",
-                "recognized": true,
-                "authorized": true,
-                "record_type": "authorization",
-            }
-        })
+    /// An unsigned request document for the generated payload `payload`.
+    fn unsigned<P: trust_tasks_rs::Payload>(issuer: Option<&str>, payload: P) -> TrustTask<P> {
+        addressed(
+            TrustTask::new(
+                format!("urn:uuid:{}", Uuid::new_v4()),
+                P::type_uri(),
+                payload,
+            ),
+            issuer,
+        )
     }
 
-    fn delete_payload(authority: &str) -> Value {
-        json!({
-            "entity_id": "did:example:member",
-            "authority_id": authority,
-            "action": "git.commit.sign",
-            "resource": "repo",
-        })
+    /// `doc` with its payload as JSON, as a transport hands it to the handler.
+    fn untyped<P: serde::Serialize>(doc: TrustTask<P>) -> serde_json::Result<TrustTask<Value>> {
+        serde_json::from_value(serde_json::to_value(doc)?)
     }
 
-    async fn sign_with(doc: Value, secret: &Secret, options: SignOptions) -> TrustTask<Value> {
+    /// The member's record under `authority`, at `resource`, in the 0.1 form.
+    fn put_payload_at(authority: &str, resource: &str) -> put_spec::Payload {
+        let record: put_spec::TrustRecord = put_spec::TrustRecord::builder()
+            .entity_id("did:example:member")
+            .authority_id(authority)
+            .action("git.commit.sign")
+            .resource(resource)
+            .recognized(Some(true))
+            .authorized(Some(true))
+            .record_type(put_spec::RecordType::Authorization)
+            .try_into()
+            .expect("valid record");
+        put_spec::Payload::builder()
+            .record(record)
+            .try_into()
+            .expect("valid payload")
+    }
+
+    fn put_payload(authority: &str) -> put_spec::Payload {
+        put_payload_at(authority, "repo")
+    }
+
+    fn delete_payload(authority: &str) -> delete_spec::Payload {
+        delete_spec::Payload::builder()
+            .entity_id("did:example:member")
+            .authority_id(authority)
+            .action("git.commit.sign")
+            .resource("repo")
+            .try_into()
+            .expect("valid payload")
+    }
+
+    /// A `registry/record/query/0.1` listing the records under `authority`
+    /// (every record when `None`).
+    fn query_under(authority: Option<&str>) -> query_spec::Payload {
+        query_spec::Payload::builder()
+            .authority_id(authority.map(str::to_string))
+            .try_into()
+            .expect("valid payload")
+    }
+
+    /// git-trust's per-community config. Capability-defined and opaque to the
+    /// `governance/capability/enable` spec (a free-form object), so JSON.
+    fn authority_config(authority: &str) -> serde_json::Map<String, Value> {
+        serde_json::Map::from_iter([("authority".to_string(), json!(authority))])
+    }
+
+    fn enable_payload(capability: &str, authority: Option<&str>) -> enable_spec::Payload {
+        enable_spec::Payload::builder()
+            .capability(capability)
+            .version("0.1")
+            .config(authority.map(authority_config).unwrap_or_default())
+            .try_into()
+            .expect("valid payload")
+    }
+
+    fn disable_payload(capability: &str, reason: Option<&str>) -> disable_spec::Payload {
+        disable_spec::Payload::builder()
+            .capability(capability)
+            .reason(reason.map(|r| r.parse()).transpose().expect("valid reason"))
+            .try_into()
+            .expect("valid payload")
+    }
+
+    fn rotate_payload() -> rotate_spec::Payload {
+        rotate_spec::Payload::builder()
+            .try_into()
+            .expect("valid payload")
+    }
+
+    async fn sign_with(
+        doc: impl serde::Serialize,
+        secret: &Secret,
+        options: SignOptions,
+    ) -> TrustTask<Value> {
+        let doc = serde_json::to_value(doc).expect("serialises");
         let signed = sign_trust_task(&doc, secret, options).await.expect("sign");
         serde_json::from_value(signed).expect("signed document parses")
     }
 
     /// Signed as an operational message: `authentication` purpose.
-    async fn signed(doc: Value, secret: &Secret) -> TrustTask<Value> {
+    async fn signed(doc: impl serde::Serialize, secret: &Secret) -> TrustTask<Value> {
         sign_with(
             doc,
             secret,
@@ -1260,10 +1331,7 @@ mod tests {
     }
 
     fn code(err: &ErrorResponse) -> String {
-        serde_json::to_value(err).expect("serialises")["payload"]["code"]
-            .as_str()
-            .expect("error code")
-            .to_string()
+        err.payload.code.to_string()
     }
 
     async fn stored(repo: &LocalStorage, authority: &str) -> bool {
@@ -1278,18 +1346,19 @@ mod tests {
     }
 
     fn read_doc() -> TrustTask<Value> {
-        TrustTask::new(
+        let payload: RecognitionRequest = RecognitionRequest::builder()
+            .entity_id("did:example:entity")
+            .authority_id("did:example:authority")
+            .action("issue")
+            .resource("vc")
+            .try_into()
+            .expect("valid payload");
+        untyped(TrustTask::new(
             "req-1",
-            crate::trust_tasks::type_uris::RECOGNITION
-                .parse()
-                .expect("valid type uri"),
-            json!({
-                "entity_id": "did:example:entity",
-                "authority_id": "did:example:authority",
-                "action": "issue",
-                "resource": "vc",
-            }),
-        )
+            RecognitionRequest::type_uri(),
+            payload,
+        ))
+        .expect("document")
     }
 
     fn last_audit(f: &Fixture) -> AuditLog {
@@ -1310,7 +1379,7 @@ mod tests {
     async fn signed_put_under_the_issuers_own_authority_is_stored() {
         let (key, did) = did_key(1);
         let f = fixture(vec![did.clone()]);
-        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         let id = doc.id.clone();
 
         let response = f
@@ -1343,7 +1412,7 @@ mod tests {
     async fn an_accepted_write_records_its_digest_and_approving_key() {
         let (key, did) = did_key(1);
         let f = fixture(vec![did.clone()]);
-        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         let digest = trust_tasks_rs::document_digest(&doc).unwrap().to_string();
         let proof = doc.proof.clone().expect("signed");
 
@@ -1370,7 +1439,7 @@ mod tests {
         let (key, did) = did_key(1);
         let (_, other) = did_key(2);
         let f = fixture(vec![other]);
-        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         let digest = trust_tasks_rs::document_digest(&doc).unwrap().to_string();
 
         f.handler
@@ -1385,20 +1454,21 @@ mod tests {
         assert_eq!(entry.proof_created, None);
     }
 
-    const RECORD_PUT_0_3: &str = "https://trusttasks.org/spec/registry/record/put/0.3";
-
-    fn put_payload_0_3(authority: &str) -> Value {
-        json!({
-            "record": {
-                "entityId": "did:example:member",
-                "authorityId": authority,
-                "action": "git.commit.sign",
-                "resource": "repo",
-                "authorized": true,
-                "recordType": "authorization",
-                "validUntil": "2099-01-01T00:00:00Z",
-            }
-        })
+    fn put_payload_0_3(authority: &str) -> put3_spec::Payload {
+        let record: put3_spec::TrustRecord = put3_spec::TrustRecord::builder()
+            .entity_id("did:example:member")
+            .authority_id(authority)
+            .action("git.commit.sign")
+            .resource("repo")
+            .authorized(Some(true))
+            .record_type(put3_spec::RecordType::Authorization)
+            .valid_until(Some("2099-01-01T00:00:00Z".parse().expect("instant")))
+            .try_into()
+            .expect("valid record");
+        put3_spec::Payload::builder()
+            .record(record)
+            .try_into()
+            .expect("valid payload")
     }
 
     /// 0.3 names the authority `authorityId`; the write is bound to it exactly
@@ -1407,11 +1477,7 @@ mod tests {
     async fn a_0_3_put_is_bound_to_its_camel_case_authority() {
         let (key, did) = did_key(1);
         let f = fixture(vec![did.clone()]);
-        let doc = signed(
-            unsigned(RECORD_PUT_0_3, Some(&did), put_payload_0_3(&did)),
-            &key,
-        )
-        .await;
+        let doc = signed(unsigned(Some(&did), put_payload_0_3(&did)), &key).await;
         f.handler
             .handle(doc, Some(&did))
             .await
@@ -1428,11 +1494,7 @@ mod tests {
     async fn a_0_3_put_under_another_authority_is_refused() {
         let (key, did) = did_key(1);
         let f = fixture(vec![did.clone()]);
-        let doc = signed(
-            unsigned(RECORD_PUT_0_3, Some(&did), put_payload_0_3(OTHER_AUTHORITY)),
-            &key,
-        )
-        .await;
+        let doc = signed(unsigned(Some(&did), put_payload_0_3(OTHER_AUTHORITY)), &key).await;
         let err = f
             .handler
             .handle(doc, Some(&did))
@@ -1448,11 +1510,17 @@ mod tests {
     async fn a_0_3_put_in_the_old_spelling_is_refused() {
         let (key, did) = did_key(1);
         let f = fixture(vec![did.clone()]);
-        let doc = signed(
-            unsigned(RECORD_PUT_0_3, Some(&did), put_payload(&did)),
-            &key,
-        )
-        .await;
+        // Raw JSON: a 0.1-spelled payload under the 0.3 Type URI, which no
+        // generated 0.3 type can express.
+        let old_spelling = addressed(
+            TrustTask::new(
+                format!("urn:uuid:{}", Uuid::new_v4()),
+                put3_spec::Payload::type_uri(),
+                serde_json::to_value(put_payload(&did)).expect("serialises"),
+            ),
+            Some(&did),
+        );
+        let doc = signed(old_spelling, &key).await;
         let err = f
             .handler
             .handle(doc, Some(&did))
@@ -1472,7 +1540,7 @@ mod tests {
         key.id = format!("{did}#{public}");
         let f = fixture(vec![did.clone()]);
         let doc = sign_with(
-            unsigned(RECORD_PUT, Some(&did), put_payload(&did)),
+            unsigned(Some(&did), put_payload(&did)),
             &key,
             SignOptions::new()
                 .with_proof_purpose(WRITE_PROOF_PURPOSE)
@@ -1492,17 +1560,13 @@ mod tests {
     async fn signed_delete_under_the_issuers_own_authority_is_applied() {
         let (key, did) = did_key(2);
         let f = fixture(vec![did.clone()]);
-        let put = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let put = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         f.handler
             .handle(put, Some(&did))
             .await
             .expect("put accepted");
 
-        let delete = signed(
-            unsigned(RECORD_DELETE, Some(&did), delete_payload(&did)),
-            &key,
-        )
-        .await;
+        let delete = signed(unsigned(Some(&did), delete_payload(&did)), &key).await;
         f.handler
             .handle(delete, Some(&did))
             .await
@@ -1518,11 +1582,7 @@ mod tests {
     async fn put_under_another_authority_is_refused() {
         let (key, did) = did_key(3);
         let f = fixture(vec![did.clone()]);
-        let doc = signed(
-            unsigned(RECORD_PUT, Some(&did), put_payload(OTHER_AUTHORITY)),
-            &key,
-        )
-        .await;
+        let doc = signed(unsigned(Some(&did), put_payload(OTHER_AUTHORITY)), &key).await;
 
         let err = f
             .handler
@@ -1547,7 +1607,7 @@ mod tests {
         let (other_key, other_did) = did_key(5);
         let f = fixture(vec![did.clone(), other_did.clone()]);
         let put = signed(
-            unsigned(RECORD_PUT, Some(&other_did), put_payload(&other_did)),
+            unsigned(Some(&other_did), put_payload(&other_did)),
             &other_key,
         )
         .await;
@@ -1556,11 +1616,7 @@ mod tests {
             .await
             .expect("owner's put accepted");
 
-        let delete = signed(
-            unsigned(RECORD_DELETE, Some(&did), delete_payload(&other_did)),
-            &key,
-        )
-        .await;
+        let delete = signed(unsigned(Some(&did), delete_payload(&other_did)), &key).await;
         let err = f
             .handler
             .handle(delete, Some(&did))
@@ -1579,11 +1635,7 @@ mod tests {
             did.clone(),
             vec![OTHER_AUTHORITY.to_string()],
         )]));
-        let doc = signed(
-            unsigned(RECORD_PUT, Some(&did), put_payload(OTHER_AUTHORITY)),
-            &key,
-        )
-        .await;
+        let doc = signed(unsigned(Some(&did), put_payload(OTHER_AUTHORITY)), &key).await;
 
         handler
             .handle(doc, Some(&did))
@@ -1597,12 +1649,14 @@ mod tests {
     async fn a_put_naming_no_authority_is_refused() {
         let (key, did) = did_key(7);
         let f = fixture(vec![did.clone()]);
-        let mut payload = put_payload(&did);
-        payload["record"]
+        // Raw JSON: a record missing a required member, which the generated
+        // type cannot express.
+        let mut doc = serde_json::to_value(unsigned(Some(&did), put_payload(&did))).unwrap();
+        doc["payload"]["record"]
             .as_object_mut()
             .expect("record object")
             .remove("authority_id");
-        let doc = signed(unsigned(RECORD_PUT, Some(&did), payload), &key).await;
+        let doc = signed(doc, &key).await;
 
         let err = f
             .handler
@@ -1618,15 +1672,28 @@ mod tests {
             .enable(
                 "git-trust",
                 "0.1",
-                Some(json!({ "authority": authority })),
+                Some(Value::Object(authority_config(authority))),
                 None,
             )
             .await
             .expect("git-trust enabled");
     }
 
-    fn grant_payload() -> Value {
-        json!({ "subject": "did:example:member", "resource": "org/repo" })
+    fn grant_payload() -> grant_spec::Payload {
+        grant_spec::Payload::builder()
+            .subject("did:example:member")
+            .resource("org/repo")
+            .try_into()
+            .expect("valid payload")
+    }
+
+    fn revoke_payload(reason: Option<&str>) -> revoke_spec::Payload {
+        revoke_spec::Payload::builder()
+            .subject("did:example:member")
+            .resource("org/repo")
+            .reason(reason.map(|r| r.parse()).transpose().expect("valid reason"))
+            .try_into()
+            .expect("valid payload")
     }
 
     #[tokio::test]
@@ -1634,7 +1701,7 @@ mod tests {
         let (key, did) = did_key(20);
         let f = fixture(vec![did.clone()]);
         enable_git_trust(&f, &did).await;
-        let doc = signed(unsigned(GRANT, Some(&did), grant_payload()), &key).await;
+        let doc = signed(unsigned(Some(&did), grant_payload()), &key).await;
 
         f.handler
             .handle(doc, Some(&did))
@@ -1660,7 +1727,7 @@ mod tests {
         let (key, did) = did_key(21);
         let f = fixture(vec![did.clone()]);
         enable_git_trust(&f, OTHER_AUTHORITY).await;
-        let doc = signed(unsigned(GRANT, Some(&did), grant_payload()), &key).await;
+        let doc = signed(unsigned(Some(&did), grant_payload()), &key).await;
 
         let err = f
             .handler
@@ -1679,13 +1746,8 @@ mod tests {
         let f = fixture(vec![did.clone()]);
         let doc = signed(
             unsigned(
-                ENABLE,
                 Some(&did),
-                json!({
-                    "capability": "git-trust",
-                    "version": "0.1",
-                    "config": { "authority": OTHER_AUTHORITY },
-                }),
+                enable_payload("git-trust", Some(OTHER_AUTHORITY)),
             ),
             &key,
         )
@@ -1706,15 +1768,7 @@ mod tests {
         let (key, did) = did_key(23);
         let f = fixture(vec![did.clone()]);
         let doc = signed(
-            unsigned(
-                ENABLE,
-                Some(&did),
-                json!({
-                    "capability": "git-trust",
-                    "version": "0.1",
-                    "config": { "authority": did },
-                }),
-            ),
+            unsigned(Some(&did), enable_payload("git-trust", Some(&did))),
             &key,
         )
         .await;
@@ -1737,7 +1791,7 @@ mod tests {
         let f = fixture(vec![did.clone()]);
         enable_git_trust(&f, OTHER_AUTHORITY).await;
         let doc = signed(
-            unsigned(DISABLE, Some(&did), json!({ "capability": "git-trust" })),
+            unsigned(Some(&did), disable_payload("git-trust", None)),
             &key,
         )
         .await;
@@ -1766,7 +1820,7 @@ mod tests {
             trust_tasks_rs::erase_verifier(trust_tasks_proof::affinidi::Verifier::for_did_key()),
         )
         .with_dedup(Arc::new(MemoryMessageIdStore::default()));
-        let doc = signed(unsigned(GRANT, Some(&did), grant_payload()), &key).await;
+        let doc = signed(unsigned(Some(&did), grant_payload()), &key).await;
 
         let err = unbound.handle(doc, Some(&did)).await.expect_err("refused");
 
@@ -1809,7 +1863,7 @@ mod tests {
         )
         .with_dedup(Arc::new(MemoryMessageIdStore::default()))
         .with_capabilities(capabilities);
-        let doc = signed(unsigned(GRANT, Some(&did), grant_payload()), &key).await;
+        let doc = signed(unsigned(Some(&did), grant_payload()), &key).await;
 
         let err = handler.handle(doc, Some(&did)).await.expect_err("refused");
 
@@ -1821,11 +1875,7 @@ mod tests {
         let (key, did) = did_key(27);
         let f = fixture(vec![did.clone()]);
         let doc = signed(
-            unsigned(
-                ENABLE,
-                Some(&did),
-                json!({ "capability": "git-trust", "version": "0.1" }),
-            ),
+            unsigned(Some(&did), enable_payload("git-trust", None)),
             &key,
         )
         .await;
@@ -1842,12 +1892,8 @@ mod tests {
 
     // --- enablement per authority ---------------------------------------------
 
-    fn enable_doc(authority: &str) -> Value {
-        json!({
-            "capability": "git-trust",
-            "version": "0.1",
-            "config": { "authority": authority },
-        })
+    fn enable_doc(authority: &str) -> enable_spec::Payload {
+        enable_payload("git-trust", Some(authority))
     }
 
     async fn grant_record(f: &Fixture, authority: &str) -> Option<bool> {
@@ -1871,7 +1917,7 @@ mod tests {
         let (key_b, b) = did_key(91);
         let f = fixture(vec![a.clone(), b.clone()]);
         for (key, did) in [(&key_a, &a), (&key_b, &b)] {
-            let doc = signed(unsigned(ENABLE, Some(did), enable_doc(did)), key).await;
+            let doc = signed(unsigned(Some(did), enable_doc(did)), key).await;
             f.handler
                 .handle(doc, Some(did))
                 .await
@@ -1880,7 +1926,7 @@ mod tests {
         assert_eq!(f.capabilities.authorities("git-trust").await.len(), 2);
 
         for (key, did) in [(&key_a, &a), (&key_b, &b)] {
-            let doc = signed(unsigned(GRANT, Some(did), grant_payload()), key).await;
+            let doc = signed(unsigned(Some(did), grant_payload()), key).await;
             f.handler
                 .handle(doc, Some(did))
                 .await
@@ -1890,7 +1936,7 @@ mod tests {
 
         // A disables its enablement; B's is untouched and still grants.
         let doc = signed(
-            unsigned(DISABLE, Some(&a), json!({ "capability": "git-trust" })),
+            unsigned(Some(&a), disable_payload("git-trust", None)),
             &key_a,
         )
         .await;
@@ -1900,13 +1946,13 @@ mod tests {
             vec![Some(b.clone())]
         );
 
-        let doc = signed(unsigned(GRANT, Some(&a), grant_payload()), &key_a).await;
+        let doc = signed(unsigned(Some(&a), grant_payload()), &key_a).await;
         let err = f.handler.handle(doc, Some(&a)).await.expect_err("A is off");
         // The only enablement left is B's, which A may not act under.
         assert_eq!(code(&err), "permissionDenied");
         assert_eq!(grant_record(&f, &b).await, Some(true));
         let doc = signed(
-            unsigned(DISABLE, Some(&a), json!({ "capability": "git-trust" })),
+            unsigned(Some(&a), disable_payload("git-trust", None)),
             &key_a,
         )
         .await;
@@ -1917,15 +1963,7 @@ mod tests {
             "B's enablement is not A's to disable"
         );
 
-        let doc = signed(
-            unsigned(
-                "https://trusttasks.org/spec/git-trust/revoke/0.1",
-                Some(&b),
-                grant_payload(),
-            ),
-            &key_b,
-        )
-        .await;
+        let doc = signed(unsigned(Some(&b), revoke_payload(None)), &key_b).await;
         f.handler
             .handle(doc, Some(&b))
             .await
@@ -1946,7 +1984,7 @@ mod tests {
         enable_git_trust(&f, &did).await;
         enable_git_trust(&f, OTHER_AUTHORITY).await;
 
-        let doc = signed(unsigned(GRANT, Some(&did), grant_payload()), &key).await;
+        let doc = signed(unsigned(Some(&did), grant_payload()), &key).await;
         let err = handler
             .handle(doc, Some(&did))
             .await
@@ -1955,8 +1993,13 @@ mod tests {
         assert_eq!(grant_record(&f, &did).await, None);
 
         let mut payload = grant_payload();
-        payload["ext"] = json!({ EXT_NAMESPACE: { EXT_AUTHORITY: OTHER_AUTHORITY } });
-        let doc = signed(unsigned(GRANT, Some(&did), payload), &key).await;
+        // The value under the namespace is the registry's own extension,
+        // opaque to the spec (SPEC §4.5.1), so JSON.
+        payload.ext = Some(grant_spec::Ext::from(HashMap::from([(
+            grant_spec::ExtKey::try_from(EXT_NAMESPACE).expect("namespace"),
+            json!({ EXT_AUTHORITY: OTHER_AUTHORITY }),
+        )])));
+        let doc = signed(unsigned(Some(&did), payload), &key).await;
         handler.handle(doc, Some(&did)).await.expect("named");
         assert_eq!(grant_record(&f, OTHER_AUTHORITY).await, Some(true));
         assert_eq!(grant_record(&f, &did).await, None);
@@ -1968,17 +2011,11 @@ mod tests {
         let (key, did) = did_key(93);
         let f = fixture(vec![did.clone()]);
         enable_git_trust(&f, &did).await;
-        let doc = signed(unsigned(GRANT, Some(&did), grant_payload()), &key).await;
+        let doc = signed(unsigned(Some(&did), grant_payload()), &key).await;
         f.handler.handle(doc, Some(&did)).await.expect("granted");
 
-        let mut payload = grant_payload();
-        payload["reason"] = json!("left the project");
         let doc = signed(
-            unsigned(
-                "https://trusttasks.org/spec/git-trust/revoke/0.1",
-                Some(&did),
-                payload,
-            ),
+            unsigned(Some(&did), revoke_payload(Some("left the project"))),
             &key,
         )
         .await;
@@ -1992,9 +2029,8 @@ mod tests {
 
         let doc = signed(
             unsigned(
-                DISABLE,
                 Some(&did),
-                json!({ "capability": "git-trust", "reason": "moved to another tool" }),
+                disable_payload("git-trust", Some("moved to another tool")),
             ),
             &key,
         )
@@ -2022,8 +2058,8 @@ mod tests {
         )
         .with_dedup(Arc::new(MemoryMessageIdStore::default()))
         .with_capabilities(f.capabilities.clone());
-        let mut doc = unsigned(RECORD_PUT, Some(&did), put_payload(&did));
-        doc["recipient"] = json!(format!("{SCID_ME}?src=example.com"));
+        let mut doc = unsigned(Some(&did), put_payload(&did));
+        doc.recipient = Some(format!("{SCID_ME}?src=example.com"));
         let doc = signed(doc, &key).await;
 
         handler.handle(doc, Some(&did)).await.expect("accepted");
@@ -2032,8 +2068,9 @@ mod tests {
 
     // --- host-defined capability tasks ----------------------------------------
 
+    /// A host's own task (no published specification, so no generated type):
+    /// the point of these tests is a host-defined payload.
     const BADGE_ISSUE: &str = "https://trusttasks.org/spec/badge/issue/0.1";
-    const ROTATE: &str = "https://trusttasks.org/spec/registry/did/rotate/0.2";
 
     /// A host's own task that changes state, registered by a host capability
     /// that declares no reads.
@@ -2053,17 +2090,18 @@ mod tests {
         runs: Arc<std::sync::atomic::AtomicUsize>,
     ) -> crate::capabilities::CapabilityDefinition {
         crate::capabilities::CapabilityDefinition {
-            manifest: serde_json::from_value(json!({
-                "capability": "badge",
-                "version": "0.1",
-                "specs": ["badge/*"]
-            }))
-            .expect("manifest"),
+            manifest: crate::capabilities::CapabilityManifest::builder()
+                .capability("badge")
+                .version("0.1")
+                .specs(vec!["badge/*".to_string()])
+                .try_into()
+                .expect("manifest"),
             register: Arc::new(
                 move |dispatcher: RegistryDispatcher, _: &crate::capabilities::CapabilityState| {
                     let runs = runs.clone();
                     dispatcher.on::<BadgeIssue, _>(move |doc| -> crate::trust_tasks::TaskFuture {
                         runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        // Host-defined task: its (empty) response has no spec type.
                         Box::pin(async move { Ok(doc.respond_with(new_id(), json!({}))) })
                     })
                 },
@@ -2097,15 +2135,16 @@ mod tests {
         BadgeFixture { f, runs }
     }
 
-    fn badge_payload() -> Value {
-        json!({ "subject": "did:example:member" })
+    fn badge_payload() -> BadgeIssue {
+        BadgeIssue {
+            subject: "did:example:member".to_string(),
+        }
     }
 
     #[tokio::test]
     async fn an_undeclared_capability_task_from_an_anonymous_caller_is_refused() {
         let b = badge_fixture(Vec::new(), true).await;
-        let doc: TrustTask<Value> =
-            serde_json::from_value(unsigned(BADGE_ISSUE, None, badge_payload())).unwrap();
+        let doc: TrustTask<Value> = untyped(unsigned(None, badge_payload())).unwrap();
 
         let err = b.f.handler.handle(doc, None).await.expect_err("refused");
 
@@ -2118,7 +2157,7 @@ mod tests {
     async fn an_undeclared_capability_task_from_a_non_admin_is_refused() {
         let (key, did) = did_key(60);
         let b = badge_fixture(vec!["did:example:admin".to_string()], true).await;
-        let doc = signed(unsigned(BADGE_ISSUE, Some(&did), badge_payload()), &key).await;
+        let doc = signed(unsigned(Some(&did), badge_payload()), &key).await;
 
         let err =
             b.f.handler
@@ -2134,8 +2173,7 @@ mod tests {
     async fn an_unsigned_capability_task_from_an_admin_is_refused() {
         let (_, did) = did_key(61);
         let b = badge_fixture(vec![did.clone()], true).await;
-        let doc: TrustTask<Value> =
-            serde_json::from_value(unsigned(BADGE_ISSUE, Some(&did), badge_payload())).unwrap();
+        let doc: TrustTask<Value> = untyped(unsigned(Some(&did), badge_payload())).unwrap();
 
         let err =
             b.f.handler
@@ -2155,7 +2193,7 @@ mod tests {
         let (key, did) = did_key(62);
         let b = badge_fixture(vec![did.clone()], true).await;
 
-        let doc = signed(unsigned(BADGE_ISSUE, Some(&did), badge_payload()), &key).await;
+        let doc = signed(unsigned(Some(&did), badge_payload()), &key).await;
         let err =
             b.f.handler
                 .handle(doc, Some(&did))
@@ -2168,7 +2206,7 @@ mod tests {
             b.f.handler
                 .clone()
                 .with_admin_authorities(HashMap::from([(did.clone(), vec![ME.to_string()])]));
-        let doc = signed(unsigned(BADGE_ISSUE, Some(&did), badge_payload()), &key).await;
+        let doc = signed(unsigned(Some(&did), badge_payload()), &key).await;
         operator
             .handle(doc, Some(&did))
             .await
@@ -2193,8 +2231,7 @@ mod tests {
             Vec::new(),
             trust_tasks_rs::erase_verifier(trust_tasks_proof::affinidi::Verifier::for_did_key()),
         );
-        let doc: TrustTask<Value> =
-            serde_json::from_value(unsigned(BADGE_ISSUE, None, badge_payload())).unwrap();
+        let doc: TrustTask<Value> = untyped(unsigned(None, badge_payload())).unwrap();
 
         query.handle(doc, None).await.expect_err("refused");
 
@@ -2205,13 +2242,7 @@ mod tests {
     async fn enabling_a_capability_without_an_authority_needs_an_admin_of_the_registry_did() {
         let (key, did) = did_key(63);
         let b = badge_fixture(vec![did.clone()], false).await;
-        let enable = || {
-            unsigned(
-                ENABLE,
-                Some(&did),
-                json!({ "capability": "badge", "version": "0.1" }),
-            )
-        };
+        let enable = || unsigned(Some(&did), enable_payload("badge", None));
 
         let err =
             b.f.handler
@@ -2239,11 +2270,7 @@ mod tests {
     async fn disabling_a_capability_that_is_not_enabled_answers_not_enabled() {
         let (key, did) = did_key(64);
         let b = badge_fixture(vec![did.clone()], false).await;
-        let doc = signed(
-            unsigned(DISABLE, Some(&did), json!({ "capability": "badge" })),
-            &key,
-        )
-        .await;
+        let doc = signed(unsigned(Some(&did), disable_payload("badge", None)), &key).await;
 
         let err =
             b.f.handler
@@ -2261,7 +2288,7 @@ mod tests {
     async fn rotating_the_registry_did_needs_an_admin_of_the_registry_did() {
         let (key, did) = did_key(65);
         let f = fixture(vec![did.clone()]);
-        let doc = signed(unsigned(ROTATE, Some(&did), json!({})), &key).await;
+        let doc = signed(unsigned(Some(&did), rotate_payload()), &key).await;
 
         let err = f
             .handler
@@ -2283,7 +2310,7 @@ mod tests {
             .handler
             .clone()
             .with_admin_authorities(HashMap::from([(did.clone(), vec![ME.to_string()])]));
-        let doc = signed(unsigned(ROTATE, Some(&did), json!({})), &key).await;
+        let doc = signed(unsigned(Some(&did), rotate_payload()), &key).await;
 
         // Past the authority binding the rotation itself runs; with no VTA
         // configured (or no `vta` feature) it fails as a task, not as a
@@ -2300,18 +2327,12 @@ mod tests {
 
     // --- record/query is not public ------------------------------------------
 
-    const RECORD_QUERY: &str = "https://trusttasks.org/spec/registry/record/query/0.1";
-
     #[tokio::test]
     async fn an_unsigned_record_query_is_refused() {
         let (_, did) = did_key(40);
         let f = fixture(vec![did.clone()]);
-        let doc: TrustTask<Value> = serde_json::from_value(unsigned(
-            RECORD_QUERY,
-            Some(&did),
-            json!({ "authority_id": did }),
-        ))
-        .expect("parses");
+        let doc: TrustTask<Value> =
+            untyped(unsigned(Some(&did), query_under(Some(&did)))).expect("parses");
 
         let err = f
             .handler
@@ -2326,23 +2347,18 @@ mod tests {
     async fn a_signed_record_query_under_the_issuers_authority_answers() {
         let (key, did) = did_key(41);
         let f = fixture(vec![did.clone()]);
-        let put = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let put = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         f.handler
             .handle(put, Some(&did))
             .await
             .expect("put accepted");
-        let query = signed(
-            unsigned(RECORD_QUERY, Some(&did), json!({ "authority_id": did })),
-            &key,
-        )
-        .await;
+        let query = signed(unsigned(Some(&did), query_under(Some(&did))), &key).await;
 
         let response = f.handler.handle(query, Some(&did)).await.expect("answered");
 
-        assert_eq!(
-            response.payload["records"].as_array().map(Vec::len),
-            Some(1)
-        );
+        let answer: query_spec::Response =
+            serde_json::from_value(response.payload).expect("a query response");
+        assert_eq!(answer.records.len(), 1);
         assert!(matches!(last_audit(&f).operation, AuditOperation::Read));
     }
 
@@ -2351,11 +2367,7 @@ mod tests {
         let (key, did) = did_key(42);
         let f = fixture(vec![did.clone()]);
         let query = signed(
-            unsigned(
-                RECORD_QUERY,
-                Some(&did),
-                json!({ "authority_id": OTHER_AUTHORITY }),
-            ),
+            unsigned(Some(&did), query_under(Some(OTHER_AUTHORITY))),
             &key,
         )
         .await;
@@ -2373,7 +2385,7 @@ mod tests {
     async fn a_record_query_naming_no_authority_is_refused() {
         let (key, did) = did_key(43);
         let f = fixture(vec![did.clone()]);
-        let query = signed(unsigned(RECORD_QUERY, Some(&did), json!({})), &key).await;
+        let query = signed(unsigned(Some(&did), query_under(None)), &key).await;
 
         let err = f
             .handler
@@ -2395,15 +2407,11 @@ mod tests {
             .clone()
             .with_dedup(Arc::new(MemoryMessageIdStore::default().with_limits(10, 1)));
         for _ in 0..3 {
-            let query = signed(
-                unsigned(RECORD_QUERY, Some(&did), json!({ "authority_id": did })),
-                &key,
-            )
-            .await;
+            let query = signed(unsigned(Some(&did), query_under(Some(&did))), &key).await;
             handler.handle(query, Some(&did)).await.expect("answered");
         }
 
-        let put = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let put = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         handler
             .handle(put, Some(&did))
             .await
@@ -2416,11 +2424,7 @@ mod tests {
     async fn a_record_query_from_a_non_admin_is_refused() {
         let (key, did) = did_key(44);
         let f = fixture(vec!["did:example:admin".to_string()]);
-        let query = signed(
-            unsigned(RECORD_QUERY, Some(&did), json!({ "authority_id": did })),
-            &key,
-        )
-        .await;
+        let query = signed(unsigned(Some(&did), query_under(Some(&did))), &key).await;
 
         let err = f
             .handler
@@ -2437,7 +2441,7 @@ mod tests {
     async fn a_write_without_an_issuer_is_refused() {
         let (key, did) = did_key(8);
         let f = fixture(vec![did.clone()]);
-        let mut doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let mut doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         doc.issuer = None;
 
         let err = f
@@ -2461,7 +2465,7 @@ mod tests {
         let (key, did) = did_key(9);
         let (_, sender) = did_key(10);
         let f = fixture(vec![did.clone(), sender.clone()]);
-        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         let err = f
             .handler
@@ -2480,11 +2484,7 @@ mod tests {
         let (_, did) = did_key(11);
         let (other_key, other_did) = did_key(12);
         let f = fixture(vec![did.clone(), other_did.clone()]);
-        let mut doc = signed(
-            unsigned(RECORD_PUT, Some(&other_did), put_payload(&did)),
-            &other_key,
-        )
-        .await;
+        let mut doc = signed(unsigned(Some(&other_did), put_payload(&did)), &other_key).await;
         doc.issuer = Some(did.clone());
 
         assert!(matches!(
@@ -2510,7 +2510,7 @@ mod tests {
         let bare = "did:scid:vh:1:QmScid";
         let located = "did:scid:vh:1:QmScid?src=registry.example";
         let f = fixture(vec![bare.to_string()]);
-        let mut doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let mut doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         doc.issuer = Some(located.to_string());
         doc.proof.as_mut().expect("signed").verification_method = format!("{located}#key-1");
 
@@ -2553,7 +2553,7 @@ mod tests {
         let (key, did) = did_key(13);
         let f = fixture(vec![did.clone()]);
         let doc = sign_with(
-            unsigned(RECORD_PUT, Some(&did), put_payload(&did)),
+            unsigned(Some(&did), put_payload(&did)),
             &key,
             SignOptions::new().with_proof_purpose("assertionMethod"),
         )
@@ -2573,7 +2573,8 @@ mod tests {
     async fn a_tampered_write_is_refused() {
         let (key, did) = did_key(14);
         let f = fixture(vec![did.clone()]);
-        let mut doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let mut doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
+        // Raw JSON: the payload changed after signing, which is the point.
         doc.payload["record"]["entity_id"] = json!("did:example:someone-else");
 
         let err = f
@@ -2590,7 +2591,7 @@ mod tests {
     async fn a_write_from_a_non_admin_is_denied() {
         let (key, did) = did_key(15);
         let f = fixture(vec!["did:example:admin".to_string()]);
-        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         let err = f
             .handler
@@ -2607,7 +2608,7 @@ mod tests {
     async fn an_anonymous_write_is_denied() {
         let (key, did) = did_key(16);
         let f = fixture(vec![did.clone()]);
-        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         assert!(matches!(
             f.handler.authorize_write(&doc, None),
@@ -2620,8 +2621,7 @@ mod tests {
         let (_, did) = did_key(17);
         let f = fixture(vec![did.clone()]);
         let doc: TrustTask<Value> =
-            serde_json::from_value(unsigned(RECORD_PUT, Some(&did), put_payload(&did)))
-                .expect("parses");
+            untyped(unsigned(Some(&did), put_payload(&did))).expect("parses");
 
         assert!(matches!(
             f.handler.authorize_write(&doc, Some(&did)),
@@ -2634,7 +2634,10 @@ mod tests {
     async fn refused_code(edit: impl FnOnce(&mut Value)) -> String {
         let (key, did) = did_key(30);
         let f = fixture(vec![did.clone()]);
-        let mut unsigned_doc = unsigned(RECORD_PUT, Some(&did), put_payload(&did));
+        // Raw JSON: each caller edits the envelope into a shape the handler
+        // must refuse (no recipient, no `issuedAt`, ...).
+        let mut unsigned_doc =
+            serde_json::to_value(unsigned(Some(&did), put_payload(&did))).expect("serialises");
         edit(&mut unsigned_doc);
         let doc = signed(unsigned_doc, &key).await;
         let err = f
@@ -2701,7 +2704,7 @@ mod tests {
         let f = fixture(vec![did.clone()]);
         let didcomm = f.handler.clone();
         let tsp = f.handler.clone();
-        let first = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let first = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         let original = didcomm
             .handle(first.clone(), Some(&did))
@@ -2713,9 +2716,9 @@ mod tests {
             .expect("an identical redelivery is answered");
         assert_eq!(original, replayed, "answered from the record, not re-run");
 
-        let mut reuse = unsigned(RECORD_PUT, Some(&did), put_payload(&did));
-        reuse["id"] = json!(first.id);
-        reuse["payload"]["record"]["resource"] = json!("another-repo");
+        // Another document under the first one's id.
+        let mut reuse = unsigned(Some(&did), put_payload_at(&did, "another-repo"));
+        reuse.id = first.id.clone();
         let reuse = signed(reuse, &key).await;
         let err = tsp.handle(reuse, Some(&did)).await.expect_err("refused");
         assert_eq!(code(&err), "idConflict");
@@ -2727,7 +2730,7 @@ mod tests {
     async fn a_replayed_duplicate_is_audited_as_a_replay() {
         let (key, did) = did_key(33);
         let f = fixture(vec![did.clone()]);
-        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         f.handler
             .handle(doc.clone(), Some(&did))
@@ -2784,7 +2787,7 @@ mod tests {
         let (key, did) = did_key(34);
         let f = fixture(vec![did.clone()]);
         let handler = f.handler.clone().with_dedup(Arc::new(AlwaysInFlight));
-        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         let err = handler
             .handle(doc, Some(&did))
@@ -2806,14 +2809,14 @@ mod tests {
     async fn only_a_proven_admin_is_audited_as_one() {
         let (key, did) = did_key(35);
         let f = fixture(vec![did.clone()]);
-        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
         f.handler.handle(doc, Some(&did)).await.expect("accepted");
         let entry = last_audit(&f);
         assert_eq!(entry.role, AuditRole::Admin);
 
         let (outsider_key, outsider) = did_key(36);
         let doc = signed(
-            unsigned(RECORD_PUT, Some(&outsider), put_payload(&outsider)),
+            unsigned(Some(&outsider), put_payload(&outsider)),
             &outsider_key,
         )
         .await;
@@ -2839,6 +2842,8 @@ mod tests {
     /// registers it: nothing says whether it needs a proof.
     #[tokio::test]
     async fn an_undescribed_registry_task_is_not_served() {
+        // An undescribed task in the registry's family: deliberately not a
+        // published specification, so hand-written.
         const SHADOW: &str = "https://trusttasks.org/spec/registry/shadow/0.1";
         #[derive(serde::Serialize, serde::Deserialize)]
         struct Shadow {}
@@ -2851,6 +2856,7 @@ mod tests {
         let dispatcher = build_dispatcher(Arc::new(LocalStorage::new())).on::<Shadow, _>(
             move |doc| -> crate::trust_tasks::TaskFuture {
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Never served; an undescribed task has no response type.
                 Box::pin(async move { Ok(doc.respond_with(new_id(), json!({}))) })
             },
         );
@@ -2862,8 +2868,7 @@ mod tests {
         );
         assert!(!handler.is_write("registry/shadow"));
 
-        let doc: TrustTask<Value> =
-            serde_json::from_value(unsigned(SHADOW, None, json!({}))).expect("document");
+        let doc: TrustTask<Value> = untyped(unsigned(None, Shadow {})).expect("document");
         let err = handler.handle(doc, None).await.expect_err("not served");
         assert_eq!(code(&err), "unsupportedType");
         assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -2881,7 +2886,7 @@ mod tests {
             trust_tasks_rs::erase_verifier(trust_tasks_proof::affinidi::Verifier::for_did_key()),
         )
         .with_capabilities(f.capabilities.clone());
-        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         let err = unrecorded
             .handle(doc, Some(&did))
@@ -2982,8 +2987,8 @@ mod tests {
     async fn a_success_reply_is_signed_by_the_registry() {
         let (key, did) = did_key(1);
         let (handler, registry) = signing_registry(vec![did.clone()]);
-        let mut doc = unsigned(RECORD_PUT, Some(&did), put_payload(&did));
-        doc["recipient"] = json!(registry);
+        let mut doc = unsigned(Some(&did), put_payload(&did));
+        doc.recipient = Some(registry.clone());
         let doc = signed(doc, &key).await;
 
         let response = handler
@@ -3002,8 +3007,8 @@ mod tests {
     async fn a_rejection_is_signed_by_the_registry() {
         let (key, did) = did_key(1);
         let (handler, registry) = signing_registry(Vec::new());
-        let mut doc = unsigned(RECORD_PUT, Some(&did), put_payload(&did));
-        doc["recipient"] = json!(registry);
+        let mut doc = unsigned(Some(&did), put_payload(&did));
+        doc.recipient = Some(registry.clone());
         let doc = signed(doc, &key).await;
 
         let err = handler
@@ -3021,13 +3026,9 @@ mod tests {
     async fn a_refusal_names_the_registry_whatever_the_request_addressed() {
         let (_, did) = did_key(1);
         let (handler, registry) = signing_registry(Vec::new());
-        let mut doc = unsigned(
-            RECORD_PUT,
-            Some("did:example:someone-else"),
-            put_payload(&did),
-        );
-        doc["recipient"] = json!("did:example:not-the-registry");
-        let doc: TrustTask<Value> = serde_json::from_value(doc).expect("document");
+        let mut doc = unsigned(Some("did:example:someone-else"), put_payload(&did));
+        doc.recipient = Some("did:example:not-the-registry".to_string());
+        let doc: TrustTask<Value> = untyped(doc).expect("document");
 
         let err = handler
             .handle(doc, Some(&did))
@@ -3139,6 +3140,7 @@ mod tests {
             let schema: Value = serde_json::from_str(schema).expect("schema is JSON");
             assert!(schema.is_object(), "{uri}: schema is not an object");
             assert!(
+                // Raw JSON: input no generated type accepts, which is the point.
                 !accepts(json!("not a payload")),
                 "{uri}: accepted a non-object"
             );
@@ -3158,7 +3160,7 @@ mod tests {
     async fn a_write_without_an_authenticated_sender_is_audited_as_such() {
         let (key, did) = did_key(40);
         let f = fixture(vec![did.clone()]);
-        let doc = signed(unsigned(RECORD_PUT, Some(&did), put_payload(&did)), &key).await;
+        let doc = signed(unsigned(Some(&did), put_payload(&did)), &key).await;
 
         f.handler.handle(doc, None).await.expect_err("refused");
 
@@ -3174,8 +3176,7 @@ mod tests {
         let (_, did) = did_key(41);
         let f = fixture(vec![did.clone()]);
         let doc: TrustTask<Value> =
-            serde_json::from_value(unsigned(RECORD_PUT, Some(&did), put_payload(&did)))
-                .expect("document parses");
+            untyped(unsigned(Some(&did), put_payload(&did))).expect("document parses");
 
         f.handler
             .handle(doc, Some(&did))

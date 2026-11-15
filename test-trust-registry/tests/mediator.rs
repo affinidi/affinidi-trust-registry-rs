@@ -7,7 +7,9 @@
 //! `TspTransport`, the transports verifiers use.
 
 #![cfg(feature = "mediator")]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+// `deprecated`: the hand-driven round trips speak the superseded 0.1
+// `registry/*` versions on purpose (the registry still serves them).
+#![allow(clippy::unwrap_used, clippy::expect_used, deprecated)]
 
 use affinidi_messaging_test_mediator::TestEnvironment;
 use serde_json::{Value, json};
@@ -85,28 +87,26 @@ use std::time::Duration;
 use affinidi_messaging_sdk::messages::fetch::FetchOptions;
 use affinidi_messaging_sdk::profiles::ATMProfile;
 use affinidi_tdk::didcomm::Message;
-use trust_registry::trust_tasks::payloads::type_uris;
+use trust_registry::trust_tasks::payloads::{
+    RecognitionRequest, RecognitionResponse, RecordPutRequest,
+};
 use trust_tasks_didcomm::ENVELOPE_TYPE;
-use trust_tasks_rs::TrustTask;
+use trust_tasks_rs::{ErrorPayload, Payload as _, StandardCode, TrustTask};
 
-// The tests build requests and read responses as `serde_json::Value` so they
-// stay decoupled from the payload struct representation (which differs across
-// the "adopt published specs" change); the wire shape — flat TRQP identifiers
-// and a `recognized` bool — is identical either way.
+/// A `registry/recognition/0.1` query for the seeded record, built with the
+/// generated request type.
 fn build_request(issuer: &str, recipient: &str) -> TrustTask<Value> {
-    let type_uri = type_uris::RECOGNITION
-        .parse()
-        .expect("valid recognition type uri");
-    let payload = json!({
-        "entity_id": "did:example:entity",
-        "authority_id": "did:example:authority",
-        "action": "issue",
-        "resource": "vc"
-    });
+    let payload: RecognitionRequest = RecognitionRequest::builder()
+        .entity_id("did:example:entity")
+        .authority_id("did:example:authority")
+        .action("issue")
+        .resource("vc")
+        .try_into()
+        .expect("valid recognition request");
     let mut doc = TrustTask::new(
         format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-        type_uri,
-        payload,
+        RecognitionRequest::type_uri(),
+        serde_json::to_value(payload).expect("serialise the request"),
     );
     doc.issuer = Some(issuer.to_string());
     doc.recipient = Some(recipient.to_string());
@@ -116,7 +116,10 @@ fn build_request(issuer: &str, recipient: &str) -> TrustTask<Value> {
 
 /// Poll the client's inbox until a Trust Task envelope arrives, returning its
 /// response payload.
-async fn await_recognition_response(env: &TestEnvironment, profile: &Arc<ATMProfile>) -> Value {
+async fn await_recognition_response(
+    env: &TestEnvironment,
+    profile: &Arc<ATMProfile>,
+) -> RecognitionResponse {
     for _ in 0..40 {
         let fetched = env
             .atm
@@ -129,7 +132,7 @@ async fn await_recognition_response(env: &TestEnvironment, profile: &Arc<ATMProf
                 continue;
             };
             if message.typ == ENVELOPE_TYPE {
-                let task: TrustTask<Value> =
+                let task: TrustTask<RecognitionResponse> =
                     serde_json::from_value(message.body).expect("parse response task");
                 return task.payload;
             }
@@ -180,11 +183,7 @@ async fn recognition_round_trips_over_didcomm() {
         .expect("forward to trust registry");
 
     let response = await_recognition_response(&env, &client.profile).await;
-    assert_eq!(
-        response["recognized"],
-        json!(true),
-        "seeded record recognized"
-    );
+    assert!(response.recognized, "seeded record recognized");
 
     tr.shutdown().await;
     env.shutdown().await.ok();
@@ -196,19 +195,23 @@ use affinidi_messaging_test_mediator::TestUser;
 use trust_registry::storage::repository::{TrustRecordAdminRepository, TrustRecordQuery};
 use trust_tasks_proof::affinidi::{SignOptions, sign_trust_task};
 
-/// The member record a community writes under `authority`.
-fn put_payload(authority: &str) -> Value {
-    json!({
-        "record": {
-            "entity_id": "did:example:member",
-            "authority_id": authority,
-            "action": "git.commit.sign",
-            "resource": "repo",
-            "recognized": true,
-            "authorized": true,
-            "record_type": "authorization"
-        }
-    })
+/// The member record a community writes under `authority`, as a
+/// `registry/record/put/0.1` payload.
+fn put_payload(authority: &str) -> RecordPutRequest {
+    let record = TrustRecordBuilder::new()
+        .entity_id(EntityId::new("did:example:member"))
+        .authority_id(AuthorityId::new(authority))
+        .action(Action::new("git.commit.sign"))
+        .resource(Resource::new("repo"))
+        .recognized(true)
+        .authorized(true)
+        .record_type(RecordType::Authorization)
+        .build()
+        .expect("valid record");
+    RecordPutRequest::builder()
+        .record(&record)
+        .try_into()
+        .expect("valid put request")
 }
 
 fn member_query(authority: &str) -> TrustRecordQuery {
@@ -225,8 +228,8 @@ fn member_query(authority: &str) -> TrustRecordQuery {
 async fn signed_put(client: &TestUser, recipient: &str, authority: &str) -> TrustTask<Value> {
     let mut doc = TrustTask::new(
         format!("urn:uuid:{}", uuid::Uuid::new_v4()),
-        type_uris::RECORD_PUT.parse().expect("valid put type uri"),
-        put_payload(authority),
+        RecordPutRequest::type_uri(),
+        serde_json::to_value(put_payload(authority)).expect("serialise the put"),
     );
     doc.issuer = Some(client.did.clone());
     doc.recipient = Some(recipient.to_string());
@@ -350,7 +353,9 @@ async fn signed_put_under_another_authority_is_refused_over_didcomm() {
     let reply = round_trip(&env, &client, &tr_did, &request).await;
 
     assert!(!reply.type_uri.is_response(), "put accepted: {reply:?}");
-    assert_eq!(reply.payload["code"], json!("permissionDenied"));
+    let error: ErrorPayload =
+        serde_json::from_value(reply.payload.clone()).expect("a trust-task-error payload");
+    assert_eq!(error.code, StandardCode::PermissionDenied.into());
     assert!(
         tr.repository()
             .read(member_query(other_authority))
@@ -478,6 +483,8 @@ async fn recognition_round_trips_over_tsp() {
     // The TSP binding envelope is `{ type, document }` bytes — and uses the
     // *TSP* binding envelope type, not the DIDComm one.
     let request = build_request(&client.did, &tr_did);
+    // Raw JSON: the TSP binding envelope (not a Trust Task); trust-tasks-tsp
+    // exposes no type for it.
     let envelope = json!({ "type": trust_tasks_tsp::ENVELOPE_TYPE, "document": request });
     let bytes = serde_json::to_vec(&envelope).expect("serialise tsp envelope");
     env.atm
@@ -505,9 +512,9 @@ async fn recognition_round_trips_over_tsp() {
                 .await
                 .expect("tsp unpack");
             let envelope: Value = serde_json::from_slice(&payload).expect("parse tsp envelope");
-            let task: TrustTask<Value> =
+            let task: TrustTask<RecognitionResponse> =
                 serde_json::from_value(envelope["document"].clone()).expect("parse response task");
-            recognized = Some(task.payload["recognized"] == json!(true));
+            recognized = Some(task.payload.recognized);
         }
         if recognized.is_some() {
             break;
@@ -629,17 +636,25 @@ async fn await_request(env: &TestEnvironment, registry: &TestUser) -> TrustTask<
     panic!("no Trust Task request reached the registry's inbox");
 }
 
-/// An authorization `#response` to `request` saying `authorized`.
+/// An authorization `#response` to `request` (the client's 0.2 query) saying
+/// `authorized`, built with the generated response type.
 fn authorization_reply(request: &TrustTask<Value>, authorized: bool) -> TrustTask<Value> {
-    let payload = json!({
-        "entityId": request.payload["entityId"],
-        "authorityId": request.payload["authorityId"],
-        "action": request.payload["action"],
-        "resource": request.payload["resource"],
-        "authorized": authorized,
-        "evaluatedAt": chrono::Utc::now(),
-    });
-    request.respond_with(format!("urn:uuid:{}", uuid::Uuid::new_v4()), payload)
+    use trql_client::payloads::v0_2::{AuthorizationRequest, AuthorizationResponse};
+    let asked: AuthorizationRequest =
+        serde_json::from_value(request.payload.clone()).expect("a 0.2 authorization request");
+    let response: AuthorizationResponse = AuthorizationResponse::builder()
+        .entity_id(asked.entity_id)
+        .authority_id(asked.authority_id)
+        .action(asked.action)
+        .resource(asked.resource)
+        .authorized(authorized)
+        .evaluated_at(chrono::Utc::now())
+        .try_into()
+        .expect("valid authorization response");
+    request.respond_with(
+        format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+        serde_json::to_value(response).expect("serialise the response"),
+    )
 }
 
 /// Send `reply` to `to`, authcrypted with `from`'s own key.

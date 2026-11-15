@@ -154,39 +154,18 @@ pub async fn dispatch_tsp_application(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+// `deprecated`: the queries are the superseded 0.1 versions, which this
+// registry still serves.
+#[allow(clippy::unwrap_used, clippy::expect_used, deprecated)]
 mod tests {
     use super::*;
-
-    fn doc_with(type_uri: &str, proof: bool) -> TrustTask<Value> {
-        let mut doc = TrustTask::new(
-            uuid::Uuid::new_v4().to_string(),
-            type_uri.parse().expect("valid type uri"),
-            serde_json::json!({}),
-        );
-        if proof {
-            doc.proof = Some(
-                serde_json::from_value(serde_json::json!({
-                    "type": "DataIntegrityProof",
-                    "cryptosuite": "eddsa-jcs-2022",
-                    "created": "2026-07-07T00:00:00Z",
-                    "proofPurpose": "authentication",
-                    "verificationMethod": "did:example:admin#key-1",
-                    "proofValue": "z0000"
-                }))
-                .expect("valid proof fixture"),
-            );
-        }
-        doc
-    }
-
-    const RECOGNITION: &str = "https://trusttasks.org/spec/registry/recognition/0.1";
 
     // The write ACL these tests used to cover moved to
     // `crate::trust_tasks::handler`, along with `authorize_write` itself — it is
     // now shared with the DIDComm binding rather than duplicated here, and is
     // tested once at its new home.
 
+    use crate::trust_tasks::payloads::{AuthorizationResponse, RecognitionResponse};
     use crate::trust_tasks::test_support::{CLIENT_DID, query_doc, seeded_handler};
     use crate::trust_tasks::type_uris;
 
@@ -229,7 +208,8 @@ mod tests {
         let reply = query_over_tsp(type_uris::RECOGNITION).await;
         assert!(reply.type_uri.is_response());
         assert_eq!(reply.type_uri.slug(), "registry/recognition");
-        assert_eq!(reply.payload["recognized"], serde_json::json!(true));
+        let answer: RecognitionResponse = serde_json::from_value(reply.payload).unwrap();
+        assert!(answer.recognized);
     }
 
     #[tokio::test]
@@ -237,12 +217,13 @@ mod tests {
         let reply = query_over_tsp(type_uris::AUTHORIZATION).await;
         assert!(reply.type_uri.is_response());
         assert_eq!(reply.type_uri.slug(), "registry/authorization");
-        assert_eq!(reply.payload["authorized"], serde_json::json!(true));
+        let answer: AuthorizationResponse = serde_json::from_value(reply.payload).unwrap();
+        assert!(answer.authorized);
     }
 
     #[test]
     fn envelope_round_trips() {
-        let doc = doc_with(RECOGNITION, false);
+        let doc = query_doc(type_uris::RECOGNITION);
         let bytes = build_envelope(&doc);
         let parsed = parse_envelope(&bytes).expect("round-trips");
         assert_eq!(parsed.type_uri.slug(), "registry/recognition");
@@ -250,6 +231,8 @@ mod tests {
 
     #[test]
     fn envelope_rejects_wrong_type() {
+        // Raw JSON: a binding envelope of the wrong type, which no generated
+        // type expresses.
         let bytes = serde_json::to_vec(&serde_json::json!({
             "type": "https://example.com/not-tsp",
             "document": {}

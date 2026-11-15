@@ -971,12 +971,15 @@ mod tests {
     use super::*;
     use trust_tasks_rs::TrustTask;
 
-    const PUT: &str = "https://trusttasks.org/spec/registry/record/put/0.1";
+    use crate::trust_tasks::payloads::camel::{RecognitionRequest, RecordPutRequest};
+    use trust_tasks_rs::Payload as _;
 
     fn write_doc(id: &str, issuer: Option<&str>) -> TrustTask<Value> {
         let mut doc = TrustTask::new(
             id.to_string(),
-            PUT.parse().expect("valid type uri"),
+            RecordPutRequest::type_uri(),
+            // Raw JSON: these tests key and replay documents without
+            // dispatching them, so the payload is never read.
             serde_json::json!({}),
         );
         doc.issuer = issuer.map(str::to_string);
@@ -1233,11 +1236,14 @@ mod tests {
     }
 
     fn create_doc(id: &str, issuer: &str) -> TrustTask<Value> {
-        let record = serde_json::to_value(sample_record()).expect("record serialises");
+        let payload: RecordPutRequest = RecordPutRequest::builder()
+            .record(&sample_record())
+            .try_into()
+            .expect("valid put");
         let mut doc = TrustTask::new(
             id.to_string(),
-            PUT.parse().expect("valid type uri"),
-            serde_json::json!({ "record": record }),
+            RecordPutRequest::type_uri(),
+            serde_json::to_value(payload).expect("put serialises"),
         );
         doc.issuer = Some(issuer.to_string());
         doc
@@ -1276,7 +1282,7 @@ mod tests {
         let store = store();
         let first = create_doc("msg-1", "did:example:admin");
         let mut second = first.clone();
-        second.payload["record"]["entity_id"] = serde_json::json!("did:example:other");
+        second.payload["record"]["entityId"] = serde_json::json!("did:example:other");
 
         dispatch_idempotent(&dispatcher, &store, None, first)
             .await
@@ -1372,17 +1378,17 @@ mod tests {
         let dispatcher = build_dispatcher(repo.clone());
         let store = store();
 
+        let request: RecognitionRequest = RecognitionRequest::builder()
+            .entity_id("did:example:entity")
+            .authority_id("did:example:authority")
+            .action("issue")
+            .resource("vc")
+            .try_into()
+            .expect("valid recognition request");
         let read = TrustTask::new(
             "read-1".to_string(),
-            crate::trust_tasks::type_uris::RECOGNITION
-                .parse()
-                .expect("valid type uri"),
-            serde_json::json!({
-                "entity_id": "did:example:entity",
-                "authority_id": "did:example:authority",
-                "action": "issue",
-                "resource": "vc"
-            }),
+            RecognitionRequest::type_uri(),
+            serde_json::to_value(request).expect("request serialises"),
         );
 
         assert!(

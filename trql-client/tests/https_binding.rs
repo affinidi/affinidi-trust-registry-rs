@@ -15,8 +15,10 @@ use axum::{
     http::{StatusCode, header},
     routing::post,
 };
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use trql_client::payloads::v0_2::{AuthorizationRequest, AuthorizationResponse};
 use trql_client::{
     DEFAULT_MAX_RESPONSE_BYTES, HttpsTransport, HttpsTransportConfig, MAX_ERROR_DETAIL_CHARS,
     TrqlClient, TrqlError, TrqpQuery,
@@ -51,15 +53,7 @@ async fn authorization_round_trip_over_http() {
         post(|Json(doc): Json<TrustTask<Value>>| async move {
             assert_eq!(doc.recipient.as_deref(), Some("did:example:registry"));
             assert_eq!(doc.type_uri.slug(), "registry/authorization");
-            let payload = serde_json::json!({
-                "entityId": doc.payload["entityId"],
-                "authorityId": doc.payload["authorityId"],
-                "action": doc.payload["action"],
-                "resource": doc.payload["resource"],
-                "authorized": true,
-                "evaluatedAt": "2026-07-16T00:00:00Z",
-            });
-            Json(doc.respond_with("urn:uuid:reply".to_string(), payload))
+            Json(authorized_reply(doc))
         }),
     );
     let base = serve(router).await;
@@ -169,15 +163,7 @@ async fn correlated_answer_for_another_authority_is_rejected_over_the_wire() {
     let router = Router::new().route(
         "/trust-tasks",
         post(|Json(doc): Json<TrustTask<Value>>| async move {
-            let payload = serde_json::json!({
-                "entityId": doc.payload["entityId"],
-                "authorityId": "did:example:not-who-we-asked-about",
-                "action": doc.payload["action"],
-                "resource": doc.payload["resource"],
-                "authorized": true,
-                "evaluatedAt": "2026-07-16T00:00:00Z",
-            });
-            Json(doc.respond_with("urn:uuid:reply".to_string(), payload))
+            Json(answer(doc, Some("did:example:not-who-we-asked-about")))
         }),
     );
     let base = serve(router).await;
@@ -213,17 +199,7 @@ async fn correlated_answer_for_another_authority_is_rejected_over_the_wire() {
 async fn unconfirmed_referral_is_rejected_over_the_wire() {
     let router = Router::new().route(
         "/trust-tasks",
-        post(|Json(doc): Json<TrustTask<Value>>| async move {
-            let payload = serde_json::json!({
-                "entityId": doc.payload["entityId"],
-                "authorityId": doc.payload["authorityId"],
-                "action": doc.payload["action"],
-                "resource": doc.payload["resource"],
-                "authorized": true,
-                "evaluatedAt": "2026-07-16T00:00:00Z",
-            });
-            Json(doc.respond_with("urn:uuid:reply".to_string(), payload))
-        }),
+        post(|Json(doc): Json<TrustTask<Value>>| async move { Json(authorized_reply(doc)) }),
     );
     let base = serve(router).await;
     let transport = HttpsTransport::new(local_config(&base)).unwrap();
@@ -261,16 +237,29 @@ async fn unconfirmed_referral_is_rejected_over_the_wire() {
     assert!(response.authorized);
 }
 
+/// The registry's granting `registry/authorization/0.2` answer to `doc`,
+/// built with the generated response type: the asked tuple echoed, except
+/// the authority when `authority` names another one.
+fn answer(doc: TrustTask<Value>, authority: Option<&str>) -> TrustTask<Value> {
+    let asked: AuthorizationRequest =
+        serde_json::from_value(doc.payload.clone()).expect("a 0.2 authorization request");
+    let response: AuthorizationResponse = AuthorizationResponse::builder()
+        .entity_id(asked.entity_id)
+        .authority_id(authority.map_or(asked.authority_id, str::to_string))
+        .action(asked.action)
+        .resource(asked.resource)
+        .authorized(true)
+        .evaluated_at("2026-07-16T00:00:00Z".parse::<DateTime<Utc>>().unwrap())
+        .try_into()
+        .unwrap();
+    doc.respond_with(
+        "urn:uuid:reply".to_string(),
+        serde_json::to_value(response).unwrap(),
+    )
+}
+
 fn authorized_reply(doc: TrustTask<Value>) -> TrustTask<Value> {
-    let payload = serde_json::json!({
-        "entityId": doc.payload["entityId"],
-        "authorityId": doc.payload["authorityId"],
-        "action": doc.payload["action"],
-        "resource": doc.payload["resource"],
-        "authorized": true,
-        "evaluatedAt": "2026-07-16T00:00:00Z",
-    });
-    doc.respond_with("urn:uuid:reply".to_string(), payload)
+    answer(doc, None)
 }
 
 fn query() -> TrqpQuery {

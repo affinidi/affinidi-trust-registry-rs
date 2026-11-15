@@ -131,11 +131,13 @@ mod tests {
     use super::*;
 
     fn error_for(reason: RejectReason) -> ErrorResponse {
+        use crate::trust_tasks::payloads::camel::RecognitionRequest;
+        use trust_tasks_rs::Payload as _;
         let doc: TrustTask<Value> = TrustTask::new(
             "req-1",
-            "https://trusttasks.org/spec/registry/recognition/0.1"
-                .parse()
-                .expect("valid type uri"),
+            RecognitionRequest::type_uri(),
+            // Raw JSON: only the rejection is built from this document; its
+            // payload is never read.
             serde_json::json!({}),
         );
         doc.reject_with(new_id(), reason)
@@ -152,6 +154,7 @@ mod tests {
     #[test]
     fn unsupported_type_maps_to_client_error() {
         let resp = error_response(error_for(RejectReason::UnsupportedType {
+            // A type no specification defines, by design.
             type_uri: "https://trusttasks.org/spec/registry/nope/0.1".into(),
         }));
         assert!(resp.status().is_client_error());

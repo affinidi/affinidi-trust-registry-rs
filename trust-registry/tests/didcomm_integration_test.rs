@@ -1,5 +1,8 @@
 // Test code: a panic on an unexpected `Err`/`None` is the failure report.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// The `registry/record/*` 0.1 types are superseded (deprecated); the registry
+// still serves them and these tests speak them on purpose.
+#![allow(deprecated)]
 
 use affinidi_tdk::messaging::tasks::messaging::account::update::v0_2::{
     MediatorAcl, MediatorAclAccessListMode,
@@ -23,11 +26,15 @@ use trust_registry::{
         handlers::trqp::{QUERY_RECOGNITION_MESSAGE_TYPE, QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE},
         prepare_atm_and_profile,
     },
-    trust_tasks::type_uris,
+    specs::registry::record::put::v0_1 as put_spec,
+    trust_tasks::payloads::{
+        RecordDeleteRequest, RecordPutRequest, RecordPutResponse, RecordQueryRequest,
+        RecordQueryResponse,
+    },
 };
 use trust_tasks_didcomm::ENVELOPE_TYPE;
 use trust_tasks_proof::affinidi::{CryptoSuite, SignOptions, sign_trust_task};
-use trust_tasks_rs::TrustTask;
+use trust_tasks_rs::{ErrorPayload, Payload, TrustTask};
 use uuid::Uuid;
 
 static TEST_CONTEXT: OnceCell<Arc<TestConfig>> = OnceCell::const_new();
@@ -161,40 +168,93 @@ fn signing_key(config: &TestConfig) -> Secret {
         .expect("the client has a verification key")
 }
 
-fn record_key(test_name: &str, authority: &str) -> Value {
+/// The four-part key of the test's record: entity, authority, action,
+/// resource.
+fn key_parts(test_name: &str, authority: &str) -> [String; 4] {
+    [
+        format!("{ENTITY_ID}_{test_name}"),
+        authority.to_string(),
+        format!("{ACTION}_{test_name}"),
+        format!("{RESOURCE}_{test_name}"),
+    ]
+}
+
+/// The legacy TRQP-over-DIDComm query body (not a Trust Task).
+fn trqp_body(test_name: &str, authority: &str) -> Value {
+    let [entity_id, authority_id, action, resource] = key_parts(test_name, authority);
     json!({
-        "entity_id": format!("{ENTITY_ID}_{test_name}"),
-        "authority_id": authority,
-        "action": format!("{ACTION}_{test_name}"),
-        "resource": format!("{RESOURCE}_{test_name}"),
+        "entity_id": entity_id,
+        "authority_id": authority_id,
+        "action": action,
+        "resource": resource,
     })
 }
 
-fn record(test_name: &str, authority: &str, granted: bool) -> Value {
-    let mut record = record_key(test_name, authority);
-    record["recognized"] = json!(granted);
-    record["authorized"] = json!(granted);
-    record["record_type"] = json!("authorization");
-    record["context"] = json!({
-        "description": "Test credential type",
-        "version": "1.0",
-        "tags": ["test", "demo"]
-    });
-    record
+fn record(test_name: &str, authority: &str, granted: bool) -> put_spec::TrustRecord {
+    let [entity_id, authority_id, action, resource] = key_parts(test_name, authority);
+    put_spec::TrustRecord::builder()
+        .entity_id(entity_id)
+        .authority_id(authority_id)
+        .action(action)
+        .resource(resource)
+        .recognized(Some(granted))
+        .authorized(Some(granted))
+        .record_type(put_spec::RecordType::Authorization)
+        .context(serde_json::Map::from_iter([
+            ("description".to_string(), json!("Test credential type")),
+            ("version".to_string(), json!("1.0")),
+            ("tags".to_string(), json!(["test", "demo"])),
+        ]))
+        .try_into()
+        .expect("valid record")
+}
+
+/// `registry/record/put/0.1` of the test's record.
+fn put_request(test_name: &str, authority: &str, granted: bool) -> RecordPutRequest {
+    RecordPutRequest::builder()
+        .record(record(test_name, authority, granted))
+        .try_into()
+        .expect("valid put")
+}
+
+/// `registry/record/query/0.1`: an exact fetch of the test's record.
+fn query_request(test_name: &str, authority: &str) -> RecordQueryRequest {
+    let [entity_id, authority_id, action, resource] = key_parts(test_name, authority);
+    RecordQueryRequest::builder()
+        .entity_id(Some(entity_id))
+        .authority_id(Some(authority_id))
+        .action(Some(action))
+        .resource(Some(resource))
+        .try_into()
+        .expect("valid query")
+}
+
+/// `registry/record/delete/0.1` of the test's record.
+fn delete_request(test_name: &str, authority: &str) -> RecordDeleteRequest {
+    let [entity_id, authority_id, action, resource] = key_parts(test_name, authority);
+    RecordDeleteRequest::builder()
+        .entity_id(entity_id)
+        .authority_id(authority_id)
+        .action(action)
+        .resource(resource)
+        .try_into()
+        .expect("valid delete")
+}
+
+/// A success reply's payload as the generated response type.
+fn parse<R: Payload>(reply: &TrustTask<Value>) -> R {
+    assert!(reply.type_uri.is_response(), "refused: {reply:?}");
+    serde_json::from_value(reply.payload.clone()).expect("the reply parses as its response type")
 }
 
 /// A Trust Task from the client to the registry, signed with the client's
-/// verification key when `sign` is set.
-async fn trust_task(
-    config: &TestConfig,
-    type_uri: &str,
-    payload: Value,
-    sign: bool,
-) -> TrustTask<Value> {
+/// verification key when `sign` is set. The document's `type` is the
+/// generated payload's Type URI.
+async fn trust_task<P: Payload>(config: &TestConfig, payload: P, sign: bool) -> TrustTask<Value> {
     let mut doc = TrustTask::new(
         format!("urn:uuid:{}", Uuid::new_v4()),
-        type_uri.parse().expect("valid type uri"),
-        payload,
+        P::type_uri(),
+        serde_json::to_value(payload).unwrap(),
     );
     doc.issuer = Some(config.client_did.clone());
     doc.recipient = Some(config.trust_registry_did.clone());
@@ -247,11 +307,15 @@ async fn round_trip(
     serde_json::from_value(reply).unwrap()
 }
 
-fn error_code(reply: &TrustTask<Value>) -> Option<&str> {
+/// The error code of a `trust-task-error` reply, read through the
+/// framework's error payload type.
+fn error_code(reply: &TrustTask<Value>) -> Option<String> {
     if reply.type_uri.is_response() {
         return None;
     }
-    reply.payload.get("code").and_then(Value::as_str)
+    serde_json::from_value::<ErrorPayload>(reply.payload.clone())
+        .ok()
+        .map(|error| error.code.to_string())
 }
 
 async fn put(
@@ -261,13 +325,7 @@ async fn put(
     authority: &str,
     granted: bool,
 ) -> TrustTask<Value> {
-    let doc = trust_task(
-        config,
-        type_uris::RECORD_PUT,
-        json!({ "record": record(test_name, authority, granted) }),
-        true,
-    )
-    .await;
+    let doc = trust_task(config, put_request(test_name, authority, granted), true).await;
     round_trip(context, config, &doc).await
 }
 
@@ -277,13 +335,7 @@ async fn query(
     test_name: &str,
     authority: &str,
 ) -> TrustTask<Value> {
-    let doc = trust_task(
-        config,
-        type_uris::RECORD_QUERY,
-        record_key(test_name, authority),
-        true,
-    )
-    .await;
+    let doc = trust_task(config, query_request(test_name, authority), true).await;
     round_trip(context, config, &doc).await
 }
 
@@ -336,16 +388,16 @@ async fn test_signed_put_under_own_authority_is_stored() {
     let (context, config) = get_test_context().await;
 
     let reply = put(&context, &config, "put", &config.client_did, true).await;
-    assert!(reply.type_uri.is_response(), "put refused: {reply:?}");
-    assert_eq!(reply.payload["ok"], true);
+    let ack: RecordPutResponse = parse(&reply);
+    assert!(ack.ok);
 
     let reply = query(&context, &config, "put", &config.client_did).await;
-    assert!(reply.type_uri.is_response(), "query refused: {reply:?}");
-    let stored = &reply.payload["records"][0];
-    assert_eq!(stored["entity_id"], format!("{ENTITY_ID}_put"));
-    assert_eq!(stored["authority_id"], config.client_did);
-    assert_eq!(stored["recognized"], true);
-    assert_eq!(stored["authorized"], true);
+    let answer: RecordQueryResponse = parse(&reply);
+    let stored = &answer.records[0];
+    assert_eq!(stored.entity_id, format!("{ENTITY_ID}_put"));
+    assert_eq!(stored.authority_id, config.client_did);
+    assert_eq!(stored.recognized, Some(true));
+    assert_eq!(stored.authorized, Some(true));
 }
 
 #[tokio::test]
@@ -355,12 +407,13 @@ async fn test_signed_put_replaces_an_existing_record() {
 
     put(&context, &config, "update", &config.client_did, true).await;
     let reply = put(&context, &config, "update", &config.client_did, false).await;
-    assert!(reply.type_uri.is_response(), "put refused: {reply:?}");
-    assert_eq!(reply.payload["created"], false);
+    let ack: RecordPutResponse = parse(&reply);
+    assert!(!ack.created);
 
     let reply = query(&context, &config, "update", &config.client_did).await;
-    assert_eq!(reply.payload["records"][0]["recognized"], false);
-    assert_eq!(reply.payload["records"][0]["authorized"], false);
+    let answer: RecordQueryResponse = parse(&reply);
+    assert_eq!(answer.records[0].recognized, Some(false));
+    assert_eq!(answer.records[0].authorized, Some(false));
 }
 
 #[tokio::test]
@@ -369,13 +422,7 @@ async fn test_signed_delete_removes_the_record() {
     let (context, config) = get_test_context().await;
 
     put(&context, &config, "delete", &config.client_did, true).await;
-    let delete = trust_task(
-        &config,
-        type_uris::RECORD_DELETE,
-        record_key("delete", &config.client_did),
-        true,
-    )
-    .await;
+    let delete = trust_task(&config, delete_request("delete", &config.client_did), true).await;
     let reply = round_trip(&context, &config, &delete).await;
     assert!(reply.type_uri.is_response(), "delete refused: {reply:?}");
 
@@ -392,11 +439,11 @@ async fn test_put_under_another_authority_is_refused() {
     let (context, config) = get_test_context().await;
 
     let reply = put(&context, &config, "foreign", OTHER_AUTHORITY, true).await;
-    assert_eq!(error_code(&reply), Some("permissionDenied"));
+    assert_eq!(error_code(&reply).as_deref(), Some("permissionDenied"));
 
     // Records under another authority cannot be read back either.
     let reply = query(&context, &config, "foreign", OTHER_AUTHORITY).await;
-    assert_eq!(error_code(&reply), Some("permissionDenied"));
+    assert_eq!(error_code(&reply).as_deref(), Some("permissionDenied"));
 }
 
 #[tokio::test]
@@ -406,13 +453,12 @@ async fn test_delete_under_another_authority_is_refused() {
 
     let delete = trust_task(
         &config,
-        type_uris::RECORD_DELETE,
-        record_key("foreign-delete", OTHER_AUTHORITY),
+        delete_request("foreign-delete", OTHER_AUTHORITY),
         true,
     )
     .await;
     let reply = round_trip(&context, &config, &delete).await;
-    assert_eq!(error_code(&reply), Some("permissionDenied"));
+    assert_eq!(error_code(&reply).as_deref(), Some("permissionDenied"));
 }
 
 #[tokio::test]
@@ -430,13 +476,12 @@ async fn test_unsigned_record_query_is_refused() {
     .await;
     let doc = trust_task(
         &config,
-        type_uris::RECORD_QUERY,
-        record_key("unsigned-query", &config.client_did),
+        query_request("unsigned-query", &config.client_did),
         false,
     )
     .await;
     let reply = round_trip(&context, &config, &doc).await;
-    assert_eq!(error_code(&reply), Some("proofRequired"));
+    assert_eq!(error_code(&reply).as_deref(), Some("proofRequired"));
 }
 
 #[tokio::test]
@@ -446,13 +491,12 @@ async fn test_unsigned_put_is_refused() {
 
     let doc = trust_task(
         &config,
-        type_uris::RECORD_PUT,
-        json!({ "record": record("unsigned", &config.client_did, true) }),
+        put_request("unsigned", &config.client_did, true),
         false,
     )
     .await;
     let reply = round_trip(&context, &config, &doc).await;
-    assert_eq!(error_code(&reply), Some("proofRequired"));
+    assert_eq!(error_code(&reply).as_deref(), Some("proofRequired"));
 }
 
 /// The legacy `tr-admin/1.0` record protocol is no longer served: a
@@ -466,7 +510,9 @@ async fn test_tr_admin_create_record_is_not_served() {
         &context.atm,
         context.profile.clone(),
         &config.trust_registry_did,
-        &record("tr-admin", &config.client_did, true),
+        // The retired tr-admin/1.0 body carried the record's snake_case
+        // members, which is what the 0.1 wire record serialises to.
+        &serde_json::to_value(record("tr-admin", &config.client_did, true)).unwrap(),
         TR_ADMIN_CREATE_RECORD,
         None,
     )
@@ -495,7 +541,7 @@ async fn test_trqp_handler() {
         &context.atm,
         context.profile.clone(),
         &config.trust_registry_did,
-        &record_key("trqp", &config.client_did),
+        &trqp_body("trqp", &config.client_did),
         QUERY_RECOGNITION_MESSAGE_TYPE,
         None,
     )

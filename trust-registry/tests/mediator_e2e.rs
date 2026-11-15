@@ -32,6 +32,9 @@
 
 // Test code: a panic on an unexpected `Err`/`None` is the failure report.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// The `registry/record/*` 0.1 types are superseded (deprecated); the registry
+// still serves them and this test speaks them on purpose.
+#![allow(deprecated)]
 
 mod e2e;
 
@@ -41,8 +44,11 @@ use serde_json::{Value, json};
 use trust_registry::didcomm::handlers::trqp::{
     QUERY_RECOGNITION_MESSAGE_TYPE, QUERY_RECOGNITION_RESPONSE_MESSAGE_TYPE,
 };
-use trust_registry::trust_tasks::type_uris;
-use trust_tasks_rs::TrustTask;
+use trust_registry::specs::registry::record::put::v0_1 as put_spec;
+use trust_registry::trust_tasks::payloads::{
+    RecordPutRequest, RecordPutResponse, RecordQueryRequest, RecordQueryResponse,
+};
+use trust_tasks_rs::{ErrorPayload, TrustTask};
 
 use e2e::client::{Client, IdentityKeys};
 use e2e::docker::MediatorStack;
@@ -147,39 +153,28 @@ async fn scenario(registry: &mut RegistryProcess, client: &Client) -> Result<(),
 
     // A signed write under the client's own authority is stored ...
     let put = client
-        .trust_task(
-            &registry.did,
-            type_uris::RECORD_PUT,
-            json!({ "record": written_record(&client.did) }),
-            true,
-        )
+        .trust_task(&registry.did, written_put(&client.did), true)
         .await?;
     let reply = client
         .round_trip(&registry.did, &put, REPLY_TIMEOUT)
         .await?;
     expect_response(&reply, "the signed put is accepted")?;
-    expect(
-        reply.payload["ok"] == true,
-        "the put reports ok",
-        &reply.payload,
-    )?;
+    let ack: RecordPutResponse = parse(&reply)?;
+    expect(ack.ok, "the put reports ok", &reply.payload)?;
 
     // ... and a signed query reads it back.
     let query = client
-        .trust_task(
-            &registry.did,
-            type_uris::RECORD_QUERY,
-            written_key(&client.did),
-            true,
-        )
+        .trust_task(&registry.did, written_query(&client.did), true)
         .await?;
     let reply = client
         .round_trip(&registry.did, &query, REPLY_TIMEOUT)
         .await?;
     expect_response(&reply, "the signed query is answered")?;
-    let stored = &reply.payload["records"][0];
+    let answer: RecordQueryResponse = parse(&reply)?;
     expect(
-        stored["authority_id"] == client.did.as_str() && stored["authorized"] == true,
+        answer.records.first().is_some_and(|stored| {
+            stored.authority_id == client.did && stored.authorized == Some(true)
+        }),
         "the query returns the written record",
         &reply.payload,
     )?;
@@ -187,18 +182,13 @@ async fn scenario(registry: &mut RegistryProcess, client: &Client) -> Result<(),
 
     // An unsigned write is refused.
     let unsigned = client
-        .trust_task(
-            &registry.did,
-            type_uris::RECORD_PUT,
-            json!({ "record": written_record(&client.did) }),
-            false,
-        )
+        .trust_task(&registry.did, written_put(&client.did), false)
         .await?;
     let reply = client
         .round_trip(&registry.did, &unsigned, REPLY_TIMEOUT)
         .await?;
     expect(
-        error_code(&reply) == Some("proofRequired"),
+        error_code(&reply).as_deref() == Some("proofRequired"),
         "an unsigned put is refused with proofRequired",
         &json!({ "type": reply.type_uri.to_string(), "payload": reply.payload }),
     )?;
@@ -296,6 +286,8 @@ async fn run_private_mode_refused() -> Result<(), String> {
     }
 }
 
+/// The TRQP body (REST, and the legacy DIDComm TRQP protocol) naming the
+/// seeded record. Not a Trust Task.
 fn seeded_key() -> Value {
     json!({
         "entity_id": SEEDED_ENTITY,
@@ -305,22 +297,62 @@ fn seeded_key() -> Value {
     })
 }
 
+/// The REST TRQP body naming the written record (not a Trust Task).
 fn written_key(authority: &str) -> Value {
     json!({
-        "entity_id": "did:example:e2e-written",
+        "entity_id": WRITTEN_ENTITY,
         "authority_id": authority,
-        "action": "issue",
-        "resource": "e2e-credential",
+        "action": WRITTEN_ACTION,
+        "resource": WRITTEN_RESOURCE,
     })
 }
 
-fn written_record(authority: &str) -> Value {
-    let mut record = written_key(authority);
-    record["recognized"] = json!(true);
-    record["authorized"] = json!(true);
-    record["record_type"] = json!("authorization");
-    record["context"] = json!({ "description": "written by the e2e test" });
-    record
+const WRITTEN_ENTITY: &str = "did:example:e2e-written";
+const WRITTEN_ACTION: &str = "issue";
+const WRITTEN_RESOURCE: &str = "e2e-credential";
+
+/// `registry/record/put/0.1` writing the e2e record under `authority`.
+fn written_put(authority: &str) -> RecordPutRequest {
+    let record: put_spec::TrustRecord = put_spec::TrustRecord::builder()
+        .entity_id(WRITTEN_ENTITY)
+        .authority_id(authority)
+        .action(WRITTEN_ACTION)
+        .resource(WRITTEN_RESOURCE)
+        .recognized(Some(true))
+        .authorized(Some(true))
+        .record_type(put_spec::RecordType::Authorization)
+        .context(serde_json::Map::from_iter([(
+            "description".to_string(),
+            json!("written by the e2e test"),
+        )]))
+        .try_into()
+        .expect("valid record");
+    RecordPutRequest::builder()
+        .record(record)
+        .try_into()
+        .expect("valid put")
+}
+
+/// `registry/record/query/0.1`: an exact fetch of the e2e record.
+fn written_query(authority: &str) -> RecordQueryRequest {
+    RecordQueryRequest::builder()
+        .entity_id(Some(WRITTEN_ENTITY.to_string()))
+        .authority_id(Some(authority.to_string()))
+        .action(Some(WRITTEN_ACTION.to_string()))
+        .resource(Some(WRITTEN_RESOURCE.to_string()))
+        .try_into()
+        .expect("valid query")
+}
+
+/// A success reply's payload as the generated response type.
+fn parse<R: trust_tasks_rs::Payload>(reply: &TrustTask<Value>) -> Result<R, String> {
+    serde_json::from_value(reply.payload.clone()).map_err(|e| {
+        format!(
+            "reply payload is not a {}: {e}: {}",
+            R::TYPE_URI,
+            reply.payload
+        )
+    })
 }
 
 async fn post(http: &reqwest::Client, url: &str, body: &Value) -> Result<Value, String> {
@@ -338,11 +370,15 @@ async fn post(http: &reqwest::Client, url: &str, body: &Value) -> Result<Value, 
     Ok(body)
 }
 
-fn error_code(reply: &TrustTask<Value>) -> Option<&str> {
+/// The error code of a `trust-task-error` reply, read through the
+/// framework's error payload type.
+fn error_code(reply: &TrustTask<Value>) -> Option<String> {
     if reply.type_uri.is_response() {
         return None;
     }
-    reply.payload.get("code").and_then(Value::as_str)
+    serde_json::from_value::<ErrorPayload>(reply.payload.clone())
+        .ok()
+        .map(|error| error.code.to_string())
 }
 
 fn expect_response(reply: &TrustTask<Value>, what: &str) -> Result<(), String> {

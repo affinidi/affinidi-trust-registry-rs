@@ -321,17 +321,20 @@ pub async fn verify_proof(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // `deprecated`: the superseded 0.1 types name the documents.
+    #![allow(clippy::unwrap_used, clippy::expect_used, deprecated)]
 
     use super::*;
+    use crate::trust_tasks::payloads::{RecognitionRequest, RecordPutRequest};
+    use trust_tasks_rs::{Payload as _, TypeUri};
 
-    fn doc_with_dummy_proof(type_uri: &str) -> TrustTask<Value> {
-        let mut doc = TrustTask::new(
-            "id-1",
-            type_uri.parse().expect("valid type uri"),
-            serde_json::json!({}),
-        );
+    /// A document of `type_uri` carrying a proof that verifies against
+    /// nothing. Only the type and the proof are looked at, so the payload is
+    /// left empty (raw JSON: neither task's generated type accepts `{}`).
+    fn doc_with_dummy_proof(type_uri: TypeUri) -> TrustTask<Value> {
+        let mut doc = TrustTask::new("id-1", type_uri, serde_json::json!({}));
         doc.issuer = Some("did:example:admin".to_string());
+        // Raw JSON: a proof with a bogus `proofValue`, which is the point.
         doc.proof = Some(
             serde_json::from_value(serde_json::json!({
                 "type": "DataIntegrityProof",
@@ -349,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn read_document_skips_verification() {
         let verifier = erase_verifier(Verifier::for_did_key());
-        let doc = doc_with_dummy_proof("https://trusttasks.org/spec/registry/recognition/0.1");
+        let doc = doc_with_dummy_proof(RecognitionRequest::type_uri());
         assert!(verify_write_proof(&verifier, None, &doc).await.is_ok());
     }
 
@@ -358,19 +361,17 @@ mod tests {
         // A did:key verifier rejects a proof whose verificationMethod is not a
         // resolvable did:key with a valid signature.
         let verifier = erase_verifier(Verifier::for_did_key());
-        let doc = doc_with_dummy_proof("https://trusttasks.org/spec/registry/record/put/0.1");
+        let doc = doc_with_dummy_proof(RecordPutRequest::type_uri());
         assert!(matches!(
             verify_write_proof(&verifier, None, &doc).await,
             Err(RejectReason::ProofInvalid { .. })
         ));
     }
 
-    const RECORD_PUT: &str = "https://trusttasks.org/spec/registry/record/put/0.1";
-
     #[tokio::test]
     async fn write_without_proof_is_refused() {
         let verifier = erase_verifier(Verifier::for_did_key());
-        let mut doc = doc_with_dummy_proof(RECORD_PUT);
+        let mut doc = doc_with_dummy_proof(RecordPutRequest::type_uri());
         doc.proof = None;
         assert!(matches!(
             verify_write_proof(&verifier, None, &doc).await,
@@ -381,7 +382,7 @@ mod tests {
     #[tokio::test]
     async fn write_without_issuer_is_refused() {
         let verifier = erase_verifier(Verifier::for_did_key());
-        let mut doc = doc_with_dummy_proof(RECORD_PUT);
+        let mut doc = doc_with_dummy_proof(RecordPutRequest::type_uri());
         doc.issuer = None;
         assert!(matches!(
             verify_write_proof(&verifier, None, &doc).await,
@@ -447,7 +448,7 @@ mod tests {
 
         assert_eq!(health.to_json()["verifier"], "didKeyOnly");
         assert_eq!(health.to_json()["status"], "degraded");
-        let doc = doc_with_dummy_proof(RECORD_PUT);
+        let doc = doc_with_dummy_proof(RecordPutRequest::type_uri());
         assert!(
             matches!(
                 verify_write_proof(&verifier, None, &doc).await,
@@ -478,7 +479,12 @@ mod tests {
         .await;
         assert_eq!(health.to_json()["verifier"], "ok");
         assert!(matches!(
-            verify_write_proof(&verifier, None, &doc_with_dummy_proof(RECORD_PUT)).await,
+            verify_write_proof(
+                &verifier,
+                None,
+                &doc_with_dummy_proof(RecordPutRequest::type_uri())
+            )
+            .await,
             Err(RejectReason::ProofInvalid { .. })
         ));
     }
