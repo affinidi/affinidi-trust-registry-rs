@@ -43,6 +43,14 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
     when the DID document is built; either way the registry does not start.
     The registry's own re-derivation for JWK-loaded P-256/secp256k1 keys is
     removed, since the resolver now loads them in the form it publishes.
+  - **Upgrade note: proxy URLs for the mediator websocket.** With
+    affinidi-messaging-sdk 0.47 (from 0.46.1), an `HTTPS_PROXY` / `ALL_PROXY`
+    whose scheme is `https://` or a non-HTTP one such as `socks5://` is
+    refused when the mediator websocket connects; it used to be sent a
+    plaintext `CONNECT`. A deployment that names a plain HTTP proxy as
+    `HTTPS_PROXY=https://proxy:3128` loses its mediator connection after
+    upgrading: write it as `http://proxy:3128`. A percent-escaped proxy
+    password is now sent decoded.
   - Write proofs from a DID that names `localhost` or a private-network host
     are refused before resolution, and each resolution has a 10 s deadline
     (trust-tasks-proof 0.38 `CachedDidResolver`). The registry's DID resolver
