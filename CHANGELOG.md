@@ -918,6 +918,31 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Fixed
 
+- **A transient failure resolving a writer's DID no longer refuses the write
+  as `proofInvalid` and deletes it** (#302, R1.6). Verifying a write's proof
+  answered every resolver error but the degraded verifier's with
+  `proofInvalid` (non-retryable), and the message was acked. A timeout
+  (including trust-tasks-proof's 10 s deadline per resolution), a DID host
+  that could not be reached (DNS, connect, TLS, reset), an upstream 5xx, 408
+  or 429, or the resolver cache itself unavailable is now answered
+  `unavailable` (retryable). A definitive answer (DID not found or
+  deactivated, unsupported method, malformed DID, a host the host policy
+  refuses, a key not listed under `authentication`, a bad signature) stays
+  `proofInvalid`. trust-tasks-proof reports resolver errors as text, so the
+  classification (`trust_tasks::proof::classify_resolver_error`) matches the
+  0.39 / resolver-cache 0.8 forms conservatively: anything not known to be
+  transient stays `proofInvalid`.
+- **A retryable refusal on DIDComm leaves the message queued.** The DIDComm
+  Trust Task binding sent every refusal and acked the message. A refusal the
+  framework marks `retryable` (storage unavailable, the same document in
+  flight, the resolver unavailable, the transient resolution failure above)
+  is still sent, and the message is now left queued at the mediator and
+  tried again under the listener's give-up bounds (5 attempts over at least
+  10 minutes), as the TSP path already did. A sender may therefore see the
+  same retryable refusal more than once; a write is still applied at most
+  once (the replay record does not keep a retryable refusal as the answer).
+  `trust_tasks::is_final_answer` says which outcomes are final, for hosts
+  driving their own socket (`route_didcomm_envelope`).
 - **A TSP-enabled registry answers DIDComm again.** With `ENABLE_TSP=true`
   the delivery crate's `MessagingService` started taking messages off the
   mediator socket as soon as it was built, before the registry subscribed;

@@ -84,18 +84,21 @@ async fn handle_inbound(
     sender_did: &str,
     doc: TrustTask<Value>,
 ) -> (Vec<u8>, TspDispatch) {
-    match tasks.handle(doc, Some(sender_did)).await {
-        Ok(response) => (build_envelope(&response), TspDispatch::Answered),
-        Err(err) => (build_envelope(&err), finality(&err)),
+    let outcome = tasks.handle(doc, Some(sender_did)).await;
+    let dispatch = finality(&outcome);
+    match outcome {
+        Ok(response) => (build_envelope(&response), dispatch),
+        Err(err) => (build_envelope(&err), dispatch),
     }
 }
 
-/// Whether a refusal is final: one the framework marks `retryable` is not.
-fn finality(err: &trust_tasks_rs::ErrorResponse) -> TspDispatch {
-    if err.payload.retryable {
-        TspDispatch::Retryable
-    } else {
+/// Whether an answer is final ([`crate::trust_tasks::is_final_answer`]): a
+/// refusal the framework marks `retryable` is not.
+fn finality(outcome: &Result<TrustTask<Value>, trust_tasks_rs::ErrorResponse>) -> TspDispatch {
+    if crate::trust_tasks::is_final_answer(outcome) {
         TspDispatch::Answered
+    } else {
+        TspDispatch::Retryable
     }
 }
 
@@ -108,7 +111,7 @@ pub enum TspDispatch {
     Answered,
     /// The registry could not decide now (the refusal is `retryable`: storage
     /// unavailable, an internal error, the same document still being
-    /// handled). The refusal was sent so the client can retry, and the frame
+    /// handled, the issuer's DID failing to resolve transiently). The refusal was sent so the client can retry, and the frame
     /// should stay queued so the registry tries it again too; a write is
     /// still applied once, through the dedup store.
     Retryable,
@@ -186,21 +189,21 @@ mod tests {
         use trust_tasks_rs::RejectReason;
         let doc = query_doc(type_uris::RECOGNITION);
         let unavailable = doc.reject_with("r1", RejectReason::Unavailable { retry_after: None });
-        assert_eq!(finality(&unavailable), TspDispatch::Retryable);
+        assert_eq!(finality(&Err(unavailable)), TspDispatch::Retryable);
         let internal = doc.reject_with(
             "r2",
             RejectReason::InternalError {
                 reason: "storage connection failed".into(),
             },
         );
-        assert_eq!(finality(&internal), TspDispatch::Retryable);
+        assert_eq!(finality(&Err(internal)), TspDispatch::Retryable);
         let denied = doc.reject_with(
             "r3",
             RejectReason::PermissionDenied {
                 reason: "not an admin".into(),
             },
         );
-        assert_eq!(finality(&denied), TspDispatch::Answered);
+        assert_eq!(finality(&Err(denied)), TspDispatch::Answered);
     }
 
     #[tokio::test]

@@ -121,13 +121,54 @@ impl ProtocolHandler for TrustTasksHandler {
             return Ok(());
         };
 
-        match outcome {
-            Ok(response) => self.send(ctx, &response).await,
-            Err(err) => self.send(ctx, &err).await,
+        let last_word = crate::trust_tasks::is_final_answer(&outcome);
+        match &outcome {
+            Ok(response) => self.send(ctx, response).await,
+            Err(err) => self.send(ctx, err).await,
         }
-        Ok(())
+        if last_word {
+            return Ok(());
+        }
+        // R1.6: a retryable refusal (storage unavailable, the same document
+        // in flight, a proof that could not be verified now because the
+        // issuer's DID did not resolve) is not this message's answer. The
+        // refusal is sent, so the sender knows to retry, and the message is
+        // reported unhandled, so the listener leaves it queued at the mediator
+        // and tries it again under the give-up bounds of
+        // `didcomm::listener::delivery`, as the TSP path does.
+        //
+        // Trade-off, taken deliberately: each redelivery that is refused again
+        // answers again, so a sender may see the same retryable refusal more
+        // than once (bounded by `GIVE_UP_ATTEMPTS` over `GIVE_UP_MIN_AGE`), and
+        // a redelivery that succeeds answers after a refusal. Acking instead
+        // would lose a valid signed write whose sender does not retry. A
+        // write is applied at most once either way: the replay record does
+        // not keep a retryable refusal, and keeps the final outcome.
+        Err(Box::new(RetryableRefusal(
+            outcome
+                .err()
+                .map(|err| err.payload.code.to_string())
+                .unwrap_or_default(),
+        )))
     }
 }
+
+/// A Trust Task answered with a retryable refusal: the message is left queued
+/// for redelivery rather than acked.
+#[derive(Debug)]
+pub struct RetryableRefusal(String);
+
+impl std::fmt::Display for RetryableRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "answered with a retryable `{}` refusal; left queued for redelivery",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for RetryableRefusal {}
 
 impl TrustTasksHandler {
     /// Pack `doc` as an [`ENVELOPE_TYPE`] DIDComm message and forward it to the
@@ -169,7 +210,146 @@ impl TrustTasksHandler {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, deprecated)]
+
     use super::*;
+
+    /// #302, the delivery-path consequence: a write refused because its
+    /// issuer's DID did not resolve in time is answered and then reported
+    /// unhandled, so the pickup listener leaves it queued for redelivery; a
+    /// write refused because the DID is not found is handled, so it is acked.
+    #[tokio::test]
+    async fn a_retryable_refusal_is_left_queued_and_a_final_one_acked() {
+        use crate::didcomm::listener::delivery::{Ack, DeliveryLedger, Outcome};
+        use crate::specs::registry::record::put::v0_1 as put_spec;
+        use crate::storage::adapters::local_storage::LocalStorage;
+        use crate::trust_tasks::build_dispatcher;
+        use crate::trust_tasks::proof::tests::{NOT_FOUND, TIMEOUT, verifier_failing_with};
+        use affinidi_tdk::common::{TDKSharedState, config::TDKConfig};
+        use affinidi_tdk::messaging::{ATM, config::ATMConfig, profiles::ATMProfile};
+        use std::time::Duration;
+        use tokio::sync::RwLock;
+        use trust_tasks_rs::Payload as _;
+
+        const REGISTRY: &str = "did:example:registry";
+        const WRITER: &str = "did:example:writer";
+
+        let tdk = TDKSharedState::new(
+            TDKConfig::builder()
+                .with_load_environment(false)
+                .build()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        // No mediator: the reply is attempted and fails, which is logged.
+        let atm = Arc::new(
+            ATM::new(ATMConfig::builder().build().unwrap(), Arc::new(tdk))
+                .await
+                .unwrap(),
+        );
+        let profile = Arc::new(
+            ATMProfile::new(&atm, Some("registry".into()), REGISTRY.into(), None)
+                .await
+                .unwrap(),
+        );
+        let ctx = Arc::new(HandlerContext {
+            atm,
+            profile,
+            authenticated_sender: WRITER.to_string(),
+            thid: None,
+        });
+
+        // A put by an admin carrying a proof; the failing resolver is reached
+        // before the signature is looked at.
+        let write = || {
+            let record: put_spec::TrustRecord = put_spec::TrustRecord::builder()
+                .entity_id("did:example:member")
+                .authority_id(WRITER)
+                .action("issue")
+                .resource("vc")
+                .recognized(Some(true))
+                .authorized(Some(true))
+                .record_type(put_spec::RecordType::Authorization)
+                .try_into()
+                .unwrap();
+            let payload: put_spec::Payload = put_spec::Payload::builder()
+                .record(record)
+                .try_into()
+                .unwrap();
+            let mut doc = TrustTask::new(
+                format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+                put_spec::Payload::type_uri(),
+                serde_json::to_value(payload).unwrap(),
+            );
+            doc.issuer = Some(WRITER.to_string());
+            doc.recipient = Some(REGISTRY.to_string());
+            doc.issued_at = Some(chrono::Utc::now());
+            doc.proof = Some(
+                serde_json::from_value(serde_json::json!({
+                    "type": "DataIntegrityProof",
+                    "cryptosuite": "eddsa-jcs-2022",
+                    "created": "2026-07-09T00:00:00Z",
+                    "proofPurpose": "authentication",
+                    "verificationMethod": format!("{WRITER}#key-1"),
+                    "proofValue": "z0000"
+                }))
+                .unwrap(),
+            );
+            Message::build(
+                "m".to_string(),
+                ENVELOPE_TYPE.to_string(),
+                serde_json::to_value(doc).unwrap(),
+            )
+            .finalize()
+        };
+        let binding = |resolver_error| {
+            let repo = Arc::new(LocalStorage::new());
+            let dispatcher = Arc::new(RwLock::new(Arc::new(build_dispatcher(repo))));
+            TrustTasksHandler::new(
+                TaskHandler::new(
+                    dispatcher,
+                    REGISTRY,
+                    vec![WRITER.to_string()],
+                    verifier_failing_with(resolver_error),
+                )
+                .with_dedup(Arc::new(crate::dedup::MemoryMessageIdStore::default())),
+            )
+        };
+        let outcome = |result: Result<(), Box<dyn std::error::Error>>| match result {
+            Ok(()) => Outcome::Handled,
+            Err(_) => Outcome::Retry,
+        };
+        let mut ledger = DeliveryLedger::default();
+        let now = tokio::time::Instant::now();
+
+        let transient = tokio::time::timeout(
+            Duration::from_secs(20),
+            binding(TIMEOUT).handle(&ctx, write(), UnpackMetadata::default()),
+        )
+        .await
+        .expect("bounded");
+        let err = transient.as_ref().expect_err("reported unhandled");
+        assert!(err.to_string().contains("unavailable"), "{err}");
+        ledger.claim("transient", now);
+        assert_eq!(
+            ledger.finish("transient", outcome(transient), now),
+            Ack::Retain
+        );
+
+        let definitive = tokio::time::timeout(
+            Duration::from_secs(20),
+            binding(NOT_FOUND).handle(&ctx, write(), UnpackMetadata::default()),
+        )
+        .await
+        .expect("bounded");
+        assert!(definitive.is_ok());
+        ledger.claim("definitive", now);
+        assert_eq!(
+            ledger.finish("definitive", outcome(definitive), now),
+            Ack::Now
+        );
+    }
 
     // The write ACL these tests used to cover moved to
     // `crate::trust_tasks::handler` along with `authorize_write` itself, which
