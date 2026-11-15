@@ -57,10 +57,13 @@ jobs:
   schedule:
     # RELEASES.md's schedule table is generated from the v* tags
     # (scripts/release_schedule.py); release-schedule.yml opens the PR that
-    # updates it after each tag. This fails a PR into main whose table does
-    # not match the tags, so it cannot drift. PRs into main only: a release
-    # branch's copy of RELEASES.md is not maintained, and on push the check
-    # would hold nightly back between a tag and the schedule PR's merge.
+    # updates it after each tag and daily. This runs the generator's tests on
+    # every PR into main, and compares the table with the tags only on a PR
+    # that changes RELEASES.md or the generator: such a PR must not hand-edit
+    # or break the table. Any other PR's verdict must not depend on when a
+    # tag was pushed (a re-run reuses the old merge commit), so it is not
+    # compared. PRs into main only: a release branch's copy of RELEASES.md is
+    # not maintained.
     name: release schedule
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
     runs-on: ubuntu-24.04
@@ -77,8 +80,16 @@ jobs:
           persist-credentials: false
       - name: Unit tests for the generator
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
-      - name: The table matches the tags
-        run: python3 scripts/release_schedule.py
+      - name: The table matches the tags (when the PR touches it)
+        run: |
+          set -euo pipefail
+          # HEAD is the PR merged into its base; its first parent is the base.
+          changed=$(git diff --name-only HEAD^1 HEAD -- RELEASES.md 'scripts/release_schedule*.py')
+          if [ -z "$changed" ]; then
+            echo "Neither RELEASES.md nor the generator changes here; table not compared."
+            exit 0
+          fi
+          python3 scripts/release_schedule.py
   semver:
     # Patch releases must be semver-compatible. Every PR into a release branch
     # (a backport, a `release-direct` fix, a prep PR) is checked against the

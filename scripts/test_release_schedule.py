@@ -99,6 +99,21 @@ class Render(unittest.TestCase):
             ["| 0.31 | `release/0.31` | 2026-11-03 | 2026-11-05 | `0.31.10` | supported (N) |"],
         )
 
+    def test_an_rc_of_a_patch_is_not_latest(self):
+        rows = body_rows(
+            rs.render(tags(v0_31_0="2026-11-05", v0_31_1="2026-11-06", v0_31_2_rc0="2026-11-07"))
+        )
+        self.assertIn("| `0.31.1` |", rows[0])
+
+    def test_a_cut_that_never_went_ga_is_superseded_once_a_newer_line_is(self):
+        rows = body_rows(
+            rs.render(tags(v0_30_0="2026-10-29", v0_31_0_rc0="2026-11-01", v0_32_0="2026-11-05"))
+        )
+        self.assertEqual(
+            rows[1], "| 0.31 | `release/0.31` | 2026-11-01 | — | `0.31.0-rc.0` | superseded |"
+        )
+        self.assertTrue(rows[0].endswith("| supported (N-1) |"))
+
     def test_status_follows_version_order_across_majors(self):
         rows = body_rows(
             rs.render(tags(v0_99_0="2026-01-01", v1_0_0="2026-02-01", v1_1_0="2026-03-01"))

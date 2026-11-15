@@ -457,9 +457,10 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   what "supported" means, and how a fix is delivered (backport label, then a
   patch release). The schedule table in RELEASES.md is now generated from the
   `v*` tags by `scripts/release_schedule.py` (with unit tests);
-  `release-schedule.yml` regenerates it after every release tag and opens the
-  PR, and the `release schedule` job in `checks.yaml` fails a PR into `main`
-  whose table does not match the tags. Its dates are UTC, which moves 0.29's
+  `release-schedule.yml` regenerates it after every release tag and daily, and
+  opens (or closes) the PR; the `release schedule` job in `checks.yaml` fails
+  a PR into `main` that changes RELEASES.md or the generator and leaves the
+  table not matching the tags. Its dates are UTC, which moves 0.29's
   RC/GA date and 0.27's end of life from 2026-10-29 to 2026-10-28 (the date
   0.29's changelog heading already carries).
 - **`trql-client`: `trql_client::trust_tasks`** re-exports `TrustTask`,

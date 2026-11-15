@@ -13,19 +13,22 @@ For each release line `major.minor` with at least one tag:
 - First RC: the earliest `v<x.y>.0-rc.N` tag; a line cut without an rc tag
   (0.27, cut by the local script) shows its GA date.
 - GA: the `v<x.y>.0` tag, or `—` while the line is still in release candidates.
-- Latest: the line's highest version tag.
+- Latest: the line's highest GA or patch tag once it is GA (an rc of a patch,
+  `v0.31.1-rc.0`, is not a release); before GA, its highest rc.
 - Status: the newest GA line is `supported (N)`, the GA line below it
   `supported (N-1)` (RELEASES.md, Support). Every older GA line is
   `end of life (<date>)`, the date being the GA of the line two above it,
-  which is what ended its support. A line not yet GA is `release candidate`.
+  which is what ended its support. A line not yet GA is `release candidate`
+  while no newer line is GA, and `superseded` once one is (it never will be).
 
 Usage (Python >= 3.11, from anywhere in a checkout with the tags fetched):
 
     python3 scripts/release_schedule.py           # check: exit 1 if RELEASES.md differs
     python3 scripts/release_schedule.py --write   # rewrite the table in place
 
-`release-schedule.yml` runs `--write` after every release tag and opens the
-PR; the `release schedule` job in checks.yaml runs the check.
+`release-schedule.yml` runs `--write` after every release tag (and daily) and
+opens the PR; the `release schedule` job in checks.yaml runs the check on PRs
+that change RELEASES.md or this script.
 """
 
 from __future__ import annotations
@@ -144,12 +147,20 @@ def render(tags: dict[Version, datetime.date]) -> str:
         rcs = [v for v in versions if v.patch == 0 and v.rc is not None]
         ga_date = tags.get(ga(line))
         first_rc = min(tags[v] for v in rcs) if rcs else ga_date
+        released = [v for v in versions if v.rc is None]
+        latest = (released or versions)[-1]
+        if line in status:
+            state = status[line]
+        elif ga_lines and ga_lines[-1] > line:
+            state = "superseded"
+        else:
+            state = "release candidate"
         rows.append(
             f"| {name} | `release/{name}` "
             f"| {first_rc.isoformat() if first_rc else '—'} "
             f"| {ga_date.isoformat() if ga_date else '—'} "
-            f"| `{versions[-1]}` "
-            f"| {status.get(line, 'release candidate')} |\n"
+            f"| `{latest}` "
+            f"| {state} |\n"
         )
     return "".join(rows)
 
