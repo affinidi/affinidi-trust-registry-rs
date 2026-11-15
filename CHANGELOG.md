@@ -32,20 +32,26 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   cannot be read) and every `TR_CAPABILITY_REFRESH_SECS` (new, default 5) in
   the background; enable and disable write one enablement with a
   compare-and-swap on its revision, so concurrent changes on two replicas lose
-  no update. API: `CapabilityStateStore` is now async and per enablement
-  (`load`, `put(key, expected_revision, state) -> Put`, `is_shared`; `save`
-  is gone); `CapabilitySet::new` is async; `CapabilityState` has a
-  `revision` member; `MemoryCapabilityStore` is `Clone` (clones share one
-  state) and reports itself shared; `ServerConfig` has
-  `capability_refresh_interval`. New: `CapabilitySet::refresh`,
-  `spawn_refresher`, `serves`, `import_state_file`,
+  no update. Every store call is abandoned after 10 s (`STORE_TIMEOUT`), and
+  the DynamoDB capability store's own client copy gets SDK request timeouts
+  (3 s per attempt, 8 s per operation; the records' and dedup client is
+  unchanged). API: `CapabilityStateStore` is now async and per enablement
+  (`load`, `put(key, expected_revision, state) -> Put`, `is_shared`, which
+  defaults to `true`; `save` is gone); `CapabilitySet::new` is async;
+  `CapabilityState` has a `revision` member; `MemoryCapabilityStore` is
+  `Clone` (clones share one state) and reports itself shared; `ServerConfig`
+  has `capability_refresh_interval`. New: `CapabilitySet::refresh`,
+  `spawn_refresher`, `join_refresher` (`ServerHandle::join` awaits it),
+  `serves`, `import_state_file`, `STORE_TIMEOUT`,
   `TaskHandler::with_capability_refresh`, and the `RedisCapabilityStore` /
-  `DynamoDbCapabilityStore` types. **Upgrade:** on the first start with an
-  empty shared state, a `TR_CAPABILITY_STATE` file is imported once and
-  renamed to `<file>.imported`; with several replicas, the first to start
-  imports its file and the others log that theirs is ignored, so make sure
-  that replica's file holds the intended state (or enable on one replica after
-  the upgrade). **Downgrade:** an earlier release reads only the file. Rename
+  `DynamoDbCapabilityStore` types. **Upgrade:** a `TR_CAPABILITY_STATE` file
+  is merged into the shared state (writing only enablements it has never
+  held) and renamed to `<file>.imported` once that has fully succeeded; a
+  failed write fails startup and the next start retries. With several
+  replicas, each one's file is merged on its first start, so enablements any
+  of them had are carried over, and where two files disagree on one
+  enablement the first replica to start wins (check `governance/capability/list`
+  after the upgrade). **Downgrade:** an earlier release reads only the file. Rename
   `<file>.imported` back to restore the state as it was at the upgrade;
   changes made since live only in Redis/DynamoDB (`HGETALL CAP#enablements`,
   or a `Query` of `PK = CAP#enablements`) and must be re-applied by hand. The

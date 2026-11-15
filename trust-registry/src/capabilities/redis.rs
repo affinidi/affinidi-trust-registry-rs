@@ -196,19 +196,24 @@ mod tests {
         // A capability no registry has, so no set adopts it.
         let probe = EnablementKey::new(format!("listing-probe-{}", uuid::Uuid::new_v4()), None);
         let state = crate::capabilities::conformance::state(true, None);
-        assert!(matches!(
-            store.put(&probe, 0, &state).await.expect("put"),
-            Put::Written(1)
-        ));
-        let listed = storage.list().await.expect("list");
-        assert!(
-            listed
-                .unreadable()
-                .iter()
-                .all(|u| !u.storage_key().starts_with("CAP#")),
-            "the capability state is not read as a record"
-        );
-        assert!(store.load().await.expect("load").contains_key(&probe));
+        // The checks run to the end, failing or not, so the probe is always
+        // removed from the shared hash.
+        let checked = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+            assert!(matches!(
+                store.put(&probe, 0, &state).await.expect("put"),
+                Put::Written(1)
+            ));
+            let listed = storage.list().await.expect("list");
+            assert!(
+                listed
+                    .unreadable()
+                    .iter()
+                    .all(|u| !u.storage_key().starts_with("CAP#")),
+                "the capability state is not read as a record"
+            );
+            assert!(store.load().await.expect("load").contains_key(&probe));
+        }))
+        .await;
         let mut connection = storage.connection();
         let _: () = redis::cmd("HDEL")
             .arg(STATE_KEY)
@@ -216,5 +221,8 @@ mod tests {
             .query_async(&mut connection)
             .await
             .expect("HDEL");
+        if let Err(panic) = checked {
+            std::panic::resume_unwind(panic);
+        }
     }
 }

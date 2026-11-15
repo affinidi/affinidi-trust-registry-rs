@@ -254,9 +254,35 @@ pub trait CapabilityStateStore: Send + Sync {
     /// store. A set over a shared store re-reads it before every capability
     /// task ([`CapabilitySet::refresh`]); over a store only it writes, it
     /// trusts what it holds.
+    ///
+    /// Defaults to `true`, the safe answer for a store that does not say: a
+    /// set that re-reads a store nobody else writes only does extra reads,
+    /// while one that trusts a store others write serves stale enablement.
+    /// [`FileCapabilityStore`] answers `false`.
     fn is_shared(&self) -> bool {
-        false
+        true
     }
+}
+
+/// The longest one read or write of the capability store may take. Store
+/// calls are made while the set's state is serialised ([`CapabilitySet`]'s
+/// `sync`), so a stalled call must not hold every capability task of this
+/// registry: past this it is abandoned and reported as a storage error
+/// (answered `unavailable`/`internalError`, both retryable).
+pub const STORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `call`, abandoned after [`STORE_TIMEOUT`].
+async fn bounded<T>(
+    what: &str,
+    call: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::time::timeout(STORE_TIMEOUT, call)
+        .await
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "the capability store did not answer the {what} within {STORE_TIMEOUT:?}"
+            ))
+        })
 }
 
 /// The name a shared store keeps an enablement under: its key as a JSON
@@ -477,6 +503,11 @@ impl CapabilityStateStore for FileCapabilityStore {
             .await
             .map_err(|e| format!("the state write did not finish: {e}"))?
     }
+
+    /// Only this process writes the file.
+    fn is_shared(&self) -> bool {
+        false
+    }
 }
 
 /// In-memory store for tests and ephemeral deployments. Its clones share one
@@ -520,38 +551,41 @@ impl CapabilityStateStore for MemoryCapabilityStore {
     }
 }
 
-/// Import a state file into a shared store, once: when `shared` holds no
-/// enablement and `file` holds some, each is written to `shared` if it is
-/// still absent there (so a replica importing at the same time cannot be
-/// overwritten), and the file is renamed to `<file>.imported`, so it is not
-/// imported again (after the shared state is cleared, say) and a downgraded
-/// registry does not silently serve its stale state. When `shared` already
-/// holds state, the file is left alone and reported as ignored.
+/// Import a state file into a shared store: each of its enablements is
+/// written to `shared` only if `shared` has never held that enablement
+/// (`put` at revision 0), so nothing the shared state already says — enabled
+/// or disabled, by any replica — is overwritten. Once every entry is written
+/// or found present, the file is renamed to `<file>.imported`; that rename is
+/// what marks the import done.
 ///
-/// Answers how many enablements were imported.
+/// - A failed write (the store unreachable mid-import) fails the import and
+///   leaves the file in place; the next start repeats the whole import, which
+///   skips what already landed and writes the rest, so no enablement of the
+///   file is lost.
+/// - With several replicas each upgrading with a file of its own, each
+///   file is merged in on its replica's first start: enablements the shared
+///   state has never seen are added, the rest are kept as the shared state
+///   has them.
+/// - Once renamed, the file is never imported again (after the shared state is
+///   cleared, say), and a downgraded registry does not serve its stale state
+///   until the operator renames it back.
+///
+/// Answers how many enablements were written.
 pub async fn import_state_file(
     shared: &dyn CapabilityStateStore,
     file: &FileCapabilityStore,
 ) -> Result<usize, String> {
-    let local = file.load().await?;
+    let local = bounded("read of the state file", file.load()).await?;
     if local.is_empty() {
-        return Ok(0);
-    }
-    if !shared.load().await?.is_empty() {
-        tracing::warn!(
-            "capability state file {} is ignored: the record backend already holds the \
-             capability state every replica shares",
-            file.path().display()
-        );
         return Ok(0);
     }
     let mut imported = 0;
     for (key, state) in &local {
-        match shared.put(key, 0, state).await? {
+        match bounded("import write", shared.put(key, 0, state)).await? {
             Put::Written(_) => imported += 1,
             Put::Conflict => tracing::info!(
-                "capability enablement {key:?} from {} not imported: another replica stored it \
-                 first",
+                "capability enablement {key:?} from {} not imported: the shared state already \
+                 holds it",
                 file.path().display()
             ),
         }
@@ -561,14 +595,19 @@ pub async fn import_state_file(
     let renamed = PathBuf::from(renamed);
     match std::fs::rename(file.path(), &renamed) {
         Ok(()) => tracing::info!(
-            "imported {imported} capability enablement(s) from {} into the shared record \
+            "imported {imported} of {} capability enablement(s) from {} into the shared record \
              backend; the file is no longer read and was renamed to {}",
+            local.len(),
             file.path().display(),
             renamed.display()
         ),
+        // Harmless: the next start repeats the import, which writes nothing
+        // the shared state already holds, and tries the rename again.
         Err(e) => tracing::warn!(
-            "imported {imported} capability enablement(s) from {} into the shared record \
-             backend; the file is no longer read, but could not be renamed to {}: {e}",
+            "imported {imported} of {} capability enablement(s) from {} into the shared record \
+             backend, but could not rename it to {}: {e}; it will be merged again (writing \
+             nothing the shared state already holds) on the next start",
+            local.len(),
             file.path().display(),
             renamed.display()
         ),
@@ -676,6 +715,9 @@ pub struct CapabilitySet {
     sync: tokio::sync::Mutex<()>,
     /// How many reads of the store have been adopted ([`Self::refresh`]).
     refreshed: std::sync::atomic::AtomicU64,
+    /// The background re-read ([`Self::spawn_refresher`]), awaited by
+    /// [`Self::join_refresher`].
+    refresher: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     weak: std::sync::Weak<Self>,
 }
 
@@ -823,7 +865,7 @@ impl CapabilitySet {
         base_query: Box<dyn Fn() -> RegistryDispatcher + Send + Sync>,
     ) -> Result<Arc<Self>, String> {
         let store: Arc<dyn CapabilityStateStore> = Arc::from(store);
-        let state = store.load().await?;
+        let state = bounded("read", store.load()).await?;
         let available: BTreeMap<String, CapabilityDefinition> = available
             .into_iter()
             .map(|d| (d.manifest.capability.to_string(), d))
@@ -856,6 +898,7 @@ impl CapabilitySet {
                 weak: weak.clone(),
                 sync: tokio::sync::Mutex::new(()),
                 refreshed: std::sync::atomic::AtomicU64::new(0),
+                refresher: std::sync::Mutex::new(None),
                 classification,
                 available,
                 state: RwLock::new(state),
@@ -990,6 +1033,14 @@ impl CapabilitySet {
     /// aborted by a timeout or a shutdown) cannot stop it between the write
     /// and the swap, so the store, the memory and the dispatchers still
     /// agree.
+    ///
+    /// Each store call is bounded by [`STORE_TIMEOUT`]. A write that timed
+    /// out, or whose answer was lost, may still have landed: the change is
+    /// then reported as a storage error although the store holds it, and this
+    /// set's memory catches up on its next read of the store (the next
+    /// capability task on a shared store, or the next change). A retry of
+    /// the same change then answers as it would after a success
+    /// (`alreadyEnabled`, `notEnabled`).
     async fn change(
         &self,
         key: EnablementKey,
@@ -1012,9 +1063,7 @@ impl CapabilitySet {
                 let current = set.state.read().await.get(&key).cloned();
                 let expected = current.as_ref().map_or(0, |s| s.revision);
                 let next = decide(current.as_ref())?;
-                match set
-                    .store
-                    .put(&key, expected, &next)
+                match bounded("write", set.store.put(&key, expected, &next))
                     .await
                     .map_err(CapabilityError::Storage)?
                 {
@@ -1045,7 +1094,9 @@ impl CapabilitySet {
     /// Read the store and adopt what it holds as the state, swapping the
     /// dispatchers if it differs. Call with [`Self::sync`] held.
     async fn read_store(&self) -> Result<(), CapabilityError> {
-        let loaded = self.store.load().await.map_err(CapabilityError::Storage)?;
+        let loaded = bounded("read", self.store.load())
+            .await
+            .map_err(CapabilityError::Storage)?;
         if *self.state.read().await != loaded {
             let mut state = self.state.write().await;
             *state = loaded;
@@ -1066,9 +1117,14 @@ impl CapabilitySet {
     /// a disable made on another replica is honoured from the next task on.
     /// Concurrent callers share one read when it began after they called.
     ///
-    /// An error (the store unreachable) leaves the state as it was; the
-    /// handler then refuses the task as unavailable rather than decide on a
-    /// state it could not confirm.
+    /// An error (the store unreachable, or no answer within
+    /// [`STORE_TIMEOUT`]) leaves the state as it was; the handler then
+    /// refuses the task as unavailable rather than decide on a state it could
+    /// not confirm.
+    ///
+    /// It is also how this set catches up on its own write whose answer was
+    /// lost (a timeout after the write was sent): the change was reported as
+    /// failed, but if it landed, the next read adopts it.
     pub async fn refresh(&self) -> Result<(), CapabilityError> {
         if !self.store.is_shared() {
             return Ok(());
@@ -1112,37 +1168,75 @@ impl CapabilitySet {
     /// [`query_dispatcher`](Self::query_dispatcher)) converge on other
     /// registries' changes within that interval. Tasks handled by the
     /// [`TaskHandler`](crate::trust_tasks::TaskHandler) do not wait for it:
-    /// they re-read the store first ([`refresh`](Self::refresh)). Returns
-    /// `None`, starting nothing, over a store only this set writes. Ends with
-    /// `shutdown`, or when the set is dropped.
+    /// they re-read the store first ([`refresh`](Self::refresh)). Answers
+    /// whether it started one: not over a store only this set writes. Ends
+    /// with `shutdown` (without waiting for a read in progress), or when the
+    /// set is dropped; [`join_refresher`](Self::join_refresher) awaits it. A
+    /// second call replaces the first refresher, which is stopped.
     pub fn spawn_refresher(
         self: &Arc<Self>,
         every: std::time::Duration,
         shutdown: tokio_util::sync::CancellationToken,
-    ) -> Option<tokio::task::JoinHandle<()>> {
+    ) -> bool {
         if !self.store.is_shared() {
-            return None;
+            return false;
         }
         let weak = self.weak.clone();
-        Some(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut ticks = tokio::time::interval(every);
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             ticks.tick().await;
             loop {
                 tokio::select! {
-                    _ = ticks.tick() => {
-                        let Some(set) = weak.upgrade() else { return };
-                        if let Err(e) = set.refresh().await {
-                            tracing::warn!(
-                                "could not re-read the shared capability state (tasks are \
-                                 refused until it can be read): {e:?}"
-                            );
-                        }
-                    }
+                    _ = ticks.tick() => {}
+                    _ = shutdown.cancelled() => return,
+                }
+                let Some(set) = weak.upgrade() else { return };
+                // The read runs in a task of its own (`refresh`), so leaving
+                // it on shutdown cannot split adopting a state from swapping
+                // the dispatchers.
+                tokio::select! {
+                    refreshed = set.refresh() => if let Err(e) = refreshed {
+                        tracing::warn!(
+                            "could not re-read the shared capability state (capability tasks \
+                             are refused until it can be read): {e:?}"
+                        );
+                    },
                     _ = shutdown.cancelled() => return,
                 }
             }
-        }))
+        });
+        let previous = self
+            .refresher
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .replace(task);
+        if let Some(previous) = previous {
+            previous.abort();
+        }
+        true
+    }
+
+    /// Wait for the refresher ([`spawn_refresher`](Self::spawn_refresher)) to
+    /// end, once its shutdown token is cancelled (it returns at once then); one
+    /// still running after [`STORE_TIMEOUT`] is aborted. Does nothing when
+    /// none was started, or it was already joined.
+    pub async fn join_refresher(&self) {
+        let task = self
+            .refresher
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        let Some(mut task) = task else { return };
+        match tokio::time::timeout(STORE_TIMEOUT, &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) if e.is_cancelled() => {}
+            Ok(Err(e)) => tracing::error!("the capability state refresher failed: {e}"),
+            Err(_) => {
+                tracing::warn!("the capability state refresher did not stop in time; aborted");
+                task.abort();
+            }
+        }
     }
 
     /// List capabilities, one entry per enablement: the enabled ones, and with
@@ -2656,13 +2750,10 @@ mod tests {
         .unwrap();
         std::fs::write(&path, "not json").unwrap();
         set.refresh().await.expect("not read, so not refused");
-        assert!(
-            set.spawn_refresher(
-                std::time::Duration::from_millis(10),
-                tokio_util::sync::CancellationToken::new()
-            )
-            .is_none()
-        );
+        assert!(!set.spawn_refresher(
+            std::time::Duration::from_millis(10),
+            tokio_util::sync::CancellationToken::new()
+        ));
     }
 
     /// A shared store that cannot be read fails the refresh, and leaves the
@@ -2689,6 +2780,70 @@ mod tests {
         assert!(set.snapshot("demo", None).await.enabled);
     }
 
+    /// A shared store whose calls never answer once `stalled` is set.
+    #[derive(Default)]
+    struct Stalling {
+        inner: MemoryCapabilityStore,
+        stalled: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl CapabilityStateStore for Arc<Stalling> {
+        async fn load(&self) -> Result<CapabilityStates, String> {
+            if self.stalled.load(std::sync::atomic::Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            self.inner.load().await
+        }
+        async fn put(
+            &self,
+            key: &EnablementKey,
+            expected: u64,
+            state: &CapabilityState,
+        ) -> Result<Put, String> {
+            if self.stalled.load(std::sync::atomic::Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            self.inner.put(key, expected, state).await
+        }
+    }
+
+    /// A store call that never answers is abandoned after STORE_TIMEOUT, so
+    /// it fails the task instead of holding every capability task of the
+    /// registry; once the store answers again, so does the set.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_store_call_is_abandoned() {
+        let store = Arc::new(Stalling::default());
+        let set = CapabilitySet::new(
+            vec![test_capability("demo")],
+            Box::new(store.clone()),
+            empty_base(),
+            empty_base(),
+        )
+        .await
+        .unwrap();
+        store
+            .stalled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            set.refresh().await,
+            Err(CapabilityError::Storage(_))
+        ));
+        assert!(matches!(
+            set.enable("demo", "0.1", None, None).await,
+            Err(CapabilityError::Storage(_))
+        ));
+        assert!(started.elapsed() <= STORE_TIMEOUT * 2 + std::time::Duration::from_secs(1));
+        store
+            .stalled
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        set.enable("demo", "0.1", None, None)
+            .await
+            .expect("the store answers again");
+        assert!(dispatch_ok(&set).await);
+    }
+
     /// The background refresher brings a set's dispatcher handles in line
     /// with another set's change, without any task.
     #[tokio::test]
@@ -2706,9 +2861,10 @@ mod tests {
         };
         let (a, b) = (set_over(store.clone()).await, set_over(store).await);
         let shutdown = tokio_util::sync::CancellationToken::new();
-        let refresher = b
-            .spawn_refresher(std::time::Duration::from_millis(20), shutdown.clone())
-            .expect("a shared store is re-read");
+        assert!(
+            b.spawn_refresher(std::time::Duration::from_millis(20), shutdown.clone()),
+            "a shared store is re-read"
+        );
         a.enable("demo", "0.1", None, None).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while !dispatch_ok(&b).await {
@@ -2718,6 +2874,8 @@ mod tests {
         .await
         .expect("B's dispatcher serves A's enable");
         shutdown.cancel();
-        refresher.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), b.join_refresher())
+            .await
+            .expect("the refresher stops at once on shutdown");
     }
 }

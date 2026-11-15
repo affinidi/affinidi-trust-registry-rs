@@ -61,11 +61,37 @@ impl DynamoDbCapabilityStore {
         partition: impl Into<String>,
     ) -> Self {
         Self {
-            client,
+            client: with_timeouts(&client),
             table_name: table_name.into(),
             partition: partition.into(),
         }
     }
+}
+
+/// The longest one attempt of a store request may take before the SDK
+/// retries it, and the longest a request may take with its retries. Within
+/// [`STORE_TIMEOUT`](super::STORE_TIMEOUT), which bounds every store call in
+/// any case.
+const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// `client` with request timeouts of its own. The SDK sets none by default,
+/// so a stalled connection would hold a capability read until
+/// [`STORE_TIMEOUT`](super::STORE_TIMEOUT). Only this store's copy of the
+/// client gets them: the records and the accepted document identifiers keep
+/// the client as it was built.
+fn with_timeouts(client: &Client) -> Client {
+    let timeouts = aws_sdk_dynamodb::config::timeout::TimeoutConfig::builder()
+        .operation_attempt_timeout(ATTEMPT_TIMEOUT)
+        .operation_timeout(OPERATION_TIMEOUT)
+        .build();
+    Client::from_conf(
+        client
+            .config()
+            .to_builder()
+            .timeout_config(timeouts)
+            .build(),
+    )
 }
 
 fn text<'a>(item: &'a HashMap<String, AttributeValue>, name: &str) -> Option<&'a str> {
@@ -218,20 +244,25 @@ mod tests {
         assert!(store.is_shared());
         let probe = EnablementKey::new(format!("listing-probe-{}", uuid::Uuid::new_v4()), None);
         let state = crate::capabilities::conformance::state(true, None);
-        assert!(matches!(
-            store.put(&probe, 0, &state).await.expect("put"),
-            Put::Written(1)
-        ));
-        let listed = storage.list().await.expect("list");
-        assert!(
-            listed
-                .unreadable()
-                .iter()
-                .all(|u| !u.storage_key().starts_with("CAP#")
-                    && !u.storage_key().starts_with("[\"listing-probe")),
-            "the capability state is not read as a record"
-        );
-        assert!(store.load().await.expect("load").contains_key(&probe));
+        // The checks run to the end, failing or not, so the probe is always
+        // removed from the shared partition.
+        let checked = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+            assert!(matches!(
+                store.put(&probe, 0, &state).await.expect("put"),
+                Put::Written(1)
+            ));
+            let listed = storage.list().await.expect("list");
+            assert!(
+                listed
+                    .unreadable()
+                    .iter()
+                    .all(|u| !u.storage_key().starts_with("CAP#")
+                        && !u.storage_key().starts_with("[\"listing-probe")),
+                "the capability state is not read as a record"
+            );
+            assert!(store.load().await.expect("load").contains_key(&probe));
+        }))
+        .await;
         let (client, table) = storage.client_and_table();
         client
             .delete_item()
@@ -241,5 +272,8 @@ mod tests {
             .send()
             .await
             .expect("delete the probe");
+        if let Err(panic) = checked {
+            std::panic::resume_unwind(panic);
+        }
     }
 }

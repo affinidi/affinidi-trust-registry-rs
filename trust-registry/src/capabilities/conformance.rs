@@ -386,36 +386,96 @@ pub(crate) async fn concurrent_changes_lose_no_update(f: CapabilityStoreFixture)
     }
 }
 
-/// A local state file is imported into an empty shared store once, and only
-/// when the store is empty.
-pub(crate) async fn a_state_file_is_imported_once(f: CapabilityStoreFixture) {
+/// `inner`, whose puts fail once `ok` of them have succeeded: the store
+/// becoming unreachable part-way through an import.
+struct FailingPuts<'a> {
+    inner: &'a dyn CapabilityStateStore,
+    ok: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl CapabilityStateStore for FailingPuts<'_> {
+    async fn load(&self) -> Result<CapabilityStates, String> {
+        self.inner.load().await
+    }
+
+    async fn put(
+        &self,
+        key: &EnablementKey,
+        expected: u64,
+        state: &CapabilityState,
+    ) -> Result<Put, String> {
+        let left = self.ok.load(std::sync::atomic::Ordering::SeqCst);
+        if left == 0 {
+            return Err("unreachable".to_string());
+        }
+        self.ok.store(left - 1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.put(key, expected, state).await
+    }
+}
+
+/// A state file is merged into the shared store until it has been imported
+/// whole: an import cut short by a failed write leaves the file in place, and
+/// the next start writes the rest; another replica's file adds only what the
+/// shared state has never held; an imported file is renamed and not read
+/// again.
+pub(crate) async fn a_state_file_is_merged_until_imported(f: CapabilityStoreFixture) {
     let (shared, _) = f.handles().await;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("capabilities.json");
+    let imported = dir.path().join("capabilities.json.imported");
+    let keys: Vec<EnablementKey> = ["did:example:a", "did:example:b", "did:example:c"]
+        .iter()
+        .map(|a| EnablementKey::new("demo", Some(a)))
+        .collect();
     let file = FileCapabilityStore::new(&path);
-    let key = EnablementKey::new("demo", Some("did:example:a"));
-    assert_eq!(
-        file.put(&key, 0, &state(true, Some("did:example:a")))
-            .await
-            .unwrap(),
-        Put::Written(1)
-    );
+    for key in &keys {
+        let authority = key.authority.as_deref();
+        file.put(key, 0, &state(true, authority)).await.unwrap();
+    }
 
-    assert_eq!(import_state_file(shared.as_ref(), &file).await.unwrap(), 1);
+    // The store fails after the first write: the import fails, the file
+    // stays.
+    let failing = FailingPuts {
+        inner: shared.as_ref(),
+        ok: std::sync::atomic::AtomicUsize::new(1),
+    };
+    assert!(import_state_file(&failing, &file).await.is_err());
+    assert!(path.exists(), "a failed import leaves the file to retry");
+    assert_eq!(shared.load().await.unwrap().len(), 1);
+
+    // The restart repeats it: the rest is written, nothing twice.
+    assert_eq!(import_state_file(shared.as_ref(), &file).await.unwrap(), 2);
     let loaded = shared.load().await.unwrap();
-    assert!(loaded[&key].enabled);
-    assert!(!path.exists(), "the file is renamed once imported");
-    assert!(dir.path().join("capabilities.json.imported").exists());
+    for key in &keys {
+        assert!(loaded[key].enabled, "{key:?} imported");
+        assert_eq!(loaded[key].revision, 1, "{key:?} written once");
+    }
+    assert!(!path.exists() && imported.exists(), "renamed once imported");
 
-    // A file found later is not imported over the shared state.
-    let file = FileCapabilityStore::new(&path);
-    let other = EnablementKey::new("demo", Some("did:example:b"));
-    file.put(&other, 0, &state(true, Some("did:example:b")))
+    // A renamed file is not read again.
+    assert_eq!(import_state_file(shared.as_ref(), &file).await.unwrap(), 0);
+
+    // Another replica's file: what the shared state holds is kept as it
+    // holds it, what it never held is added.
+    let other_dir = tempfile::tempdir().unwrap();
+    let other_path = other_dir.path().join("capabilities.json");
+    let other = FileCapabilityStore::new(&other_path);
+    let first = &keys[0];
+    other
+        .put(first, 0, &state(false, first.authority.as_deref()))
         .await
         .unwrap();
-    assert_eq!(import_state_file(shared.as_ref(), &file).await.unwrap(), 0);
-    assert!(!shared.load().await.unwrap().contains_key(&other));
-    assert!(path.exists(), "an ignored file is left alone");
+    let new = EnablementKey::new("demo", Some("did:example:d"));
+    other
+        .put(&new, 0, &state(true, Some("did:example:d")))
+        .await
+        .unwrap();
+    assert_eq!(import_state_file(shared.as_ref(), &other).await.unwrap(), 1);
+    let loaded = shared.load().await.unwrap();
+    assert!(loaded[first].enabled, "the shared state wins");
+    assert!(loaded[&new].enabled, "a new enablement is merged in");
+    assert!(!other_path.exists(), "renamed once merged");
 }
 
 /// Generates the suite for one backend: `$name` names the module, `$fixture`
@@ -458,7 +518,7 @@ macro_rules! replica_tests {
                 @tests $fixture;
                 replicas_converge,
                 concurrent_changes_lose_no_update,
-                a_state_file_is_imported_once,
+                a_state_file_is_merged_until_imported,
             );
         }
     };

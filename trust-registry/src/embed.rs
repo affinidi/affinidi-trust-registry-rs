@@ -476,8 +476,11 @@ impl TrustRegistryBuilder {
     /// the Trust Task handlers every binding shares. Binds no socket and starts
     /// no listener. Starts background tasks that end with the shutdown token:
     /// the audit flusher, the advertised-vs-served transport check (when the
-    /// registry has a DID), and, if the DID resolver could not be built, its
-    /// retry.
+    /// registry has a DID), the re-read of a shared capability state
+    /// ([`CapabilitySet::spawn_refresher`]; [`ServerHandle::join`](crate::server::ServerHandle::join)
+    /// awaits it, a host that does not serve calls
+    /// [`CapabilitySet::join_refresher`] after cancelling the token), and,
+    /// if the DID resolver could not be built, its retry.
     pub async fn build(self) -> Result<TrustRegistry, BoxError> {
         if ReplySigner::for_config(&self.config).is_none() {
             warn!(
@@ -544,7 +547,7 @@ impl TrustRegistryBuilder {
         let shutdown = self.shutdown.unwrap_or_default();
         // Over a shared store, the dispatcher handles converge on other
         // replicas' changes within the interval; tasks re-read it first.
-        let _refresher = capabilities.spawn_refresher(
+        capabilities.spawn_refresher(
             self.config.server_config.capability_refresh_interval,
             shutdown.clone(),
         );

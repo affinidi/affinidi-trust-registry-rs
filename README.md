@@ -904,20 +904,27 @@ embedding the registry can pass its own store
   `Query`; concurrent tasks share one read). A disable handled by one replica
   is therefore honoured by the next task on every other. If the state cannot
   be read, the task is refused as `unavailable` (retryable) rather than
-  decided on what the replica last saw. Record writes and TRQP queries do not
-  read it.
+  decided on what the replica last saw. Every read and write of the state is
+  abandoned after 10 s, so a stalled Redis or DynamoDB call fails the
+  capability tasks waiting on it instead of holding them; a change whose
+  answer was lost that way may still have landed, and every replica (this one
+  included) adopts it on its next read. Record writes and TRQP queries do not
+  read the state.
 - **Dispatcher handles converge within `TR_CAPABILITY_REFRESH_SECS`** (default
   5 s). A host that dispatches through `TrustRegistry::dispatcher()` or
   `query_dispatcher()` directly, bypassing the Trust Task handler, sees another
   replica's change after at most that interval: that is the bounded staleness
   of the direct-dispatch path only.
-- **Migration.** On the first start with an empty shared state, a
-  `TR_CAPABILITY_STATE` file is imported into it once (each entry written
-  only if still absent, so replicas importing at once cannot overwrite each
-  other), logged, and renamed to `<file>.imported`, so it is never imported
-  again. When the shared state is not empty the file is left alone and a
-  warning says it is ignored. Without a file, every replica starts with
-  nothing enabled, as before.
+- **Migration.** On a start with the shared backend, a `TR_CAPABILITY_STATE`
+  file is merged into the shared state: each enablement in it is written only
+  if the shared state has never held that enablement, so nothing the shared
+  state says (enabled or disabled, by any replica) is overwritten. Once every
+  entry is written or found present, the import is logged and the file is
+  renamed to `<file>.imported`, so it is never read again. If a write fails
+  part-way, startup fails and the file stays; the next start repeats the
+  import, skipping what already landed. With several replicas upgrading, each
+  one's file is merged on its first start, adding only enablements no one has
+  stored. Without a file, a replica starts with what the shared state holds.
 
 Refusals carry the codes the task specifications declare: `registry/record/put:alreadyExists`
 and `:notFound` (a strict put), `registry/record/delete:notFound`,
@@ -1362,7 +1369,7 @@ none of these variables reach it.
 | -------- | ----------- | ------------------ |
 | `LISTEN_ADDRESS` | Socket address the REST/TRQP HTTP server (and `/health`) binds to. Ignored when `ENABLE_REST=false`. | default: `0.0.0.0:3232` |
 | `CORS_ALLOWED_ORIGINS` | Origins allowed to call the HTTP API from a browser: a comma-separated list of origins exactly as browsers send them (`https://app.example.com`, `http://localhost:3000`; no path or trailing `/`), or `*` for any origin. Unset or empty: no cross-origin access (same-origin only). An entry that is not an origin stops startup. With a list, `GET`, `POST` and `OPTIONS` and the `content-type` header are allowed. | default: none (same-origin only) |
-| `TR_CAPABILITY_STATE` | File capability enablement state is persisted in, with the CSV, in-memory and fjall backends (one process; never share it between two). With Redis or DynamoDB the state is kept in the record backend instead, and this file, if present, is imported once into an empty shared state and renamed to `<file>.imported`. Relative paths are relative to the working directory. | default: `./.trust-registry/capabilities.json` |
+| `TR_CAPABILITY_STATE` | File capability enablement state is persisted in, with the CSV, in-memory and fjall backends (one process; never share it between two). With Redis or DynamoDB the state is kept in the record backend instead, and this file, if present, is merged into the shared state (adding only enablements it has never held) and then renamed to `<file>.imported`. Relative paths are relative to the working directory. | default: `./.trust-registry/capabilities.json` |
 | `TR_CAPABILITY_REFRESH_SECS` | With Redis or DynamoDB, how often each replica re-reads the shared capability state in the background, so its dispatcher handles converge on other replicas' changes. Capability tasks re-read it before they are authorised whatever this is. A positive whole number. | default: `5` |
 | `TR_HTTP_REQUEST_TIMEOUT_SECS` | The longest an HTTP request body may take to arrive (else `408`), and then the longest its answer may take (else `503` with `Retry-After`). | default: `10` |
 | `TR_HTTP_HEADER_TIMEOUT_SECS` | A request's headers must be complete within this long of the connection opening, or of the next request's first byte on a kept-alive connection; the deadline does not move as bytes arrive. | default: `15` |
