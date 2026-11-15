@@ -157,7 +157,7 @@ pub mod fjall;
 pub mod redis;
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -375,6 +375,16 @@ fn chrono_duration(duration: Duration) -> chrono::Duration {
     chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
 }
 
+/// Where a store kept in process memory reads the time. The stores read the
+/// wall clock; their tests read one they set, so a lease or retention lapses
+/// when the test says rather than when real time does.
+pub(crate) type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
+
+/// The wall clock.
+pub(crate) fn wall_clock() -> Clock {
+    Arc::new(Utc::now)
+}
+
 /// `now` plus `duration`, saturating instead of overflowing.
 pub(crate) fn expiry(now: DateTime<Utc>, duration: Duration) -> DateTime<Utc> {
     now.checked_add_signed(chrono_duration(duration))
@@ -590,6 +600,7 @@ impl Inner {
 /// let it be replayed.
 pub struct MemoryMessageIdStore {
     config: MessageIdStoreConfig,
+    clock: Clock,
     inner: Mutex<Inner>,
 }
 
@@ -606,8 +617,16 @@ impl MemoryMessageIdStore {
     pub fn from_config(config: MessageIdStoreConfig) -> Self {
         Self {
             config,
+            clock: wall_clock(),
             inner: Mutex::new(Inner::default()),
         }
+    }
+
+    /// Read the time from `clock` rather than the wall clock.
+    #[cfg(test)]
+    pub(crate) fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Set the total and per-issuer bounds.
@@ -635,7 +654,7 @@ impl Default for MemoryMessageIdStore {
 #[async_trait]
 impl MessageIdStore for MemoryMessageIdStore {
     async fn claim(&self, key: &str, digest: &str) -> Result<Claim, DedupError> {
-        let now = Utc::now();
+        let now = (self.clock)();
         let mut inner = self.lock();
         inner.evict_expired(now, self.config.in_flight_lease);
         inner.claim(key, digest, now, &self.config)
@@ -647,7 +666,7 @@ impl MessageIdStore for MemoryMessageIdStore {
         token: &ClaimToken,
         outcome: &StoredOutcome,
     ) -> Result<(), DedupError> {
-        let expires_at = expiry(Utc::now(), self.config.retention);
+        let expires_at = expiry((self.clock)(), self.config.retention);
         self.lock()
             .complete(key, token, outcome, expires_at)
             .map(|_| ())
@@ -1613,11 +1632,17 @@ mod tests {
     // The store contract, as every implementation must keep it.
     crate::dedup::conformance::message_id_store_conformance_tests!(
         memory,
-        Some(crate::dedup::conformance::StoreFixture::new(|config| {
-            Box::pin(async move {
-                std::sync::Arc::new(MemoryMessageIdStore::from_config(config))
-                    as std::sync::Arc<dyn MessageIdStore>
+        Some({
+            let clock = crate::dedup::conformance::TestClock::new();
+            let reads = std::sync::Arc::clone(&clock);
+            crate::dedup::conformance::StoreFixture::new(move |config| {
+                let clock = reads.clock();
+                Box::pin(async move {
+                    std::sync::Arc::new(MemoryMessageIdStore::from_config(config).with_clock(clock))
+                        as std::sync::Arc<dyn MessageIdStore>
+                })
             })
-        }))
+            .with_clock(clock)
+        })
     );
 }

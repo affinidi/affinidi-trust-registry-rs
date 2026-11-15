@@ -18,18 +18,29 @@
 //! Every test uses message keys under an issuer unique to that test, and
 //! short retentions, so the suite can run against a shared store and leaves
 //! nothing that outlives it for long.
+//!
+//! The tests that let a lease or a retention lapse never race real time
+//! (#303). A store kept in process memory reads a [`TestClock`] the test
+//! advances ([`StoreFixture::with_clock`]). A store judged by its server's
+//! clock is shared, and the lease of a claim is set by the handle that makes
+//! it: the claim that takes over is made on a handle with a long lease, a
+//! lapse is waited for by polling rather than a fixed sleep, and a check that
+//! must run inside a short retention is retried on a fresh id when the runner
+//! was too slow for it to mean anything.
 
 use std::any::Any;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use trust_tasks_rs::{Payload as _, TrustTask};
 
 use crate::trust_tasks::payloads::camel::RecordPutRequest;
 
-use super::{Claim, ClaimToken, DedupError, MessageIdStore, StoredOutcome};
+use super::{Claim, ClaimToken, Clock, DedupError, MessageIdStore, StoredOutcome};
 use crate::configs::MessageIdStoreConfig;
 
 /// Builds a handle on the store under test with the given settings.
@@ -40,6 +51,35 @@ pub(crate) type MakeStore =
 /// handle the test held is dropped before it is called.
 pub(crate) type Restart = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 
+/// A clock that stands still until the test advances it.
+pub(crate) struct TestClock {
+    start: DateTime<Utc>,
+    advanced_ms: AtomicU64,
+}
+
+impl TestClock {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            start: Utc::now(),
+            advanced_ms: AtomicU64::new(0),
+        })
+    }
+
+    /// The clock a store reads.
+    pub(crate) fn clock(self: &Arc<Self>) -> Clock {
+        let this = Arc::clone(self);
+        Arc::new(move || {
+            let advanced = this.advanced_ms.load(Ordering::SeqCst);
+            this.start + chrono::Duration::milliseconds(i64::try_from(advanced).unwrap_or(i64::MAX))
+        })
+    }
+
+    fn advance(&self, by: Duration) {
+        let by = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
+        self.advanced_ms.fetch_add(by, Ordering::SeqCst);
+    }
+}
+
 /// One store implementation under test.
 pub(crate) struct StoreFixture {
     make: MakeStore,
@@ -49,6 +89,8 @@ pub(crate) struct StoreFixture {
     /// Whether the store keeps the per-issuer bound of its config.
     bounded: bool,
     restart: Option<Restart>,
+    /// The clock every handle reads, when the store reads one.
+    clock: Option<Arc<TestClock>>,
     _guard: Option<Box<dyn Any + Send + Sync>>,
 }
 
@@ -65,6 +107,7 @@ impl StoreFixture {
             shared: false,
             bounded: true,
             restart: None,
+            clock: None,
             _guard: None,
         }
     }
@@ -90,6 +133,13 @@ impl StoreFixture {
         self
     }
 
+    /// Every handle from `make` reads `clock`: the tests advance it to let a
+    /// lease or retention lapse.
+    pub(crate) fn with_clock(mut self, clock: Arc<TestClock>) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
     pub(crate) fn with_guard(mut self, guard: impl Any + Send + Sync) -> Self {
         self._guard = Some(Box::new(guard));
         self
@@ -110,10 +160,45 @@ fn steady() -> MessageIdStoreConfig {
     }
 }
 
-/// How long the tests that wait for a lease or retention to lapse set it to,
-/// and how long they then wait.
-const SHORT: Duration = Duration::from_millis(400);
-const PAST_SHORT: Duration = Duration::from_millis(1_200);
+/// How long the tests that wait for a lease or retention to lapse set it to.
+const SHORT: Duration = Duration::from_millis(1_000);
+/// On real time: how often a lapse is polled for, and how long after `SHORT`
+/// it may take to be seen before the test fails.
+const POLL: Duration = Duration::from_millis(50);
+const LAPSE_GRACE: Duration = Duration::from_secs(30);
+/// On real time: how many fresh ids a check that must run inside `SHORT` is
+/// tried on before the test gives up.
+const ATTEMPTS: usize = 5;
+
+/// Claim `key` (for `"digest"`) on `store` once `lapse` has passed since the
+/// entry holding it was made. On a [`TestClock`] the clock is advanced past
+/// `lapse` and the claim must be acquired at once. On real time the claim is
+/// retried until it is acquired; each refusal before must be one `waiting`
+/// accepts.
+async fn claim_once_lapsed(
+    fixture: &StoreFixture,
+    store: &dyn MessageIdStore,
+    key: &str,
+    lapse: Duration,
+    waiting: impl Fn(&Claim) -> bool,
+) -> ClaimToken {
+    if let Some(clock) = &fixture.clock {
+        clock.advance(lapse + Duration::from_millis(1));
+        return acquired(store.claim(key, "digest").await);
+    }
+    let deadline = tokio::time::Instant::now() + lapse + LAPSE_GRACE;
+    loop {
+        match store.claim(key, "digest").await {
+            Ok(Claim::Acquired(token)) => return token,
+            Ok(claim) if waiting(&claim) && tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(POLL).await;
+            }
+            other => {
+                panic!("expected the claim to be acquired once {lapse:?} lapsed, got {other:?}")
+            }
+        }
+    }
+}
 
 /// Message keys under an issuer unique to one test.
 struct Keys {
@@ -273,12 +358,22 @@ pub(crate) async fn a_lapsed_claim_is_taken_over_and_fenced(fixture: &StoreFixtu
             ..steady()
         })
         .await;
+    // The second claim must still hold the id when the checks below run. On
+    // a test clock time stands still; on real time it is made on a handle
+    // with a long lease, which a shared store records with the claim.
+    let taker = match (&fixture.clock, fixture.shared) {
+        (Some(_), _) => Arc::clone(&store),
+        (None, true) => fixture.store(steady()).await,
+        (None, false) => panic!("a store on real time must be shared to run this test"),
+    };
     let keys = Keys::new();
     let key = keys.key("1");
 
     let first = acquired(store.claim(&key, "digest").await);
-    tokio::time::sleep(PAST_SHORT).await;
-    let second = acquired(store.claim(&key, "digest").await);
+    let second = claim_once_lapsed(fixture, taker.as_ref(), &key, SHORT, |claim| {
+        matches!(claim, Claim::InFlight)
+    })
+    .await;
 
     assert!(matches!(
         store.complete(&key, &first, &outcome("first")).await,
@@ -290,7 +385,7 @@ pub(crate) async fn a_lapsed_claim_is_taken_over_and_fenced(fixture: &StoreFixtu
         "the second claim still holds the id"
     );
 
-    store
+    taker
         .complete(&key, &second, &outcome("second"))
         .await
         .expect("complete");
@@ -310,16 +405,29 @@ pub(crate) async fn an_outcome_expires_after_the_retention(fixture: &StoreFixtur
         })
         .await;
     let keys = Keys::new();
-    let key = keys.key("1");
 
-    let token = acquired(store.claim(&key, "digest").await);
-    store
-        .complete(&key, &token, &outcome("short-lived"))
-        .await
-        .expect("complete");
-    replayed(store.claim(&key, "digest").await);
-    tokio::time::sleep(PAST_SHORT).await;
-    acquired(store.claim(&key, "digest").await);
+    for attempt in 0..ATTEMPTS {
+        let key = keys.key(&attempt.to_string());
+        let token = acquired(store.claim(&key, "digest").await);
+        let completing = tokio::time::Instant::now();
+        store
+            .complete(&key, &token, &outcome("short-lived"))
+            .await
+            .expect("complete");
+        match store.claim(&key, "digest").await {
+            Ok(Claim::Replay(_)) => {}
+            // On real time, a check that returned after the retention says
+            // nothing: try again on a fresh id.
+            _ if fixture.clock.is_none() && completing.elapsed() >= SHORT => continue,
+            other => panic!("expected a replay inside the retention, got {other:?}"),
+        }
+        claim_once_lapsed(fixture, store.as_ref(), &key, SHORT, |claim| {
+            matches!(claim, Claim::Replay(_))
+        })
+        .await;
+        return;
+    }
+    panic!("no attempt checked the outcome inside its {SHORT:?} retention");
 }
 
 const CONCURRENT_CLAIMS: usize = 16;
