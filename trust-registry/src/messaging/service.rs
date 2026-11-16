@@ -1020,9 +1020,12 @@ async fn handle_tsp(
     )
     .await
     {
+        // A final answer, or (R1.6, handoff to the sender) a retryable refusal
+        // that reached the sender, which now owns the retry: ack.
         Ok(crate::tsp::TspDispatch::Answered) => Outcome::Handled,
-        // The refusal sent was `retryable` (storage unavailable, an internal
-        // error): leave the frame queued so it is tried again (R1.6).
+        // A retryable refusal (storage unavailable, an internal error, the
+        // issuer's DID not resolving now) that could not be sent: nobody else
+        // will retry it, so leave the frame queued to be tried again (R1.6).
         Ok(crate::tsp::TspDispatch::Retryable) => Outcome::Retry,
         // Decrypted cleanly but is not a Trust Task envelope.
         Err(_) => Outcome::Poison,

@@ -56,15 +56,23 @@ pub fn is_authentication_method(doc: &Document, vm: &str) -> bool {
 /// document lists it under `authentication`, whatever `proofPurpose` the proof
 /// declares, through [`CachedDidResolver`] (which also requires the method's
 /// controller to be the DID that names it).
+///
+/// A resolution that failed transiently ([`classify_resolver_error`]) is
+/// reported as [`RESOLUTION_UNAVAILABLE`], which [`verify_proof`] answers
+/// `unavailable` (retryable) rather than `proofInvalid`.
 pub struct AuthenticationKeyResolver {
-    keys: CachedDidResolver,
+    keys: Arc<dyn ProofPurposeResolver>,
 }
 
 impl AuthenticationKeyResolver {
     pub fn new(client: Arc<DIDCacheClient>) -> Self {
-        Self {
-            keys: CachedDidResolver::new(client),
-        }
+        Self::over(Arc::new(CachedDidResolver::new(client)))
+    }
+
+    /// Over any resolver that reports its failures as [`CachedDidResolver`]
+    /// does.
+    fn over(keys: Arc<dyn ProofPurposeResolver>) -> Self {
+        Self { keys }
     }
 }
 
@@ -78,7 +86,119 @@ impl ProofPurposeResolver for AuthenticationKeyResolver {
         self.keys
             .resolve_vm_for_purpose(vm, ProofPurpose::Authentication)
             .await
+            .map_err(|error| match &error {
+                DataIntegrityError::Resolver(message)
+                    if classify_resolver_error(message) == ResolutionFailure::Transient =>
+                {
+                    tracing::warn!(
+                        "resolving {vm} for a Trust Task proof failed transiently ({message}); \
+                         answering unavailable so the sender retries"
+                    );
+                    DataIntegrityError::Resolver(RESOLUTION_UNAVAILABLE.to_string())
+                }
+                _ => error,
+            })
     }
+}
+
+/// What [`AuthenticationKeyResolver`] reports in place of a resolution that
+/// failed transiently. [`verify_proof`] answers it `unavailable` (retryable):
+/// nothing is known to be wrong with the proof.
+///
+/// A fixed string, compared exactly, so a resolver message carrying text the
+/// sender chose (a DID, a URL) cannot pass for it.
+pub const RESOLUTION_UNAVAILABLE: &str =
+    "resolving the issuer's DID failed transiently; the proof could not be verified now";
+
+/// Whether a failed DID resolution may succeed if tried again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionFailure {
+    /// It may pass: a timeout, no response, a connection or DNS failure, an
+    /// upstream 5xx / 408 / 429, or the resolver cache itself unavailable.
+    Transient,
+    /// A definitive answer: the DID is not found or deactivated, its method is
+    /// unsupported, it is malformed, its host is refused by the host policy,
+    /// the key is not authorised, or anything not known to be transient.
+    Definitive,
+}
+
+/// What [`CachedDidResolver`] (trust-tasks-proof 0.39) reports when a
+/// resolution misses its deadline.
+const CACHED_RESOLVER_TIMEOUT: &str =
+    "resolving the verificationMethod's DID did not finish in time";
+/// The prefix [`CachedDidResolver`] puts before the resolver cache's own
+/// error (`DIDCacheError`'s `Display`).
+const CACHED_RESOLVER_RESOLVE: &str = "resolve the verificationMethod's DID: ";
+
+/// Classify the message of a [`DataIntegrityError::Resolver`] from
+/// [`CachedDidResolver`].
+///
+/// trust-tasks-proof stringifies the resolver cache's typed `DIDCacheError`
+/// (and its own deadline) into that one variant, so this reads the `Display`
+/// forms of trust-tasks-proof 0.39 and affinidi-did-resolver-cache-sdk 0.8 /
+/// affinidi-did-resolver-traits 0.1. It matches conservatively: only the
+/// forms known to be transient are; anything else, including a form a later
+/// release introduces, is definitive (`proofInvalid`, as before).
+///
+/// Known misclassifications, all toward retryable (the sender retries, and
+/// the same answer comes back until it gives up):
+/// - a `NetworkFetch` with no status covers a failure *after* the host
+///   answered as well as no response: a did:web body that cannot be read, or
+///   a did:webvh log served with 200 that cannot be decoded, is reported the
+///   same way as a DNS failure, so it is transient;
+/// - a client in network mode receives every cache-server error, a definitive
+///   one included (not found, deactivated), as a `Transport error` string, so
+///   it is transient. The registry builds its verifier's client in local mode.
+///
+/// TODO(#302 follow-up, upstream): ask trust-tasks-proof for a typed
+/// resolver error (e.g. a `DataIntegrityError` variant or a source carrying
+/// the `DIDCacheError` / `NetworkFetchError`, or an `is_transient()`), so this
+/// stops depending on message text. The unit tests below pin each form.
+pub fn classify_resolver_error(message: &str) -> ResolutionFailure {
+    use ResolutionFailure::{Definitive, Transient};
+
+    if message == CACHED_RESOLVER_TIMEOUT {
+        return Transient;
+    }
+    let Some(cache) = message.strip_prefix(CACHED_RESOLVER_RESOLVE) else {
+        // The host policy, the document checks, the key decoding: all about
+        // the DID or its document, none about reaching it.
+        return Definitive;
+    };
+    // `DIDCacheError::NetworkTimeout`, `TransportError` (network mode: the
+    // cache server unreachable or its connection lost) and `ConfigError` (the
+    // resolver cache itself unusable): none says anything about the proof.
+    if cache == "Network timeout"
+        || cache.starts_with("Transport error: ")
+        || cache.starts_with("Config error: ")
+    {
+        return Transient;
+    }
+    // `DIDCacheError::NetworkFetch(NetworkFetchError)`.
+    if cache.starts_with("DID host ") {
+        if cache.ends_with("rate-limited resolution (HTTP 429)") {
+            return Transient;
+        }
+        // "DID host [<url> ]answered HTTP <status>": the last occurrence is
+        // the one the error formats, whatever the URL holds.
+        return match cache
+            .rsplit_once("answered HTTP ")
+            .and_then(|(_, status)| status.parse::<u16>().ok())
+        {
+            Some(status) if status >= 500 || status == 408 || status == 429 => Transient,
+            // 404, 410, 403, …: the host answered about the DID.
+            _ => Definitive,
+        };
+    }
+    // A fetch that got no response at all: DNS, connect, TLS, reset.
+    if cache.starts_with("network fetch failed: ")
+        || (cache.starts_with("fetching ") && cache.contains(" failed: "))
+    {
+        return Transient;
+    }
+    // `DIDError` (not found, deactivated, malformed, a log that does not
+    // verify), `UnsupportedMethod`, `ParsingError`.
+    Definitive
 }
 
 /// Whether `slug` is one of the registry's own tasks that changes the
@@ -310,7 +430,7 @@ pub async fn verify_proof(
         });
     }
     verifier.verify_json(doc).await.map_err(|e| match e {
-        trust_tasks_rs::VerificationError::Other(reason) if reason == RESOLVER_UNAVAILABLE => {
+        trust_tasks_rs::VerificationError::Other(reason) if is_unavailable(&reason) => {
             RejectReason::Unavailable { retry_after: None }
         }
         e => RejectReason::ProofInvalid {
@@ -319,13 +439,23 @@ pub async fn verify_proof(
     })
 }
 
+/// Whether a verifier's `Other` reason says the proof could not be checked
+/// now, rather than that it is wrong: the degraded verifier's
+/// [`RESOLVER_UNAVAILABLE`], or [`RESOLUTION_UNAVAILABLE`] as the Affinidi
+/// verifier reports it (a `DataIntegrityError::Resolver`, displayed).
+fn is_unavailable(reason: &str) -> bool {
+    reason == RESOLVER_UNAVAILABLE
+        || reason == DataIntegrityError::Resolver(RESOLUTION_UNAVAILABLE.to_string()).to_string()
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     // `deprecated`: the superseded 0.1 types name the documents.
     #![allow(clippy::unwrap_used, clippy::expect_used, deprecated)]
 
     use super::*;
     use crate::trust_tasks::payloads::{RecognitionRequest, RecordPutRequest};
+    use affinidi_tdk::did_resolver::errors::{DIDCacheError, NetworkFetchError};
     use trust_tasks_rs::{Payload as _, TypeUri};
 
     /// A document of `type_uri` carrying a proof that verifies against
@@ -463,6 +593,239 @@ mod tests {
         assert_eq!(health.to_json()["verifier"], "ok");
         assert!(matches!(
             verify_write_proof(&verifier, None, &doc).await,
+            Err(RejectReason::ProofInvalid { .. })
+        ));
+    }
+
+    /// Stands in for [`CachedDidResolver`]: fails every resolution with
+    /// `message`, as it reports a resolver failure.
+    struct FailingResolver(String);
+
+    #[async_trait]
+    impl ProofPurposeResolver for FailingResolver {
+        async fn resolve_vm_for_purpose(
+            &self,
+            _vm: &str,
+            _purpose: ProofPurpose,
+        ) -> Result<ResolvedKey, DataIntegrityError> {
+            Err(DataIntegrityError::Resolver(self.0.clone()))
+        }
+    }
+
+    /// The registry's resolver-backed verifier over a resolver that fails
+    /// every resolution with `message`.
+    pub(crate) fn verifier_failing_with(message: impl Into<String>) -> Arc<dyn DynProofVerifier> {
+        let resolver = AuthenticationKeyResolver::over(Arc::new(FailingResolver(message.into())));
+        erase_verifier(Verifier::with_resolver(Arc::new(resolver)))
+    }
+
+    /// What [`CachedDidResolver`] reports for a resolver cache error `e`: its
+    /// `format!("resolve the verificationMethod's DID: {e}")`. The prefix is
+    /// copied (it is private to trust-tasks-proof); the cache's part is the
+    /// real upstream `Display`, so a rewording there fails these tests.
+    pub(crate) fn cache_error(e: DIDCacheError) -> String {
+        format!("{CACHED_RESOLVER_RESOLVE}{e}")
+    }
+
+    /// A fetch the DID host answered with `status`.
+    fn http(status: u16) -> DIDCacheError {
+        DIDCacheError::NetworkFetch(
+            NetworkFetchError::new(format!("HTTP {status}"))
+                .with_url("https://example.com/.well-known/did.jsonl")
+                .with_status(status),
+        )
+    }
+
+    /// trust-tasks-proof 0.39's deadline message. Copied: it is a private
+    /// string inside `CachedDidResolver::resolve_for`, with no type behind it
+    /// to build it from.
+    pub(crate) const TIMEOUT: &str = CACHED_RESOLVER_TIMEOUT;
+
+    /// A DID host answering 404: the DID does not exist.
+    pub(crate) fn not_found() -> String {
+        cache_error(http(404))
+    }
+
+    async fn refusal(message: impl Into<String>) -> Result<(), RejectReason> {
+        verify_write_proof(
+            &verifier_failing_with(message),
+            None,
+            &doc_with_dummy_proof(RecordPutRequest::type_uri()),
+        )
+        .await
+    }
+
+    /// #302: trust-tasks-proof's own deadline is not a bad proof.
+    #[tokio::test]
+    async fn a_resolution_timeout_is_answered_unavailable() {
+        assert!(matches!(
+            refusal(TIMEOUT).await,
+            Err(RejectReason::Unavailable { .. })
+        ));
+        assert!(matches!(
+            refusal(cache_error(DIDCacheError::NetworkTimeout)).await,
+            Err(RejectReason::Unavailable { .. })
+        ));
+    }
+
+    /// #302: a DID host that could not be reached, or answered 5xx, is not a
+    /// bad proof.
+    #[tokio::test]
+    async fn a_network_failure_is_answered_unavailable() {
+        for error in [
+            // No response at all: DNS, connect, TLS, reset.
+            DIDCacheError::NetworkFetch(
+                NetworkFetchError::new("dns error: failed to lookup address")
+                    .with_url("https://example.com/.well-known/did.json"),
+            ),
+            DIDCacheError::NetworkFetch(NetworkFetchError::new("connection reset by peer")),
+            http(503),
+            http(429),
+            DIDCacheError::TransportError("not connected".into()),
+        ] {
+            let message = cache_error(error);
+            assert!(
+                matches!(
+                    refusal(message.clone()).await,
+                    Err(RejectReason::Unavailable { .. })
+                ),
+                "{message}"
+            );
+        }
+    }
+
+    /// A definitive answer about the DID stays `proofInvalid`.
+    #[tokio::test]
+    async fn a_definitive_resolution_failure_is_answered_proof_invalid() {
+        for message in [
+            not_found(),
+            cache_error(DIDCacheError::DIDError(
+                "did:webvh:Qm:example.com is deactivated".into(),
+            )),
+            cache_error(DIDCacheError::UnsupportedMethod("example".into())),
+            cache_error(DIDCacheError::DIDError("Failed to parse DID: bad".into())),
+        ] {
+            assert!(
+                matches!(
+                    refusal(message.clone()).await,
+                    Err(RejectReason::ProofInvalid { .. })
+                ),
+                "{message}"
+            );
+        }
+    }
+
+    /// The real resolver, offline: a DID naming a private host (the host
+    /// policy) and a DID the cache cannot resolve are definitive.
+    #[tokio::test]
+    async fn real_definitive_failures_stay_proof_invalid() {
+        use affinidi_tdk::did_resolver::config::DIDCacheConfigBuilder;
+
+        let client = Arc::new(
+            DIDCacheClient::new(DIDCacheConfigBuilder::default().build())
+                .await
+                .expect("local resolver cache"),
+        );
+        let resolver = AuthenticationKeyResolver::new(client);
+        for vm in [
+            "did:web:localhost#key-1",
+            "did:web:10.0.0.1#key-1",
+            "did:example:admin#key-1",
+        ] {
+            let err = resolver
+                .resolve_vm_for_purpose(vm, ProofPurpose::Authentication)
+                .await
+                .expect_err("does not resolve");
+            let DataIntegrityError::Resolver(message) = &err else {
+                panic!("{err:?}");
+            };
+            assert_ne!(message, RESOLUTION_UNAVAILABLE, "{vm}");
+            assert_eq!(
+                classify_resolver_error(message),
+                ResolutionFailure::Definitive,
+                "{vm}: {message}"
+            );
+        }
+    }
+
+    /// The classification, form by form, including text a sender controls.
+    #[test]
+    fn resolver_errors_are_classified_conservatively() {
+        use ResolutionFailure::{Definitive, Transient};
+        for (message, expected) in [
+            (CACHED_RESOLVER_TIMEOUT.to_string(), Transient),
+            (cache_error(DIDCacheError::NetworkTimeout), Transient),
+            (
+                cache_error(DIDCacheError::TransportError(
+                    "websocket handshake failed".into(),
+                )),
+                Transient,
+            ),
+            (
+                cache_error(DIDCacheError::ConfigError("no network address".into())),
+                Transient,
+            ),
+            (
+                cache_error(DIDCacheError::NetworkFetch(
+                    NetworkFetchError::new("HTTP 502").with_status(502),
+                )),
+                Transient,
+            ),
+            (cache_error(http(408)), Transient),
+            (
+                cache_error(DIDCacheError::NetworkFetch(
+                    NetworkFetchError::new("HTTP 429").with_status(429),
+                )),
+                Transient,
+            ),
+            (
+                cache_error(DIDCacheError::NetworkFetch(
+                    NetworkFetchError::new("connection refused").with_url("https://h/x"),
+                )),
+                Transient,
+            ),
+            (cache_error(http(404)), Definitive),
+            (cache_error(http(410)), Definitive),
+            // A URL the sender chose cannot turn a 404 into a 503.
+            (
+                cache_error(DIDCacheError::NetworkFetch(
+                    NetworkFetchError::new("HTTP 404")
+                        .with_url("https://h/answered HTTP 503")
+                        .with_status(404),
+                )),
+                Definitive,
+            ),
+            (
+                cache_error(DIDCacheError::DIDError("not found".into())),
+                Definitive,
+            ),
+            // A DID error whose text a sender may shape.
+            (
+                cache_error(DIDCacheError::DIDError("Network timeout".into())),
+                Definitive,
+            ),
+            (
+                cache_error(DIDCacheError::ParsingError("bad json".into())),
+                Definitive,
+            ),
+            (
+                format!("{CACHED_RESOLVER_RESOLVE}something new"),
+                Definitive,
+            ),
+            ("resolver error: Network timeout".to_string(), Definitive),
+        ] {
+            assert_eq!(classify_resolver_error(&message), expected, "{message}");
+        }
+    }
+
+    /// The marker reaches [`verify_proof`] exactly; a sender cannot forge it
+    /// from inside a resolver message.
+    #[tokio::test]
+    async fn the_unavailable_marker_is_matched_exactly() {
+        let forged = cache_error(DIDCacheError::DIDError(RESOLUTION_UNAVAILABLE.into()));
+        // Not reclassified by the wrapper (a `DID error`), so not unavailable.
+        assert!(matches!(
+            refusal(forged).await,
             Err(RejectReason::ProofInvalid { .. })
         ));
     }

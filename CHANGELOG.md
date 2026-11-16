@@ -118,8 +118,8 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 - **`tsp::process_tsp_frame` and `tsp::FrameOutcome` are removed**: TSP is
   received only on the delivery-layer path now, which unpacks in the SDK.
   `tsp::dispatch_tsp_application` returns `Result<tsp::TspDispatch, String>`
-  (`Err`: not a Trust Task envelope; `TspDispatch::Retryable`: the refusal
-  sent was `retryable`).
+  (`Err`: not a Trust Task envelope; `TspDispatch::Retryable`: a
+  `retryable` refusal that could not be sent, so the frame stays queued).
 - **`DIDCommError::UnreachableDidDocument` carries the URL that was tried**
   (`https://{domain}/.well-known/did.json`, or `https://{domain}/{path}/did.json`
   for a `did:web` with a path).
@@ -918,6 +918,36 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Fixed
 
+- **A transient failure resolving a writer's DID no longer refuses the write
+  as `proofInvalid` and deletes it** (#302, R1.6). Verifying a write's proof
+  answered every resolver error but the degraded verifier's with
+  `proofInvalid` (non-retryable), and the message was acked. A timeout
+  (including trust-tasks-proof's 10 s deadline per resolution), a DID host
+  that could not be reached (DNS, connect, TLS, reset), an upstream 5xx, 408
+  or 429, or the resolver cache itself unavailable is now answered
+  `unavailable` (retryable). A definitive answer (DID not found or
+  deactivated, unsupported method, malformed DID, a host the host policy
+  refuses, a key not listed under `authentication`, a bad signature) stays
+  `proofInvalid`. trust-tasks-proof reports resolver errors as text, so the
+  classification (`trust_tasks::proof::classify_resolver_error`) matches the
+  0.39 / resolver-cache 0.8 forms conservatively: anything not known to be
+  transient stays `proofInvalid`.
+- **A retryable refusal is the sender's to retry; an undelivered one is
+  kept** (R1.6, both receive paths). A refusal the framework marks
+  `retryable` (storage unavailable, the same document in flight, the
+  resolver unavailable, the transient resolution failure above) is sent, and
+  once it has reached the sender the message is acked: the sender owns the
+  retry. The registry no longer also retries it (TSP retained every
+  retryable refusal): a sender such as vtc-service re-sends a refused write
+  as a new document, and the replay record is per document id, so retrying
+  the original too could apply the same mutation twice, or land it after a
+  later write. Only a retryable refusal whose reply could not be sent leaves
+  the message queued, under the listener's give-up bounds (5 attempts over
+  at least 10 minutes), since the sender never learned it must retry; this
+  is new on DIDComm, which acked every refusal. A write is applied at most
+  once per document id; the replay record never keeps a retryable refusal as
+  the answer. `trust_tasks::leave_queued` (and `is_final_answer`) state the
+  rule, for hosts driving their own socket (`route_didcomm_envelope`).
 - **A TSP-enabled registry answers DIDComm again.** With `ENABLE_TSP=true`
   the delivery crate's `MessagingService` started taking messages off the
   mediator socket as soon as it was built, before the registry subscribed;
@@ -935,7 +965,9 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   at most 32 handlers, and the next message taken off the socket only when a
   handler slot is free (beyond the frames the SDK caches ahead of the
   stream). A TSP Trust Task the registry refused as `retryable` (storage
-  unavailable, an internal error) is answered and left queued, not acked. A
+  unavailable, an internal error) is acked once the refusal reached the
+  sender, which owns the retry, and left queued only when it could not be
+  sent (see the DIDComm entry above). A
   message left queued is offered again when the mediator next pushes the
   inbox.
 - **The TSP-enabled receive path stops cleanly** (#200). On shutdown it

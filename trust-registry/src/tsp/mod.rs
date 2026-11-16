@@ -76,23 +76,37 @@ fn build_envelope<T: serde::Serialize>(doc: &T) -> Vec<u8> {
 /// [`TaskHandler`], which is what keeps this transport's write ACL, proof
 /// verification and dedup identical to DIDComm's.
 ///
-/// Also says whether the answer is final: a refusal the framework marks
-/// `retryable` (storage unavailable, an internal error, the same document
-/// still in flight) is [`TspDispatch::Retryable`].
+/// Also returns the outcome, so the caller can decide, once it knows whether
+/// the reply was sent, whether the frame is acked ([`finality`]).
 async fn handle_inbound(
     tasks: &TaskHandler,
     sender_did: &str,
     doc: TrustTask<Value>,
-) -> (Vec<u8>, TspDispatch) {
-    match tasks.handle(doc, Some(sender_did)).await {
-        Ok(response) => (build_envelope(&response), TspDispatch::Answered),
-        Err(err) => (build_envelope(&err), finality(&err)),
-    }
+) -> (
+    Vec<u8>,
+    Result<TrustTask<Value>, trust_tasks_rs::ErrorResponse>,
+) {
+    let outcome = tasks.handle(doc, Some(sender_did)).await;
+    let reply = match &outcome {
+        Ok(response) => build_envelope(response),
+        Err(err) => build_envelope(err),
+    };
+    (reply, outcome)
 }
 
-/// Whether a refusal is final: one the framework marks `retryable` is not.
-fn finality(err: &trust_tasks_rs::ErrorResponse) -> TspDispatch {
-    if err.payload.retryable {
+/// Whether the frame answered with `outcome` is acked, given whether the
+/// reply was sent ([`crate::trust_tasks::leave_queued`]).
+///
+/// R1.6, handoff to the sender: a retryable refusal that was sent hands the
+/// retry to the sender, so the frame is acked (the registry retrying it too
+/// could apply the same mutation twice, under the sender's new document id,
+/// or land it after a later write); one that could not be sent is kept. The
+/// DIDComm binding applies the same rule.
+fn finality(
+    outcome: &Result<TrustTask<Value>, trust_tasks_rs::ErrorResponse>,
+    reply_sent: bool,
+) -> TspDispatch {
+    if crate::trust_tasks::leave_queued(outcome, reply_sent) {
         TspDispatch::Retryable
     } else {
         TspDispatch::Answered
@@ -103,14 +117,17 @@ fn finality(err: &trust_tasks_rs::ErrorResponse) -> TspDispatch {
 /// loop acks the frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TspDispatch {
-    /// A final answer — a response, or a refusal that will not change on a
-    /// retry (permission denied, a bad proof, …). Ack the frame.
+    /// Ack the frame: a final answer (a response, or a refusal that will not
+    /// change on a retry: permission denied, a bad proof, …), sent or not, or
+    /// a retryable refusal that reached the sender, which now owns the retry.
     Answered,
-    /// The registry could not decide now (the refusal is `retryable`: storage
-    /// unavailable, an internal error, the same document still being
-    /// handled). The refusal was sent so the client can retry, and the frame
-    /// should stay queued so the registry tries it again too; a write is
-    /// still applied once, through the dedup store.
+    /// Keep the frame queued: the registry could not decide now (the refusal
+    /// is `retryable`: storage unavailable, an internal error, the same
+    /// document still being handled, the issuer's DID failing to resolve
+    /// transiently) and the refusal could not be sent, so the sender does
+    /// not know to retry. The registry tries it again under the delivery
+    /// give-up bounds; a write is still applied at most once per document
+    /// id, through the dedup store.
     Retryable,
 }
 
@@ -122,11 +139,11 @@ pub enum TspDispatch {
 /// dispatch and the reply remain.
 ///
 /// Returns `Err` when the payload is not a Trust Task envelope: a property of
-/// the frame, which the receive loop acks as poison; otherwise whether the
-/// answer was final ([`TspDispatch`]). A reply that cannot be sent is logged
-/// and does not change that: a final answer has been recorded (a write
-/// applied), and a client that retries with the same document id gets it
-/// replayed.
+/// the frame, which the receive loop acks as poison; otherwise whether to ack
+/// it ([`TspDispatch`]). A reply that cannot be sent is logged. It changes
+/// nothing for a final answer, which has been recorded (a write applied): a
+/// client that retries with the same document id gets it replayed. A
+/// retryable refusal that cannot be sent keeps the frame queued.
 pub async fn dispatch_tsp_application(
     atm: &Arc<ATM>,
     profile: &Arc<ATMProfile>,
@@ -147,10 +164,15 @@ pub async fn dispatch_tsp_application(
         doc.type_uri.slug()
     );
     let (reply, outcome) = handle_inbound(tasks, sender_did, doc).await;
-    if let Err(e) = atm.tsp().send(profile, sender_did, &reply).await {
-        error!("[profile = {alias}] Failed to send TSP response to {sender_did}: {e}");
-    }
-    Ok(outcome)
+    let reply_sent = match atm.tsp().send(profile, sender_did, &reply).await {
+        Ok(_) => true,
+        Err(e) => {
+            error!("[profile = {alias}] Failed to send TSP response to {sender_did}: {e}");
+            false
+        }
+    };
+    // R1.6, handoff to the sender: see `finality`.
+    Ok(finality(&outcome, reply_sent))
 }
 
 #[cfg(test)]
@@ -175,32 +197,39 @@ mod tests {
         let tasks = seeded_handler();
         let inbound = parse_envelope(&build_envelope(&query_doc(type_uri))).expect("envelope");
         let (reply, outcome) = handle_inbound(&tasks, CLIENT_DID, inbound).await;
-        assert_eq!(outcome, TspDispatch::Answered);
+        assert_eq!(finality(&outcome, true), TspDispatch::Answered);
+        assert_eq!(finality(&outcome, false), TspDispatch::Answered);
         parse_envelope(&reply).expect("reply envelope")
     }
 
-    /// R1.6: a refusal that may change on a retry (storage unavailable, an
-    /// internal error) leaves the frame queued; a final refusal is acked.
+    /// R1.6, handoff to the sender: a refusal that may change on a retry
+    /// (storage unavailable, an internal error) is acked once it reached the
+    /// sender, which owns the retry, and leaves the frame queued only when it
+    /// could not be sent; a final refusal is acked either way.
     #[test]
-    fn only_a_final_refusal_counts_as_answered() {
+    fn a_retryable_refusal_is_kept_only_when_it_was_not_sent() {
         use trust_tasks_rs::RejectReason;
         let doc = query_doc(type_uris::RECOGNITION);
-        let unavailable = doc.reject_with("r1", RejectReason::Unavailable { retry_after: None });
-        assert_eq!(finality(&unavailable), TspDispatch::Retryable);
-        let internal = doc.reject_with(
+        let unavailable =
+            Err(doc.reject_with("r1", RejectReason::Unavailable { retry_after: None }));
+        assert_eq!(finality(&unavailable, false), TspDispatch::Retryable);
+        assert_eq!(finality(&unavailable, true), TspDispatch::Answered);
+        let internal = Err(doc.reject_with(
             "r2",
             RejectReason::InternalError {
                 reason: "storage connection failed".into(),
             },
-        );
-        assert_eq!(finality(&internal), TspDispatch::Retryable);
-        let denied = doc.reject_with(
+        ));
+        assert_eq!(finality(&internal, false), TspDispatch::Retryable);
+        assert_eq!(finality(&internal, true), TspDispatch::Answered);
+        let denied = Err(doc.reject_with(
             "r3",
             RejectReason::PermissionDenied {
                 reason: "not an admin".into(),
             },
-        );
-        assert_eq!(finality(&denied), TspDispatch::Answered);
+        ));
+        assert_eq!(finality(&denied, false), TspDispatch::Answered);
+        assert_eq!(finality(&denied, true), TspDispatch::Answered);
     }
 
     #[tokio::test]

@@ -24,7 +24,7 @@ pub mod router;
 #[cfg(all(test, feature = "tsp"))]
 pub(crate) mod test_support;
 
-pub use handler::TaskHandler;
+pub use handler::{TaskHandler, is_final_answer, leave_queued};
 pub use payloads::type_uris;
 pub use proof::{build_verifier, verify_write_proof};
 pub use reply::ReplySigner;
