@@ -1285,8 +1285,9 @@ redelivered copy with the stored response instead of executing it again
 (R1.4): a write is applied at most once per document id. A refusal marked
 retryable (`unavailable`, `internalError`, the same document still in
 flight; including a writer's DID that did not resolve now) is never stored as
-the answer. Once such a refusal has reached the sender, the inbound message
-is deleted at the mediator and the sender owns the retry: re-send the same
+the answer. Once such a refusal has been handed to the mediator for the sender (a
+REST 2xx or a websocket write; the mediator does not confirm storage), the
+inbound message is deleted at the mediator and the sender owns the retry: re-send the same
 document, or a new one. The registry keeps the message queued, and tries it
 again itself, only when it could not send the refusal. Where that record
 lives follows the storage backend:

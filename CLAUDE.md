@@ -28,9 +28,10 @@ Rules that bite hardest here:
   live in `didcomm/listener/delivery.rs`: poison is acked, a handler error,
   panic or timeout is not, a Trust Task refused as `retryable` (storage
   unavailable, internal error, a DID that did not resolve now) is acked once
-  the refusal reached the sender — handoff to the sender, which owns the
-  retry; retrying it here too could apply a mutation twice, as senders
-  re-send under a new document id — and is not acked only when the refusal
+  the refusal was handed to the mediator for the sender (a REST 2xx or a
+  websocket write; the mediator does not confirm storage) — handoff to the
+  sender, which owns the retry; retrying it here too could apply a mutation
+  twice, as senders re-send under a new document id — and is not acked only when the refusal
   could not be sent (`trust_tasks::leave_queued`, used by both paths). A
   write is applied at most once per document id. A message that keeps failing is
   deleted (logged at `error`) only after 5 failures over at least 10

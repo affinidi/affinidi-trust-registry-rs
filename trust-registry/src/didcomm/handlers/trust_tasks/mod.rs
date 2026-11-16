@@ -131,12 +131,14 @@ impl ProtocolHandler for TrustTasksHandler {
 }
 
 /// What the listener should be told about a message answered with `outcome`,
-/// given whether the reply reached the mediator: `Ok` to ack it, `Err` to
+/// given whether the reply was handed to the mediator for the sender (a REST
+/// 2xx or a websocket write; the mediator does not confirm storage): `Ok` to
+/// ack it, `Err` to
 /// leave it queued for redelivery ([`crate::trust_tasks::leave_queued`]).
 ///
 /// R1.6, handoff to the sender: a retryable refusal (storage unavailable, the
 /// same document in flight, a proof that could not be verified now because
-/// the issuer's DID did not resolve) that was delivered transfers the retry to
+/// the issuer's DID did not resolve) that was handed to the mediator transfers the retry to
 /// the sender, so the message is acked. The registry retrying the original
 /// as well could apply the same mutation twice (a sender such as vtc-service
 /// re-sends it under a new document id) or land it after a later write. Only

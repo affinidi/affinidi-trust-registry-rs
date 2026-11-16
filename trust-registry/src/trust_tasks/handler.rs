@@ -114,14 +114,20 @@ pub fn is_final_answer(outcome: &Result<TrustTask<Value>, ErrorResponse>) -> boo
 /// carrying it could not be sent (the send failed; a send that hangs is cut
 /// off by the handler timeout, which retains the message too).
 ///
-/// A retryable refusal that reached the sender is a handoff to the sender:
-/// it now owns the retry, and the message is acked. A sender such as
+/// A retryable refusal that was handed to the mediator for the sender (a
+/// REST 2xx or a websocket write; the mediator does not confirm storage) is a
+/// handoff to the sender: it now owns the retry, and the message is acked. A sender such as
 /// vtc-service re-sends a refused write as a new document (a new id), and
 /// the replay record is per document id; if the registry also kept retrying
 /// the original, the same mutation could be applied twice, and the stale
 /// original could land after a later, contradicting write. A refusal the
 /// sender never received leaves nobody to retry, so that message is kept,
 /// under the delivery give-up bounds (`didcomm::listener::delivery`).
+///
+/// If the ack of a delivered retryable refusal itself fails, the message is
+/// redelivered and may then be applied while the sender also re-sends it
+/// under a new id: rare (the refusal was sent, then the ack failed) and
+/// bounded by the delivery give-up bounds.
 ///
 /// A final answer is acked whether or not its reply was sent: it is
 /// recorded, and a copy of the same document is answered from the record.
@@ -2917,7 +2923,7 @@ mod tests {
         use crate::trust_tasks::proof::tests::{TIMEOUT, not_found, verifier_failing_with};
 
         let (key, did) = did_key(36);
-        let f = fixture(vec![did.clone()]);
+        let f = fixture(vec![did.clone()]).await;
         let dedup: Arc<dyn MessageIdStore> = Arc::new(MemoryMessageIdStore::default());
         let over = |verifier| {
             TaskHandler::new(f.capabilities.dispatcher(), ME, vec![did.clone()], verifier)

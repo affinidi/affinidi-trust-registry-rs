@@ -191,7 +191,8 @@ impl TrustRegistry {
     /// is [`leave_queued`](crate::trust_tasks::leave_queued), the rule the
     /// built-in listeners follow (R1.6): ack a final answer, and ack a
     /// retryable refusal (such as a proof whose issuer's DID did not resolve
-    /// now) that reached the sender, which then owns the retry; keep the
+    /// now) that was handed to the mediator for the sender, which then owns the
+    /// retry; keep the
     /// message queued only when a retryable refusal could not be sent.
     pub async fn route_didcomm_envelope(
         &self,
