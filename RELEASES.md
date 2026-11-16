@@ -147,19 +147,19 @@ the local fallback, a maintainer opened it.
 
 Every PR with a user-visible change adds its entry under `## Unreleased` at the
 top of `CHANGELOG.md` on `main`. The tooling owns the headings, and both sides
-end up as `## 0.27.0 (date)`:
+end up as the same `## 0.27.0 (<GA date>)`; nobody edits a heading by hand:
 
-- on the release branch, the GA prep turns `## Unreleased` into
-  `## 0.27.0 (<GA date>)`;
-- on `main`, the cut PR closes `## Unreleased` under a heading for the release
-  and opens a fresh `## Unreleased` above it. `scripts/cut-release.py` writes
-  `## 0.27.0 (<cut date, UTC>)`. The `release-cut.yml` workflow (the shared
-  `pipeline-rust` action) still writes `## 0.27.0 (release/0.27)`: change that
-  heading to the date in the cut PR before merging it.
+- at the cut, the cut PR closes `main`'s `## Unreleased` under
+  `## 0.27.0 (unreleased)` and opens a fresh `## Unreleased` above it
+  (`release-cut.yml` and the `scripts/cut-release.py` fallback alike);
+- at GA, the GA prep turns the release branch's `## Unreleased` into
+  `## 0.27.0 (<GA date>)` and opens a second PR, `release-date/0.27` into
+  `main`, that rewrites `main`'s `## 0.27.0 …` heading to the same string.
+  Merge it once the GA prep PR is merged and the `v0.27.0` tag exists.
 
-When the GA lands on a later day than the cut, set `main`'s heading to the GA
-date in a follow-up PR, so the two branches carry the same heading and a
-backport touching `CHANGELOG.md` conflicts only on `## Unreleased`.
+So the two branches carry the same heading, and a backport touching
+`CHANGELOG.md` conflicts only on `## Unreleased`. A patch's section lives only
+on the release branch.
 
 ## Procedures
 
@@ -177,7 +177,7 @@ With the release bot's token it pushes `release/0.29` (workspace at `0.29.0`,
 `RELEASE` = `0.29.0-rc.0`, which `release-tag.yml` tags), creates the
 `backport release/0.29` label, and opens the `release-cut/0.29` PR that moves
 `main` to `0.30.0` and closes `main`'s `## Unreleased` changelog section under
-`## 0.29.0`. Merge it. Tagging `v0.29.0-rc.0` adds the release to the
+`## 0.29.0 (unreleased)` (dated at GA, see [Changelog](#changelog)). Merge it. Tagging `v0.29.0-rc.0` adds the release to the
 schedule above through the `release-schedule.yml` PR; merge that too.
 
 `from` (`-f from=<rev>`) cuts from something other than `origin/nightly`.
@@ -201,12 +201,18 @@ Actions → **Prepare a release** → choose the release branch as the ref and
 `## Unreleased` section becomes `## 0.27.0 (date)`; patch: a new section listing
 the commits since the last tag, above the newest version's), moves the whole workspace for a patch, and
 opens a `chore(release): v…` PR from `release-prep/<major.minor>/<version>`.
+A GA also opens `chore(release): date <version> in main's changelog` from
+`release-date/<major.minor>` into `main` (see [Changelog](#changelog)). A
+rerun of the prep force-updates both branches and reuses their open PRs.
 
 **Merging it is the release.** On that push to the release branch:
 
 - `release-tag.yml` tags `v<RELEASE>` and opens the GitHub Release (notes =
   that version's changelog section; an rc is a prerelease).
 - `release.yaml` publishes the crates for a GA or patch (below).
+
+After a GA, once the `v<major.minor>.0` tag exists, merge the
+`release-date/<major.minor>` PR.
 
 ### Publish (crates.io)
 
@@ -291,7 +297,10 @@ Settings, not files:
   `release-prep.yml`, `backport.yml` and `release-schedule.yml` push
   branches and open PRs with it (the enterprise does not allow `GITHUB_TOKEN`
   to open PRs, and a PR it opened would run no CI). The app needs contents and
-  pull-requests write on this repository. Its login,
+  pull-requests write on this repository, and no ruleset may stop it
+  creating or force-pushing the `release-cut/*`, `release-prep/*` and
+  `release-date/*` branches it opens PRs from (a rerun of the prep
+  force-pushes the last two). Its login,
   `affinidi-semantic-release[bot]`, is the one `branch rules` accepts cut,
   prep and backport PRs from.
 - **Ruleset on `release/**`:** require a PR, require the `checks` jobs and
