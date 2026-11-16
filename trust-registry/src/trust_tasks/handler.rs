@@ -1957,6 +1957,7 @@ mod tests {
                     config: None,
                     enabled_at: Utc::now(),
                     revision: 0,
+                    change_id: None,
                 },
             )
             .await

@@ -56,6 +56,7 @@ pub(crate) fn state(enabled: bool, authority: Option<&str>) -> CapabilityState {
         config: authority.map(|a| serde_json::json!({ CONFIG_AUTHORITY: a })),
         enabled_at: Utc::now(),
         revision: 0,
+        change_id: None,
     }
 }
 

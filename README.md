@@ -906,8 +906,9 @@ embedding the registry can pass its own store
   be read, the task is refused as `unavailable` (retryable) rather than
   decided on what the replica last saw. Every read and write of the state is
   abandoned after 10 s, so a stalled Redis or DynamoDB call fails the
-  capability tasks waiting on it instead of holding them; a change whose
-  answer was lost that way may still have landed, and every replica (this one
+  capability tasks waiting on it instead of holding them (tasks arriving
+  while a read is stalled share that read and its failure, so they do not
+  queue one 10 s read after another); a change whose answer was lost that way may still have landed, and every replica (this one
   included) adopts it on its next read. Record writes and TRQP queries do not
   read the state.
 - **Dispatcher handles converge within `TR_CAPABILITY_REFRESH_SECS`** (default

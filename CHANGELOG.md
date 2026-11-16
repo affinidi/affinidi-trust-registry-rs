@@ -35,10 +35,14 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   no update. Every store call is abandoned after 10 s (`STORE_TIMEOUT`), and
   the DynamoDB capability store's own client copy gets SDK request timeouts
   (3 s per attempt, 8 s per operation; the records' and dedup client is
-  unchanged). API: `CapabilityStateStore` is now async and per enablement
+  unchanged); callers waiting on a stalled store share the read that stalls
+  and its failure, so they all fail within about one timeout. API:
+  `CapabilityStateStore` is now async and per enablement
   (`load`, `put(key, expected_revision, state) -> Put`, `is_shared`, which
   defaults to `true`; `save` is gone); `CapabilitySet::new` is async;
-  `CapabilityState` has a `revision` member; `MemoryCapabilityStore` is
+  `CapabilityState` has `revision` and `changeId` members (the latter lets a
+  change recognise its own write when a DynamoDB SDK retry of a landed
+  attempt reports a conflict); `CapabilityError` is `Clone`; `MemoryCapabilityStore` is
   `Clone` (clones share one state) and reports itself shared; `ServerConfig`
   has `capability_refresh_interval`. New: `CapabilitySet::refresh`,
   `spawn_refresher`, `join_refresher` (`ServerHandle::join` awaits it),
@@ -55,8 +59,8 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   `<file>.imported` back to restore the state as it was at the upgrade;
   changes made since live only in Redis/DynamoDB (`HGETALL CAP#enablements`,
   or a `Query` of `PK = CAP#enablements`) and must be re-applied by hand. The
-  state file now carries a `revision` member per enablement, which earlier
-  releases ignore.
+  state file now carries `revision` and `changeId` members per enablement,
+  which earlier releases ignore.
 
 - **Dependencies move to the family vta-sdk 0.90 declares (affinidi-crypto
   0.3)**: `vta-sdk` 0.80 → 0.90, `vti-secrets` 0.29 → 0.39 (vti-common 0.66;

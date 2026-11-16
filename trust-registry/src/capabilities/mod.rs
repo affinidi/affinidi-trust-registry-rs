@@ -211,6 +211,13 @@ pub struct CapabilityState {
     /// passed to `put` has its own revision ignored.
     #[serde(default)]
     pub revision: u64,
+    /// The enable or disable that wrote this state: a fresh identifier per
+    /// change, so a registry recognises its own write when the store reports
+    /// a conflict for it (the DynamoDB SDK retrying an attempt that had
+    /// landed, whose answer was lost). `None` for a state no change wrote
+    /// (one written by an earlier release, or imported).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
 }
 
 /// Every enablement the registry knows of, enabled or retained after a
@@ -621,7 +628,7 @@ pub type DispatcherHandle = Arc<RwLock<Arc<RegistryDispatcher>>>;
 /// Errors from enable/disable. The governance handlers below answer each with
 /// the specification's extension code for it
 /// (`governance/capability/enable:unknownCapability`, ...).
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CapabilityError {
     /// Not built into this host, or not at the requested version.
     UnknownCapability(String),
@@ -713,8 +720,11 @@ pub struct CapabilitySet {
     /// older read can never replace the state a later one, or a change,
     /// put in place.
     sync: tokio::sync::Mutex<()>,
-    /// How many reads of the store have been adopted ([`Self::refresh`]).
-    refreshed: std::sync::atomic::AtomicU64,
+    /// How many reads of the store have begun, and the outcome of the last
+    /// one: callers waiting for a read share one that began after they
+    /// arrived ([`Self::read_coalesced`]).
+    reads: std::sync::atomic::AtomicU64,
+    last_read: std::sync::Mutex<Result<(), CapabilityError>>,
     /// The background re-read ([`Self::spawn_refresher`]), awaited by
     /// [`Self::join_refresher`].
     refresher: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -784,6 +794,7 @@ fn probe_state() -> CapabilityState {
         config: None,
         enabled_at: DateTime::<Utc>::UNIX_EPOCH,
         revision: 0,
+        change_id: None,
     }
 }
 
@@ -897,7 +908,8 @@ impl CapabilitySet {
                 tasks: RwLock::new(composed.tasks),
                 weak: weak.clone(),
                 sync: tokio::sync::Mutex::new(()),
-                refreshed: std::sync::atomic::AtomicU64::new(0),
+                reads: std::sync::atomic::AtomicU64::new(0),
+                last_read: std::sync::Mutex::new(Ok(())),
                 refresher: std::sync::Mutex::new(None),
                 classification,
                 available,
@@ -987,6 +999,7 @@ impl CapabilitySet {
             config,
             enabled_at: Utc::now(),
             revision: 0,
+            change_id: None,
         };
         self.classification
             .check(capability, definition, &entry)
@@ -1041,6 +1054,13 @@ impl CapabilitySet {
     /// capability task on a shared store, or the next change). A retry of
     /// the same change then answers as it would after a success
     /// (`alreadyEnabled`, `notEnabled`).
+    ///
+    /// A write can also land and be answered as a conflict: the DynamoDB SDK
+    /// retries an attempt that timed out (3 s) although it had landed, and
+    /// the retry's condition fails against the write itself. Each change
+    /// stamps what it writes with its own [`CapabilityState::change_id`], so
+    /// when the re-read after a conflict finds its own stamp, the change
+    /// answers as written instead of `alreadyEnabled` / `notEnabled`.
     async fn change(
         &self,
         key: EnablementKey,
@@ -1051,18 +1071,38 @@ impl CapabilitySet {
         let set = self.weak.upgrade().ok_or_else(|| {
             CapabilityError::Storage("the capability set is shutting down".to_string())
         })?;
+        let arrived = self.reads_started();
+        let change_id = uuid::Uuid::new_v4().to_string();
         tokio::spawn(async move {
             let _serial = set.sync.lock().await;
             for attempt in 0..MAX_CHANGE_ATTEMPTS {
-                if attempt > 0 {
+                if attempt == 0 {
+                    // A read that began after this change arrived is as
+                    // fresh as one it would make (the write is checked
+                    // against the revision anyway); its failure fails the
+                    // change at once instead of queueing another read behind
+                    // a stalled store.
+                    set.read_coalesced(arrived).await?;
+                } else {
                     // Back off a little more after each lost race, so
                     // replicas contending for one enablement spread out.
                     tokio::time::sleep(std::time::Duration::from_millis(5 << attempt)).await;
+                    set.read_store().await?;
                 }
-                set.read_store().await?;
                 let current = set.state.read().await.get(&key).cloned();
+                if let Some(landed) = current
+                    .as_ref()
+                    .filter(|s| s.change_id.as_deref() == Some(change_id.as_str()))
+                {
+                    // This change's own write landed although the store
+                    // answered it as a conflict (a retried attempt).
+                    return Ok(landed.clone());
+                }
                 let expected = current.as_ref().map_or(0, |s| s.revision);
-                let next = decide(current.as_ref())?;
+                let next = CapabilityState {
+                    change_id: Some(change_id.clone()),
+                    ..decide(current.as_ref())?
+                };
                 match bounded("write", set.store.put(&key, expected, &next))
                     .await
                     .map_err(CapabilityError::Storage)?
@@ -1093,7 +1133,18 @@ impl CapabilitySet {
 
     /// Read the store and adopt what it holds as the state, swapping the
     /// dispatchers if it differs. Call with [`Self::sync`] held.
+    ///
+    /// Every read is counted when it begins, and its outcome kept, failure
+    /// included, so callers that were waiting for a read can share it
+    /// ([`Self::read_coalesced`]).
     async fn read_store(&self) -> Result<(), CapabilityError> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let outcome = self.adopt_store().await;
+        *self.last_read.lock().unwrap_or_else(|p| p.into_inner()) = outcome.clone();
+        outcome
+    }
+
+    async fn adopt_store(&self) -> Result<(), CapabilityError> {
         let loaded = bounded("read", self.store.load())
             .await
             .map_err(CapabilityError::Storage)?;
@@ -1102,9 +1153,29 @@ impl CapabilitySet {
             *state = loaded;
             self.rebuild(&state).await;
         }
-        self.refreshed
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
+    }
+
+    /// How many reads of the store have begun.
+    fn reads_started(&self) -> u64 {
+        self.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A read of the store no older than the call that counted `arrived`
+    /// reads begun: the last read's outcome, failure included, when it began
+    /// after that (reads are serialised by [`Self::sync`], held here, so none
+    /// is in progress); a read of its own otherwise. However many callers
+    /// wait on a stalled store, each waits for at most the read in progress
+    /// when it arrived and the one after it.
+    async fn read_coalesced(&self, arrived: u64) -> Result<(), CapabilityError> {
+        if self.reads_started() > arrived {
+            return self
+                .last_read
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+        }
+        self.read_store().await
     }
 
     /// Converge on changes other registries made to a shared store: re-read
@@ -1115,7 +1186,11 @@ impl CapabilitySet {
     /// it authorises or serves any capability or governance task, so the
     /// decision is made on the state as it was read after the task arrived:
     /// a disable made on another replica is honoured from the next task on.
-    /// Concurrent callers share one read when it began after they called.
+    /// Concurrent callers share one read that began after they called, and
+    /// its outcome: when the store stalls, every caller waiting fails with
+    /// the one read that timed out, after at most two [`STORE_TIMEOUT`]s
+    /// (the read in progress when it arrived, and the next), however many
+    /// are waiting.
     ///
     /// An error (the store unreachable, or no answer within
     /// [`STORE_TIMEOUT`]) leaves the state as it was; the handler then
@@ -1132,17 +1207,12 @@ impl CapabilitySet {
         let set = self.weak.upgrade().ok_or_else(|| {
             CapabilityError::Storage("the capability set is shutting down".to_string())
         })?;
-        let arrived = self.refreshed.load(std::sync::atomic::Ordering::SeqCst);
+        let arrived = self.reads_started();
         // In a task of its own, so a caller that stops waiting cannot stop
         // it between adopting the state and swapping the dispatchers.
         tokio::spawn(async move {
             let _serial = set.sync.lock().await;
-            // Two reads adopted since this call arrived: the second began
-            // after it, so it is as fresh as one this call would make.
-            if set.refreshed.load(std::sync::atomic::Ordering::SeqCst) >= arrived + 2 {
-                return Ok(());
-            }
-            set.read_store().await
+            set.read_coalesced(arrived).await
         })
         .await
         .map_err(|e| CapabilityError::Storage(format!("the state refresh did not finish: {e}")))?
@@ -2842,6 +2912,107 @@ mod tests {
             .await
             .expect("the store answers again");
         assert!(dispatch_ok(&set).await);
+    }
+
+    /// Callers waiting on a stalled store share the read that stalls: five
+    /// refreshes and three changes arriving together all fail within one
+    /// STORE_TIMEOUT, not one after another.
+    #[tokio::test(start_paused = true)]
+    async fn waiters_on_a_stalled_store_share_its_failure() {
+        let store = Arc::new(Stalling::default());
+        let set = CapabilitySet::new(
+            vec![test_capability("demo")],
+            Box::new(store.clone()),
+            empty_base(),
+            empty_base(),
+        )
+        .await
+        .unwrap();
+        store
+            .stalled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let started = tokio::time::Instant::now();
+        let refreshes = futures::future::join_all((0..5).map(|_| set.refresh()));
+        let changes = futures::future::join_all((0..3).map(|n| {
+            set.enable(
+                "demo",
+                "0.1",
+                Some(serde_json::json!({ CONFIG_AUTHORITY: format!("did:example:{n}") })),
+                None,
+            )
+        }));
+        let (refreshes, changes) = tokio::join!(refreshes, changes);
+        assert!(
+            refreshes
+                .iter()
+                .all(|r| matches!(r, Err(CapabilityError::Storage(_))))
+        );
+        assert!(
+            changes
+                .iter()
+                .all(|r| matches!(r, Err(CapabilityError::Storage(_))))
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < STORE_TIMEOUT + std::time::Duration::from_secs(1),
+            "{elapsed:?}"
+        );
+    }
+
+    /// A shared store whose next put lands but is answered as a conflict, as
+    /// a DynamoDB SDK retry of a landed attempt is.
+    #[derive(Default)]
+    struct LandsAsConflict {
+        inner: MemoryCapabilityStore,
+        next: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl CapabilityStateStore for Arc<LandsAsConflict> {
+        async fn load(&self) -> Result<CapabilityStates, String> {
+            self.inner.load().await
+        }
+        async fn put(
+            &self,
+            key: &EnablementKey,
+            expected: u64,
+            state: &CapabilityState,
+        ) -> Result<Put, String> {
+            let written = self.inner.put(key, expected, state).await?;
+            if self.next.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Ok(Put::Conflict);
+            }
+            Ok(written)
+        }
+    }
+
+    /// A change whose own write landed but was answered as a conflict
+    /// answers as written, not as `alreadyEnabled` / `notEnabled`; another
+    /// change's write still answers as before.
+    #[tokio::test]
+    async fn a_change_recognises_its_own_write_after_a_conflict() {
+        let store = Arc::new(LandsAsConflict::default());
+        let set = CapabilitySet::new(
+            vec![test_capability("demo")],
+            Box::new(store.clone()),
+            empty_base(),
+            empty_base(),
+        )
+        .await
+        .unwrap();
+        store.next.store(true, std::sync::atomic::Ordering::SeqCst);
+        let enabled = set.enable("demo", "0.1", None, None).await.unwrap();
+        assert_eq!(enabled.revision, 1, "written once");
+        assert!(enabled.change_id.is_some());
+        assert!(dispatch_ok(&set).await);
+        store.next.store(true, std::sync::atomic::Ordering::SeqCst);
+        set.disable("demo", None).await.expect("its own disable");
+        assert!(!dispatch_ok(&set).await);
+        assert_eq!(
+            set.disable("demo", None).await,
+            Err(CapabilityError::NotEnabled),
+            "a later disable still answers notEnabled"
+        );
     }
 
     /// The background refresher brings a set's dispatcher handles in line
