@@ -1138,6 +1138,13 @@ impl CapabilitySet {
     /// included, so callers that were waiting for a read can share it
     /// ([`Self::read_coalesced`]).
     async fn read_store(&self) -> Result<(), CapabilityError> {
+        // Until this read finishes, a caller sharing it must not see the
+        // previous read's success: if it never finishes (a panic in the
+        // spawned task, or the future dropped), the counter has moved past
+        // callers that arrived after that older read began.
+        *self.last_read.lock().unwrap_or_else(|p| p.into_inner()) = Err(CapabilityError::Storage(
+            "the capability store read did not finish".into(),
+        ));
         self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let outcome = self.adopt_store().await;
         *self.last_read.lock().unwrap_or_else(|p| p.into_inner()) = outcome.clone();
