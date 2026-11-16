@@ -363,7 +363,7 @@ mod tests {
         );
     }
 
-    fn set_over(repository: Arc<dyn TrustRecordAdminRepository>) -> Arc<CapabilitySet> {
+    async fn set_over(repository: Arc<dyn TrustRecordAdminRepository>) -> Arc<CapabilitySet> {
         let query_repo = repository.clone();
         CapabilitySet::new(
             vec![definition(repository).unwrap()],
@@ -372,6 +372,7 @@ mod tests {
             // Query surface serves real TRQP reads, like the HTTP binding.
             Box::new(move || crate::trust_tasks::build_query_dispatcher(query_repo.clone())),
         )
+        .await
         .unwrap()
     }
 
@@ -449,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn grant_then_query_then_revoke_full_loop() {
         let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::default());
-        let set = set_over(repository);
+        let set = set_over(repository).await;
 
         // Enable with the community authority in config.
         set.enable(
@@ -499,7 +500,7 @@ mod tests {
     #[tokio::test]
     async fn a_grant_with_an_invalid_identifier_is_malformed() {
         let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::default());
-        let set = set_over(repository.clone());
+        let set = set_over(repository.clone()).await;
         set.enable(
             "git-trust",
             "0.1",
@@ -539,7 +540,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_without_grant_rejects() {
         let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::default());
-        let set = set_over(repository);
+        let set = set_over(repository).await;
         set.enable(
             "git-trust",
             "0.1",
@@ -558,7 +559,7 @@ mod tests {
     #[tokio::test]
     async fn enable_requires_an_authority_did() {
         let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::default());
-        let set = set_over(repository);
+        let set = set_over(repository).await;
 
         for bad in [
             serde_json::json!({}),
@@ -586,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn tasks_do_not_route_while_disabled() {
         let repository: Arc<dyn TrustRecordAdminRepository> = Arc::new(LocalStorage::default());
-        let set = set_over(repository);
+        let set = set_over(repository).await;
         assert!(
             dispatch(&set, true, grant(SIGNER, REPO),).await.is_err(),
             "off by default"
@@ -634,6 +635,7 @@ mod tests {
             Box::new(Dispatcher::new),
             Box::new(move || crate::trust_tasks::build_query_dispatcher(query_repo.clone())),
         )
+        .await
         .unwrap();
         let stored = || async {
             repository

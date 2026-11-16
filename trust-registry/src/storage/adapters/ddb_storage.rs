@@ -73,6 +73,12 @@ impl DynamoDbStorage {
         }
     }
 
+    /// The client and table, as the stores kept beside the records use them.
+    #[cfg(test)]
+    pub(crate) fn client_and_table(&self) -> (Client, String) {
+        (self.client.clone(), self.table_name.clone())
+    }
+
     fn build_key(storage_key: &str) -> HashMap<String, AttributeValue> {
         let mut key = HashMap::with_capacity(2);
         key.insert(
@@ -511,10 +517,25 @@ impl TrustRecordAdminRepository for DynamoDbStorage {
             *config,
         ))))
     }
+
+    /// The DynamoDB capability enablement state
+    /// ([`DynamoDbCapabilityStore`](crate::capabilities::dynamodb::DynamoDbCapabilityStore),
+    /// the partition `CAP#enablements`), in this table, over this client,
+    /// shared by every replica on this table.
+    async fn capability_store(
+        &self,
+    ) -> Result<Option<Box<dyn crate::capabilities::CapabilityStateStore>>, RepositoryError> {
+        Ok(Some(Box::new(
+            crate::capabilities::dynamodb::DynamoDbCapabilityStore::new(
+                self.client.clone(),
+                self.table_name.clone(),
+            ),
+        )))
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use aws_sdk_dynamodb::types::{
         AttributeDefinition, BillingMode, CancellationReason, KeySchemaElement, KeyType,
@@ -567,7 +588,7 @@ mod tests {
     /// test table (`TR_TEST_DYNAMODB_TABLE`, default
     /// `trust-registry-conformance`) created if it is missing. Tests write
     /// only records under their own authority and delete only those.
-    async fn test_storage() -> Option<DynamoDbStorage> {
+    pub(crate) async fn test_storage() -> Option<DynamoDbStorage> {
         let endpoint = crate::storage::conformance::dynamodb_test_endpoint()?;
         let table = std::env::var("TR_TEST_DYNAMODB_TABLE")
             .unwrap_or_else(|_| "trust-registry-conformance".to_string());

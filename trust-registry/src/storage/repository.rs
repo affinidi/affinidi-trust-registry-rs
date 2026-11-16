@@ -378,6 +378,24 @@ pub trait TrustRecordAdminRepository: TrustRecordRepository {
         Ok(None)
     }
 
+    /// The store of capability enablement state
+    /// ([`crate::capabilities::CapabilityStateStore`]) that belongs with this
+    /// repository's storage, when that storage is shared by several
+    /// processes, or `None`.
+    ///
+    /// [`TrustRegistryBuilder`](crate::TrustRegistryBuilder) uses it when no
+    /// store is passed, so replicas on one Redis or DynamoDB agree on which
+    /// capabilities are enabled, for which authorities. The Redis and
+    /// DynamoDB adapters return one, keyed apart from the records and the
+    /// accepted document identifiers. The default, and the CSV, in-memory and
+    /// fjall adapters (one process each), return `None`; the builder then
+    /// uses the local state file (`TR_CAPABILITY_STATE`).
+    async fn capability_store(
+        &self,
+    ) -> Result<Option<Box<dyn crate::capabilities::CapabilityStateStore>>, RepositoryError> {
+        Ok(None)
+    }
+
     /// The record `query` names, or [`RepositoryError::RecordNotFound`].
     ///
     /// The same lookup as [`TrustRecordRepository::find_by_query`], with

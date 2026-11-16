@@ -80,6 +80,9 @@ pub struct ServerHandle {
     http_grace: Duration,
     health: Arc<RegistryHealth>,
     audit: Arc<crate::audit::bounded::BoundedAuditLogger>,
+    /// Whose background re-read of the shared capability state is awaited
+    /// once the tasks have stopped.
+    capabilities: Option<Arc<crate::capabilities::CapabilitySet>>,
 }
 
 impl ServerHandle {
@@ -121,7 +124,8 @@ impl ServerHandle {
     }
 
     /// Wait until the service stops, then wait for every task to finish and
-    /// flush the audit log.
+    /// flush the audit log; the capability state refresher, when one runs, is
+    /// awaited too.
     ///
     /// The service stops when the shutdown token is cancelled, when the HTTP
     /// server ends, or — with REST disabled — when the DIDComm listener ends.
@@ -136,7 +140,12 @@ impl ServerHandle {
     /// failed, panicked, or had to be aborted.
     pub async fn join(self) -> Result<(), BoxError> {
         let audit = self.audit.clone();
+        let capabilities = self.capabilities.clone();
         let result = self.join_tasks().await;
+        // The shutdown token is cancelled by now, so the refresher returns.
+        if let Some(capabilities) = capabilities {
+            capabilities.join_refresher().await;
+        }
         // Whatever ended the tasks, record the refusals still only counted.
         audit.flush().await;
         result
@@ -525,6 +534,7 @@ pub(crate) async fn serve_registry(
         http_grace,
         audit: registry.audit.clone(),
         health: registry.health.clone(),
+        capabilities: Some(registry.capabilities.clone()),
     })
 }
 
@@ -837,6 +847,7 @@ mod tests {
             http_grace: Duration::from_secs(5),
             health: Arc::new(RegistryHealth::new(true)),
             audit: audit(),
+            capabilities: None,
         }
     }
 

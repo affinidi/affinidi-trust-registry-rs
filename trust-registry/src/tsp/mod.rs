@@ -119,7 +119,8 @@ fn finality(
 pub enum TspDispatch {
     /// Ack the frame: a final answer (a response, or a refusal that will not
     /// change on a retry: permission denied, a bad proof, …), sent or not, or
-    /// a retryable refusal that reached the sender, which now owns the retry.
+    /// a retryable refusal that was handed to the mediator for the sender, which
+    /// now owns the retry.
     Answered,
     /// Keep the frame queued: the registry could not decide now (the refusal
     /// is `retryable`: storage unavailable, an internal error, the same

@@ -1021,7 +1021,8 @@ async fn handle_tsp(
     .await
     {
         // A final answer, or (R1.6, handoff to the sender) a retryable refusal
-        // that reached the sender, which now owns the retry: ack.
+        // that was handed to the mediator for the sender, which now owns the
+        // retry: ack.
         Ok(crate::tsp::TspDispatch::Answered) => Outcome::Handled,
         // A retryable refusal (storage unavailable, an internal error, the
         // issuer's DID not resolving now) that could not be sent: nobody else

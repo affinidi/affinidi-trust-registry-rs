@@ -21,6 +21,47 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Breaking
 
+- **Capability enablement is shared by replicas on Redis or DynamoDB
+  (#298).** The default capability store now comes from the repository
+  (`TrustRecordAdminRepository::capability_store`, new, default `None`): the
+  Redis adapter keeps the state in the hash `CAP#enablements`, the DynamoDB
+  adapter in the partition `PK = CAP#enablements` of the records' table; CSV,
+  in-memory and fjall keep the `TR_CAPABILITY_STATE` file. Each replica
+  re-reads the shared state before it authorises or serves a capability or
+  `governance/capability/*` task (refusing it as `unavailable` when the state
+  cannot be read) and every `TR_CAPABILITY_REFRESH_SECS` (new, default 5) in
+  the background; enable and disable write one enablement with a
+  compare-and-swap on its revision, so concurrent changes on two replicas lose
+  no update. Every store call is abandoned after 10 s (`STORE_TIMEOUT`), and
+  the DynamoDB capability store's own client copy gets SDK request timeouts
+  (3 s per attempt, 8 s per operation; the records' and dedup client is
+  unchanged); callers waiting on a stalled store share the read that stalls
+  and its failure, so they all fail within about one timeout. API:
+  `CapabilityStateStore` is now async and per enablement
+  (`load`, `put(key, expected_revision, state) -> Put`, `is_shared`, which
+  defaults to `true`; `save` is gone); `CapabilitySet::new` is async;
+  `CapabilityState` has `revision` and `changeId` members (the latter lets a
+  change recognise its own write when a DynamoDB SDK retry of a landed
+  attempt reports a conflict); `CapabilityError` is `Clone`; `MemoryCapabilityStore` is
+  `Clone` (clones share one state) and reports itself shared; `ServerConfig`
+  has `capability_refresh_interval`. New: `CapabilitySet::refresh`,
+  `spawn_refresher`, `join_refresher` (`ServerHandle::join` awaits it),
+  `serves`, `import_state_file`, `STORE_TIMEOUT`,
+  `TaskHandler::with_capability_refresh`, and the `RedisCapabilityStore` /
+  `DynamoDbCapabilityStore` types. **Upgrade:** a `TR_CAPABILITY_STATE` file
+  is merged into the shared state (writing only enablements it has never
+  held) and renamed to `<file>.imported` once that has fully succeeded; a
+  failed write fails startup and the next start retries. With several
+  replicas, each one's file is merged on its first start, so enablements any
+  of them had are carried over, and where two files disagree on one
+  enablement the first replica to start wins (check `governance/capability/list`
+  after the upgrade). **Downgrade:** an earlier release reads only the file. Rename
+  `<file>.imported` back to restore the state as it was at the upgrade;
+  changes made since live only in Redis/DynamoDB (`HGETALL CAP#enablements`,
+  or a `Query` of `PK = CAP#enablements`) and must be re-applied by hand. The
+  state file now carries `revision` and `changeId` members per enablement,
+  which earlier releases ignore.
+
 - **Dependencies move to the family vta-sdk 0.90 declares (affinidi-crypto
   0.3)**: `vta-sdk` 0.80 → 0.90, `vti-secrets` 0.29 → 0.39 (vti-common 0.66;
   its `SecretsConfig`/`SecretBackend` are in `configs::secret_store`'s public
