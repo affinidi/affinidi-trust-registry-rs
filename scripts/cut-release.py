@@ -17,8 +17,10 @@ authenticated. It:
      requirement) to `<name>.0` and writes `RELEASE` = `<name>.0-rc.0`, and
      `release-cut/<name>` = main + one commit that moves the workspace to the
      next minor (`0.28.0` after `0.27`) and closes main's `## Unreleased`
-     changelog section under `## <name>.0 (<today, UTC>)`, with a fresh
-     `## Unreleased` above it;
+     changelog section under `## <name>.0 (unreleased)`, with a fresh
+     `## Unreleased` above it. The GA prep (release-prep.yml) dates that
+     heading on main in a `release-date/<name>` PR, with the date it gives
+     the release branch;
   4. pushes both branches in one `git push --atomic`: either both exist
      afterwards or neither does. `release-tag.yml` then tags
      `v<name>.0-rc.0` (a prerelease; crates are not published);
@@ -40,13 +42,20 @@ entries that shipped in the release under its heading by hand, in the PR.
 """
 
 import argparse
-import datetime
 import json
 import pathlib
 import sys
 import tempfile
 
-from release_lib import RELEASE_NAME, git, run, set_version, unreleased_split
+from release_lib import (
+    RELEASE_NAME,
+    close_unreleased,
+    git,
+    pending_heading,
+    run,
+    set_version,
+    unreleased_split,
+)
 
 
 def worktree(rev, tmp, name):
@@ -103,7 +112,6 @@ def main():
     cut_head = f"release-cut/{args.name}"
     version = f"{args.name}.0"
     next_version = f"{major}.{minor + 1}.0"
-    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
 
     git("fetch", "origin", "--tags", "--prune")
     main_sha = git("rev-parse", "--verify", "origin/main^{commit}").stdout.strip()
@@ -161,10 +169,7 @@ def main():
                     src, cur = unreleased_split(source_log), unreleased_split(main_changelog.read_text())
                     split = bool(src and cur and src[1] == cur[1])
                     if split:
-                        before, body, after = cur
-                        main_changelog.write_text(
-                            f"{before}## Unreleased\n\n## {version} ({today})\n{body}{after}"
-                        )
+                        main_changelog.write_text(close_unreleased(main_changelog.read_text(), version))
                 git("add", "-A", cwd=mn)
                 git(
                     "commit", "-s", "-m",
@@ -179,7 +184,7 @@ def main():
                 print(
                     "WARNING: main's `## Unreleased` differs from the cut's (or CHANGELOG.md is "
                     "missing); CHANGELOG.md on main was not split. Move the shipped entries under "
-                    f"`## {version} ({today})` by hand in the release-cut PR.",
+                    f"`{pending_heading(version)}` by hand in the release-cut PR; the GA prep dates it.",
                     file=sys.stderr,
                 )
             if args.dry_run:

@@ -573,6 +573,16 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Changed
 
+- **Release tooling dates `main`'s changelog heading at GA (#271).** The
+  pipeline-rust actions move to `9f2e1cb` (pipeline-rust #100): a cut now
+  closes `main`'s `## Unreleased` under `## x.y.0 (unreleased)`, and the GA
+  prep, besides dating the release branch's heading, opens a
+  `release-date/x.y` PR into `main` that rewrites that heading to the same
+  `## x.y.0 (<GA date>)`. The local fallback `scripts/cut-release.py` writes
+  the same placeholder (with unit tests in `scripts/test_release_lib.py`).
+  RELEASES.md drops the "fix the heading by hand in the cut PR" and "follow-up
+  PR with the GA date" steps: merge the `release-date/x.y` PR once the
+  `vx.y.0` tag exists. Every pipeline-rust pin moves to the same commit.
 - **No hand-built Trust Tasks.** The `registry/*` records map to and from
   the domain `TrustRecord` through `From<&TrustRecord>` /
   `TryFrom<&spec::TrustRecord>` implemented on the generated

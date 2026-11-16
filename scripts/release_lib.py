@@ -174,3 +174,26 @@ def unreleased_split(changelog):
     nxt = re.search(r"^## ", changelog[m.end():], re.M)
     end = m.end() + nxt.start() if nxt else len(changelog)
     return changelog[: m.start()], changelog[m.end(): end], changelog[end:]
+
+
+def pending_heading(version):
+    """main's heading for a version that is cut but not yet GA: `## 0.42.0 (unreleased)`.
+
+    The placeholder pipeline-rust's release-cut writes too. Its GA prep
+    (release-prep.yml) replaces everything after the version with the date it
+    gives the release branch, in a `release-date/<major.minor>` PR into main.
+    """
+    return f"## {version} (unreleased)"
+
+
+def close_unreleased(changelog, version):
+    """main's CHANGELOG at the cut: `## Unreleased` becomes `version`'s pending section.
+
+    A fresh, empty `## Unreleased` opens above it. None if there is no
+    `## Unreleased` section.
+    """
+    parts = unreleased_split(changelog)
+    if not parts:
+        return None
+    before, body, after = parts
+    return f"{before}## Unreleased\n\n{pending_heading(version)}\n{body}{after}"
