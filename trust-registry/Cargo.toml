@@ -89,6 +89,24 @@ toml = { version = "1.2.1", optional = true }
 crossterm = { version = "0.29.0", optional = true }
 urlencoding = "2.1.3"
 
+# ── Allocator ────────────────────────────────────────────────────────────
+## jemalloc, used by the `trust-registry` binary only (set as the global
+## allocator in main.rs — a library must never impose an allocator on its
+## consumers).
+##
+## The default system allocator (glibc malloc on Linux) does not return the
+## memory of freed allocations to the OS promptly. The registry's request path
+## is a sawtooth of short-lived allocations (packed/unpacked DIDComm and TSP
+## messages, serialised records, AWS SDK buffers), and glibc retains those
+## arenas, so RSS ratchets up to its high-water mark and stays there. That
+## reads as a leak in monitoring even though the live heap is flat. jemalloc's
+## decay-based purging returns the pages, so RSS tracks live memory.
+##
+## Not available on MSVC; the cfg gate below falls back to the system
+## allocator there.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { workspace = true, optional = true }
+
 [build-dependencies]
 trust-tasks-build.workspace = true
 
@@ -138,7 +156,16 @@ default = [
     "storage-redis",
     "loaders-aws",
     "standalone",
+    "jemalloc",
 ]
+# Use jemalloc as the `trust-registry` binary's global allocator (see the
+# dependency comment). On by default: with the system allocator the process
+# holds its RSS high-water mark for its lifetime. Disable
+# (`--no-default-features`) if you need to profile against the system
+# allocator or are building for a target jemalloc doesn't support. A host
+# embedding the registry as a library is unaffected either way: the allocator
+# is installed by the binary, never the library.
+jemalloc = ["dep:tikv-jemallocator"]
 # The `setup-trust-registry` binary. `secrets-config`
 # because the setup wizard writes the profile bundle through the secret store.
 dev-tools = ["didwebvh-rs", "dep:clap", "dep:crossterm", "secrets-config"]

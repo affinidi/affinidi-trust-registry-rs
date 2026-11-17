@@ -116,6 +116,8 @@ aws-sdk-secretsmanager = { version = "1.128.0", default-features = false, featur
 ] }
 serde_dynamo = { version = "4.3.0", features = ["aws-sdk-dynamodb+1"] }
 redis = { version = "1.8.2", features = ["tokio-comp", "connection-manager"] }
+# Global allocator of the `trust-registry` binary (see trust-registry/Cargo.toml).
+tikv-jemallocator = "0.7"
 
 # Test dependencies
 reqwest = { version = "0.13.5", features = ["json"] }
