@@ -614,6 +614,17 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Changed
 
+- **The `trust-registry` binary uses jemalloc as its global allocator.** With
+  glibc malloc, memory freed after a burst of requests stayed resident, so RSS
+  ratcheted up to its high-water mark and never came down — which looks like a
+  leak on a memory graph. jemalloc (with `background_thread:true`,
+  `dirty_decay_ms:5000`, `muzzy_decay_ms:5000`, exported as
+  `_rjem_malloc_conf` since tikv-jemalloc-sys prefixes jemalloc's symbols) returns
+  freed pages to the OS, so RSS tracks the live heap. It is behind the new
+  default-on `jemalloc` feature of the `trust-registry` crate and installed
+  only by the binary (`main.rs`), never the library, so a host embedding the
+  registry keeps its own allocator. Not used on MSVC targets.
+
 - **Release tooling dates `main`'s changelog heading at GA (#271).** The
   pipeline-rust actions move to `9f2e1cb` (pipeline-rust #100): a cut now
   closes `main`'s `## Unreleased` under `## x.y.0 (unreleased)`, and the GA
