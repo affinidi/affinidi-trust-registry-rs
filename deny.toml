@@ -5,7 +5,15 @@
 version = 2
 yanked = "deny"
 # Any entry here must say why, and by when it is to be reviewed again.
-ignore = []
+# Keep it in step with `auditIgnore` in .github/workflows/checks.yaml.
+ignore = [
+  # Accepted 2026-11-17: status-only "unmaintained" advisories with no fixed
+  # release and no reported vulnerability. chrono is used directly and arrives
+  # again through the affinidi-tdk stack, so it cannot leave the graph from
+  # here alone.
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained (chronotope/chrono#1768): status only, no vulnerability, no fixed release. Used directly and through the affinidi-tdk stack. Remove when this workspace and affinidi-tdk-rs have migrated to `jiff` or `time`." },
+  { id = "RUSTSEC-2026-0542", reason = "humantime marked unmaintained because chrono is: status only, no vulnerability; humantime 2.4.0 has no dependencies, so chrono's status does not reach it. Remove with RUSTSEC-2026-0543, or when nothing here depends on humantime." },
+]
 
 [bans]
 # Report duplicate versions so growth in the graph is visible in CI output.
