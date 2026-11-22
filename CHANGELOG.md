@@ -980,6 +980,10 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Fixed
 
+- **`url` 2.5.9 (RUSTSEC-2026-0592).** The lockfile moves `url` from 2.5.8
+  to 2.5.9. In 2.5.8 `Url::origin()` recursed once per nested `blob:`
+  prefix, so a crafted URL could overflow the stack and abort the process
+  (GHSA-hrj5-67jp-wqp9).
 - **A transient failure resolving a writer's DID no longer refuses the write
   as `proofInvalid` and deletes it** (#302, R1.6). Verifying a write's proof
   answered every resolver error but the degraded verifier's with
