@@ -44,6 +44,10 @@ jobs:
     with:
       toolchain: '1.96.0'
       rustflags: '-D warnings'
+      # Kept in step with deny.toml's [advisories] ignore list: chrono and
+      # humantime "unmaintained", accepted 2026-11-17 (no vulnerability, no
+      # fixed release). Without this, cargo-audit files an issue for each.
+      auditIgnore: 'RUSTSEC-2026-0543,RUSTSEC-2026-0542'
   guards:
     # Cheap, build-free guards that protect the release pipeline: lockstep
     # versions, CHANGELOG / RELEASE consistency.
