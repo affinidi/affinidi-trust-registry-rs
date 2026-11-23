@@ -491,6 +491,15 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ### Added
 
+- **`/livez` and `/readyz` for Kubernetes probes.** `GET /livez` answers
+  `200 {"status":"ok"}` while the process serves HTTP and checks nothing else;
+  `GET /readyz` answers `200 {"status":"ready","storage":"ok"}`, or `503` with
+  `"storage":"unavailable"` while the record store does not answer (the same
+  cached probe `/health` reports). The write path does not affect readiness, so
+  a mediator outage never drains the read path. Both are exempt from the
+  request limits. `/health` is unchanged. API: `TrustRegistry::probe_router`
+  (new, separate from `health_router` so a host with its own probes can leave
+  it out) and `RegistryHealth::readiness`.
 - **Release support policy and a generated release schedule (#272).**
   RELEASES.md and SECURITY.md state the commitment explicitly: the newest two
   GA minor releases (N and N-1) are supported, however short-lived — at the

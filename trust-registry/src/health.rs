@@ -359,6 +359,35 @@ impl RegistryHealth {
         self.to_json()
     }
 
+    /// Readiness for `GET /readyz`: can this registry serve reads right now?
+    /// Returns whether it is ready and the body to answer with.
+    ///
+    /// Only the record store counts, refreshed as for [`report`](Self::report)
+    /// (at most every [`STORAGE_PROBE_TTL`], bounded by
+    /// [`STORAGE_PROBE_TIMEOUT`]). The write path, the verifier and the
+    /// advertised transports do not: reads are served without any of them,
+    /// so draining the registry for one would turn a degraded write path into
+    /// an outage of the read path, which is the reasoning behind `/health`'s
+    /// `200` as well. A registry with no record store attached (a host that
+    /// has not called [`attach_storage`](Self::attach_storage)) has nothing to
+    /// check and is ready.
+    ///
+    /// The body carries `status` (`ready` or `notReady`) and, once a store is
+    /// attached, `storage` (`ok` or `unavailable`). Never the cause, which is
+    /// in the log.
+    pub async fn readiness(&self) -> (bool, serde_json::Value) {
+        self.probe_storage().await;
+        let storage = *read(&self.storage.available);
+        let ready = storage != Some(false);
+        let mut body = serde_json::json!({
+            "status": if ready { "ready" } else { "notReady" },
+        });
+        if let Some(available) = storage {
+            body["storage"] = (if available { "ok" } else { "unavailable" }).into();
+        }
+        (ready, body)
+    }
+
     async fn probe_storage(&self) {
         let Some(repository) = self.storage.repository.get() else {
             return;
