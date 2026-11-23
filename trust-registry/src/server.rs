@@ -351,18 +351,22 @@ fn build_cors_layer(allowed_origins: &[String]) -> Result<Option<CorsLayer>, Box
     ))
 }
 
-/// Build the top-level HTTP router (health check + TRQP application routes +
-/// request limits + CORS).
+/// Build the top-level HTTP router (health check + `/livez` / `/readyz` +
+/// TRQP application routes + request limits + CORS).
 ///
 /// The service form of the router: the registry's own
 /// [`router`](crate::TrustRegistry::router) and
-/// [`health_router`](crate::TrustRegistry::health_router), which a host can
+/// [`health_router`](crate::TrustRegistry::health_router) and
+/// [`probe_router`](crate::TrustRegistry::probe_router), which a host can
 /// mount itself, plus the request time and concurrency limits
 /// ([`crate::http::limits`]) and the CORS layer, all of which a host owns for
 /// itself.
 fn build_router(registry: &crate::TrustRegistry) -> Result<Router, BoxError> {
     let cors = build_cors_layer(&registry.config.server_config.cors_allowed_origins)?;
-    let routes = registry.health_router().merge(registry.router());
+    let routes = registry
+        .health_router()
+        .merge(registry.probe_router())
+        .merge(registry.router());
     let router = bound_requests(routes, &registry.config.server_config.http_limits);
     Ok(match cors {
         Some(cors) => router.layer(cors),
@@ -1036,6 +1040,37 @@ mod tests {
         assert_eq!(body["status"], "OK");
         assert_eq!(body["writes"], "unknown");
         assert_eq!(body["storage"], "ok");
+    }
+
+    /// The service serves the orchestrator probes beside `/health`: alive, and
+    /// ready over a working store even while the write path is unknown.
+    #[tokio::test]
+    async fn service_serves_livez_and_readyz() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let registry = registry("127.0.0.1:0".to_string(), true, CancellationToken::new()).await;
+        let router = build_router(&registry).expect("router");
+        for (path, want) in [
+            ("/livez", serde_json::json!({ "status": "ok" })),
+            (
+                "/readyz",
+                serde_json::json!({ "status": "ready", "storage": "ok" }),
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body, want, "{path}");
+        }
     }
 
     #[cfg(feature = "standalone")]

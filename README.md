@@ -298,6 +298,25 @@ The image runs the registry as the unprivileged user `trustregistry` (UID/GID 10
 | `tspRelationships` | `ok`, `full` | See `TR_TSP_MAX_RELATIONSHIPS`. |
 | `givenUpMessages` | number | Messages the DIDComm listener deleted from the mediator after they failed to be handled five times over at least ten minutes, since start. Present while the pickup listener runs. |
 
+**Kubernetes probes.** Beside `/health`, the REST listener serves `GET /livez` and `GET /readyz`. Both are outside the request limits, like `/health`.
+
+| Route | Answers | Use it for |
+|---|---|---|
+| `/livez` | `200 {"status":"ok"}` while the process serves HTTP; checks nothing else | `livenessProbe` |
+| `/readyz` | `200 {"status":"ready","storage":"ok"}`; `503 {"status":"notReady","storage":"unavailable"}` while the record store does not answer | `readinessProbe` |
+
+Readiness counts only the record store, the same probe `storage` reports (at most every five seconds, bounded at three), because reads need nothing else. The write path, the verifier and the advertised transports leave it ready, for the reason `/health` stays `200`: draining the registry for a mediator outage would take the read path down with the write path. Give the readiness probe a `timeoutSeconds` above the three-second store bound:
+
+```yaml
+livenessProbe:
+  httpGet: { path: /livez, port: 3232 }
+  periodSeconds: 10
+readinessProbe:
+  httpGet: { path: /readyz, port: 3232 }
+  periodSeconds: 5
+  timeoutSeconds: 4
+```
+
 ## Using Redis as Storage Backend
 
 Redis is a high-performance, in-memory data store that can be used as a storage backend for Trust Registry. Redis provides fast read/write operations and is ideal for production deployments requiring low-latency access to trust records.
@@ -632,6 +651,8 @@ let app = host_router.nest("/registry", registry.router());
 `/health`** — both belong to the host, and applying ours would override or
 collide with theirs. Use `registry.health()` to fold the registry's health into
 the host's own endpoint, or `registry.health_router()` for a ready-made one.
+`registry.probe_router()` serves `/livez` and `/readyz` on their own, so a host
+that already has probes of its own can leave them out.
 
 With `TrustRegistryConfig::embedded`, which loads no DID profile, the registry
 has no identity of its own: `POST /trust-tasks` answers `404` (a problem

@@ -126,6 +126,8 @@ impl TrustRegistry {
     ///   service applies to itself;
     /// - `/health` — available separately as [`health_router`](Self::health_router),
     ///   or fold [`health`](Self::health) into the host's own endpoint;
+    /// - `/livez` and `/readyz` — available separately as
+    ///   [`probe_router`](Self::probe_router);
     /// - request time, concurrency and connection limits — every route here
     ///   is unauthenticated, so a host exposing them must bound requests
     ///   itself, as [`crate::http::limits`] does for the standalone service.
@@ -156,6 +158,43 @@ impl TrustRegistry {
                 async move { Json(health.report().await) }
             }),
         )
+    }
+
+    /// Kubernetes-style probes, for a host or orchestrator that routes on
+    /// them: `GET /livez` and `GET /readyz`. The standalone service serves
+    /// this router beside [`health_router`](Self::health_router); it is a
+    /// separate router so a host that already serves its own probes can
+    /// leave it out rather than collide with it.
+    ///
+    /// - `/livez` answers `200 {"status":"ok"}` while the server answers and
+    ///   checks nothing else, so no dependency failure gets a working process
+    ///   restarted.
+    /// - `/readyz` answers `200` while reads can be served and `503` while the
+    ///   record store is unavailable ([`RegistryHealth::readiness`]).
+    pub fn probe_router(&self) -> axum::Router {
+        use axum::{Json, http::StatusCode, routing::get};
+
+        let health = self.health.clone();
+        axum::Router::new()
+            .route(
+                "/livez",
+                get(|| async { Json(serde_json::json!({ "status": "ok" })) }),
+            )
+            .route(
+                "/readyz",
+                get(move || {
+                    let health = health.clone();
+                    async move {
+                        let (ready, body) = health.readiness().await;
+                        let code = if ready {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        };
+                        (code, Json(body))
+                    }
+                }),
+            )
     }
 
     /// The full Trust Task handler: admin dispatcher, write ACL, proof
@@ -1135,5 +1174,91 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
         assert_eq!(body["status"], "degraded");
         assert_eq!(body["storage"], "unavailable");
+    }
+
+    /// GET `path` on `router`, returning the status and the JSON body.
+    async fn get_json(
+        router: axum::Router,
+        path: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("router responds");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, serde_json::from_slice(&body).expect("JSON body"))
+    }
+
+    /// The probes over a working store: alive and ready. Neither is part of
+    /// the mountable router, which a host owns the probes of.
+    #[tokio::test]
+    async fn probe_router_is_live_and_ready_over_a_working_store() {
+        let registry = registry().await;
+
+        let (status, body) = get_json(registry.probe_router(), "/livez").await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body, serde_json::json!({ "status": "ok" }));
+
+        let (status, body) = get_json(registry.probe_router(), "/readyz").await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["storage"], "ok");
+
+        for path in ["/livez", "/readyz"] {
+            let (status, _) = {
+                use axum::body::Body;
+                use axum::http::Request;
+                use tower::ServiceExt;
+                let r = registry
+                    .router()
+                    .oneshot(
+                        Request::builder()
+                            .uri(path)
+                            .body(Body::empty())
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("router responds");
+                (r.status(), ())
+            };
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    /// A dead record store: still alive (a restart would not fix it), but not
+    /// ready, so an orchestrator stops routing reads to it. The body names the
+    /// failed check, never the error.
+    #[tokio::test]
+    async fn probe_router_is_live_but_not_ready_over_a_dead_record_store() {
+        let registry = TrustRegistry::builder(TrustRegistryConfig::embedded("/tmp/tr-embed-test"))
+            .repository(Arc::new(DownStore))
+            .capabilities(Vec::new())
+            .capability_store(Box::new(MemoryCapabilityStore::default()))
+            .build()
+            .await
+            .expect("builds");
+
+        let (status, body) = get_json(registry.probe_router(), "/livez").await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body, serde_json::json!({ "status": "ok" }));
+
+        let (status, body) = get_json(registry.probe_router(), "/readyz").await;
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body,
+            serde_json::json!({ "status": "notReady", "storage": "unavailable" })
+        );
     }
 }

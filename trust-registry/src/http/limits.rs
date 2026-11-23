@@ -15,7 +15,7 @@
 //!   work dropped), for example behind a stalled storage backend;
 //! - **requests in flight** ([`HttpLimits::max_concurrent_requests`]): a
 //!   request beyond the limit is answered `503` with `Retry-After` at once
-//!   rather than queued. `/health` is exempt, so a busy registry can still be
+//!   rather than queued. `/health`, `/livez` and `/readyz` are exempt, so a busy registry can still be
 //!   probed;
 //! - **open connections** ([`HttpLimits::max_connections`]): beyond the limit
 //!   the listener stops accepting until one closes;
@@ -80,8 +80,9 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 1024;
 /// How long a client told the service is busy should wait, in seconds.
 const RETRY_AFTER_SECS: &str = "1";
 
-/// The path exempt from the request limits.
-const HEALTH_PATH: &str = "/health";
+/// The paths exempt from the request limits: the health check and the
+/// orchestrator probes, which must answer while the registry is busy.
+const EXEMPT_PATHS: &[&str] = &["/health", "/livez", "/readyz"];
 
 /// Bounds on what one HTTP client can make the registry hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,7 +192,8 @@ impl HttpLimits {
 /// [`max_body_bytes`](HttpLimits::max_body_bytes) before the request takes a
 /// slot, then at most
 /// [`max_concurrent_requests`](HttpLimits::max_concurrent_requests) answered at
-/// once, each within `request_timeout`. `/health` is exempt. Every answer is
+/// once, each within `request_timeout`. `/health`, `/livez` and `/readyz` are
+/// exempt. Every answer is
 /// marked as neither to be sniffed nor stored.
 pub fn bound_requests(router: Router, limits: &HttpLimits) -> Router {
     let permits = Arc::new(Semaphore::new(limits.max_concurrent_requests));
@@ -199,7 +201,7 @@ pub fn bound_requests(router: Router, limits: &HttpLimits) -> Router {
     router.layer(middleware::from_fn(move |request: Request, next: Next| {
         let permits = permits.clone();
         async move {
-            let mut response = if request.uri().path() == HEALTH_PATH {
+            let mut response = if EXEMPT_PATHS.contains(&request.uri().path()) {
                 next.run(request).await
             } else {
                 answer_bounded(request, next, permits, limits).await
@@ -1081,7 +1083,9 @@ mod tests {
                         }
                     }),
                 )
-                .route("/health", get(|| async { "up" })),
+                .route("/health", get(|| async { "up" }))
+                .route("/livez", get(|| async { "up" }))
+                .route("/readyz", get(|| async { "up" })),
             &limits(10_000, 1),
         );
         let first = tokio::spawn(
@@ -1098,6 +1102,14 @@ mod tests {
             .unwrap();
         assert_eq!(health.status(), StatusCode::OK);
         assert_eq!(health.headers()[header::CACHE_CONTROL], "no-store");
+        for probe in ["/livez", "/readyz"] {
+            let resp = router
+                .clone()
+                .oneshot(Request::get(probe).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{probe}");
+        }
 
         release.notify_one();
         first.await.unwrap().unwrap();
