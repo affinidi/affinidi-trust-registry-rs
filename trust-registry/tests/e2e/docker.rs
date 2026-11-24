@@ -83,26 +83,33 @@ impl MediatorStack {
             &redis_image,
         ])
         .await?;
-        docker(&[
-            "run",
-            "-d",
-            "--name",
-            &mediator,
-            "--network",
-            &network,
+        let port_map = format!("127.0.0.1:{port}:{MEDIATOR_CONTAINER_PORT}");
+        let volume = format!("{}:/out", conf.display());
+        let mut args = vec!["run", "-d", "--name", &mediator, "--network", &network];
+        // Run the mediator as the same user `mediator-setup` wrote the config
+        // as. The image's own user (10001 since 0.55) cannot read the
+        // owner-only (0600) mediator.toml and secrets, and running as the
+        // file owner keeps them owner-only instead of loosening them.
+        let user = host_user().await;
+        if let Some(user) = &user {
+            args.extend(["--user", user.as_str()]);
+        }
+        let env_db = format!("DATABASE_URL={redis_url}");
+        let env_local = format!("LOCAL_ENDPOINTS=http://localhost:{port}");
+        args.extend([
             "-p",
-            &format!("127.0.0.1:{port}:{MEDIATOR_CONTAINER_PORT}"),
+            &port_map,
             "-v",
-            &format!("{}:/out", conf.display()),
+            &volume,
             // The generated config names `./atm-functions.lua` relative to it.
             "-w",
             "/out/conf",
             "-e",
-            &format!("DATABASE_URL={redis_url}"),
+            &env_db,
             // Lets the mediator recognise its own URL in a DID document and
             // deliver locally instead of forwarding to itself.
             "-e",
-            &format!("LOCAL_ENDPOINTS=http://localhost:{port}"),
+            &env_local,
             // Pinned rather than taken from the setup default: refuse Trust
             // Tasks without a valid proof and `issuedAt`, so a registry or client
             // that sends them unsigned fails here instead of in a deployment.
@@ -111,8 +118,8 @@ impl MediatorStack {
             &image,
             "-c",
             "mediator.toml",
-        ])
-        .await?;
+        ]);
+        docker(&args).await?;
 
         let ready = format!("{}/readyz", stack.url);
         if let Err(e) = wait_for_http(&ready, Duration::from_secs(60)).await {

@@ -85,7 +85,9 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   it replaces is optional and has no 0.55 image); v0.33.1 there was arm64
   only, so it failed on amd64 runners with `exec format error`. It passes
   `--allow-plaintext-file`, which that `mediator-setup` needs for a file
-  secret store in a `container` deployment.
+  secret store in a `container` deployment, and runs the mediator container
+  as the user that wrote its owner-only config (the 0.55 image runs as
+  uid 10001, which cannot read it).
 
 - **Dependencies move to the family vta-sdk 0.90 declares (affinidi-crypto
   0.3)**: `vta-sdk` 0.80 → 0.90, `vti-secrets` 0.29 → 0.39 (vti-common 0.66;
