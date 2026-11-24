@@ -94,6 +94,7 @@ once a newer release is GA, and Latest ignores an rc of a patch.
 | 0.29 | `release/0.29` | 2026-10-28 | 2026-10-28 | `0.29.0` | end of life (2026-11-05) |
 | 0.30 | `release/0.30` | 2026-10-29 | 2026-10-29 | `0.30.0` | supported (N-1) |
 | 0.31 | `release/0.31` | 2026-11-05 | 2026-11-05 | `0.31.0` | supported (N) |
+| 0.32 | `release/0.32` | 2026-11-24 | — | `0.32.0-rc.0` | release candidate |
 <!-- release-schedule:end -->
 
 ## Support
