@@ -87,7 +87,9 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   `--allow-plaintext-file`, which that `mediator-setup` needs for a file
   secret store in a `container` deployment, and runs the mediator container
   as the user that wrote its owner-only config (the 0.55 image runs as
-  uid 10001, which cannot read it).
+  uid 10001, which cannot read it), with the config directory also mounted
+  at `/etc/mediator/conf`, where a `container` deployment's config names its
+  secrets file.
 
 - **Dependencies move to the family vta-sdk 0.90 declares (affinidi-crypto
   0.3)**: `vta-sdk` 0.80 → 0.90, `vti-secrets` 0.29 → 0.39 (vti-common 0.66;

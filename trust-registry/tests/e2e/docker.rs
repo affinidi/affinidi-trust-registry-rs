@@ -85,6 +85,10 @@ impl MediatorStack {
         .await?;
         let port_map = format!("127.0.0.1:{port}:{MEDIATOR_CONTAINER_PORT}");
         let volume = format!("{}:/out", conf.display());
+        // A `container` deployment's mediator.toml names the files written
+        // next to it (the `file://` secrets among them) under the image's
+        // config mount, /etc/mediator/conf, not where setup wrote them.
+        let conf_volume = format!("{}:/etc/mediator/conf", conf.join("conf").display());
         let mut args = vec!["run", "-d", "--name", &mediator, "--network", &network];
         // Run the mediator as the same user `mediator-setup` wrote the config
         // as. The image's own user (10001 since 0.55) cannot read the
@@ -101,6 +105,8 @@ impl MediatorStack {
             &port_map,
             "-v",
             &volume,
+            "-v",
+            &conf_volume,
             // The generated config names `./atm-functions.lua` relative to it.
             "-w",
             "/out/conf",
