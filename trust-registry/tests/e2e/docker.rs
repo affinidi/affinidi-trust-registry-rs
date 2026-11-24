@@ -234,6 +234,11 @@ async fn generate_mediator_config(
         "none",
         "--database-url",
         redis_url,
+        // A `container` deployment is closed (explicit_allow) by default since
+        // 0.55; the registry and the test clients self-register, as they do
+        // against an open mediator.
+        "--set",
+        "security.network_mode=open",
         // A config without an admin DID does not load.
         "--admin",
         "generate",
