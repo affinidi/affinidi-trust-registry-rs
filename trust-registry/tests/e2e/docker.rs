@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::process::Command;
 
-pub const DEFAULT_MEDIATOR_IMAGE: &str = "public.ecr.aws/affinidi/messaging-mediator:v0.33.1";
+pub const DEFAULT_MEDIATOR_IMAGE: &str = "public.ecr.aws/affinidi/messaging-mediator:v0.55.0";
 const DEFAULT_REDIS_IMAGE: &str = "redis:7-alpine";
 
 /// The port the mediator listens on inside its container.
@@ -212,6 +212,9 @@ async fn generate_mediator_config(
         &public_url,
         "--secret-storage",
         "file",
+        // A `container` deployment refuses a plaintext file:// store unless
+        // it is accepted explicitly; this one lives only for the test run.
+        "--allow-plaintext-file",
         "--ssl",
         "none",
         "--database-url",

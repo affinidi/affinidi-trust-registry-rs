@@ -62,6 +62,29 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   state file now carries `revision` and `changeId` members per enablement,
   which earlier releases ignore.
 
+- **Dependencies move to the TDK 0.49 generation vta-sdk 0.92 declares
+  (affinidi-crypto 0.4)**: `vta-sdk` 0.90 → 0.92, `vti-secrets` 0.39 → 0.41
+  (vti-common 0.68), `affinidi-tdk` 0.45 → 0.49, `affinidi-messaging-sdk`
+  0.47 → 0.50, `affinidi-messaging-core` 0.1.15, `affinidi-did-common` 0.4 →
+  0.5 (with affinidi-data-integrity 0.9, affinidi-secrets-resolver 0.6,
+  affinidi-did-resolver-cache-sdk 0.9, affinidi-encoding 0.2), the
+  `trust-tasks-*` runtime crates 0.39 → 0.41, `trust-tasks-build` 0.2.1, and
+  (test only) `affinidi-messaging-test-mediator` 0.55. Types from
+  `affinidi-tdk`, `affinidi-messaging-sdk` and `trust-tasks-rs` cross the
+  public API of `trust-registry` and `trql-client`, so an embedder moves with
+  them. affinidi-messaging-sdk 0.50 still requires trust-tasks-rs 0.40, so the
+  graph carries that copy alongside 0.41 until the SDK moves; no trust-tasks
+  type crosses between the SDK and the registry, so the two do not meet.
+  `trql-client` no longer depends on `affinidi-messaging-sdk` directly: its
+  `tsp` feature gets the SDK's `tsp` through `affinidi-tdk/tsp`. The
+  `registry/*` 0.1 wire handlers stay, for clients that still send them.
+  CI builds and lints with Rust 1.100.0 (MSRV stays 1.95). The ignored
+  `mediator_e2e` suite runs against the multi-arch mediator image
+  `public.ecr.aws/affinidi/messaging-mediator:v0.55.0` (v0.33.1 was arm64
+  only, so it failed on amd64 runners with `exec format error`), and passes
+  `--allow-plaintext-file`, which that `mediator-setup` needs for a file
+  secret store in a `container` deployment.
+
 - **Dependencies move to the family vta-sdk 0.90 declares (affinidi-crypto
   0.3)**: `vta-sdk` 0.80 → 0.90, `vti-secrets` 0.29 → 0.39 (vti-common 0.66;
   its `SecretsConfig`/`SecretBackend` are in `configs::secret_store`'s public

@@ -180,8 +180,8 @@ async fn main() -> Result<()> {
         None,
     )
     .await?;
-    println!("\nAdding profile: {}", &did_config.alias);
-    println!("Profile DID: {}", &did);
+    println!("\nAdding profile: {}", did_config.alias);
+    println!("Profile DID: {}", did);
     tdk.add_profile(&profile).await;
 
     let atm = Arc::new(
