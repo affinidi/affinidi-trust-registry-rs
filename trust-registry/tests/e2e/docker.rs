@@ -15,7 +15,7 @@ use tokio::process::Command;
 
 // GHCR, where the mediator's publish-images workflow always publishes a
 // multi-arch (amd64 + arm64) image; its ECR Public mirror is optional.
-pub const DEFAULT_MEDIATOR_IMAGE: &str = "ghcr.io/affinidi/messaging-mediator:v0.55.0";
+pub const DEFAULT_MEDIATOR_IMAGE: &str = "ghcr.io/affinidi/messaging-mediator:v0.56.0";
 const DEFAULT_REDIS_IMAGE: &str = "redis:7-alpine";
 
 /// The port the mediator listens on inside its container.
