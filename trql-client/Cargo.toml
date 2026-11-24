@@ -31,12 +31,12 @@ didcomm = [
 # 0.x dependency, so this stays opt-in.
 tsp = [
     "dep:affinidi-tdk",
-    "dep:affinidi-messaging-sdk",
     "dep:affinidi-messaging-core",
     "dep:trust-tasks-tsp",
     "dep:tokio",
+    # Also switches on the re-exported SDK's `tsp` feature (`atm.tsp()`):
+    # affinidi-tdk's `tsp` forwards `affinidi-messaging-sdk?/tsp`.
     "affinidi-tdk/tsp",
-    "affinidi-messaging-sdk/tsp",
 ]
 
 [dependencies]
@@ -55,7 +55,6 @@ reqwest = { workspace = true, optional = true }
 
 # didcomm / tsp
 affinidi-tdk = { workspace = true, optional = true }
-affinidi-messaging-sdk = { workspace = true, optional = true }
 # `ConnState`, the websocket connection state the SDK reports (not re-exported
 # by the SDK); the same release the SDK depends on.
 affinidi-messaging-core = { workspace = true, optional = true }

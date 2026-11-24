@@ -22,7 +22,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use futures::future::BoxFuture;
 use serde_json::Value;
-use trust_tasks_rs::{Dispatcher, Payload as _, TrustTask};
+use trust_tasks_rs::{Dispatcher, TrustTask};
 
 use super::*;
 

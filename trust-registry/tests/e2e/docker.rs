@@ -13,7 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::process::Command;
 
-pub const DEFAULT_MEDIATOR_IMAGE: &str = "public.ecr.aws/affinidi/messaging-mediator:v0.33.1";
+// GHCR, where the mediator's publish-images workflow always publishes a
+// multi-arch (amd64 + arm64) image; its ECR Public mirror is optional.
+pub const DEFAULT_MEDIATOR_IMAGE: &str = "ghcr.io/affinidi/messaging-mediator:v0.55.0";
 const DEFAULT_REDIS_IMAGE: &str = "redis:7-alpine";
 
 /// The port the mediator listens on inside its container.
@@ -81,26 +83,39 @@ impl MediatorStack {
             &redis_image,
         ])
         .await?;
-        docker(&[
-            "run",
-            "-d",
-            "--name",
-            &mediator,
-            "--network",
-            &network,
+        let port_map = format!("127.0.0.1:{port}:{MEDIATOR_CONTAINER_PORT}");
+        let volume = format!("{}:/out", conf.display());
+        // A `container` deployment's mediator.toml names the files written
+        // next to it (the `file://` secrets among them) under the image's
+        // config mount, /etc/mediator/conf, not where setup wrote them.
+        let conf_volume = format!("{}:/etc/mediator/conf", conf.join("conf").display());
+        let mut args = vec!["run", "-d", "--name", &mediator, "--network", &network];
+        // Run the mediator as the same user `mediator-setup` wrote the config
+        // as. The image's own user (10001 since 0.55) cannot read the
+        // owner-only (0600) mediator.toml and secrets, and running as the
+        // file owner keeps them owner-only instead of loosening them.
+        let user = host_user().await;
+        if let Some(user) = &user {
+            args.extend(["--user", user.as_str()]);
+        }
+        let env_db = format!("DATABASE_URL={redis_url}");
+        let env_local = format!("LOCAL_ENDPOINTS=http://localhost:{port}");
+        args.extend([
             "-p",
-            &format!("127.0.0.1:{port}:{MEDIATOR_CONTAINER_PORT}"),
+            &port_map,
             "-v",
-            &format!("{}:/out", conf.display()),
+            &volume,
+            "-v",
+            &conf_volume,
             // The generated config names `./atm-functions.lua` relative to it.
             "-w",
             "/out/conf",
             "-e",
-            &format!("DATABASE_URL={redis_url}"),
+            &env_db,
             // Lets the mediator recognise its own URL in a DID document and
             // deliver locally instead of forwarding to itself.
             "-e",
-            &format!("LOCAL_ENDPOINTS=http://localhost:{port}"),
+            &env_local,
             // Pinned rather than taken from the setup default: refuse Trust
             // Tasks without a valid proof and `issuedAt`, so a registry or client
             // that sends them unsigned fails here instead of in a deployment.
@@ -109,8 +124,8 @@ impl MediatorStack {
             &image,
             "-c",
             "mediator.toml",
-        ])
-        .await?;
+        ]);
+        docker(&args).await?;
 
         let ready = format!("{}/readyz", stack.url);
         if let Err(e) = wait_for_http(&ready, Duration::from_secs(60)).await {
@@ -212,10 +227,18 @@ async fn generate_mediator_config(
         &public_url,
         "--secret-storage",
         "file",
+        // A `container` deployment refuses a plaintext file:// store unless
+        // it is accepted explicitly; this one lives only for the test run.
+        "--allow-plaintext-file",
         "--ssl",
         "none",
         "--database-url",
         redis_url,
+        // A `container` deployment is closed (explicit_allow) by default since
+        // 0.55; the registry and the test clients self-register, as they do
+        // against an open mediator.
+        "--set",
+        "security.network_mode=open",
         // A config without an admin DID does not load.
         "--admin",
         "generate",

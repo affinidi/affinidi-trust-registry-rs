@@ -47,4 +47,4 @@ jobs:
           kind: ${{ inputs.kind }}
           token: ${{ steps.app-token.outputs.token }}
           # cargo runs `cargo update -w` after a patch's version bump.
-          toolchain: '1.96.0'
+          toolchain: '1.100.0'
