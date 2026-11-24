@@ -80,8 +80,10 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
   `registry/*` 0.1 wire handlers stay, for clients that still send them.
   CI builds and lints with Rust 1.100.0 (MSRV stays 1.95). The ignored
   `mediator_e2e` suite runs against the multi-arch mediator image
-  `public.ecr.aws/affinidi/messaging-mediator:v0.55.0` (v0.33.1 was arm64
-  only, so it failed on amd64 runners with `exec format error`), and passes
+  `ghcr.io/affinidi/messaging-mediator:v0.55.0` from GHCR, where the
+  mediator's `publish-images` workflow always publishes (the ECR Public mirror
+  it replaces is optional and has no 0.55 image); v0.33.1 there was arm64
+  only, so it failed on amd64 runners with `exec format error`. It passes
   `--allow-plaintext-file`, which that `mediator-setup` needs for a file
   secret store in a `container` deployment.
 

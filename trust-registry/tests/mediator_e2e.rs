@@ -15,7 +15,7 @@
 //! ```
 //!
 //! - `E2E_MEDIATOR_IMAGE`: mediator image (default
-//!   `public.ecr.aws/affinidi/messaging-mediator:v0.55.0`)
+//!   `ghcr.io/affinidi/messaging-mediator:v0.55.0`)
 //! - `E2E_REDIS_IMAGE`: Redis image (default `redis:7-alpine`)
 //! - `E2E_KEEP_STACK=1`: leave the containers running afterwards
 //! - `E2E_TR_LOG`: `RUST_LOG` for the registry (default `info`)

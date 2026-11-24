@@ -13,7 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::process::Command;
 
-pub const DEFAULT_MEDIATOR_IMAGE: &str = "public.ecr.aws/affinidi/messaging-mediator:v0.55.0";
+// GHCR, where the mediator's publish-images workflow always publishes a
+// multi-arch (amd64 + arm64) image; its ECR Public mirror is optional.
+pub const DEFAULT_MEDIATOR_IMAGE: &str = "ghcr.io/affinidi/messaging-mediator:v0.55.0";
 const DEFAULT_REDIS_IMAGE: &str = "redis:7-alpine";
 
 /// The port the mediator listens on inside its container.
