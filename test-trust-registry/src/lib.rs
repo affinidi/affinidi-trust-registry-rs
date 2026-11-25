@@ -44,6 +44,13 @@ use trust_registry::server::{ServerHandle, serve};
 use trust_registry::storage::adapters::local_storage::LocalStorage;
 use trust_registry::storage::repository::TrustRecordAdminRepository;
 
+// `trql-client` is a normal (optional) dependency only so the `mediator` /
+// `tsp` features can switch on its transports for the tests: a feature cannot
+// name a dev-dependency's feature. The fixture itself does not use it; this
+// marks it used so cargo's `unused_dependencies` lint stays quiet.
+#[cfg(feature = "mediator")]
+use trql_client as _;
+
 #[cfg(feature = "mediator")]
 use affinidi_messaging_test_mediator::TestMediatorHandle;
 #[cfg(feature = "mediator")]
