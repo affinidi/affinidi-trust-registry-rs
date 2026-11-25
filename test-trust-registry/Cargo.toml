@@ -30,7 +30,7 @@ tsp = [
 ]
 
 [dependencies]
-trust-registry = { path = "../trust-registry", version = "0.32.0" }
+trust-registry = { path = "../trust-registry", version = "0.33.0" }
 
 tokio.workspace = true
 tokio-util.workspace = true
@@ -42,12 +42,12 @@ tempfile = { workspace = true, optional = true }
 # Only so the `mediator` / `tsp` features can switch on the client's mediator
 # transports for the tests (a feature cannot name a dev-dependency's feature).
 # The fixture's own code does not use it.
-trql-client = { path = "../trql-client", version = "0.32.0", default-features = false, optional = true }
+trql-client = { path = "../trql-client", version = "0.33.0", default-features = false, optional = true }
 
 [dev-dependencies]
 # The tests query the registry through the real client (HTTPS always; DIDComm
 # and TSP with the features above).
-trql-client = { path = "../trql-client", version = "0.32.0" }
+trql-client = { path = "../trql-client", version = "0.33.0" }
 reqwest.workspace = true
 serde_json.workspace = true
 # Client side of the routed Trust Task round-trip (mediator/tsp tests).

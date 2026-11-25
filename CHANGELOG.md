@@ -18,6 +18,8 @@ From 0.27 on, releases follow [RELEASES.md](RELEASES.md): new entries go under
 
 ## Unreleased
 
+## 0.32.0 (unreleased)
+
 
 ### Breaking
 
