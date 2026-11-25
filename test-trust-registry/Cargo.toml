@@ -41,7 +41,8 @@ affinidi-tdk = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 # Only so the `mediator` / `tsp` features can switch on the client's mediator
 # transports for the tests (a feature cannot name a dev-dependency's feature).
-# The fixture's own code does not use it.
+# The fixture's own code does not use it (see the `use trql_client as _` in
+# src/lib.rs, which keeps cargo's unused_dependencies lint quiet).
 trql-client = { path = "../trql-client", version = "0.33.0", default-features = false, optional = true }
 
 [dev-dependencies]
