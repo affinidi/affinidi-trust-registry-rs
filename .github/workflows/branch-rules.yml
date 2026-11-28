@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: affinidi/pipeline-rust/.github/actions/release-branch-rules@7befb926adbfcc583a26b16660ad21529f71641f # main, 2026-11-25
+      - uses: affinidi/pipeline-rust/.github/actions/release-branch-rules@ac0853ca6d1b4bdbe3a472c82161296de6130755 # main, 2026-11-28
         with:
           # Also accepts a maintainer's local cut or prep PR (scripts/cut-release.py).
           # Set to "false" when that script is deleted: once a release has been

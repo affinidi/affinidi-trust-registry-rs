@@ -44,7 +44,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
-      - uses: affinidi/pipeline-rust/.github/actions/release-backport@7befb926adbfcc583a26b16660ad21529f71641f # main, 2026-11-25
+      - uses: affinidi/pipeline-rust/.github/actions/release-backport@ac0853ca6d1b4bdbe3a472c82161296de6130755 # main, 2026-11-28
         with:
           token: ${{ steps.app-token.outputs.token }}
           pull-description: |-
